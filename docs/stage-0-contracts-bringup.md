@@ -1,0 +1,396 @@
+# 第0阶段：合同、工具链与最小可执行处理器
+
+状态：**执行指南，不是已完成实现**。本分阶段文件供多人并行分配；所有命令、文件、测试和结果都必须等对应任务实现后产生。任何“完成”必须能引用真实 Git commit/artifact hash/日志，不凭口头状态。
+
+## 1. 这个子系统是做什么的
+
+ISA/profile、内部协议、构建、固件、harness、第一个可比较 trace 被冻结，后续团队不再凭口头约定工作。
+
+## 2. 为什么存在 / 上游输入
+
+- 上游输入：无真实处理器/固件/harness可比 trace。
+- 已有依赖：architecture-review、source-inventory、primary references、三份原始报告。
+- 本阶段输出：硬件集成、板级性能、advanced fabric性能结论。
+- 首要原则：不允许构建出处理器但无法reference比对；不允许先写decoder再决定profile；不允许把latest工具当固定环境。
+
+此阶段决定后续所有团队的合同。ISA负责人先冻结能力，协议负责人冻结packet和ownership，工具负责人冻结版本，固件与harness负责人用同一memory map做首个可执行对照。
+
+## 3. 总体结构
+
+```mermaid
+flowchart TD
+  ISA[I-001 ISA/Profile] --> CONTRACT[I-002 Packet/Tag Contract]
+  CONTRACT --> COMMON[I-005 FIFO + I-006 RAM]
+  ISA --> TOOLS[I-003 Build/Tools]
+  CONTRACT --> HARNESS[I-004 Verilator Harness]
+  COMMON --> HARNESS
+  FW[I-007 Firmware Corpus] --> HARNESS
+  TOOLS --> HARNESS
+  HARNESS --> BASE[I-008 Simplified Bring-up]
+  BASE --> QUALITY[V-009..V-012 Reset/ELF/Signature Checks]
+```
+
+图中的箭头是数据/控制依赖；性能策略不得在正确性前打开。每个分支可以分给不同负责人，但跨接口字段以 [implementation-plan.md](implementation-plan.md) §1.3 和本文件任务卡为准，不能各团队私改。
+
+## 4. 团队分工与进度追踪
+
+| Team | 负责任务 | 当前状态 | Owner | 证据链接 | 下一动作 | Blocker |
+|---|---|---|---|---|---|---|
+| 体系结构配置负责人 | I-001 | Not started | 待定 | 待填 artifact/commit | 读取任务卡并建立输入锁 | 待填 |
+| 协议契约负责人 | I-002 | Not started | 待定 | 待填 artifact/commit | 读取任务卡并建立输入锁 | 待填 |
+| 构建负责人 | I-003 | Not started | 待定 | 待填 artifact/commit | 读取任务卡并建立输入锁 | 待填 |
+| Verilator harness负责人 | I-004 | Not started | 待定 | 待填 artifact/commit | 读取任务卡并建立输入锁 | 待填 |
+| 基础RTL负责人 | I-005 | Not started | 待定 | 待填 artifact/commit | 读取任务卡并建立输入锁 | 待填 |
+| memory wrapper负责人 | I-006 | Not started | 待定 | 待填 artifact/commit | 读取任务卡并建立输入锁 | 待填 |
+| 固件负责人 | I-007 | Not started | 待定 | 待填 artifact/commit | 读取任务卡并建立输入锁 | 待填 |
+| bring-up负责人 | I-008 | Not started | 待定 | 待填 artifact/commit | 读取任务卡并建立输入锁 | 待填 |
+| 构建负责人 | I-003 | Not started | 待定 | 待填 artifact/commit | 读取任务卡并建立输入锁 | 待填 |
+| 验证负责人 | V-001 | Not started | 待定 | 待填 artifact/commit | 读取任务卡并建立输入锁 | 待填 |
+| 验证负责人 | V-002 | Not started | 待定 | 待填 artifact/commit | 读取任务卡并建立输入锁 | 待填 |
+| 验证负责人 | V-003 | Not started | 待定 | 待填 artifact/commit | 读取任务卡并建立输入锁 | 待填 |
+| 验证负责人 | V-004 | Not started | 待定 | 待填 artifact/commit | 读取任务卡并建立输入锁 | 待填 |
+| 验证负责人 | V-005 | Not started | 待定 | 待填 artifact/commit | 读取任务卡并建立输入锁 | 待填 |
+| 验证负责人 | V-006 | Not started | 待定 | 待填 artifact/commit | 读取任务卡并建立输入锁 | 待填 |
+| 验证负责人 | V-007 | Not started | 待定 | 待填 artifact/commit | 读取任务卡并建立输入锁 | 待填 |
+| 验证负责人 | V-008 | Not started | 待定 | 待填 artifact/commit | 读取任务卡并建立输入锁 | 待填 |
+| 验证负责人 | V-009 | Not started | 待定 | 待填 artifact/commit | 读取任务卡并建立输入锁 | 待填 |
+| 验证负责人 | V-010 | Not started | 待定 | 待填 artifact/commit | 读取任务卡并建立输入锁 | 待填 |
+| 验证负责人 | V-011 | Not started | 待定 | 待填 artifact/commit | 读取任务卡并建立输入锁 | 待填 |
+| 验证负责人 | V-012 | Not started | 待定 | 待填 artifact/commit | 读取任务卡并建立输入锁 | 待填 |
+
+状态只能取 `Not started / Inputs locked / In progress / Blocked / Evidence complete / Accepted`。Accepted 需要阶段负责人和验证负责人同时签字；Blocked 必须写最小外部事实、影响范围、请求对象和下一日期，不写“快好了”。
+
+## 5. 可跟踪任务卡
+
+每张卡含实现接口、数据、设计取舍、步骤、交接、验证和回退。完成定义：对应 `Pass` 全部有直接证据，相关负控制也工作；不是“代码写完”或“仿真曾跑过”。
+
+### I-001 — 冻结 ISA 与平台配置 manifest
+
+- **负责/门禁**：体系结构配置负责人；ISA/profile 冻结。
+- **前置依赖**：none；仍受 implementation-plan 集成依赖表约束。
+- **做什么**：定义 config/profile schema：XLEN、extensions、privilege、VLEN/ELEN、hart 数、memory map、endianness、misalignment policy、CSR WARL/WPRI；逐项指定 p0/p1/p2/p3 值及来源。
+- **输入数据/接口**：p0/p1/p2/p3 capability、memory/PMA、misalignment、CSR、VLEN/ELEN
+- **输出与交接**：发布profiles、capability、PMA/PMP、CSR/ISA matrix
+- **设计取舍**：能力交集而非并集；A/C在p1合并验收，避免只测其一
+- **实现微步骤**：逐个profile列出XLEN、扩展、privilege、hart、VLEN/ELEN及来源；逐区列出RAM/MMIO、cacheability/idempotence、宽度、对齐、atomic与错误；逐项CSR列出WARL/WPRI/reset值与不可改变值；生成compiler/reference/DUT共用的机器可读manifest和说明；跑负例：广告A/C/F/D/V或非法PMA必须拒绝；reviewer确认每条宣称能力存在未来实现与V任务；经架构/验证/平台负责人三方签收版本。
+- **主要阻塞风险**：提前广告扩展、CSR WARL/WPRI未定义、runtime/config漂移；阻断规则：ISA 字符串包含未实现扩展，或 memory/CSR 行为未定义。
+- **验收证据**：每个 profile 可生成唯一 compiler/ref/DUT capability 交集；任何宣称指令有实现任务和验证任务。；验证口径：静态schema校验、capability交集、负例
+- **失败/回退动作**：发现声明未实现时回退profile并重新冻结
+- **来源覆盖**：ISA scope, configuration, SRC-01/SRC-02/SRC-03。；来源 IR-001, architecture-review.md。
+- **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
+
+### I-002 — 冻结 packet、tag、credit、memory contract
+
+- **负责/门禁**：协议契约负责人；packet/tag/credit冻结。
+- **前置依赖**：I-001；仍受 implementation-plan 集成依赖表约束。
+- **做什么**：为每接口写 transfer/cancel/response 状态表、owner、字段宽度推导；穷举 reset、flush、same-cycle accept/cancel、tag wrap 与 late response 组合。
+- **输入数据/接口**：接口、状态机、identity生命周期、ABA上界
+- **输出与交接**：interfaces、ownership/lifetime、watchdog
+- **设计取舍**：先可证明ownership再性能字段压缩
+- **实现微步骤**：逐接口画状态转移并指定owner；为每类tag推导容量与最长存活上界；列宏/uop/attempt/PRF/transaction的分离字段；定义cancel、credit return、flush同周期优先级；构造tiny-tag ABA反例清单；由验证团队审查wait graph与可观察性；冻结schema并生成后续包类型需求。
+- **主要阻塞风险**：tag wrap、last-uop误完成、重复credit、旧响应别名；阻断规则：用 ROB index 或 PC 单独识别在途指令，或取消没有 credit 回收路径。
+- **验收证据**：每类资源有唯一分配/释放事件；所有响应可判定 live/killed/stale，模数比较上界可计算。；验证口径：协议状态表、反例清单、contract review
+- **失败/回退动作**：重新收紧接口字段或选择全drain恢复
+- **来源覆盖**：uOP identity, ownership, recovery, network。；来源 architecture-review.md, SRC-01/SRC-02/SRC-03。
+- **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
+
+### I-003 — 实现可复现构建与能力拒绝
+
+- **负责/门禁**：构建负责人；构建环境锁定。
+- **前置依赖**：I-001, I-002；仍受 implementation-plan 集成依赖表约束。
+- **做什么**：创建 file list、Make targets、配置生成器与 manifest；构建不同 profile 到独立目录；未知 feature/缺依赖立即失败而不 fallback。
+- **输入数据/接口**：filelist、profile、tool/container、config生成
+- **输出与交接**：Make/config/manifest/环境证据
+- **设计取舍**：原生SV独立build与XiangShan环境隔离
+- **实现微步骤**：创建通用filelist和profile生成器；固定Make目标、输出目录和manifest格式；为缺失工具/未知profile定义退出码；记录工具版本、license能力、输入hash；在错误profile/缺工具/输出不可写下跑负控制；与H工具锁和V环境校准对账；发布可复现build contract。
+- **主要阻塞风险**：主机PATH、latest镜像、未实现config静默fallback；阻断规则：使用宿主机隐含路径、自动改 ISA 或遗留旧二进制冒充新构建。
+- **验收证据**：清空可再生 build 后两次构建使用相同输入清单；非法 profile 确定非零且不产出成功 manifest。；验证口径：clean build、hash对账、负例退出
+- **失败/回退动作**：锁定更小依赖或补生成器，不放宽profile
+- **来源覆盖**：reproducibility, tooling, portability。；来源 validation-plan.md, platform-plan.md。
+- **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
+
+### I-004 — 实现 Verilator harness 与失败输出
+
+- **负责/门禁**：Verilator harness负责人；基础可执行仿真。
+- **前置依赖**：I-003；仍受 implementation-plan 集成依赖表约束。
+- **做什么**：实现 ELF/bin loader、tick、reset、memory endpoint、seed、cycle limit、retire callback、first-mismatch dump；运行 CASE=harness.reset_load_exit 和 timeout/invalid-image 负例。
+- **输入数据/接口**：时钟、reset、tick、ELF、退出、trace event
+- **输出与交接**：eaf-sim、event stream、run manifest
+- **设计取舍**：默认SV探针canonical event，Difftest包装器后置
+- **实现微步骤**：实现顶层构造/reset/load/单cycle eval/final；接canonical retire callback和结果输出；实现平台/seed/event/max-cycle选项；接入ELF合法性检查与退出码；运行reset、timeout、坏ELF、注入mismatch负例；记录完整命令和可重放manifest；与V-009/V-010校准采样语义。
+- **主要阻塞风险**：eval重复计数、超时假成功、错误ELF继续执行；阻断规则：仅 UART 打印即当正确，或 reference adapter 未连接仍返回 PASS。
+- **验收证据**：指定镜像地址和 reset PC 一致；PASS 签名与退出码配对；超时/无 retire/损坏 ELF 均非零。；验证口径：负控制、timeout、replay、已知程序
+- **失败/回退动作**：退到无timing时钟模型并修复采样
+- **来源覆盖**：Verilator, functional prototype, reproducibility。；来源 validation-plan.md。
+- **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
+
+### I-005 — 实现 valid/ready FIFO 与 skid buffer
+
+- **负责/门禁**：基础RTL负责人；packet transfer可靠。
+- **前置依赖**：I-002, I-003；仍受 implementation-plan 集成依赖表约束。
+- **做什么**：实现不依赖 vendor primitive 的 FIFO；运行 CASE=fifo.backpressure，交错 push/pop/full/empty/reset，检查 payload 稳定和 packet 序列。
+- **输入数据/接口**：valid/ready、深度、payload稳定、reset
+- **输出与交接**：rtl/common FIFO、property harness
+- **设计取舍**：先透明可审计FIFO再性能skid优化
+- **实现微步骤**：定义FIFO时序接口与深度参数；实现push/pop/full/empty和稳定payload；编写逐拍序列/覆盖率测试；用小深度模型做packet conservation；加入reset/cancel组合反例；lint/elaboration并记录警告disposition；供所有下游模块统一复用。
+- **主要阻塞风险**：满丢包、空出包、reset旧valid、credit双返；阻断规则：full 时丢包、empty 时伪出包、reset 后旧 valid 泄露。
+- **验收证据**：有界模型中 accepted=emitted+buffered+explicitly_cancelled，任何 stall 不改变头项。；验证口径：单元序列、invariant、lint
+- **失败/回退动作**：禁用高级skid，仅保留透明FIFO
+- **来源覆盖**：buffering, packet conservation。；来源 architecture-review.md。
+- **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
+
+### I-006 — 实现同步 RAM 抽象与碰撞语义
+
+- **负责/门禁**：memory wrapper负责人；RAM语义统一。
+- **前置依赖**：I-002, I-003；仍受 implementation-plan 集成依赖表约束。
+- **做什么**：固定 synchronous read、byte write、无全阵列 reset；外置 valid 清零；显式 bypass/serialize 同地址 read/write；运行 CASE=ram.collision_matrix。
+- **输入数据/接口**：同步读、byte enable、mixed-port collision、latency
+- **输出与交接**：RAM wrapper、semantics matrix
+- **设计取舍**：通用接口+平台wrapper，不假设vendor默认模式
+- **实现微步骤**：定义generic RAM port/latency contract；列出每目标part支持/禁止RAM模式；实现仲裁和已知读写竞争语义；开发碰撞/边距矩阵测试；比较Verilator、厂商模型和综合推断；从common RTL删除vendor直接实例；生成适配器输出给PRF/cache/ROM。
+- **主要阻塞风险**：simulation组合读、X传播差异、意外全FF reset；阻断规则：仿真组合读而实板一拍读，或依赖未定义 mixed-port 行为。
+- **验收证据**：全地址碰撞/不同 byte mask 的可观察结果符合一种固定 contract，平台变化只改变 wrapper。；验证口径：collision cases、inference reports、H-004
+- **失败/回退动作**：禁有风险端口或外置仲裁
+- **来源覆盖**：PRF/cache storage, FPGA/ASIC portability。；来源 platform-plan.md。
+- **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
+
+### I-007 — 实现 bare-metal 镜像与 host oracle
+
+- **负责/门禁**：固件负责人；可独立执行的ELF。
+- **前置依赖**：I-001, I-004；仍受 implementation-plan 集成依赖表约束。
+- **做什么**：写 crt0/linker/trap handler、tohost/UART result record、signature 区；生成 add/branch/load/store/mul 程序，host 独立计算整数结果。
+- **输入数据/接口**：crt0、linker、trap、BSS、signature、tohost
+- **输出与交接**：ELF corpus、loader map、expected signatures
+- **设计取舍**：freestanding无隐藏libc，先p0
+- **实现微步骤**：定义memory map和section/entry/stack；写启动、异常入口和结果协议；生成12程序corpus及三输入；独立host oracle计算结果和guard bytes；审计反汇编仅含p0指令；运行装载和错误输入负例；冻结ELF hash给DUT/XiangShan/reference。
+- **主要阻塞风险**：默认工具链偷用C/A/F、entry/BSS不一致、host oracle不独立；阻断规则：只比较 DUT 自己产生的期望值，或 hidden libc 引入不支持指令。
+- **验收证据**：reference 与 harness loader 对 segment/BSS/entry 一致；错一个 signature byte 必须失败。；验证口径：反汇编、加载字节、独立签名
+- **失败/回退动作**：重编译固定march/flags或修订平台
+- **来源覆盖**：executable functional prototype, firmware。；来源 IR-001, validation-plan.md。
+- **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
+
+### I-008 — 实现简化标量语义路径作为 bring-up 对照
+
+- **负责/门禁**：bring-up负责人；简化执行路径校准。
+- **前置依赖**：I-004, I-007；仍受 implementation-plan 集成依赖表约束。
+- **做什么**：以单 issue/no speculation 的简化 RTL 路径执行相同 corpus，并接通 retire events；它只用于定位前端/ISA 错误，不替代后续 OoO fabric。
+- **输入数据/接口**：单issue/no-speculation、retire trace、initial programs
+- **输出与交接**：baseline RTL、first trace、limit statement
+- **设计取舍**：仅定位前端/ISA错误，绝不替代p0
+- **实现微步骤**：实现直接fetch/decode/execute/commit路径；关闭speculation但仍通过event接口；跑RV64I/M directed小集；对比独立reference每个event；翻转rd/PC验证检测器；显式标注build为bring-up only；完成后停止在此配置接受性能结果。
+- **主要阻塞风险**：把software/simplified path当最终core、忽略dynamic；阻断规则：以软件解释器的通过结果申报处理器 RTL 完成。
+- **验收证据**：directed p0 corpus 与 reference 逐 architectural event 一致；故意翻转 rd/PC 被 comparator 捕获。；验证口径：reference diff、negative control
+- **失败/回退动作**：修复decoder/memory后重跑，不扩大scope
+- **来源覆盖**：scalar baseline, differential integration。；来源 validation-plan.md, SRC-01/SRC-02/SRC-03。
+- **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
+
+### I-003 — 实现可复现构建与能力拒绝
+
+- **负责/门禁**：构建负责人；构建环境锁定。
+- **前置依赖**：I-001, I-002；仍受 implementation-plan 集成依赖表约束。
+- **做什么**：创建 file list、Make targets、配置生成器与 manifest；构建不同 profile 到独立目录；未知 feature/缺依赖立即失败而不 fallback。
+- **输入数据/接口**：filelist、profile、tool/container、config生成
+- **输出与交接**：Make/config/manifest/环境证据
+- **设计取舍**：原生SV独立build与XiangShan环境隔离
+- **实现微步骤**：创建通用filelist和profile生成器；固定Make目标、输出目录和manifest格式；为缺失工具/未知profile定义退出码；记录工具版本、license能力、输入hash；在错误profile/缺工具/输出不可写下跑负控制；与H工具锁和V环境校准对账；发布可复现build contract。
+- **主要阻塞风险**：主机PATH、latest镜像、未实现config静默fallback；阻断规则：使用宿主机隐含路径、自动改 ISA 或遗留旧二进制冒充新构建。
+- **验收证据**：清空可再生 build 后两次构建使用相同输入清单；非法 profile 确定非零且不产出成功 manifest。；验证口径：clean build、hash对账、负例退出
+- **失败/回退动作**：锁定更小依赖或补生成器，不放宽profile
+- **来源覆盖**：reproducibility, tooling, portability。；来源 validation-plan.md, platform-plan.md。
+- **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
+
+### V-001 — 冻结上游闭包与来源账本
+
+- **负责/门禁**：验证负责人；验证证据闭合。
+- **前置依赖**：none；仍受 implementation-plan 集成依赖表约束。
+- **做什么**：在实施环境收集 XiangShan 递归 gitlinks、NEMU config、参考库构建 provenance、工具版本及文件 hash；解析容器 tag 为 digest，区分源码重建库与预编译库。
+- **输入数据/接口**：第 1 节 SHA、上游主源、架构 ISA 决议里程碑。
+- **输出与交接**：不含浮动 branch/latest 的 source-lock 清单及来源证据。
+- **设计取舍**：有限集合/模型边界明确，不用样本数冒充形式证明
+- **实现微步骤**：冻结该任务输入、版本与capability交集；展开有限case/seed/budget manifest；实现真实检查器并接入负控制；执行正控制和故障注入；闭合计划/执行/通过/失败/unsupported计数；最小化失败并建立replay；阶段负责人签收或阻断后续gate。
+- **主要阻塞风险**：静默skip、mock echo、空覆盖率、把deferred当成功；阻断规则：缺失子模块、配置混版、库来源未知、tag/digest 不一致或靠主机偶然 PATH。
+- **验收证据**：每个可执行输入都有不可变标识、来源和许可证；表内 SHA 对应实际 checkout；未核实组合明确不进入执行 gate。；验证口径：每个可执行输入都有不可变标识、来源和许可证；表内 SHA 对应实际 checkout；未核实组合明确不进入执行 gate。
+- **失败/回退动作**：缺失子模块、配置混版、库来源未知、tag/digest 不一致或靠主机偶然 PATH。
+- **来源覆盖**：SRC-03 §XiangShan 的工程方法很适合借鉴；可重现性。；来源 VR-001, VR-002, VR-003, VR-004, VR-008。
+- **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
+
+### V-002 — 建立 capability 交集而非扩展并集
+
+- **负责/门禁**：验证负责人；验证证据闭合。
+- **前置依赖**：V-001；仍受 implementation-plan 集成依赖表约束。
+- **做什么**：为 DUT、XiangShan、NEMU、Spike、Sail、ACT4 分别列 XLEN、扩展版本、CSR、PMP/PMA、地址宽度、VLEN/ELEN、misaligned policy、trap 可选行为；计算逐 workload 可比交集及明确 unsupported 原因。
+- **输入数据/接口**：ISA/privilege/profile 决议、编译器选项、各模型精确配置。
+- **输出与交接**：capability-matrix 与每 suite 的适用/拒绝集合。
+- **设计取舍**：有限集合/模型边界明确，不用样本数冒充形式证明
+- **实现微步骤**：冻结该任务输入、版本与capability交集；展开有限case/seed/budget manifest；实现真实检查器并接入负控制；执行正控制和故障注入；闭合计划/执行/通过/失败/unsupported计数；最小化失败并建立replay；阶段负责人签收或阻断后续gate。
+- **主要阻塞风险**：静默skip、mock echo、空覆盖率、把deferred当成功；阻断规则：把 `G` 当 IM、把 upstream config 的 V/H/Sv48 当本核承诺、缺功能被误记通过。
+- **验收证据**：p0 只生成 RV64IM_Zicsr_Zifencei/M-mode 程序；交集之外的测试不能执行后才悄悄 skip；后续扩展保留待验收行。；验证口径：p0 只生成 RV64IM_Zicsr_Zifencei/M-mode 程序；交集之外的测试不能执行后才悄悄 skip；后续扩展保留待验收行。
+- **失败/回退动作**：把 `G` 当 IM、把 upstream config 的 V/H/Sv48 当本核承诺、缺功能被误记通过。
+- **来源覆盖**：SRC-03 §最小原型应该是 Scalar Elastic Backend、§RVV 与 CPU—GPU 连续体。；来源 VR-003, VR-005, VR-006, VR-007, VR-009, VR-013。
+- **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
+
+### V-003 — 校准隔离环境与失败退出
+
+- **负责/门禁**：验证负责人；验证证据闭合。
+- **前置依赖**：V-001；仍受 implementation-plan 集成依赖表约束。
+- **做什么**：在未来实施环境建立 A/B 两套锁定环境，运行版本/帮助检查及缺库、错误架构库、无写权限输出目录三个失败场景；记录构建资源峰值但不改硬件预算。
+- **输入数据/接口**：容器/主机依赖清单、未来 CLI 契约。
+- **输出与交接**：环境证据包与 CLI 退出码对照。
+- **设计取舍**：有限集合/模型边界明确，不用样本数冒充形式证明
+- **实现微步骤**：冻结该任务输入、版本与capability交集；展开有限case/seed/budget manifest；实现真实检查器并接入负控制；执行正控制和故障注入；闭合计划/执行/通过/失败/unsupported计数；最小化失败并建立replay；阶段负责人签收或阻断后续gate。
+- **主要阻塞风险**：静默skip、mock echo、空覆盖率、把deferred当成功；阻断规则：自动回退无 reference、联网获取未锁依赖、把工具 crash 记为 DUT PASS。
+- **验收证据**：所有工具与锁一致；三种故障明确非零并有诊断；从空输出目录开始可独立重建同一输入集合。；验证口径：所有工具与锁一致；三种故障明确非零并有诊断；从空输出目录开始可独立重建同一输入集合。
+- **失败/回退动作**：自动回退无 reference、联网获取未锁依赖、把工具 crash 记为 DUT PASS。
+- **来源覆盖**：SRC-03 §FPGA 原型与验证路线；可复现宿主环境。；来源 VR-002, VR-005, VR-006, VR-007, VR-008, VR-009。
+- **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
+
+### V-004 — 验证 NEMU ABI 与序列化布局
+
+- **负责/门禁**：验证负责人；验证证据闭合。
+- **前置依赖**：V-001, V-002, V-003；仍受 implementation-plan 集成依赖表约束。
+- **做什么**：逐符号核对原型、bool/enum/struct 布局和宏；用独立状态写入/读回、已知两条算术指令及一次 store 验证方向；再加载缺符号与错误布局库确认 fail-closed。
+- **输入数据/接口**：冻结 refproxy、NEMU reference 库、canonical-state 定义。
+- **输出与交接**：ABI manifest、状态 round-trip、实际 reference-step 语义与负控制日志。
+- **设计取舍**：有限集合/模型边界明确，不用样本数冒充形式证明
+- **实现微步骤**：冻结该任务输入、版本与capability交集；展开有限case/seed/budget manifest；实现真实检查器并接入负控制；执行正控制和故障注入；闭合计划/执行/通过/失败/unsupported计数；最小化失败并建立replay；阶段负责人签收或阻断后续gate。
+- **主要阻塞风险**：静默skip、mock echo、空覆盖率、把deferred当成功；阻断规则：两参数 regcpy 误接三参数 ABI、状态截断、大小相等但字段顺序错误、缺扩展符号静默忽略。
+- **验收证据**：所有字段按预期读回且 reference 真正执行产生已知结果；错库在任何 DUT 执行前拒绝；不能只做 mock echo。；验证口径：所有字段按预期读回且 reference 真正执行产生已知结果；错库在任何 DUT 执行前拒绝；不能只做 mock echo。
+- **失败/回退动作**：两参数 regcpy 误接三参数 ABI、状态截断、大小相等但字段顺序错误、缺扩展符号静默忽略。
+- **来源覆盖**：SRC-03 §XiangShan 的工程方法很适合借鉴；reference adapter。；来源 VR-003, VR-004, VR-005。
+- **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
+
+### V-005 — 执行 XiangShan 上游环境正控制
+
+- **负责/门禁**：验证负责人；验证证据闭合。
+- **前置依赖**：V-003, V-004；仍受 implementation-plan 集成依赖表约束。
+- **做什么**：未来按第 2 节原例构建并运行 XiangShan+NEMU；保存完整 build 配置、Difftest 开启证据、退出原因及首尾 commit；不将样例迁就成 p0。
+- **输入数据/接口**：来源闭合的上游组合、ready-to-run coremark、上游 README 示例。
+- **输出与交接**：独立 DUT-B 环境校准记录。
+- **设计取舍**：有限集合/模型边界明确，不用样本数冒充形式证明
+- **实现微步骤**：冻结该任务输入、版本与capability交集；展开有限case/seed/budget manifest；实现真实检查器并接入负控制；执行正控制和故障注入；闭合计划/执行/通过/失败/unsupported计数；最小化失败并建立replay；阶段负责人签收或阻断后续gate。
+- **主要阻塞风险**：静默skip、mock echo、空覆盖率、把deferred当成功；阻断规则：没加载 reference、只看进程退出 0、替换 workload/配置后仍称上游原例通过。
+- **验收证据**：样例按其退出协议完成、比较器确实工作且无 mismatch；结果只证明该环境路径。；验证口径：样例按其退出协议完成、比较器确实工作且无 mismatch；结果只证明该环境路径。
+- **失败/回退动作**：没加载 reference、只看进程退出 0、替换 workload/配置后仍称上游原例通过。
+- **来源覆盖**：SRC-03 §XiangShan 的工程方法很适合借鉴。；来源 VR-002, VR-004。
+- **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
+
+### V-006 — 校准独立 Spike 与 Sail 语义
+
+- **负责/门禁**：验证负责人；验证证据闭合。
+- **前置依赖**：V-002, V-003；仍受 implementation-plan 集成依赖表约束。
+- **做什么**：使用各模型官方 CLI/配置运行同一 ISA 交集程序，比较寄存器/签名与明确语义；记录 C++ API 或日志 adapter 的版本边界，遇分歧最小化并查规范。
+- **输入数据/接口**：主线 Spike pin、Sail 0.14.1、12 个无外设依赖的小程序。
+- **输出与交接**：三参考三角对照表、模型差异记录。
+- **设计取舍**：有限集合/模型边界明确，不用样本数冒充形式证明
+- **实现微步骤**：冻结该任务输入、版本与capability交集；展开有限case/seed/budget manifest；实现真实检查器并接入负控制；执行正控制和故障注入；闭合计划/执行/通过/失败/unsupported计数；最小化失败并建立replay；阶段负责人签收或阻断后续gate。
+- **主要阻塞风险**：静默skip、mock echo、空覆盖率、把deferred当成功；阻断规则：把主线 Spike 当 NEMU ABI `.so`、默认 Sail 最大配置冒充 p0、用二比一投票解决规范争议。
+- **验收证据**：12 个程序在确定性字段一致；允许差异由规范条款解释且有独立合法性检查。；验证口径：12 个程序在确定性字段一致；允许差异由规范条款解释且有独立合法性检查。
+- **失败/回退动作**：把主线 Spike 当 NEMU ABI `.so`、默认 Sail 最大配置冒充 p0、用二比一投票解决规范争议。
+- **来源覆盖**：SRC-03 §Retire/architectural correctness 建议。；来源 VR-005, VR-006, VR-007。
+- **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
+
+### V-007 — 固定通用 ELF 与平台入口
+
+- **负责/门禁**：验证负责人；验证证据闭合。
+- **前置依赖**：V-002, V-006；仍受 implementation-plan 集成依赖表约束。
+- **做什么**：生成 freestanding/static LP64 ELF，反汇编审计实际 ISA，固定 entry、stack、BSS、RAM、trap vector；导出 PT_LOAD 内容及 binary 转换 provenance，禁用未经审计的 libc/编译器扩展。
+- **输入数据/接口**：交叉工具链、p0 平台描述、linker/startup/退出协议实现里程碑。
+- **输出与交接**：兼容 ELF 契约及首个跨环境程序包。
+- **设计取舍**：有限集合/模型边界明确，不用样本数冒充形式证明
+- **实现微步骤**：冻结该任务输入、版本与capability交集；展开有限case/seed/budget manifest；实现真实检查器并接入负控制；执行正控制和故障注入；闭合计划/执行/通过/失败/unsupported计数；最小化失败并建立replay；阶段负责人签收或阻断后续gate。
+- **主要阻塞风险**：静默skip、mock echo、空覆盖率、把deferred当成功；阻断规则：默认编译器悄悄使用 C/A/F、把用户态 ELF 当 bare-metal、假设不同 reset ROM 相同。
+- **验收证据**：指令、初始化字节、entry 与终止协议均在 DUT/ref 交集；原 ELF 与转换 image 在声明加载地址的字节一致。；验证口径：指令、初始化字节、entry 与终止协议均在 DUT/ref 交集；原 ELF 与转换 image 在声明加载地址的字节一致。
+- **失败/回退动作**：默认编译器悄悄使用 C/A/F、把用户态 ELF 当 bare-metal、假设不同 reset ROM 相同。
+- **来源覆盖**：SRC-03 §software sees normal RISC-V、§最小原型应该是 Scalar Elastic Backend。；来源 VR-002, VR-005, VR-006, VR-007, VR-009。
+- **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
+
+### V-008 — 冻结 architectural event 接口
+
+- **负责/门禁**：验证负责人；验证证据闭合。
+- **前置依赖**：V-002, V-004；仍受 implementation-plan 集成依赖表约束。
+- **做什么**：编写每字段宽度、有效性、边界顺序与采样时刻；对两条同周期指令加 trap、store drain 的实际序列手工推导事件，分别经 SV/C++ 序列化校验。
+- **输入数据/接口**：第 3 节 event schema、退休接口实现里程碑、路线 A/B 选择。
+- **输出与交接**：版本化 schema、探针映射与逐步期望事件表。
+- **设计取舍**：有限集合/模型边界明确，不用样本数冒充形式证明
+- **实现微步骤**：冻结该任务输入、版本与capability交集；展开有限case/seed/budget manifest；实现真实检查器并接入负控制；执行正控制和故障注入；闭合计划/执行/通过/失败/unsupported计数；最小化失败并建立replay；阶段负责人签收或阻断后续gate。
+- **主要阻塞风险**：静默skip、mock echo、空覆盖率、把deferred当成功；阻断规则：只暴露执行结果不暴露退休状态、多个退休共享一份错误快照、vector 被固定截为低 128 位。
+- **验收证据**：每个 architectural effect 可定位到唯一 hart/指令；没有无定义字段或跨周期错位；路线 B 生成物与软件端完全同版。；验证口径：每个 architectural effect 可定位到唯一 hart/指令；没有无定义字段或跨周期错位；路线 B 生成物与软件端完全同版。
+- **失败/回退动作**：只暴露执行结果不暴露退休状态、多个退休共享一份错误快照、vector 被固定截为低 128 位。
+- **来源覆盖**：SRC-03 §uOP 不应该只是传统 CPU 的 micro-op、§Per-Hart Commit Domain。；来源 VR-003, VR-008, VR-011。
+- **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
+
+### V-009 — 证明 reset 与初始状态可重放
+
+- **负责/门禁**：验证负责人；验证证据闭合。
+- **前置依赖**：V-007, V-008；仍受 implementation-plan 集成依赖表约束。
+- **做什么**：在 1/2/5/17 个有效时钟 reset 长度和不同解除相位运行同一程序；reset 中断正在进行的仿真并重启；分别检查 SRAM 非复位内容的初始化合同。
+- **输入数据/接口**：SV reset 实现、明确同步/异步极性、平台初值。
+- **输出与交接**：reset 波形片段、首条合法退休与状态证据。
+- **设计取舍**：有限集合/模型边界明确，不用样本数冒充形式证明
+- **实现微步骤**：冻结该任务输入、版本与capability交集；展开有限case/seed/budget manifest；实现真实检查器并接入负控制；执行正控制和故障注入；闭合计划/执行/通过/失败/unsupported计数；最小化失败并建立replay；阶段负责人签收或阻断后续gate。
+- **主要阻塞风险**：静默skip、mock echo、空覆盖率、把deferred当成功；阻断规则：依赖 C++ 内存碰巧为零、reset 期间伪提交、旧事务穿越 reset 污染新 run。
+- **验收证据**：reset 期间无提交/设备写；解除后 PC/权限/CSR/queue ownership 确定；同 seed 重放状态一致。；验证口径：reset 期间无提交/设备写；解除后 PC/权限/CSR/queue ownership 确定；同 seed 重放状态一致。
+- **失败/回退动作**：依赖 C++ 内存碰巧为零、reset 期间伪提交、旧事务穿越 reset 污染新 run。
+- **来源覆盖**：SRC-03 §Architectural State 不动态、§precise retire。；来源 VR-008, VR-011。
+- **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
+
+### V-010 — 校准 Verilator 时钟与采样循环
+
+- **负责/门禁**：验证负责人；验证证据闭合。
+- **前置依赖**：V-008, V-009；仍受 implementation-plan 集成依赖表约束。
+- **做什么**：明确低相驱动、高相 eval、稳定后事件采样；使用 `eval()`/`final()`，需要延迟时才启用并正确推进 `--timing` 事件；逐项施加 backpressure 检查一次握手仅记录一次。
+- **输入数据/接口**：C++ harness 实现里程碑、Verilator 5.052。
+- **输出与交接**：单周期时间线、重复采样检测记录。
+- **设计取舍**：有限集合/模型边界明确，不用样本数冒充形式证明
+- **实现微步骤**：冻结该任务输入、版本与capability交集；展开有限case/seed/budget manifest；实现真实检查器并接入负控制；执行正控制和故障注入；闭合计划/执行/通过/失败/unsupported计数；最小化失败并建立replay；阶段负责人签收或阻断后续gate。
+- **主要阻塞风险**：静默skip、mock echo、空覆盖率、把deferred当成功；阻断规则：eval 被误作时钟、DPI 回调出现双计数、开启 timing 后不推进 pending event、结束前漏 final。
+- **验收证据**：整数时间单位固定；每次 accept/retire 与 RTL 事件一一对应；end-of-run final assertion 执行。；验证口径：整数时间单位固定；每次 accept/retire 与 RTL 事件一一对应；end-of-run final assertion 执行。
+- **失败/回退动作**：eval 被误作时钟、DPI 回调出现双计数、开启 timing 后不推进 pending event、结束前漏 final。
+- **来源覆盖**：SRC-03 §Elastic Latency Execution、§Completion Fabric。；来源 VR-008。
+- **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
+
+### V-011 — 验证 ELF 装载与内存边界
+
+- **负责/门禁**：验证负责人；验证证据闭合。
+- **前置依赖**：V-007, V-010；仍受 implementation-plan 集成依赖表约束。
+- **做什么**：对正常多 PT_LOAD/BSS/非零 entry 和损坏 magic、端序、溢出、重叠、越界、filesz>memsz、动态 ELF 逐项执行；以已知 byte pattern 检查 load/store 字节序及边界 fault。
+- **输入数据/接口**：harness loader、稀疏/连续 RAM 模型、平台 PMA。
+- **输出与交接**：loader case 清单与加载后内存摘要。
+- **设计取舍**：有限集合/模型边界明确，不用样本数冒充形式证明
+- **实现微步骤**：冻结该任务输入、版本与capability交集；展开有限case/seed/budget manifest；实现真实检查器并接入负控制；执行正控制和故障注入；闭合计划/执行/通过/失败/unsupported计数；最小化失败并建立replay；阶段负责人签收或阻断后续gate。
+- **主要阻塞风险**：静默skip、mock echo、空覆盖率、把deferred当成功；阻断规则：只加载第一个 segment、忽略 ELF entry、silent truncation、错误映像继续跑。
+- **验收证据**：正常段逐字节一致、BSS 为规定零、拒绝项在开始运行前 code 2；地址错误不绕回 RAM。；验证口径：正常段逐字节一致、BSS 为规定零、拒绝项在开始运行前 code 2；地址错误不绕回 RAM。
+- **失败/回退动作**：只加载第一个 segment、忽略 ELF entry、silent truncation、错误映像继续跑。
+- **来源覆盖**：SRC-03 §Memory Fabric；程序镜像可移植性。；来源 VR-003, VR-007, VR-008, VR-009。
+- **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
+
+### V-012 — 固定 signature 与终止判断
+
+- **负责/门禁**：验证负责人；验证证据闭合。
+- **前置依赖**：V-010, V-011；仍受 implementation-plan 集成依赖表约束。
+- **做什么**：分别运行正常完成、显式 FAIL、无退出循环、WFI、写过 PASS 后出现 mismatch、signature 越界与末尾 pending store 的程序。
+- **输入数据/接口**：startup/退出协议、signature 区间、外部设备模型。
+- **输出与交接**：终止状态机证据及最终 signature/memory 文件。
+- **设计取舍**：有限集合/模型边界明确，不用样本数冒充形式证明
+- **实现微步骤**：冻结该任务输入、版本与capability交集；展开有限case/seed/budget manifest；实现真实检查器并接入负控制；执行正控制和故障注入；闭合计划/执行/通过/失败/unsupported计数；最小化失败并建立replay；阶段负责人签收或阻断后续gate。
+- **主要阻塞风险**：静默skip、mock echo、空覆盖率、把deferred当成功；阻断规则：timeout 当成功、只匹配 UART 文本、未完成 store 就读 signature、空程序算通过。
+- **验收证据**：只有完整协议完成、检查器无误且规定 drain 完成才返回 0；每种错误获得约定非零。；验证口径：只有完整协议完成、检查器无误且规定 drain 完成才返回 0；每种错误获得约定非零。
+- **失败/回退动作**：timeout 当成功、只匹配 UART 文本、未完成 store 就读 signature、空程序算通过。
+- **来源覆盖**：SRC-03 §precise retire、§FPGA 原型与验证路线。；来源 VR-003, VR-008, VR-009。
+- **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
+
+## 6. 阶段级阻塞清单
+
+| Blocker | 触发条件 | 立即动作 | 责任升级 |
+|---|---|---|---|
+| 合同缺失或互相矛盾 | 任一输入没有版本/hash，或两文档字段不一致 | 停止新增实现，更新合同并重跑负控制 | 阶段负责人 → 架构负责人 |
+| 验证不能证明 | reference不支持、检查器跳过、trace溢出或空套件 | 标UNSUPPORTED并阻断相应能力，不降级为PASS | 验证负责人 |
+| 资源/时序不适配 | synthesis/P&R失败、exact board不支持、ASIC库缺失 | 记录真实报告，缩小几何或请求器件/许可/库决策 | 平台/ASIC负责人 |
+| 动态协议错误 | 丢/重packet、ABA、stale response、credit泄漏、drain卡死 | 冻结动态策略，回退到本卡保守模式，建立最小replay | 对应子系统负责人 |
+| 性能假设被否定 | fixed/dynamic对照负收益或隐藏资源差异 | 保留负结果，关闭该策略默认路径，不把目标改成成功案例 | 研究集成负责人 |
+
+## 7. 阶段 Track Log（持续追加）
+
+| 日期 | 事件 | 证据 | 负责人 | 下一步 |
+|---|---|---|---|---|
+| 2026-09-29 | 初始团队指南由完整架构/验证/平台计划生成 | 本文件、source-inventory、references | 规划集成 | 各团队冻结输入并更新上表 |
