@@ -31,12 +31,16 @@ originals = {
     "deep-research-report(2).md": "faf4317a72ba9fbd812eeeea7c1bb09e2f0a1519ce21622799cad608137e74fb",
 }
 plans = ["docs/implementation-plan.md", "docs/validation-plan.md", "docs/platform-plan.md"]
+stage_docs = [
+    "docs/stage-0-contracts-bringup.md", "docs/stage-1-scalar-control.md",
+    "docs/stage-2-execution-fabric.md", "docs/stage-3-memory-system.md",
+    "docs/stage-4-vector-locality.md", "docs/stage-5-multihart-aggregation.md",
+    "docs/stage-6-verification-quality.md", "docs/stage-7-fpga-hardware.md",
+    "docs/stage-8-asic-release.md", "docs/stage-9-lockstep-safety.md",
+]
 new_docs = ["README.md", "docs/architecture-review.md", *plans,
             "docs/source-inventory.md", "docs/references.md", "docs/verification.md",
-            *[f"docs/stage-{n}-{name}.md" for n, name in enumerate([
-                "contracts-bringup", "scalar-control", "execution-fabric",
-                "memory-system", "vector-locality", "multihart-aggregation",
-                "verification-quality", "fpga-hardware", "asic-release"])]]
+            *stage_docs]
 expected_files = set(originals) | set(new_docs)
 actual_md = {str(p.relative_to(root)) for p in root.rglob("*.md") if ".git" not in p.parts}
 assert actual_md == expected_files, ("document inventory mismatch", sorted(actual_md ^ expected_files))
@@ -72,8 +76,8 @@ for name in plans:
             assert len(entries) == 1 and entries[0].strip(), ("task field", task_id, field)
             values[field] = entries[0]
         tasks[task_id] = values
-assert Counter(task_id[0] for task_id in tasks) == {"I":86, "V":80, "H":47}, "task count changed"
-for prefix, count in [("I",86),("V",80),("H",47)]:
+assert Counter(task_id[0] for task_id in tasks) == {"I":91, "V":84, "H":49}, "task count changed"
+for prefix, count in [("I",91),("V",84),("H",49)]:
     assert {key for key in tasks if key.startswith(prefix)} == {f"{prefix}-{n:03}" for n in range(1,count+1)}, "task ID gap"
 deps = {key: set(re.findall(r"\b[IVH]-\d{3}\b", value["Depends"])) for key,value in tasks.items()}
 for key, value in tasks.items():
@@ -103,14 +107,14 @@ for _,_,disposition,task_refs in rows:
     ids = set(re.findall(r"\b[IVH]-\d{3}\b", task_refs))
     assert ids and ids <= tasks.keys() and disposition.strip(), ("unmapped source", task_refs)
 
-expected_refs = {f"{prefix}-{n:03}" for prefix,count in [("AR",18),("IR",4),("VR",15),("HR",12)] for n in range(1,count+1)}
+expected_refs = {f"{prefix}-{n:03}" for prefix,count in [("AR",21),("IR",4),("VR",15),("HR",14)] for n in range(1,count+1)}
 definitions = []
 for name in ["docs/architecture-review.md",*plans]:
     definitions += re.findall(r"^\| ((?:AR|VR|HR)-\d{3}) \|", texts[name], re.M)
-    definitions += re.findall(r"^- \*\*(IR-\d{3})\*\*", texts[name], re.M)
-assert len(definitions) == len(set(definitions)) == 49 and set(definitions) == expected_refs, "reference definitions mismatch"
+    definitions += re.findall(r"^- \*\*(AR-\d{3}|IR-\d{3})\*\*", texts[name], re.M)
+assert len(definitions) == len(set(definitions)) == 54 and set(definitions) == expected_refs, "reference definitions mismatch"
 master_refs = re.findall(r"^\| ((?:AR|IR|VR|HR)-\d{3}) \|", texts["docs/references.md"], re.M)
-assert len(master_refs) == 49 and set(master_refs) == expected_refs, "master ledger mismatch"
+assert len(master_refs) == 54 and set(master_refs) == expected_refs, "master ledger mismatch"
 local_links, external_urls = 0, set()
 for name in new_docs:
     text = re.sub(r"```[^\n]*\n.*?\n```", "", texts[name], flags=re.S)
@@ -131,7 +135,6 @@ for name in new_docs:
 
 tracked = set(subprocess.check_output(["git", "ls-files", "-z"], cwd=root).decode().split("\0")) - {""}
 assert expected_files <= tracked, ("untracked documents", sorted(expected_files-tracked))
-stage_docs = new_docs[-9:]
 for stage in stage_docs:
     text = texts[stage]
     for required in ["## 1. 这个子系统是做什么的", "## 2. 为什么存在 / 上游输入",
@@ -159,6 +162,7 @@ print(json.dumps({"status":"PASS", "original_documents":3,
     "stage_task_cards":sum(1 for task_id in tasks if re.search(r"^### " + task_id + r" — ", combined_stage_text, re.M)),
     "git_whitespace":"PASS",
     "verification_scope":"documentation/provenance/graph; no processor simulation or hardware run"}, ensure_ascii=False, indent=2))
+
 ```
 <!-- DOC-CHECK-END -->
 
@@ -166,7 +170,7 @@ print(json.dumps({"status":"PASS", "original_documents":3,
 
 - 将source-inventory的102行逐项与实际原文标题/行范围比较；审查接受/纠正/分期是否有对应I/V/H任务。三个源文件hash必须不变。
 - 交叉审查ISA profile、XLEN/VLEN、RAM延迟、per-hart ownership、macro/uOP/attempt、RVV partial trap、LLB freshness、MMIO/AMO、cohort eligibility、credit/drain/ABA在四份主计划中的合同一致性。
-- 九个stage指南均含用途、上游输入、Mermaid结构、团队进度表、任务卡（负责/输入/微步骤/风险/验收/回退）、阶段阻塞清单和Track Log；其中出现的每个213任务ID必须在主计划中定义，且指南覆盖了所有任务。Mermaid块只检查存在与基本闭合，不把渲染成功当架构正确。
+- 十个stage指南均含用途、上游输入、Mermaid结构、团队进度表、任务卡（负责/输入/微步骤/风险/验收/回退）、阶段阻塞清单和Track Log；其中出现的每个224任务ID必须在主计划中定义，且指南覆盖了所有任务。Mermaid块只检查存在与基本闭合，不把渲染成功当架构正确。
 - 核对XiangShan是第二DUT，Difftest是框架，NEMU/Spike/Sail是各有能力边界的参考；候选SHA和upstream命令有primary来源，本轮未运行。多hart memory不由single-hart lockstep代替。
 - 三family都有exact-part/工具/约束/route/编程/reset/program/signature/负控制/证据任务；Zynq分支不混用，ARM PS执行不能冒充PL RISC-V执行。
 - ASIC的PDK/library/SRAM/DFT/ATPG/MBIST/STA/PDN/IR-EM/DRC-LVS/封装/首硅分开gate，FPGA验证不越权证明ASIC。
@@ -186,4 +190,4 @@ print(json.dumps({"status":"PASS", "original_documents":3,
 
 ## 5. 当前检查结果
 
-2026-09-29 完整文档检查在 `git add README.md docs` 后执行并通过：3份原始文档、5,447行、102个源标题全覆盖；213个任务（86 I、80 V、47 H）均有团队任务卡；64个跨文档集成依赖行、557条合并依赖边、DAG无环；49个引用ID、94个local links、73个外部URL条目；20份预期Markdown全部Git-tracked；9个stage指南均含Mermaid/追踪/阻塞/日志；新文档staged与unstaged whitespace检查均通过。原报告行尾空格保持原样，hash不变；检查范围不代表CPU/板级/ASIC已验证。
+2026-09-29 新增可选 lockstep 后重新执行当前检查并通过：224个任务（91 I、84 V、49 H）、54个引用ID、21份Markdown、10个stage指南；具体当前数值由嵌入式检查器输出。原报告hash不变，检查范围不代表CPU/板级/ASIC已验证。

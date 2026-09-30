@@ -110,7 +110,7 @@
 
 | Source range | 原始标题 | 处置 | Tasks |
 |---|---|---|---|
-| SRC-03:1-2 | 面向 RISC-V / RVV 的动态聚合处理器架构研究：从高 IPC CPU 到 GPU-like SIMT 的弹性执行 Fabric | 保留MosaicRV（原EAF-V）完整目标而非神奇GPU加速 | I-001, I-084 |
+| SRC-03:1-2 | 面向 RISC-V / RVV 的动态聚合处理器架构研究：从高 IPC CPU 到 GPU-like SIMT 的弹性执行 Fabric | 保留MosaicRV（原EAF-V）完整目标而非神奇GPU加速；新增optional lockstep不改变原ISA目标 | I-001, I-084, I-087 |
 | SRC-03:3-54 | 研究结论与架构定位 | 论文数字与本设计结果分开，primary追溯 | I-077, I-078 |
 | SRC-03:55-56 | 从 XiangShan 与现有 RISC-V 设计推导新的 Pipeline | 顺序control plane+弹性backend | I-002, I-017 |
 | SRC-03:57-129 | 不要把 Frontend 也完全 Fabric 化 | latency-sensitive frontend保留常规结构 | I-009, I-021 |
@@ -154,8 +154,12 @@
 | SRC-03:2172-2234 | 再加入多 Hart 与 Cohort Fusion | 保留multihart与cohort split/rejoin | I-064, I-069 |
 | SRC-03:2235-2270 | 最后才做 Pod Aggregation | 先coarse inter-pod，再考虑细粒度成本 | I-072, I-073 |
 | SRC-03:2271-2346 | XiangShan 的工程方法很适合借鉴 | XiangShan第二DUT；Difftest/reference是真实校验路径 | V-005, V-075 |
-| SRC-03:2347-2528 | 推荐的最终 EAF-V 架构 | 所有核心原则进入MosaicRV最终实现与验收gate | I-082, I-083, I-084, I-085 |
+| SRC-03:2347-2528 | 推荐的最终 EAF-V 架构 | 所有核心原则进入MosaicRV最终实现与验收gate；lockstep作为可选安全profile独立验收 | I-082, I-083, I-084, I-085, I-091 |
 
 ## 5. 未继承为事实的原报告断言
 
 XiangShan queue/PRF/FU/ROB具体数值与版本绑定不足；PULP-C910/BOOM/RSD/CVA6/Vortex/Ventus/FireSim及Ara2/AraXL/Spatz/MemPool/TeraPool的原文数字与特定板卡结果，未在本轮逐项复现或全量核验，不作为本机预算、性能承诺或成功证据。相应比较思路保留为背景，实施不依赖其数值正确。Ara-Opt/SEAM-V仅核到primary摘要主张，Core Fusion/TRIPS语义差异已在架构审查限定。每条性能假说最终依靠本项目等资源、实际时钟、正确性先行的实验。
+
+## 6. 后续新增需求：optional lockstep
+
+用户在初次三份报告之外明确提出 lockstep。该需求不改变原始文档范围：在 [architecture-review.md](architecture-review.md) §11.1 中定义为可选安全 profile，由 I-087–I-091 实现、V-081–V-084 验证、H-048/H-049 完成三FPGA/ASIC物理边界。它不是原报告的隐藏假设，也不是默认处理器模式；DCLS检测与TMR纠错分开，lockstep pair不是第二个 architectural hart。

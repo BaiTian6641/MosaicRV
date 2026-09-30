@@ -9,12 +9,12 @@
 
 1. [原始文档库存与逐节覆盖](docs/source-inventory.md)：三份原报告，5,447 行、102 个标题，原文保持字节不变；记录所有思想的接受、修正与分期。
 2. [架构审查](docs/architecture-review.md)：固定物理结构/动态资源归属、每 hart 精确提交、tag/credit/恢复、内存顺序、RVV、LLB、cohort 与完整 core-fusion 边界。
-3. [细粒度实施计划](docs/implementation-plan.md)：86 个 I 工作包；profile、接口、文件布局、未来 CLI、跨文档依赖和 release gates。
-4. [验证计划](docs/validation-plan.md)：80 个 V 工作包；锁定的 XiangShan/Difftest/NEMU 候选来源链、Verilator 接入、独立参考、负控制、有限测试集、formal/litmus 与失败复现。
-5. [平台及 ASIC 计划](docs/platform-plan.md)：47 个 H 工作包；公共 RAM/clock/reset/CDC 合同，三个独立板级 flow、真实证据协议与 ASIC SRAM/DFT/STA/physical signoff。
-6. [一手参考总账](docs/references.md)：49 个来源 ID，primary URL、版本、支持主张与访问限制；不把原报告聊天引用 token 伪造成文献。
-7. 九个团队执行指南：[第0阶段](docs/stage-0-contracts-bringup.md)、[第1阶段](docs/stage-1-scalar-control.md)、[第2阶段](docs/stage-2-execution-fabric.md)、[第3阶段](docs/stage-3-memory-system.md)、[第4阶段](docs/stage-4-vector-locality.md)、[第5阶段](docs/stage-5-multihart-aggregation.md)、[第6阶段](docs/stage-6-verification-quality.md)、[第7阶段](docs/stage-7-fpga-hardware.md)、[第8阶段](docs/stage-8-asic-release.md)。每份含用途、设计、Mermaid、微步骤、阻塞、团队进度表和 Track Log。
-8. [本轮验证与重跑指令](docs/verification.md)：文档 hash/覆盖、213 个任务字段、九个指南的结构、合并依赖图、引用/链接和 Git 跟踪检查；不包含伪造的 CPU 测试成绩。
+3. [细粒度实施计划](docs/implementation-plan.md)：91 个 I 工作包；profile、接口、文件布局、未来 CLI、跨文档依赖和 release gates。
+4. [验证计划](docs/validation-plan.md)：84 个 V 工作包；锁定的 XiangShan/Difftest/NEMU 候选来源链、Verilator 接入、独立参考、负控制、有限测试集、formal/litmus 与失败复现。
+5. [平台及 ASIC 计划](docs/platform-plan.md)：49 个 H 工作包；公共 RAM/clock/reset/CDC 合同，三个独立板级 flow、真实证据协议与 ASIC SRAM/DFT/STA/physical signoff。
+7. 十个团队执行指南：[第0阶段](docs/stage-0-contracts-bringup.md)、[第1阶段](docs/stage-1-scalar-control.md)、[第2阶段](docs/stage-2-execution-fabric.md)、[第3阶段](docs/stage-3-memory-system.md)、[第4阶段](docs/stage-4-vector-locality.md)、[第5阶段](docs/stage-5-multihart-aggregation.md)、[第6阶段](docs/stage-6-verification-quality.md)、[第7阶段](docs/stage-7-fpga-hardware.md)、[第8阶段](docs/stage-8-asic-release.md)、[第9阶段](docs/stage-9-lockstep-safety.md)。每份含用途、设计、Mermaid、微步骤、阻塞、团队进度表和 Track Log。
+8. [本轮验证与重跑指令](docs/verification.md)：文档 hash/覆盖、224 个任务字段、十个指南的结构、合并依赖图、引用/链接和 Git 跟踪检查；不包含伪造的 CPU 测试成绩。
+
 
 ## 核心修订
 
@@ -22,6 +22,7 @@
 - `execution-done`、`value-visible`、`macro-complete`、`retired` 分开；不可停顿 FU 发射前须有真实结果空间。有限 tag、epoch、lease 必须处理 ABA/晚到响应。
 - RVV 指令可以部分完成并通过 `vstart` 重启，不套用标量全有全无提交；物理 lane 数变化不改变 architectural VLEN。
 - clean LLB 副本仍需 freshness/invalidation 证明；same-PC cohort 仍需每 hart 独立权限、寄存器、异常与提交。
+- **Lockstep 是可选 profile，不是默认处理器行为。** 一个 main/shadow fault-containment pair 只构成一个 logical hart；DCLS 做检测与阻断，不自动纠错；TMR 投票是后续研究。共享 RAM/cache/clock/bus 必须单独保护或列为残余 common-mode 风险。
 - 先实现可测双 cluster 标量 fabric，再扩展 A/C/特权/FP/RVV/多 hart/cohort/pod/分布式 ROB。后置不是删除最终研究范围；动态性能收益必须允许被实验否定。
 
 ## 开始实施前的决策门槛

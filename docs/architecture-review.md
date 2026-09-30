@@ -318,6 +318,41 @@ Core Fusion 正式论文确有分布式 ROB、remote operand 与 LSQ 机制，�
 ## 11. 架构不变量与故障模型索引
 
 这些不变量约束未来 RTL assertions、定向程序、形式验证及 Verilator 观测；不是现有测试通过声明。
+### 11.1 可选 Lockstep 安全域
+
+**[提案]** MosaicRV 把 lockstep 定义为可选安全执行配置，不改变任何 ISA 指令结果：一个 logical hart 可由两个独立 redundant control/data replicas 执行同一合法输入流，比较器在不可逆架构效果发布前比较定义过的 observation points。两个副本组成一个“fault-containment pair”；它们不是两个 architectural harts，也不能被 software 当作 SMT 双线程。
+
+#### 安全域边界
+
+1. **replicated**：PC/control flow、fetch/decode metadata、RAT/free-list ownership、ROB entry decision、CSR/trap/interrupt decision、FU result/flags、LSQ address/data、vector descriptor/element result、memory request、commit/exception 与最终 architectural output。
+2. **shared but protected**：I$/D$/LLB/L2、external RAM、PLL/clock distribution、power、interconnect controller、debug/test infrastructure。共享部分必须有 ECC/parity/CRC/地址绑定或独立 monitor，否则它就是 lockstep comparator 看不到的单点故障。
+3. **not replicated by default**：performance-only counters、debug-only metadata、非关键 PMU、非安全 accelerator path；这些不能参与未检查的 architectural decision。
+4. **external observation**：同一份同步后的 interrupt/device/reset 输入在各自合法边界进入两副本；不复制异步输入信号导致 false mismatch。不可比较的合法 implementation 差异不得进入 comparator；本项目两副本默认来自同一 RTL/configuration，不把“真实微架构 OoO 差异”塞进逐拍比较。
+
+#### 时间偏移与公平性
+
+支持 **spatial lockstep**（同 cycle 双副本）与 **delayed lockstep**（shadow 延迟固定 D cycles，输入和 main output 分别延迟到统一比较点）。延迟只是故障检测/共因缓解属性，不改变 architectural order。D 是配置参数；所有 pending main architectural effects 在 shadow 对应证据到达之前不得永久丢弃。公平性合同要求 shadow 获得同等工作资源；不能把 shadow 永久饥饿后报告 lockstep“无错”。
+
+#### 故障模型与动作
+
+DCLS/DMR 只能检测非公共副本差异；它**不提供多数裁决**。单个副本输出错误可被检测，但 comparator 不能自动知道哪一边正确。默认动作是 fail-closed：阻止尚未发布的 MMIO/store/commit，向 fault controller 报告，进入 safe halt/reset 或受控 safe state。TMR 可选作后续研究：三副本加 voter；需要独立故障注入与 voter 证明。
+
+#### 可选模式与禁止组合
+
+- `performance`：不实例化/不启用 replica；常规资源聚合可用。
+- `dcls-lockstep`：两个副本形成一个 logical hart；资源租借只能作为一对受控资源组，不让 main/shadow 在不同不可验证的 dynamic route 上自由漂移。
+- `tmr-lockstep`（后续研究）：三副本加 voter；需要独立故障注入与 voter 证明。
+- 禁止把 `cohort` 的一个成员直接当 shadow：cohort 成员有独立 architectural state，lockstep shadow 没有。若未来允许 runtime split/fuse，必须经过 drain/export/重新配置证明；默认可选组合是 build/profile 级，不是每 uOP 动态切换。
+
+新增不变量：
+
+| Invariant | 内容 | 必须触发的边界／反例 |
+| --- | --- | --- |
+| AI-19 | lockstep shadow 与 main 在每个声明 observation point 使用同一合法输入/输出语义 | 异步 interrupt/device 输入未同步、main/shadow资源饥饿不同、配置漂移 |
+| AI-20 | mismatch 在声明 latency 内阻止未发布 architectural side effect | wrong-path、store/MMIO、CSR write、vector element、interrupt/trap 边界注入 |
+| AI-21 | 共享 memory/clock/input/resource 有独立保护或被列为 residual common-mode fault | 仅比较core输出但共享RAM错误同时污染两副本 |
+| AI-22 | DCLS/TMR 不能被 synthesis/DFT/动态重配置优化或拆散为无效冗余 | duplicate logic merged、shadow reset/debug状态不同、重配置只更新一边 |
+
 
 | Invariant | 内容 | 必须触发的边界／反例 |
 | --- | --- | --- |

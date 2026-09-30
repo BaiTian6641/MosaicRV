@@ -155,6 +155,18 @@ flowchart TD
 三类物理 flow 在 H-001–H-010 公共合同后可并行，H-022 是共享 Vivado runner 的校准，不要求 Virtex 等待 Zynq 实板。V-041/V-042 中有界形式证明只关闭所声明的实例/性质，不能把整个 p0 宣称为已形式化全证明。
 
 
+| I-087 | I-001, I-002 | 可选lockstep profile与故障模型 |
+| I-088 | I-087, I-017, I-024 | main/shadow副本与公平资源grant |
+| I-089 | I-088, I-026, I-034, I-019 | architectural comparator与fail-closed发布 |
+| I-090 | I-089, I-047, I-006 | shared-domain保护与综合冗余存活 |
+| V-081 | I-087, V-008, V-020, V-033 | lockstep观测点/延迟校准 |
+| V-082 | I-089, V-021, V-027, V-042 | replica fault injection与副作用阻断 |
+| V-083 | I-090, V-015, V-034 | reset/debug/reconfigure/公平 |
+| V-084 | I-090, V-067, V-079 | shared-domain与netlist冗余证据 |
+| H-048 | I-089, H-010 | 三家族物理lockstep证据 |
+| H-049 | I-090, H-038, H-041 | ASIC lockstep物理/DFT边界 |
+| I-091 | I-080, I-083, I-090, V-081, V-082, V-083, V-084 | 可选lockstep profile验收 |
+
 ## 4. 工作包：合同、工具、可执行基线
 
 ### I-001 — 冻结 ISA 与平台配置 manifest
@@ -1020,7 +1032,7 @@ flowchart TD
 - Sources: platform-plan.md。
 
 ### I-086 — 交付可复现 processor release
-- Depends: I-085
+- Depends: I-085, I-091
 - Inputs: 所有已声明 profile 的 RTL/software/tool/reference/license/hardware manifests。
 - Action: 从零重建各支持配置、重放有限验收集，归档 Git commit、submodule closure、日志、失败排除理由与用户操作手册；未达 gate 的功能不标 supported。
 - Outputs: 发布清单、可操作 rebuild/validate/program/run 指令、能力与限制矩阵。
@@ -1028,6 +1040,56 @@ flowchart TD
 - Fail: 引用工作目录未提交文件、变动 upstream branch 或无法恢复的本机环境。
 - Covers: end-to-end deliverable, reproducibility, reference tracking。
 - Sources: validation-plan.md, platform-plan.md, references.md。
+
+### I-087 — 定义可选 lockstep profile、故障模型与输出策略
+- Depends: I-001, I-002
+- Inputs: architecture-review §11.1、目标安全需求、资源/面积预算、需要保护的 hart/profile。
+- Action: 为每个 profile 显式声明 `none / dcls-lockstep / tmr-lockstep`、shadow delay、observation points、shared-domain保护、debug/reset/reconfiguration行为和故障动作；DCLS默认fail-closed。
+- Outputs: lockstep capability manifest、fault model、residual common-mode fault list。
+- Pass: 每个可复制/共享/不可比较状态逐项分类；DCLS不被描述成自动纠错；未支持TMR不宣传投票恢复。
+- Fail: lockstep被混同为cohort/SMT，或未定义哪个状态被复制、哪个共享资源没有保护。
+- Covers: optional lockstep semantics, safety mode boundaries。
+- Sources: architecture-review.md, AR-019, AR-020, AR-021。
+
+### I-088 — 实现 redundant replicas 与延迟输入/输出对齐
+- Depends: I-087, I-017, I-024
+- Inputs: 可综合single-core配置、D值、输入同步器、resource broker。
+- Action: 实例化main/shadow独立状态副本，输入同步后进入shadow，main输出经D拍延迟与shadow输出比较；让两副本获得同等合法资源grant，避免shadow饥饿。
+- Outputs: lockstep pair RTL、delay/alignment tables、公平grant证据。
+- Pass: 同输入、同reset、同授权事件下两副本architecture-observable序列一致；D各合法值均覆盖。
+- Fail: 直接复制异步输入、shadow被broker永久饿死、把main未比较输出当作已安全发布。
+- Covers: DCLS construction, delayed lockstep, resource fairness。
+- Sources: AR-019, AR-020。
+
+### I-089 — 实现 architectural comparison 与 fail-closed 发布
+- Depends: I-088, I-026, I-034, I-019
+- Inputs: observation-point schema、commit/store/MMIO/CSR/trap授权点、multibit status。
+- Action: 比较PC/next PC、指令结果、PRF/CSR deltas、trap/interrupt决策、memory request/response effect与vector element；mismatch时阻断未发布副作用并通知fault controller。
+- Outputs: equivalence checker、fault event interface、blocked-side-effect audit。
+- Pass: 注入任一声明点错误时检测并阻断相应不可逆副作用；无注入时输出与non-lockstep同一合法trace。
+- Fail: 仅比较UART文本或周期末状态，或mismatch后仍发出store/MMIO/CSR。
+- Covers: lockstep comparator, fault containment, architectural safety。
+- Sources: AR-019, AR-020, validation-plan.md。
+
+### I-090 — 保护 shared domains 与防止冗余被优化移除
+- Depends: I-089, I-047, I-006
+- Inputs: shared I/D cache、RAM/LLB、PLL/clock、bus、reset/debug、综合工具属性。
+- Action: 对共享数据加ECC/parity/CRC/地址绑定或独立monitor；在replica边界加入可综合keep/dont_touch/size_only等工程约束或等效技术，并核对netlist；禁止lockstep与debug/DFT状态互相静默关闭。
+- Outputs: shared-domain protection map、survivability netlist evidence、CDC/reset/test matrix。
+- Pass: 所有shared architectural-data路径有明确保护或残留风险记录；综合后shadow与checker仍存在且可观测。
+- Fail: synthesis合并duplicate logic、shared RAM corruption污染两副本却无任何检测、debug/scan状态关闭检查仍宣称启用。
+- Covers: common-mode faults, synthesis survivability, physical separation。
+- Sources: AR-020, HR-008, HR-009。
+
+### I-091 — 完成 lockstep 安全 profile 验收 gate
+- Depends: I-080, I-083, I-090
+- Inputs: p0/p3功能基线、fault-injection结果、三板/ASIC可选物理证据、fault-controller安全状态。
+- Action: 对lockstep profile重新运行全部适用ISA/fabric/memory/cohort测试，再执行fault campaign和performance/area对照；安全claim按目标标准边界书写，不冒充认证。
+- Outputs: lockstep acceptance bundle、安全/性能/面积tradeoff、残余故障清单。
+- Pass: normal与lockstep architectural traces合法一致，注入故障均在声明latency内检测/阻断，可选模式广告与证据闭合。
+- Fail: 把DCLS当TMR、以lockstep输出错误依旧提交、安全认证或ASIL/SIL结论无正式评估证据。
+- Covers: optional lockstep gate, fault containment, safety claim boundary。
+- Sources: AR-019, AR-020, AR-021, validation-plan.md。
 
 ## 11. 实施顺序的解释与失败后的动作
 
@@ -1037,7 +1099,8 @@ flowchart TD
 4. I-072–I-075 保留原报告完整层次化/融合目标；若实验否定性能假说，记录事实，架构 correctness 不能被性能结果替代。
 5. I-081/I-082/I-083 是独立必要门槛，不能互相替代；I-085 不等于 tapeout 承诺，foundry/PDK/DFT/signoff 是真实依赖。
 
-任何 correctness mismatch：冻结新功能，保存 seed/镜像/reference/最后正确 commit，先缩小到首个 architectural divergence，再查 producer/owner/memory visibility。任何 P&R 失败：先看 fanout/RAM inference/最长路径，减少结构几何或增加合法 pipeline stage，不能通过错误 timing exception 让报告变绿。任何 reference 不支持：补真实 oracle/性质检查并明确范围，不 blanket skip。任何实板缺失：该 family gate 保持未完成，不用照片/仿真 log 替代。
+
+6. I-087–I-091 把 lockstep 作为可选安全 profile 加入：它不改变 ISA，不强制默认启用；DCLS 先 fail-closed 检测，TMR 投票是后续研究。I-091 的验收不能替代基础 p0/p3 correctness，也不能把 lockstep 输出当作安全认证。
 
 ## 12. 本计划使用的研究来源
 
@@ -1045,3 +1108,7 @@ flowchart TD
 - **IR-002** — [Wang & Zhang, Microarchitectural Co-Optimization for Sustained Throughput of RISC-V Multi-Lane Chaining Vector Processors](https://arxiv.org/abs/2604.22314)，arXiv:2604.22314，发布日期 2026-04-24，访问 2026-09-29。已读取作者摘要：Ara-Opt 在不增加 raw bandwidth/主要配置的评估中报告 1.33×；未复现，不能推断本设计收益。尚未固定 arXiv 修订号，复现实验须在工具锁任务中固定具体版本/PDF hash。
 - **IR-003** — [Wang & Zhang, SEAM-V: A Hybrid-Decoupled RISC-V Vector Processor with Backend-Visible Packet Semantics and Source-Lifetime-Aware Scheduling](https://arxiv.org/abs/2607.17899)，arXiv:2607.17899，发布日期 2026-07-20，访问 2026-09-29。当前作者摘要报告 17 个配置的 1.38×；搜索摘要另有 1.34×/旧标题，不以搜索生成摘要覆盖 primary 内容。仅用于提出实验方向，不作复现或普遍性结论；具体 revision 待复现时锁定。
 - **IR-004** — [İpek, Kırman, Kırman, Martínez, Core Fusion: Accommodating Software Diversity in Chip Multiprocessors, ISCA 2007](https://people.ece.cornell.edu/martinez/doc/isca07.pdf)，访问 2026-09-29，已读取全文。§2 描述 collective frontend/backend，§3 有 FUSE/SPLIT 请求与 OS-visible eligibility；不能由摘要的 compatibility 主张推出本项目可无条件透明融合 harts。论文模拟配置不作为本项目 FPGA timing/area 预算。
+
+- **AR-019** — [VeeR EL2 Dual-Core Lockstep documentation](https://chipsalliance.github.io/Cores-VeeR-EL2/html/main/docs_rendered/html/dual-core-lock-step.html)，访问 2026-09-29。支持 delayed shadow、共享ICCM/DCCM/Icache、输入延迟/输出比较、debug限制、synthesis barrier与验证计划；不是MosaicRV宽OoO fabric的完整证明。
+- **AR-020** — [Antmicro, Dual-core Lockstep in the VeeR EL2 RISC-V core](https://antmicro.com/blog/2026/04/dual-core-lockstep-in-veer-el2)，2026-04-13，访问 2026-09-29。支持DMR/DCLS工程解释、可配置shadow delay、multibit控制/状态与错误注入；不证明MosaicRV的FPGA/ASIC故障覆盖或安全等级。
+- **AR-021** — [TI, Industrial Functional Safety PLC Architecture, SDAA393, June 2026](https://www.ti.com/lit/pdf/sdaa393)，访问 2026-09-29。支持DCLS只检测、无fault tolerance、common-cause限制，以及SIL/ASIL分解需独立/diversity/traceability/justification；不是对MosaicRV符合ISO 26262/IEC 61508的证明。

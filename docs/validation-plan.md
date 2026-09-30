@@ -951,9 +951,49 @@ build/<profile>/eaf-sim --elf <path> --platform <json> --ref <so> --seed <u64> -
 - Covers: SRC-03 §保持标准 software model、§最终 EAF-V/MosaicRV 架构。
 - Sources: VR-007, VR-009, VR-012, VR-013。
 
+### V-081 — 校准 lockstep 观测点与输入等价
+- Depends: V-008, V-020, V-033
+- Inputs: lockstep profile manifest、D值、同步输入合同、observation schema。
+- Action: 为每个profile列出比较字段、合法delay、异步输入同步规则、main/shadow资源公平性和不比较字段；同一程序分别运行normal/DCLS候选，证明无注入时 architectural event 序列合法一致。
+- Outputs: observation manifest、delay calibration、normal-vs-lockstep metamorphic报告。
+- Pass: 所有输入在同步后一次进入，输出按D对齐；无mismatch时安全信号不触发，两模式输出属于同一ISA合法结果。
+- Fail: 异步输入分别驱动副本、debug-only信号参与关键比较、或比较周期末粗糙状态。
+- Covers: optional DCLS, delayed lockstep, metamorphic equivalence。
+- Sources: AR-019, AR-020, validation-plan.md。
+
+### V-082 — 注入 replica 内部状态与输出故障
+- Depends: V-081, V-021, V-027, V-042
+- Inputs: main/shadow独立寄存器/CSR/ROB/LSQ/FU/vector状态和故障注入接口。
+- Action: 在shadow输入、main输出、register file、CSR、branch target、LSQ address/data、FU result、vector element和comparator control注入单点错误；每个注入在实际执行路径上生效。
+- Outputs: fault site→observation point→detection latency→blocked effect矩阵。
+- Pass: 每个声明故障在配置latency内检测，未发布store/MMIO/CSR/commit被阻断；无注入负控制不触发。
+- Fail: 用比较器mock代替真实副本、故障未到达执行路径、mismatch后副作用仍然发布。
+- Covers: lockstep fault containment, negative controls。
+- Sources: AR-019, AR-020。
+
+### V-083 — 验证 reset、debug、reconfiguration 与资源公平
+- Depends: V-015, V-034, V-082
+- Inputs: reset/debug/scan/DFT/lockstep enable/disable状态机、dynamic broker。
+- Action: 覆盖两副本同时reset、shadow延迟退出、debug进入/退出、配置切换、lease drain、shadow长期得不到资源；确认任何非lockstep状态显式发布且不会静默恢复比较。
+- Outputs: mode transition trace、resource grant histogram、fault-controller状态证据。
+- Pass: shadow与main获得有界服务；任一mode切换前旧结果完成或丢弃；debug/scan关闭检测时capability显式变化。
+- Fail: shadow永久饥饿、一个副本独自复位、debug后检测静默关闭仍宣称DCLS。
+- Covers: optional lockstep mode transitions, fairness, debug/test safety。
+- Sources: AR-019, AR-020, AR-021。
+
+### V-084 — 证明 shared-domain 保护与综合冗余存活
+- Depends: V-067, V-079, V-083
+- Inputs: shared RAM/cache/LLB/clock/bus/debug保护图、综合netlist和平台约束。
+- Action: 对共享memory/总线注入可检测错误；核对ECC/parity/CRC/address binding和monitor路径；检查综合后shadow、delay、checker、barrier仍存在，运行post-synthesis/implemented对比测试。
+- Outputs: common-mode fault ledger、netlist survivability evidence、physical protection report。
+- Pass: 每个shared architectural path有保护或残余风险记录；冗余未被优化移除；所有保护路径能被fault campaign触发。
+- Fail: 综合掉duplicate logic、共享memory corruption无检测、仅RTL仿真证明物理冗余存活。
+- Covers: common-cause faults, synthesis survival, shared-domain protection。
+- Sources: AR-019, AR-020, HR-009。
+
 ## 6. 阶段 gate 与非确定性的具体裁决
 
-基线 gate 使用 V-001–V-043 中适用于 p0 的全部义务、V-074/V-075/V-078/V-080；C/A/S/U/Sv39/F/D 各自增加 V-044–V-051 对应任务。V 阶段必须增加 V-052–V-060；多 hart memory 加 V-064–V-067；LLB/MEF 加 V-061–V-063；cohort 加 V-068–V-071；pod 加 V-072；Linux 加 V-073；硬件加 V-077/V-079。任务 Depends 是依赖图，不是“未列在 Depends 就不用做”的验收范围替代品。所有扩展再次运行受影响的 baseline、negative-control、ACT、fuzz 与 replay 套件。
+基线 gate 使用 V-001–V-043 中适用于 p0 的全部义务、V-074/V-075/V-078/V-080；C/A/S/U/Sv39/F/D 各自增加 V-044–V-051 对应任务。V 阶段必须增加 V-052–V-060；多 hart memory 加 V-064–V-067；LLB/MEF 加 V-061–V-063；cohort 加 V-068–V-071；pod 加 V-072；Linux 加 V-073；硬件加 V-077/V-079；可选 lockstep profile 加 V-081–V-084。任务 Depends 是依赖图，不是“未列在 Depends 就不用做”的验收范围替代品。所有扩展再次运行受影响的 baseline、negative-control、ACT、fuzz 与 replay 套件。
 
 | 场景 | 不能采用的方法 | 裁决与证据 |
 |---|---|---|
@@ -963,6 +1003,7 @@ build/<profile>/eaf-sim --elf <path> --platform <json> --ref <so> --seed <u64> -
 | LR/SC 合法失败 | 总是给参考复制 DUT rd | 独立检查预约/冲突与允许结果，再选择同一个合法 nondeterministic branch；进展另检 |
 | RVV FOF 可缩短 vl | 固定期待永远最大 vl | 在规范区间检验合法值、最小进展与后续程序结果；记录每次选择 |
 | FP unordered reduction / agnostic tail | 全部 vector bits 屏蔽 | 指令专用集合/关系判断、相邻非法值负控制，明确不保证相同 bit pattern |
+| lockstep 模式 | 把两个architectural hart直接组成“lockstep” | 只有I-087声明的main/shadow pair有效；异步输入必须同步，mismatch fail-closed，DCLS不声称纠错 |
 | CSR WARL/FS/VS、计数器 | 整个 CSR 不比较 | 逐字段规则；性能计数值分离；所有 waiver 逐次列账 |
 | 未支持模型功能 | `skip` 后写 DUT state 到 REF | 阻断该功能差分 gate，选择真正支持的第二模型或独立形式/定向 oracle；无验证不得宣称支持 |
 

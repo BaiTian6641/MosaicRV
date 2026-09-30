@@ -536,6 +536,26 @@ Gowin 搜索索引提到 `gw_sh`/`run all`，但本次 SUG918/Tcl PDF 获取返�
 - Covers: portability to real design, honest end-to-end evidence。
 - Sources: references.md, verification.md。
 
+### H-048 — 验证三家族 lockstep 物理分离与故障注入
+- Depends: H-010, I-089
+- Inputs: 每个family的lockstep-capable build、fault-injection控制、physical placement/clock/reset约束、故障动作。
+- Action: 对GW5A、Zynq、Virtex UltraScale+分别约束main/shadow物理分区与共同资源边界；执行正常corpus和真实fault注入，记录检测延迟、阻断副作用、资源/时序差异。
+- Outputs: 每family lockstep evidence bundle、placement/timing/fault reports。
+- Pass: 三家族都证明redundant logic实际存在、输入同步、fault被检测且未发布副作用；资源不足或无时序则该family profile blocked。
+- Fail: 仅Verilator fault injection充当实板证据、shadow被优化移除、比较器无法阻断设备写。
+- Covers: optional FPGA lockstep, physical common-mode protection。
+- Sources: AR-019, AR-020, platform-plan.md。
+
+### H-049 — 审核 ASIC lockstep 的物理与制造测试边界
+- Depends: H-038, H-041, I-090
+- Inputs: main/shadow floorplan、共享SRAM/clock/power、scan/MBIST/ATPG、fault model、目标安全认证边界。
+- Action: 对replica放置/时钟树/电源/共享宏做common-mode审查；扫描链覆盖replica和checker，MBIST/ECC覆盖shared memories；把lockstep状态纳入function/test/power mode等价与签核。
+- Outputs: ASIC lockstep physical/signoff report、fault coverage scope、residual safety analysis。
+- Pass: 每个声称的安全机制有设计、仿真、形式/物理或制造测试证据；没有正式评估时不发布ASIL/SIL合规结论。
+- Fail: 将DCLS当作TMR纠错、FPGA fault campaign替代ASIC signoff、共享SRAM/clock未纳入风险。
+- Covers: ASIC lockstep, DFT, physical safety boundary。
+- Sources: AR-019, AR-020, AR-021, HR-009。
+
 ## 10. 已读取来源、版本与访问限制
 
 所有访问日期为 2026-09-29；只记录一手来源，不把搜索生成总结当规范。外部文档未复制进仓库，以URL/版本/取得状态记录，避免未经许可再分发。
@@ -554,5 +574,7 @@ Gowin 搜索索引提到 `gw_sh`/`run all`，但本次 SUG918/Tcl PDF 获取返�
 | HR-010 | [Vivado Tcl Command Reference UG835 v2018.3](https://docs.amd.com/api/khub/documents/wNJReNjblikQ29AHV1THwg/content)、[Vivado Quick Reference](https://docs.amd.com/api/khub/documents/aNBqzHrLSGHsSXaindgD5Q/content) | 已读命令目录与batch invocation；这是已取得版本，不冒称最新2026.1全文已读。H-022对所选release检查help/flags。 |
 | HR-011 | [Gowin Quick Start SUG918](https://cdn.gowinsemi.com.cn/SUG918E.pdf)、[Arora V BSRAM/SSRAM UG300](https://cdn.gowinsemi.com.cn/UG300E.pdf) | 本轮获取返回HTTP403；仅为待取得的primary pointers。没有凭搜索摘要发布可执行GW5A Tcl或具体collision保证；阻断只在未来相应实现gate。 |
 | HR-012 | [OpenROAD project flow](https://openroad.readthedocs.io/en/latest/main/README.html)、[SkyWater PDK status](https://skywater-pdk.readthedocs.io/en/main/status.html) | OpenROAD可用于physical-flow研究；SkyWater状态页明确experimental preview而非保证production使用。本项目不预选该PDK，也不把开放工具当foundry认可。 |
+| HR-013 | [VeeR EL2 DCLS documentation](https://chipsalliance.github.io/Cores-VeeR-EL2/html/main/docs_rendered/html/dual-core-lock-step.html)、[Antmicro DCLS article](https://antmicro.com/blog/2026/04/dual-core-lockstep-in-veer-el2) | 支持synthesis barrier、delayed shadow、error injection和物理集成风险。VeeR是小规模RISC-V参考，不替代MosaicRV的宽OoO/fabric证明。 |
+| HR-014 | [TI SDAA393, June 2026](https://www.ti.com/lit/pdf/sdaa393) | 支持DCLS检测-only/common-mode限制与安全等级需系统论证；不把DCLS当作fault-tolerant TMR或自动认证。 |
 
 SRC-02 完整阅读证据：1–260、261–520、521–780、781–1040、1041–1213，均显式raw范围；补充读取SRC-03的370–539、790–1123、1997–2346。原报告的初期VCU118建议改为三family独立gate；FPGA预算数值不继承为事实；DFX保留为粗粒度可选研究；实板与ASIC成果均必须有独立证据。
