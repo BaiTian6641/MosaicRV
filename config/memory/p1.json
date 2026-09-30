@@ -1,0 +1,88 @@
+{
+  "schema_version": 1,
+  "profile": "p1",
+  "regions": [
+    {
+      "name": "boot_rom",
+      "base": 0,
+      "size": 4096,
+      "kind": "rom",
+      "readable": true,
+      "writable": false,
+      "executable": true,
+      "cacheable": false,
+      "idempotent": true,
+      "atomic_granule": 4,
+      "error_response": "access_fault"
+    },
+    {
+      "name": "uart",
+      "base": 1048576,
+      "size": 256,
+      "kind": "mmio",
+      "readable": true,
+      "writable": true,
+      "executable": false,
+      "cacheable": false,
+      "idempotent": false,
+      "atomic_granule": 4,
+      "error_response": "none",
+      "device": "uart"
+    },
+    {
+      "name": "test_harness",
+      "base": 1056768,
+      "size": 16,
+      "kind": "mmio",
+      "readable": true,
+      "writable": true,
+      "executable": false,
+      "cacheable": false,
+      "idempotent": false,
+      "atomic_granule": 4,
+      "error_response": "none",
+      "device": "test_harness"
+    },
+    {
+      "name": "clint",
+      "base": 33554432,
+      "size": 4096,
+      "kind": "mmio",
+      "readable": true,
+      "writable": true,
+      "executable": false,
+      "cacheable": false,
+      "idempotent": false,
+      "atomic_granule": 4,
+      "error_response": "none",
+      "device": "clint"
+    },
+    {
+      "name": "clint_msip",
+      "base": 786432,
+      "size": 4,
+      "kind": "mmio",
+      "readable": true,
+      "writable": true,
+      "executable": false,
+      "cacheable": false,
+      "idempotent": false,
+      "atomic_granule": 4,
+      "error_response": "none",
+      "device": "msip"
+    },
+    {
+      "name": "ram",
+      "base": 2147483648,
+      "size": 2097152,
+      "kind": "ram",
+      "readable": true,
+      "writable": true,
+      "executable": true,
+      "cacheable": true,
+      "idempotent": true,
+      "atomic_granule": 8,
+      "error_response": "access_fault"
+    }
+  ]
+}

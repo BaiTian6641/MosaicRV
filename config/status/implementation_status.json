@@ -1,0 +1,5 @@
+{
+  "schema_version": 1,
+  "comment": "Delivered work packages. A capability may only be advertised in misa / compiler -march / reference capability once every implementation task named for it in config/capability_ladder.json appears here. Entries are added only after the package's own tests pass from a clean build; evidence hashes live under results/.",
+  "delivered_tasks": []
+}

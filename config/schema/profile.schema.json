@@ -1,0 +1,80 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://mosaicrv.invalid/schema/profile.schema.json",
+  "title": "MosaicRV frozen profile manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "profile",
+    "xlen",
+    "isa_target",
+    "privilege_modes",
+    "harts",
+    "endianness",
+    "misalignment",
+    "csr_files",
+    "memory_map_file",
+    "geometry_file",
+    "reset"
+  ],
+  "properties": {
+    "schema_version": { "type": "integer", "const": 1 },
+    "profile": { "type": "string", "enum": ["p0", "p1", "p2", "p3"] },
+    "xlen": { "type": "integer", "enum": [64] },
+    "isa_target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["extensions", "vlen", "elen", "source"],
+      "properties": {
+        "extensions": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[A-Z][A-Za-z0-9_]*$" }
+        },
+        "vlen": { "type": ["integer", "null"], "minimum": 128 },
+        "elen": { "type": ["integer", "null"], "enum": [null, 32, 64] },
+        "source": { "type": "string", "minLength": 1 }
+      }
+    },
+    "privilege_modes": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "type": "string", "enum": ["M", "S", "U"] }
+    },
+    "harts": { "type": "integer", "minimum": 1, "maximum": 2 },
+    "clusters": { "type": "integer", "minimum": 1, "maximum": 2 },
+    "endianness": { "type": "string", "enum": ["little"] },
+    "misalignment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["instruction_fetch", "load", "store", "atomic"],
+      "properties": {
+        "instruction_fetch": { "type": "string", "enum": ["trap", "emulate"] },
+        "load": { "type": "string", "enum": ["trap", "emulate"] },
+        "store": { "type": "string", "enum": ["trap", "emulate"] },
+        "atomic": { "type": "string", "enum": ["trap", "raise_misaligned_fault"] }
+      }
+    },
+    "csr_files": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^csr/.+\\.json$" }
+    },
+    "memory_map_file": { "type": "string", "pattern": "^memory/.+\\.json$" },
+    "geometry_file": { "type": "string", "pattern": "^geometry/.+\\.json$" },
+    "reset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reset_vector", "boot_rom_bytes"],
+      "properties": {
+        "reset_vector": { "type": "integer", "minimum": 0, "maximum": 281474976710655 },
+        "boot_rom_bytes": { "type": "integer", "minimum": 4, "maximum": 4096 }
+      }
+    },
+    "derived_notes": { "type": "array", "items": { "type": "string" } }
+  }
+}

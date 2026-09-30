@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "profile": "p0",
+  "xlen": 64,
+  "isa_target": {
+    "extensions": [
+      "I",
+      "M",
+      "Zicsr",
+      "Zifencei",
+      "Zicntr",
+      "Zihpm"
+    ],
+    "vlen": null,
+    "elen": null,
+    "source": "docs/implementation-plan.md#1.1 p0 row: RV64IM_Zicsr_Zifencei, M-mode, bare-metal, single hart, two execution clusters, cacheless ordered memory endpoint"
+  },
+  "privilege_modes": [
+    "M"
+  ],
+  "harts": 1,
+  "clusters": 2,
+  "endianness": "little",
+  "misalignment": {
+    "instruction_fetch": "trap",
+    "load": "trap",
+    "store": "trap",
+    "atomic": "trap"
+  },
+  "csr_files": [
+    "csr/mode_m.json"
+  ],
+  "memory_map_file": "memory/p0.json",
+  "geometry_file": "geometry/p0.json",
+  "reset": {
+    "reset_vector": 2147483648,
+    "boot_rom_bytes": 4096
+  },
+  "derived_notes": [
+    "p0 deliberately does NOT claim A, C, F, D, V, S, U, Sv39 or any cache; docs/implementation-plan.md#1.1 lists these as forbidden early claims.",
+    "Two clusters exist in p0 because the execution fabric (I-022..I-032) is in scope for the p0 gate; clusters are an internal structure and are not architectural state."
+  ]
+}

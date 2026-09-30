@@ -1,0 +1,119 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://mosaicrv.invalid/schema/geometry.schema.json",
+  "title": "MosaicRV microarchitectural geometry for one profile",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "profile",
+    "frontend",
+    "rename",
+    "rob",
+    "int_prf",
+    "fabric",
+    "lsu",
+    "source"
+  ],
+  "properties": {
+    "schema_version": { "type": "integer", "const": 1 },
+    "profile": { "type": "string", "enum": ["p0", "p1", "p2", "p3"] },
+    "source": { "type": "string", "minLength": 1 },
+    "frontend": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fetch_outstanding", "btb_entries", "bpu_entries", "ras_entries", "target_quantum"],
+      "properties": {
+        "fetch_outstanding": { "type": "integer", "minimum": 1, "maximum": 16 },
+        "btb_entries": { "type": "integer", "minimum": 1, "maximum": 4096 },
+        "bpu_entries": { "type": "integer", "minimum": 1, "maximum": 65536 },
+        "ras_entries": { "type": "integer", "minimum": 1, "maximum": 256 },
+        "target_quantum": { "type": "integer", "enum": [16, 32] }
+      }
+    },
+    "rename": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rename_width", "dispatch_width"],
+      "properties": {
+        "rename_width": { "type": "integer", "enum": [1, 2] },
+        "dispatch_width": { "type": "integer", "enum": [1, 2] }
+      }
+    },
+    "rob": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["entries", "max_uops_per_macro"],
+      "properties": {
+        "entries": { "type": "integer", "minimum": 8, "maximum": 4096 },
+        "max_uops_per_macro": { "type": "integer", "minimum": 1, "maximum": 64 }
+      }
+    },
+    "int_prf": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["entries", "banks", "ports_per_bank"],
+      "properties": {
+        "entries": { "type": "integer", "minimum": 32, "maximum": 4096 },
+        "banks": { "type": "integer", "minimum": 1, "maximum": 16 },
+        "ports_per_bank": { "type": "integer", "enum": [1, 2] }
+      }
+    },
+    "fabric": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["clusters", "iq_entries_per_cluster", "alu_per_cluster", "mul_div_units", "result_fifo_per_cluster", "remote_link_latency"],
+      "properties": {
+        "clusters": { "type": "integer", "minimum": 1, "maximum": 8 },
+        "iq_entries_per_cluster": { "type": "integer", "minimum": 2, "maximum": 64 },
+        "alu_per_cluster": { "type": "integer", "minimum": 1, "maximum": 4 },
+        "mul_div_units": { "type": "integer", "minimum": 1, "maximum": 4 },
+        "result_fifo_per_cluster": { "type": "integer", "minimum": 1, "maximum": 16 },
+        "remote_link_latency": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 32,
+          "description": "registered round-trip latency in cycles for a remote operand or result transfer"
+        }
+      }
+    },
+    "lsu": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["units", "lq_entries", "sq_entries"],
+      "properties": {
+        "units": { "type": "integer", "minimum": 1, "maximum": 4 },
+        "lq_entries": { "type": "integer", "minimum": 2, "maximum": 128 },
+        "sq_entries": { "type": "integer", "minimum": 2, "maximum": 128 }
+      }
+    },
+    "caches": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["line_bytes", "l1i_sets", "l1i_ways", "l1d_sets", "l1d_ways", "mshrs"],
+      "properties": {
+        "line_bytes": { "type": "integer", "enum": [32, 64] },
+        "l1i_sets": { "type": "integer", "minimum": 1, "maximum": 8192 },
+        "l1i_ways": { "type": "integer", "minimum": 1, "maximum": 16 },
+        "l1d_sets": { "type": "integer", "minimum": 1, "maximum": 8192 },
+        "l1d_ways": { "type": "integer", "minimum": 1, "maximum": 16 },
+        "mshrs": { "type": "integer", "minimum": 1, "maximum": 32 }
+      }
+    },
+    "vector": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["vlen", "elen", "vrf_banks", "vrf_bank_bytes", "lane_groups_small", "lane_groups_medium", "lane_groups_large", "max_eu64_per_group"],
+      "properties": {
+        "vlen": { "type": "integer", "minimum": 128 },
+        "elen": { "type": "integer", "enum": [32, 64] },
+        "vrf_banks": { "type": "integer", "minimum": 1, "maximum": 128 },
+        "vrf_bank_bytes": { "type": "integer", "minimum": 8, "maximum": 512 },
+        "lane_groups_small": { "type": "integer", "minimum": 1, "maximum": 32 },
+        "lane_groups_medium": { "type": "integer", "minimum": 1, "maximum": 32 },
+        "lane_groups_large": { "type": "integer", "minimum": 1, "maximum": 32 },
+        "max_eu64_per_group": { "type": "integer", "minimum": 1, "maximum": 64 }
+      }
+    }
+  }
+}

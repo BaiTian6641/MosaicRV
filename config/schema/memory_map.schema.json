@@ -1,0 +1,51 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://mosaicrv.invalid/schema/memory_map.schema.json",
+  "title": "MosaicRV physical memory map and PMA",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "profile", "regions"],
+  "properties": {
+    "schema_version": { "type": "integer", "const": 1 },
+    "profile": { "type": "string", "enum": ["p0", "p1", "p2", "p3"] },
+    "regions": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "base",
+          "size",
+          "kind",
+          "readable",
+          "writable",
+          "executable",
+          "cacheable",
+          "idempotent",
+          "atomic_granule",
+          "error_response"
+        ],
+        "properties": {
+          "name": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+          "base": { "type": "integer", "minimum": 0, "maximum": 281474976710655 },
+          "size": { "type": "integer", "minimum": 4, "maximum": 1099511627776 },
+          "kind": { "type": "string", "enum": ["ram", "rom", "mmio"] },
+          "readable": { "type": "boolean" },
+          "writable": { "type": "boolean" },
+          "executable": { "type": "boolean" },
+          "cacheable": { "type": "boolean" },
+          "idempotent": { "type": "boolean" },
+          "atomic_granule": {
+            "type": "integer",
+            "enum": [0, 1, 2, 4, 8, 16],
+            "description": "0 means no atomicity guarantee; otherwise the largest naturally aligned access guaranteed atomic"
+          },
+          "error_response": { "type": "string", "enum": ["none", "access_fault", "store_access_fault"] },
+          "device": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" }
+        }
+      }
+    }
+  }
+}

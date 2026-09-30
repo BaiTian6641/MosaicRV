@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "comment": "One entry per CASE= named in a work-package card. tools/run_unit.py builds the listed sources with Verilator and runs them; a case that is listed but does not build or does not fail correctly counts as a failure, not as 'not applicable'.",
+  "cases": {
+    "fifo.backpressure": {
+      "task": "I-005",
+      "top": "mosaic_fifo_tb",
+      "rtl": ["rtl/common/mosaic_fifo.sv"],
+      "sv": ["sim/tb/mosaic_fifo_tb.sv"],
+      "cpp": ["sim/unit/tb_fifo.cpp"],
+      "max_cycles": 20000,
+      "seed": 1
+    },
+    "ram.collision_matrix": {
+      "task": "I-006",
+      "top": "mosaic_ram_tb",
+      "rtl": ["rtl/common/mosaic_ram.sv"],
+      "sv": ["sim/tb/mosaic_ram_tb.sv"],
+      "cpp": ["sim/unit/tb_ram.cpp"],
+      "max_cycles": 20000,
+      "seed": 1
+    }
+  }
+}

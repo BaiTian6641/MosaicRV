@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "profile": "p3",
+  "xlen": 64,
+  "isa_target": {
+    "extensions": [
+      "I",
+      "M",
+      "Zicsr",
+      "Zifencei",
+      "Zicntr",
+      "Zihpm",
+      "A",
+      "C",
+      "Zicond",
+      "Zmmul",
+      "Zaamo",
+      "Zalrsc",
+      "Zicbom",
+      "Zicbop",
+      "CMO",
+      "F",
+      "D",
+      "V",
+      "Zve64d",
+      "Zkt",
+      "Zvkt",
+      "Zimop",
+      "Zcmop"
+    ],
+    "vlen": 128,
+    "elen": 64,
+    "source": "docs/implementation-plan.md#1.1 p3 row: p2 plus two harts, resource partition/borrow, same-PC cohort, shared-memory coherence and hierarchical extension"
+  },
+  "privilege_modes": [
+    "M",
+    "S",
+    "U"
+  ],
+  "harts": 2,
+  "clusters": 2,
+  "endianness": "little",
+  "misalignment": {
+    "instruction_fetch": "trap",
+    "load": "trap",
+    "store": "trap",
+    "atomic": "raise_misaligned_fault"
+  },
+  "csr_files": [
+    "csr/mode_m.json",
+    "csr/mode_su.json",
+    "csr/vector.json",
+    "csr/hypervisor.json"
+  ],
+  "memory_map_file": "memory/p3.json",
+  "geometry_file": "geometry/p3.json",
+  "reset": {
+    "reset_vector": 2147483648,
+    "boot_rom_bytes": 4096
+  },
+  "derived_notes": [
+    "Sha, Supm/Ssnpm PMLEN=0/7 and the two-stage guest VM obligations are RVA23S64 items tracked by I-092..I-098 and are NOT implied by this profile file; they remain unclaimed until their matrix rows pass.",
+    "Sv48, CFI, Zvkng/Zvksg and the remaining S expansions stay NOT_CLAIMED unless separately selected and verified."
+  ]
+}

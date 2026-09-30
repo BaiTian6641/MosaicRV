@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "profile": "p2",
+  "source": "docs/implementation-plan.md#1.1/#1.2 p2 baseline: p1 geometry plus banked VRF sized for VLEN=128 with LMUL=8 (8 * 128 bits = 1024 bits = 32 banks of 32 bits) and the vector execution resources required by I-059",
+  "frontend": {
+    "fetch_outstanding": 4,
+    "btb_entries": 128,
+    "bpu_entries": 1024,
+    "ras_entries": 16,
+    "target_quantum": 32
+  },
+  "rename": {
+    "rename_width": 2,
+    "dispatch_width": 2
+  },
+  "rob": {
+    "entries": 64,
+    "max_uops_per_macro": 8
+  },
+  "int_prf": {
+    "entries": 96,
+    "banks": 4,
+    "ports_per_bank": 1
+  },
+  "fabric": {
+    "clusters": 2,
+    "iq_entries_per_cluster": 8,
+    "alu_per_cluster": 1,
+    "mul_div_units": 1,
+    "result_fifo_per_cluster": 2,
+    "remote_link_latency": 4
+  },
+  "lsu": {
+    "units": 1,
+    "lq_entries": 8,
+    "sq_entries": 8
+  },
+  "caches": {
+    "line_bytes": 64,
+    "l1i_sets": 256,
+    "l1i_ways": 4,
+    "l1d_sets": 256,
+    "l1d_ways": 4,
+    "mshrs": 2
+  },
+  "vector": {
+    "vlen": 128,
+    "elen": 64,
+    "vrf_banks": 32,
+    "vrf_bank_bytes": 16,
+    "lane_groups_small": 2,
+    "lane_groups_medium": 4,
+    "lane_groups_large": 8,
+    "max_eu64_per_group": 16
+  }
+}

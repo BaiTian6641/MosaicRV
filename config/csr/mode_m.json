@@ -1,0 +1,267 @@
+{
+  "schema_version": 1,
+  "profiles": ["p0", "p1", "p2", "p3"],
+  "modes": [
+    {
+      "mode": "M",
+      "csrs": [
+        {
+          "name": "mstatus",
+          "address": 768,
+          "width": 64,
+          "access": "rwr",
+          "behavior": "warl",
+          "reset": 6144,
+          "unmodifiable_bits": [
+            "63",
+            "37",
+            "36",
+            "35:34",
+            "33:32",
+            "22",
+            "21",
+            "20",
+            "19",
+            "18",
+            "17",
+            "16:15",
+            "14:13",
+            "12:11",
+            "10:9",
+            "8",
+            "6"
+          ],
+          "writable_fields": ["7", "5", "3", "1"],
+          "wpri_fields": ["62:38", "31:23", "4", "2", "0"],
+          "spec_clause": "RISC-V Privileged Specification v1.12 (tag Priv-v1.12, commit 98964261c931d51884f733664b22efe43de93033), src/machine.tex Sec 'Machine Status Registers (mstatus and mstatush)' L363 (RV64 layout Fig. mstatusreg L428-490: SD 63, WPRI 62:38, MBE 37, SBE 36, SXL 35:34, UXL 33:32, WPRI 31:23, TSR 22, TW 21, TVM 20, MXR 19, SUM 18, MPRV 17, XS 16:15, FS 14:13, MPP 12:11, VS 10:9, SPP 8, MPIE 7, UBE 6, SPIE 5, WPRI 4, MIE 3, WPRI 2, SIE 1, WPRI 0); Sec 'Reset' L2839-2858; per-field read-only-zero rules L636-660 (SXL/UXL), L673 (MPRV), L688 (MXR), L700 (SUM), L730-742 (MBE/SBE/UBE), L816 (TVM), L833-835 (TW), L856 (TSR), L611 (SPP/MPP WARL), L916-950 (FS/VS/XS). p0 is M-only and little-endian (config/profiles/p0.json), so every field except MPIE/SPIE/MIE/SIE is read-only zero and MPP is read-only 0b11."
+        },
+        {
+          "name": "misa",
+          "address": 769,
+          "width": 64,
+          "access": "rwr",
+          "behavior": "warl",
+          "reset": 9223372036854780160,
+          "unmodifiable_bits": ["63:0"],
+          "writable_fields": [],
+          "wpri_fields": [],
+          "spec_clause": "RISC-V Privileged Specification v1.12 (tag Priv-v1.12, commit 98964261c931d51884f733664b22efe43de93033), src/machine.tex Sec 'Machine ISA Register (misa)' L19-96: WARL read-write register; MXL[1:0] = bits MXLEN-1:MXLEN-2; bits MXLEN-3:26 are WARL zero; Extensions[25:0] WARL; 'The MXL field is always set to the widest supported ISA variant at reset' L56; 'At reset, the Extensions field shall contain the maximal set of supported extensions' L84; 'The MXL field may be writable in implementations that support multiple base ISAs' L51; 'The Extensions field is a WARL field that can contain writable bits where the implementation allows the supported ISA to be modified' L82-84; Table misabase L58-70 (MXL 1=32, 2=64, 3=128). p0 supports only RV64IM, so MXL reads 2 and only extension bits I(8) and M(12) are set; writable-ness is optional in the spec, so MosaicRV makes the whole register read-only. Reset 2<<62 | 1<<8 | 1<<12 = 0x8000000000001100."
+        },
+        {
+          "name": "medeleg",
+          "address": 770,
+          "width": 64,
+          "access": "rw",
+          "behavior": "warl",
+          "reset": 0,
+          "unmodifiable_bits": [],
+          "writable_fields": ["63:0"],
+          "wpri_fields": [],
+          "spec_clause": "RISC-V Privileged Specification v1.12 (tag Priv-v1.12, commit 98964261c931d51884f733664b22efe43de93033), src/machine.tex Sec 'Machine Trap Delegation Registers (medeleg and mideleg)' L1237; Fig. medelegreg L1312-1327 (whole MXLEN field is 'Synchronous Exceptions (WARL)'); L1350-1352 'For exceptions that cannot occur in less privileged modes, the corresponding medeleg bits should be read-only zero. In particular, medeleg[11] is read-only zero.'; src/priv-csrs.tex L305 address 0x302 privilege MRW. p0 implements M only (config/profiles/p0.json privilege_modes=['M']), so no synchronous exception can occur in a less privileged mode: every bit is WARL with zero as its only legal value. The register exists and writes are accepted, but each bit canonicalises to 0."
+        },
+        {
+          "name": "mideleg",
+          "address": 771,
+          "width": 64,
+          "access": "rw",
+          "behavior": "warl",
+          "reset": 0,
+          "unmodifiable_bits": [],
+          "writable_fields": ["63:0"],
+          "wpri_fields": [],
+          "spec_clause": "RISC-V Privileged Specification v1.12 (tag Priv-v1.12, commit 98964261c931d51884f733664b22efe43de93033), src/machine.tex Sec 'Machine Trap Delegation Registers (medeleg and mideleg)' L1237; Fig. midelegreg L1335-1345 (whole MXLEN field is 'Interrupts (WARL)'); L1347-1349 'mideleg holds trap delegation bits for individual interrupts, with the layout of bits matching those in the mip register'; L1364-1372 'if register mideleg exists, bit i is not set in mideleg' for an interrupt to trap to M-mode; src/priv-csrs.tex L306 address 0x303 privilege MRW. With no S/U mode there is no delegation target, so every bit is WARL with zero as its only legal value; writes are accepted and each bit canonicalises to 0."
+        },
+        {
+          "name": "mie",
+          "address": 772,
+          "width": 64,
+          "access": "rwr",
+          "behavior": "warl_wpri",
+          "reset": 0,
+          "unmodifiable_bits": [],
+          "writable_fields": ["7", "3"],
+          "wpri_fields": ["63:16", "15:8", "6:4", "2:0"],
+          "spec_clause": "RISC-V Privileged Specification v1.12 (tag Priv-v1.12, commit 98964261c931d51884f733664b22efe43de93033), src/machine.tex Sec 'Machine Interrupt Registers (mip and mie)' L1358: 'the mie register is the corresponding MXLEN-bit read/write register containing interrupt enable bits. Interrupt cause number i (as reported in CSR mcause) corresponds with bit i in both mip and mie. Bits 15:0 are allocated to standard interrupt causes only, while bits 16 and above are designated for platform or custom use.'; Fig. miereg L1395-1406; Table mcauses L2030-2060 (cause 3 = machine software interrupt, 7 = machine timer interrupt, 11 = machine external interrupt); src/priv-csrs.tex L307 address 0x304 privilege MRW. p0 has a CLINT (config/memory/p0.json) providing MSIP and MTIP but no PLIC, so MTIP(7) and MSIP(3) are implemented and writable and every other bit is write-preserve-zero."
+        },
+        {
+          "name": "mtvec",
+          "address": 773,
+          "width": 64,
+          "access": "rw",
+          "behavior": "warl",
+          "reset": 0,
+          "unmodifiable_bits": [],
+          "writable_fields": ["63:2", "1:0"],
+          "wpri_fields": [],
+          "spec_clause": "RISC-V Privileged Specification v1.12 (tag Priv-v1.12, commit 98964261c931d51884f733664b22efe43de93033), src/machine.tex Sec 'Machine Trap-Vector Base-Address Register (mtvec)' L1154: 'The mtvec register is an MXLEN-bit WARL read/write register'; Fig. mtvecreg L1164-1176 (BASE[MXLEN-1:2] WARL, MODE[1:0] WARL); L1178-1184 'The value in the BASE field must always be aligned on a 4-byte boundary'; L1189-1194 MODE table 0=Direct, 1=Vectored, >=2 Reserved; src/priv-csrs.tex L308 address 0x305 privilege MRW. MosaicRV accepts only MODE 0 and MODE 1 (MODE>=2 is Reserved and canonicalises to 0) and forces BASE[1:0]=0. No reset value is specified; the conservative choice 0 (Direct mode, base 0) is used and is a legal WARL value ('No WARL field contains an illegal value', L2856)."
+        },
+        {
+          "name": "mcounteren",
+          "address": 774,
+          "width": 32,
+          "access": "rwr",
+          "behavior": "warl",
+          "reset": 0,
+          "unmodifiable_bits": ["31:0"],
+          "writable_fields": [],
+          "wpri_fields": [],
+          "spec_clause": "RISC-V Privileged Specification v1.12 (tag Priv-v1.12, commit 98964261c931d51884f733664b22efe43de93033), src/machine.tex Sec 'Machine Counter-Enable Register (mcounteren)' L1741: 'The counter-enable register mcounteren is a 32-bit register'; Fig. mcounteren L1751-1770 (CY 0, TM 1, IR 2, HPM3..HPM31 3..31); L1772-1774 'The settings in this register only control accessibility'; L1821-1824 'In systems with U-mode, the mcounteren must be implemented, but all fields are WARL and may be read-only zero... In systems without U-mode, the mcounteren register should not exist.'; src/priv-csrs.tex L309 address 0x306 privilege MRW. p0 is M-only (no U-mode), so the register exposes no counters to any less privileged mode and every field is WARL read-only zero. Documented deviation: the spec says the register 'should not exist' in an M-only system; MosaicRV keeps it at 0x306 so software gets a defined WARL read of zero instead of an illegal-instruction trap, and the reset value is 0 which is a legal WARL value."
+        },
+        {
+          "name": "mscratch",
+          "address": 832,
+          "width": 64,
+          "access": "rw",
+          "behavior": "warl",
+          "reset": 0,
+          "unmodifiable_bits": [],
+          "writable_fields": ["63:0"],
+          "wpri_fields": [],
+          "spec_clause": "RISC-V Privileged Specification v1.12 (tag Priv-v1.12, commit 98964261c931d51884f733664b22efe43de93033), src/machine.tex Sec 'Machine Scratch Register (mscratch)' L1891: 'The mscratch register is an MXLEN-bit read/write register dedicated for use by machine mode.'; Fig. mscratchreg L1902-1912 (no field decomposition); src/priv-csrs.tex L314 address 0x340 privilege MRW. The spec imposes no field constraints, so every 64-bit value is legal and reads back unchanged; 'warl' is used because the schema has no plain-read/write token and this register is exactly an unconstrained WARL field. Reset 0: unspecified by the spec, and 0 is legal."
+        },
+        {
+          "name": "mepc",
+          "address": 833,
+          "width": 64,
+          "access": "rwr",
+          "behavior": "warl",
+          "reset": 0,
+          "unmodifiable_bits": ["1:0"],
+          "writable_fields": ["63:2"],
+          "wpri_fields": [],
+          "spec_clause": "RISC-V Privileged Specification v1.12 (tag Priv-v1.12, commit 98964261c931d51884f733664b22efe43de93033), src/machine.tex Sec 'Machine Exception Program Counter (mepc)' L1932: 'The low bit of mepc (mepc[0]) is always zero. On implementations that support only IALIGN=32, the two low bits (mepc[1:0]) are always zero.'; L1945-1950 'mepc is a WARL register that must be able to hold all valid virtual addresses'; L1962-1964 'When a trap is taken into M-mode, mepc is written with the virtual address of the instruction that was interrupted or that encountered the exception'; src/priv-csrs.tex L315 address 0x341 privilege MRW. p0 has fixed IALIGN=32, so mepc[1:0] are read-only zero. Reset 0: unspecified by the spec, and 0 is a legal WARL value."
+        },
+        {
+          "name": "mcause",
+          "address": 834,
+          "width": 64,
+          "access": "rw",
+          "behavior": "warl",
+          "reset": 0,
+          "unmodifiable_bits": [],
+          "writable_fields": ["63:0"],
+          "wpri_fields": [],
+          "spec_clause": "RISC-V Privileged Specification v1.12 (tag Priv-v1.12, commit 98964261c931d51884f733664b22efe43de93033), src/machine.tex Sec 'Machine Cause Register (mcause)' L1981-1993: 'the Interrupt bit in the mcause register is set if the trap was caused by an interrupt. The Exception Code field contains a code identifying the last exception or interrupt. The Exception Code is a WLRL field, so is only guaranteed to hold supported exception codes.'; Fig. mcausereg L1997-2008 (Interrupt = bit MXLEN-1, Exception Code = bits MXLEN-2:0); Table mcauses L2030-2060; Sec 'Reset' L2859-2862 'the value 0 should be returned on implementations that do not distinguish different reset conditions'; src/priv-csrs.tex L316 address 0x342 privilege MRW. p0 does not distinguish reset causes, so reset is 0."
+        },
+        {
+          "name": "mtval",
+          "address": 835,
+          "width": 64,
+          "access": "rw",
+          "behavior": "warl",
+          "reset": 0,
+          "unmodifiable_bits": [],
+          "writable_fields": ["63:0"],
+          "wpri_fields": [],
+          "spec_clause": "RISC-V Privileged Specification v1.12 (tag Priv-v1.12, commit 98964261c931d51884f733664b22efe43de93033), src/machine.tex Sec 'Machine Trap Value Register (mtval)' L2169: 'The mtval register is an MXLEN-bit read-write register'; L2175-2178 'The hardware platform will specify which exceptions must set mtval informatively and which may unconditionally set it to zero. If the hardware platform specifies that no exceptions set mtval to a nonzero value, then mtval is read-only zero.'; L2256-2264 'If mtval is not read-only zero, it is a WARL register that must be able to hold all valid virtual addresses and the value zero.'; src/priv-csrs.tex L317 address 0x343 privilege MRW. MosaicRV declares mtval not read-only zero and therefore implements it as a full-width WARL register. Which p0 exceptions set mtval informatively is a platform decision outside this table and is recorded as an open ambiguity in results/reports/I-001-csr-m.md. Reset 0: unspecified by the spec, and 0 is a legal WARL value."
+        },
+        {
+          "name": "mip",
+          "address": 836,
+          "width": 64,
+          "access": "rwr",
+          "behavior": "warl_wpri",
+          "reset": 0,
+          "unmodifiable_bits": [],
+          "writable_fields": ["7", "3"],
+          "wpri_fields": ["63:16", "15:8", "6:4", "2:0"],
+          "spec_clause": "RISC-V Privileged Specification v1.12 (tag Priv-v1.12, commit 98964261c931d51884f733664b22efe43de93033), src/machine.tex Sec 'Machine Interrupt Registers (mip and mie)' L1358-1364: 'The mip register is an MXLEN-bit read/write register containing information on pending interrupts... Interrupt cause number i corresponds with bit i in both mip and mie. Bits 15:0 are allocated to standard interrupt causes only, while bits 16 and above are designated for platform or custom use.'; Fig. mipreg L1376-1387; L1374-1385 trap conditions (a) MIE, (b) bit i in both mip and mie, (c) bit i clear in mideleg; src/priv-csrs.tex L318 address 0x344 privilege MRW. p0 has a CLINT (config/memory/p0.json) driving MSIP(3) and MTIP(7) and no PLIC, so MEIP(11) and every other bit is write-preserve-zero."
+        },
+        {
+          "name": "mvendorid",
+          "address": 3857,
+          "width": 32,
+          "access": "ro",
+          "behavior": "fixed",
+          "reset": 0,
+          "unmodifiable_bits": ["31:0"],
+          "spec_clause": "RISC-V Privileged Specification v1.12 (tag Priv-v1.12, commit 98964261c931d51884f733664b22efe43de93033), src/machine.tex Sec 'Machine Vendor ID Register (mvendorid)' L190: 'The mvendorid CSR is a 32-bit read-only register providing the JEDEC manufacturer ID of the provider of the core. This register must be readable in any implementation, but a value of 0 can be returned to indicate the field is not implemented or that this is a non-commercial implementation.'; Fig. mvendorreg L203-213 (Bank 31:7, Offset 6:0); src/priv-csrs.tex L295 address 0xF11 privilege MRO. MosaicRV is not a JEDEC-registered commercial vendor, so it returns 0."
+        },
+        {
+          "name": "marchid",
+          "address": 3858,
+          "width": 64,
+          "access": "ro",
+          "behavior": "fixed",
+          "reset": 0,
+          "unmodifiable_bits": ["63:0"],
+          "spec_clause": "RISC-V Privileged Specification v1.12 (tag Priv-v1.12, commit 98964261c931d51884f733664b22efe43de93033), src/machine.tex Sec 'Machine Architecture ID Register (marchid)' L240: 'The marchid CSR is an MXLEN-bit read-only register encoding the base microarchitecture of the hart. This register must be readable in any implementation, but a value of 0 can be returned to indicate the field is not implemented.'; Fig. marchreg L253-263; L265-269 'Open-source project architecture IDs are allocated globally by RISC-V International, and have non-zero architecture IDs with a zero most-significant-bit (MSB).'; src/priv-csrs.tex L296 address 0xF12 privilege MRO. MosaicRV has no allocated architecture ID yet, so it returns 0 as the spec explicitly permits."
+        },
+        {
+          "name": "mimpid",
+          "address": 3859,
+          "width": 64,
+          "access": "ro",
+          "behavior": "fixed",
+          "reset": 0,
+          "unmodifiable_bits": ["63:0"],
+          "spec_clause": "RISC-V Privileged Specification v1.12 (tag Priv-v1.12, commit 98964261c931d51884f733664b22efe43de93033), src/machine.tex Sec 'Machine Implementation ID Register (mimpid)' L293: 'The mimpid CSR provides a unique encoding of the version of the processor implementation. This register must be readable in any implementation, but a value of 0 can be returned to indicate that the field is not implemented.'; Fig. mimpidreg L306-316; src/priv-csrs.tex L297 address 0xF13 privilege MRO. No version identifier has been assigned to MosaicRV, so it returns 0."
+        },
+        {
+          "name": "mhartid",
+          "address": 3860,
+          "width": 64,
+          "access": "ro",
+          "behavior": "fixed",
+          "reset": 0,
+          "unmodifiable_bits": ["63:0"],
+          "spec_clause": "RISC-V Privileged Specification v1.12 (tag Priv-v1.12, commit 98964261c931d51884f733664b22efe43de93033), src/machine.tex Sec 'Hart ID Register (mhartid)' L327: 'The mhartid CSR is an MXLEN-bit read-only register containing the integer ID of the hardware thread running the code. This register must be readable in any implementation. Hart IDs might not necessarily be numbered contiguously in a multiprocessor system, but at least one hart must have a hart ID of zero.'; Fig. mhartidreg L340-350; src/priv-csrs.tex L298 address 0xF14 privilege MRO. config/profiles/p0.json sets harts=1, so the single MosaicRV hart is hart 0 and returns 0."
+        },
+        {
+          "name": "mcycle",
+          "address": 2816,
+          "width": 64,
+          "access": "rw",
+          "behavior": "warl",
+          "reset": 0,
+          "unmodifiable_bits": [],
+          "writable_fields": ["63:0"],
+          "wpri_fields": [],
+          "spec_clause": "RISC-V Privileged Specification v1.12 (tag Priv-v1.12, commit 98964261c931d51884f733664b22efe43de93033), src/machine.tex Sec 'Hardware Performance Monitor' L1648: 'The mcycle CSR counts the number of clock cycles executed by the processor core on which the hart is running. The mcycle and minstret registers have 64-bit precision on all RV32 and RV64 systems.'; L1656-1658 'The counter registers have an arbitrary value after the hart is reset, and can be written with a given value. Any CSR write takes effect after the writing instruction has otherwise completed.'; Fig. hpmcounter L1680-1700; src/priv-csrs.tex L363 address 0xB00 privilege MRW. Documented deviation from the task card: mcycle is architecturally MRW and writable, so access is 'rw', not 'ro'; 'fixed' would falsely claim the counter never increments. The schema has no plain-read/write behavior token, so 'warl' is used (every 64-bit value is legal and reads back). The spec makes the post-reset value arbitrary; 0 is the conservative, deterministic choice."
+        },
+        {
+          "name": "minstret",
+          "address": 2818,
+          "width": 64,
+          "access": "rw",
+          "behavior": "warl",
+          "reset": 0,
+          "unmodifiable_bits": [],
+          "writable_fields": ["63:0"],
+          "wpri_fields": [],
+          "spec_clause": "RISC-V Privileged Specification v1.12 (tag Priv-v1.12, commit 98964261c931d51884f733664b22efe43de93033), src/machine.tex Sec 'Hardware Performance Monitor' L1648-1652: 'The minstret CSR counts the number of instructions the hart has retired. The mcycle and minstret registers have 64-bit precision on all RV32 and RV64 systems.'; L1656-1658 'The counter registers have an arbitrary value after the hart is reset, and can be written with a given value.'; src/priv-csrs.tex L364 address 0xB02 privilege MRW. Same documented deviation as mcycle: architecturally MRW and writable, so 'rw'/'warl' rather than 'ro'/'fixed'. Post-reset value is arbitrary per spec; 0 is the conservative choice."
+        },
+        {
+          "name": "cycle",
+          "address": 3072,
+          "width": 64,
+          "access": "ro",
+          "behavior": "fixed",
+          "reset": 0,
+          "unmodifiable_bits": ["63:0"],
+          "spec_clause": "RISC-V Privileged Specification v1.12 (tag Priv-v1.12, commit 98964261c931d51884f733664b22efe43de93033), src/machine.tex Sec 'Machine Counter-Enable Register (mcounteren)' L1787-1791: 'The cycle, instret, and hpmcounter_n CSRs are read-only shadows of mcycle, minstret, and mhpmcounter_n, respectively.'; src/priv-csrs.tex L166 address 0xC00 privilege URO, 'Cycle counter for RDCYCLE instruction.' cycle is 64 bits wide on RV64 (it is a read-only shadow of the 64-bit mcycle, not one of the RV32-only *h aliases). Reset 0 because mcycle resets to 0."
+        },
+        {
+          "name": "time",
+          "address": 3073,
+          "width": 64,
+          "access": "ro",
+          "behavior": "fixed",
+          "reset": 0,
+          "unmodifiable_bits": ["63:0"],
+          "spec_clause": "RISC-V Privileged Specification v1.12 (tag Priv-v1.12, commit 98964261c931d51884f733664b22efe43de93033), src/machine.tex Sec 'Machine Counter-Enable Register (mcounteren)' L1788-1791: 'The time CSR is a read-only shadow of the memory-mapped mtime register.'; Sec 'Machine Timer Registers (mtime and mtimecmp)' L2485; src/priv-csrs.tex L167 address 0xC01 privilege URO, 'Timer for RDTIME instruction.' time is 64 bits wide on RV64 (timeh at 0xC81 is the RV32-only alias and is deliberately absent from this table). Reset 0: mtime is memory-mapped in the p0 CLINT (config/memory/p0.json) and its reset value is not specified by the Privileged spec; 0 is the conservative choice."
+        },
+        {
+          "name": "instret",
+          "address": 3074,
+          "width": 64,
+          "access": "ro",
+          "behavior": "fixed",
+          "reset": 0,
+          "unmodifiable_bits": ["63:0"],
+          "spec_clause": "RISC-V Privileged Specification v1.12 (tag Priv-v1.12, commit 98964261c931d51884f733664b22efe43de93033), src/machine.tex Sec 'Machine Counter-Enable Register (mcounteren)' L1787-1791: 'The cycle, instret, and hpmcounter_n CSRs are read-only shadows of mcycle, minstret, and mhpmcounter_n, respectively.'; src/priv-csrs.tex L168 address 0xC02 privilege URO, 'Instructions-retired counter for RDINSTRET instruction.' instret is 64 bits wide on RV64 (instreth at 0xC82 is the RV32-only alias and is deliberately absent from this table). Reset 0 because minstret resets to 0."
+        }
+      ]
+    }
+  ]
+}

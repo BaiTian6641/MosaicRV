@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "profile": "p1",
+  "xlen": 64,
+  "isa_target": {
+    "extensions": [
+      "I",
+      "M",
+      "Zicsr",
+      "Zifencei",
+      "Zicntr",
+      "Zihpm",
+      "A",
+      "C",
+      "Zicond",
+      "Zmmul",
+      "Zaamo",
+      "Zalrsc",
+      "Zicbom",
+      "Zicbop",
+      "CMO"
+    ],
+    "vlen": null,
+    "elen": null,
+    "source": "docs/implementation-plan.md#1.1 p1 row: p0 plus A/C, S/U privilege, Sv39, PMP, cache/interrupt/timer and the platform contract Linux needs"
+  },
+  "privilege_modes": [
+    "M",
+    "S",
+    "U"
+  ],
+  "harts": 1,
+  "clusters": 2,
+  "endianness": "little",
+  "misalignment": {
+    "instruction_fetch": "trap",
+    "load": "trap",
+    "store": "trap",
+    "atomic": "raise_misaligned_fault"
+  },
+  "csr_files": [
+    "csr/mode_m.json",
+    "csr/mode_su.json"
+  ],
+  "memory_map_file": "memory/p1.json",
+  "geometry_file": "geometry/p1.json",
+  "reset": {
+    "reset_vector": 2147483648,
+    "boot_rom_bytes": 4096
+  },
+  "derived_notes": [
+    "A and C are both required at the p1 gate; neither may be waived, per docs/implementation-plan.md#1.1.",
+    "Linux booting is system evidence, not proof of full ISA correctness; recorded separately in results/."
+  ]
+}

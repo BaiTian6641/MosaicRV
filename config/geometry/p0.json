@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "profile": "p0",
+  "source": "docs/implementation-plan.md#1.2 initial geometry: 2-wide rename/dispatch, 64 ROB entries, 96 integer physical registers, 4 PRF banks, 2x8 local IQ entries, one integer ALU per cluster, one shared iterative MUL/DIV, one LSU, LQ=8/SQ=8, two-entry result FIFO per cluster, 2-wide maximum retire",
+  "frontend": {
+    "fetch_outstanding": 4,
+    "btb_entries": 64,
+    "bpu_entries": 512,
+    "ras_entries": 16,
+    "target_quantum": 32
+  },
+  "rename": {
+    "rename_width": 2,
+    "dispatch_width": 2
+  },
+  "rob": {
+    "entries": 64,
+    "max_uops_per_macro": 8
+  },
+  "int_prf": {
+    "entries": 96,
+    "banks": 4,
+    "ports_per_bank": 1
+  },
+  "fabric": {
+    "clusters": 2,
+    "iq_entries_per_cluster": 8,
+    "alu_per_cluster": 1,
+    "mul_div_units": 1,
+    "result_fifo_per_cluster": 2,
+    "remote_link_latency": 4
+  },
+  "lsu": {
+    "units": 1,
+    "lq_entries": 8,
+    "sq_entries": 8
+  }
+}

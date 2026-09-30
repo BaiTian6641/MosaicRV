@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "profile": "p2",
+  "xlen": 64,
+  "isa_target": {
+    "extensions": [
+      "I",
+      "M",
+      "Zicsr",
+      "Zifencei",
+      "Zicntr",
+      "Zihpm",
+      "A",
+      "C",
+      "Zicond",
+      "Zmmul",
+      "Zaamo",
+      "Zalrsc",
+      "Zicbom",
+      "Zicbop",
+      "CMO",
+      "F",
+      "D",
+      "V",
+      "Zve64d",
+      "Zkt",
+      "Zvkt"
+    ],
+    "vlen": 128,
+    "elen": 64,
+    "source": "docs/implementation-plan.md#1.1 p2 row: p1 plus F/D and the full claimed set of RVV 1.0 instructions and CSRs, initial VLEN=128, ELEN=64"
+  },
+  "privilege_modes": [
+    "M",
+    "S",
+    "U"
+  ],
+  "harts": 1,
+  "clusters": 2,
+  "endianness": "little",
+  "misalignment": {
+    "instruction_fetch": "trap",
+    "load": "trap",
+    "store": "trap",
+    "atomic": "raise_misaligned_fault"
+  },
+  "csr_files": [
+    "csr/mode_m.json",
+    "csr/mode_su.json",
+    "csr/vector.json"
+  ],
+  "memory_map_file": "memory/p2.json",
+  "geometry_file": "geometry/p2.json",
+  "reset": {
+    "reset_vector": 2147483648,
+    "boot_rom_bytes": 4096
+  },
+  "derived_notes": [
+    "VLEN is fixed for the whole life of a hart; runtime lane quota changes (I-059) must never change architectural VLEN.",
+    "Zkt/Zvkt apply only to instructions actually implemented; an unimplemented instruction cannot be excused by claiming Zkt."
+  ]
+}

@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "profile": "p1",
+  "source": "docs/implementation-plan.md#1.2 p1 baseline: same geometry as p0 plus blocking L1I/L1D introduced by I-042; a smaller FPGA profile (ROB=32, PRF=64) is permitted by the plan but keeps the same ISA and two real clusters",
+  "frontend": {
+    "fetch_outstanding": 4,
+    "btb_entries": 128,
+    "bpu_entries": 1024,
+    "ras_entries": 16,
+    "target_quantum": 32
+  },
+  "rename": {
+    "rename_width": 2,
+    "dispatch_width": 2
+  },
+  "rob": {
+    "entries": 64,
+    "max_uops_per_macro": 8
+  },
+  "int_prf": {
+    "entries": 96,
+    "banks": 4,
+    "ports_per_bank": 1
+  },
+  "fabric": {
+    "clusters": 2,
+    "iq_entries_per_cluster": 8,
+    "alu_per_cluster": 1,
+    "mul_div_units": 1,
+    "result_fifo_per_cluster": 2,
+    "remote_link_latency": 4
+  },
+  "lsu": {
+    "units": 1,
+    "lq_entries": 8,
+    "sq_entries": 8
+  },
+  "caches": {
+    "line_bytes": 64,
+    "l1i_sets": 256,
+    "l1i_ways": 4,
+    "l1d_sets": 256,
+    "l1d_ways": 4,
+    "mshrs": 2
+  }
+}

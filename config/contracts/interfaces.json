@@ -1,0 +1,255 @@
+{
+  "schema_version": 1,
+  "comment": "Frozen protocol contracts for docs/implementation-plan.md section 1.3. Every field width is an expression over the profile geometry, never a hand-typed constant, so changing ROB depth or queue depth cannot silently leave an under-sized tag behind. tools/check_contracts.py evaluates the expressions and proves the arithmetic (modulus, ABA bound, compare distance) actually holds for the profile.",
+  "sources": "docs/implementation-plan.md#1.3, docs/architecture-review.md",
+  "expression_namespace": [
+    "xlen", "harts", "clusters", "rob_entries", "max_uops_per_macro",
+    "int_prf_entries", "prf_banks", "iq_entries_per_cluster", "lq_entries",
+    "sq_entries", "fetch_outstanding", "result_fifo_per_cluster", "mshrs",
+    "lsu_units", "mul_div_units", "fetch_bandwidth", "clog2"
+  ],
+  "rule": "Every interface must state one owner, an explicit transfer rule, an explicit cancel rule, an explicit response rule, and at least one resource with a unique allocate and release event. Identity must never be carried by a wrapping index alone: any field that can alias after wrap needs a generation or epoch of its own.",
+  "interfaces": [
+    {
+      "name": "fetch_decode",
+      "owner": "frontend",
+      "consumers": ["rename"],
+      "summary": "Instruction fetch requests and their responses, including the original bits and length of every instruction, so a compressed instruction crossing a fetch boundary still reports the PC it belongs to.",
+      "transfer": "valid && ready on both sides; payload must be stable while valid && !ready",
+      "payload_stable_when_stalled": true,
+      "cancel": "A redirect raises the fetch epoch. Outstanding responses carrying an older epoch are dropped at the receiver, and their request slot credit is returned exactly once.",
+      "response": "Responses may arrive out of order. Each response is classified live (epoch matches and the slot is still outstanding), stale (epoch differs) or squashed (slot already recycled); only a live response may be decoded.",
+      "identity_fields": [
+        { "name": "hart", "expr": "harts", "min_bits": 1, "why": "every packet carries its hart; p0/p1 have one, p3 has two" },
+        { "name": "pc", "expr": "xlen", "min_bits": 64, "why": "architectural instruction address" },
+        { "name": "req_id", "expr": "clog2(fetch_outstanding)", "min_bits": 1, "why": "identifies the outstanding request slot a response belongs to" },
+        { "name": "epoch", "expr": "clog2(rob_entries)+1", "min_bits": 2, "why": "a req_id alone aliases after wrap; the epoch distinguishes a recycled slot from the request that still owns it" }
+      ],
+      "resources": [
+        {
+          "name": "fetch_request_slot",
+          "count_expr": "fetch_outstanding",
+          "allocate": "frontend issues a fetch request",
+          "release": "its response is consumed, or the redirect that raised the epoch cancels it and the cancel is acknowledged"
+        }
+      ],
+      "credit_return_path": "cancel acknowledgement returns the request slot credit",
+      "aba_counterexamples": [
+        "A response for request slot 2 arrives after a redirect recycled slot 2 for a different PC; without the epoch it would be decoded at the wrong PC.",
+        "A late response for a squashed branch target is mistaken for a live response and allocates a ROB entry for an instruction that no longer exists."
+      ]
+    },
+    {
+      "name": "macro_dispatch",
+      "owner": "rename",
+      "consumers": ["issue_queues"],
+      "summary": "One dispatched macro-instruction, carrying everything needed to place it in the ROB and to route it later.",
+      "transfer": "valid && ready; the whole group is accepted atomically or not at all",
+      "payload_stable_when_stalled": true,
+      "cancel": "A squash marks the ROB entries dead; the macro is not explicitly flushed, it dies with its ROB entries, and any physical tags it allocated are freed only when the allocator observes the squash.",
+      "response": "There is no response; allocation either happens atomically for the whole group or the rename stage back-pressures. A partially allocated group is not representable.",
+      "identity_fields": [
+        { "name": "hart", "expr": "harts", "min_bits": 1, "why": "per-hart ordering domain" },
+        { "name": "rob_index", "expr": "clog2(rob_entries)", "min_bits": 6, "why": "slot in the reorder buffer" },
+        { "name": "rob_gen", "expr": "clog2(rob_entries)+1", "min_bits": 7, "why": "the ROB index wraps every rob_entries allocations; the generation makes a recycled slot distinguishable from the macro that still owns it" },
+        { "name": "uop_index", "expr": "clog2(max_uops_per_macro)", "min_bits": 3, "why": "position within a macro; a macro may own several uops" },
+        { "name": "seq", "expr": "clog2(2*rob_entries*max_uops_per_macro+1)", "min_bits": 11, "why": "age for oldest-first selection; the modulus must exceed twice the largest comparable distance, which is every uop of every live ROB entry" }
+      ],
+      "resources": [
+        {
+          "name": "rob_entry",
+          "count_expr": "rob_entries",
+          "allocate": "rename allocates the group",
+          "release": "the macro retires, or a squash kills it"
+        },
+        {
+          "name": "physical_register",
+          "count_expr": "int_prf_entries",
+          "allocate": "rename allocates a destination tag",
+          "release": "the macro retires and frees the previous mapping, or a squash frees the speculative tag"
+        }
+      ],
+      "credit_return_path": "retire frees the ROB entry and the physical tag in the same architectural order; a squash frees both without retiring",
+      "aba_counterexamples": [
+        "A uop from a squashed macro arrives at an issue queue after its ROB entry has been reallocated; matching on rob_index alone would let it execute and write the new owner's destination register.",
+        "Last-uop-arrives-is-treated-as-complete: a macro with three uops whose third uop completes first would be marked done while two uops are still outstanding."
+      ]
+    },
+    {
+      "name": "issue_lease",
+      "owner": "issue_queues",
+      "consumers": ["execution_units"],
+      "summary": "An all-or-nothing grant of the resources one uop needs to run to completion.",
+      "transfer": "One atomic grant or zero grant. There is no partial hold: a uop never waits holding one resource for another, so the wait graph cannot contain a cycle.",
+      "payload_stable_when_stalled": true,
+      "cancel": "A kill removes the uop from the queue before issue. Once a lease is granted the unit must accept it; a unit that cannot accept a granted lease must reserve capacity for it at grant time.",
+      "response": "The grant names the result credit the unit will consume. If no credit is available the grant is not made, so a unit can never stall holding a lease.",
+      "identity_fields": [
+        { "name": "owner_gen", "expr": "clog2(rob_entries)+1", "min_bits": 7, "why": "matches the macro's ROB generation; a stale grant cannot write a recycled destination" },
+        { "name": "uop_index", "expr": "clog2(max_uops_per_macro)", "min_bits": 3, "why": "which uop of the macro holds the lease" },
+        { "name": "route_id", "expr": "clog2(clusters+1)", "min_bits": 2, "why": "which cluster was granted, needed to route the result back" }
+      ],
+      "resources": [
+        {
+          "name": "issue_queue_entry",
+          "count_expr": "iq_entries_per_cluster*clusters",
+          "allocate": "dispatch inserts into the target cluster queue",
+          "release": "the uop is issued under a granted lease, or killed"
+        },
+        {
+          "name": "result_credit",
+          "count_expr": "result_fifo_per_cluster*clusters",
+          "allocate": "reserved at grant time so the unit can never stall",
+          "release": "the completion is accepted by the result FIFO"
+        }
+      ],
+      "credit_return_path": "an unissued lease returns its result credit at kill time",
+      "aba_counterexamples": [
+        "A result credit is reserved for a uop that is then killed; without a return path the credit leaks and the fabric eventually deadlocks with free issue-queue entries.",
+        "A unit accepts a lease, stalls for a cycle, and a broadcast result from another producer overwrites its destination because ownership was treated as a broadcast rather than exactly-once."
+      ]
+    },
+    {
+      "name": "operand_result",
+      "owner": "execution_units",
+      "consumers": ["writeback"],
+      "summary": "A produced value travelling from its unit to the PRF bank that owns it, or as a local bypass to a waiting consumer.",
+      "transfer": "valid && ready; payload stable while stalled",
+      "payload_stable_when_stalled": true,
+      "cancel": "If the producer has been squashed, the result is discarded at writeback and no PRF write occurs.",
+      "response": "exactly-once ownership per destination: a result is written once, not broadcast. A duplicate producer for the same destination tag plus generation is a bug, not a merge.",
+      "identity_fields": [
+        { "name": "prf_tag", "expr": "clog2(int_prf_entries)", "min_bits": 7, "why": "96 physical entries need 7 bits; the depth is deliberately not a power of two, so the free list, not a wrapping pointer, decides allocation" },
+        { "name": "prf_gen", "expr": "clog2(int_prf_entries)+1", "min_bits": 8, "why": "a tag is recycled; the generation distinguishes the new owner from the old" },
+        { "name": "producer_owner_gen", "expr": "clog2(rob_entries)+1", "min_bits": 7, "why": "the epoch check must respect an older instruction that is still live across a redirect, not blindly reject everything from the previous epoch" }
+      ],
+      "resources": [
+        {
+          "name": "prf_bank_write_port",
+          "count_expr": "prf_banks",
+          "allocate": "per cycle, one write per bank",
+          "release": "end of cycle"
+        }
+      ],
+      "credit_return_path": "a discarded result consumes its reserved credit and returns it",
+      "aba_counterexamples": [
+        "A result from a squashed uop writes the tag that has since been reallocated to a younger uop; the older instruction's value lands in the younger instruction's destination.",
+        "Two units complete for the same destination in one cycle and both are written, so the value seen depends on arbitration order rather than on the allocation order."
+      ]
+    },
+    {
+      "name": "memory_request",
+      "owner": "lsu",
+      "consumers": ["memory_endpoint"],
+      "summary": "Speculative reads and committed stores travelling to the ordered memory endpoint, plus non-speculative MMIO.",
+      "transfer": "valid && ready with per-id credit; responses may be out of order but each id completes exactly once",
+      "payload_stable_when_stalled": true,
+      "cancel": "A squashed load is cancelled; a committed store is never cancelled because it is already architecturally visible.",
+      "response": "One response per request id, carrying either data or a fault. Late responses for an id that has been reused are rejected by the id plus generation pair.",
+      "identity_fields": [
+        { "name": "hart", "expr": "harts", "min_bits": 1, "why": "per-hart ordering" },
+        { "name": "tx_id", "expr": "clog2(fetch_outstanding+lq_entries+sq_entries+mshrs)", "min_bits": 6, "why": "one outstanding transaction id space shared by fetch, LQ, SQ and MSHRs; the modulus bounds the number that can be live at once" },
+        { "name": "tx_gen", "expr": "clog2(2*(fetch_outstanding+lq_entries+sq_entries+mshrs)+1)", "min_bits": 7, "why": "a tx_id alone aliases once it wraps; the modulus exceeds twice the in-flight count so a live response can never be confused with a new request" },
+        { "name": "epoch", "expr": "clog2(rob_entries)+1", "min_bits": 7, "why": "speculative accesses from a squashed path must not be mistaken for live ones" }
+      ],
+      "resources": [
+        {
+          "name": "memory_transaction_id",
+          "count_expr": "fetch_outstanding+lq_entries+sq_entries+mshrs",
+          "allocate": "the LSU or the fetch unit issues a transaction",
+          "release": "its response is consumed"
+        }
+      ],
+      "credit_return_path": "every response returns its transaction id credit, including error responses",
+      "aba_counterexamples": [
+        "A store that has been authorized at commit is squashed by a later redirect and its address is reused; the device sees two writes and the MMIO side effect happens twice.",
+        "A load crosses an older store whose address is still unknown, the alias is discovered later, and the load is replayed; a replay without a new generation writes the old value twice."
+      ]
+    },
+    {
+      "name": "completion",
+      "owner": "execution_units",
+      "consumers": ["rob"],
+      "summary": "Notification that a uop, or one element of a vector uop, has produced its result.",
+      "transfer": "valid && ready",
+      "payload_stable_when_stalled": true,
+      "cancel": "A completion whose macro has been squashed is accepted and dropped, so the ROB slot and any reserved credit are still returned.",
+      "response": "None; the ROB entry is updated in place.",
+      "identity_fields": [
+        { "name": "rob_index", "expr": "clog2(rob_entries)", "min_bits": 6, "why": "which ROB entry" },
+        { "name": "rob_gen", "expr": "clog2(rob_entries)+1", "min_bits": 7, "why": "the ROB index alone aliases after wrap" },
+        { "name": "uop_bitmap_index", "expr": "clog2(max_uops_per_macro)", "min_bits": 3, "why": "which uop of the macro completed" },
+        { "name": "element_index", "expr": "clog2(vlen/elen*8)", "min_bits": 7, "why": "which vector element completed; a vector instruction is not all-or-nothing" }
+      ],
+      "resources": [
+        {
+          "name": "completion_bitmap",
+          "count_expr": "rob_entries",
+          "allocate": "the macro's bitmap is cleared at allocation",
+          "release": "the bitmap is fully set, at which point the macro is complete"
+        }
+      ],
+      "credit_return_path": "completion acceptance returns the uop's issue-queue entry",
+      "aba_counterexamples": [
+        "A completion from a squashed macro sets the bitmap of the macro that has since taken the same ROB entry; the new macro retires without ever executing.",
+        "A vector instruction with vl=1 completes its single element and is treated as fully complete when eight elements were expected."
+      ]
+    },
+    {
+      "name": "retire_event",
+      "owner": "commit",
+      "consumers": ["event_tap", "reference_checker"],
+      "summary": "The architectural record: per-hart monotonic order with PC, instruction bits, register writes, CSR deltas and trap information.",
+      "transfer": "Append-only stream; the consumer is never back-pressured into changing architectural behaviour",
+      "payload_stable_when_stalled": true,
+      "cancel": "There is none. Once retired, an event is architecturally final and cannot be cancelled.",
+      "response": "None.",
+      "identity_fields": [
+        { "name": "hart", "expr": "harts", "min_bits": 1, "why": "per-hart ordering domain" },
+        { "name": "retire_seq", "expr": "clog2(2*rob_entries+1)", "min_bits": 8, "why": "monotonic per-hart retire counter; the modulus exceeds twice the ROB depth so a wrapped counter is never confused with a live one" },
+        { "name": "pc", "expr": "xlen", "min_bits": 64, "why": "architectural program counter of the retired instruction" }
+      ],
+      "resources": [
+        {
+          "name": "retire_event_slot",
+          "count_expr": "rob_entries",
+          "allocate": "at retire",
+          "release": "when the event tap has consumed it"
+        }
+      ],
+      "credit_return_path": "the event tap returns the slot; the stream is lossless",
+      "aba_counterexamples": [
+        "A trap is emitted as a normal retire, so a reference checker comparing instruction streams sees a phantom instruction.",
+        "A store becomes visible to the memory model before its retire event, so a replay from the event stream produces a different memory state than the original run."
+      ]
+    },
+    {
+      "name": "reconfigure",
+      "owner": "resource_broker",
+      "consumers": ["all_fabrics"],
+      "summary": "Ownership change of an existing resource pool, for example moving a cluster's share of execution units.",
+      "transfer": "Explicit state machine: STOP_ADMIT -> DRAIN -> ACK -> PUBLISH -> RESUME",
+      "payload_stable_when_stalled": true,
+      "cancel": "An aborted reconfiguration returns the resource to its original owner with its original generation; nothing may be reused before the barrier is acknowledged.",
+      "response": "Each participant acknowledges the barrier; ids, credits and state are only recycled after every acknowledgement.",
+      "identity_fields": [
+        { "name": "old_owner_gen", "expr": "clog2(rob_entries)+1", "min_bits": 7, "why": "the generation in force before the change" },
+        { "name": "new_owner_gen", "expr": "clog2(rob_entries)+1", "min_bits": 7, "why": "the generation published after the barrier; must differ from the old one" },
+        { "name": "outstanding", "expr": "clog2(rob_entries*max_uops_per_macro+1)", "min_bits": 12, "why": "drain count, bounded by every uop of every live ROB entry" }
+      ],
+      "resources": [
+        {
+          "name": "resource_pool",
+          "count_expr": "iq_entries_per_cluster*clusters",
+          "allocate": "at the initial configuration",
+          "release": "only after the barrier is acknowledged by every participant"
+        }
+      ],
+      "credit_return_path": "drain returns every outstanding credit before publish; an unacknowledged barrier blocks resume",
+      "aba_counterexamples": [
+        "A participant is granted a resource under the new generation before the barrier is acknowledged, and a late drain from the old generation frees it.",
+        "Reconfiguration is aborted after some participants have already published, and the two halves of the pool disagree about the owner generation."
+      ]
+    }
+  ]
+}

@@ -1,0 +1,314 @@
+{
+  "schema_version": 1,
+  "comment": "Single source of truth for which profile may claim which ISA extension. Derived from docs/implementation-plan.md section 1.1 (profile table) and section 3.2.1 (RVA23S64 obligations). A profile may claim an extension only if min_profile is at or below it AND every listed impl/verify task exists in docs. 'advertise' is what the build manifest is allowed to publish in misa / compiler -march / reference capability; a capability is only advertised once its implementation tasks have delivered.",
+  "source": "docs/implementation-plan.md#1.1, docs/implementation-plan.md#3.2.1",
+  "profiles_in_order": ["p0", "p1", "p2", "p3"],
+  "capabilities": [
+    {
+      "name": "I",
+      "min_profile": "p0",
+      "kind": "isa",
+      "impl_tasks": ["I-008", "I-010", "I-011", "I-013", "I-014", "I-015", "I-016", "I-017", "I-021"],
+      "verify_tasks": ["V-008", "V-009", "V-010", "V-011", "V-012"],
+      "spec_clause": "RV64I base integer instruction set, ISA manual v20260120",
+      "isa_string_token": "i"
+    },
+    {
+      "name": "M",
+      "min_profile": "p0",
+      "kind": "isa",
+      "impl_tasks": ["I-012"],
+      "verify_tasks": ["V-008", "V-011"],
+      "spec_clause": "RV64M integer multiply/divide, ISA manual v20260120",
+      "isa_string_token": "m"
+    },
+    {
+      "name": "Zicsr",
+      "min_profile": "p0",
+      "kind": "isa",
+      "impl_tasks": ["I-019"],
+      "verify_tasks": ["V-008", "V-012"],
+      "spec_clause": "Control and status register instructions, ISA manual v20260120",
+      "isa_string_token": "zicsr"
+    },
+    {
+      "name": "Zifencei",
+      "min_profile": "p0",
+      "kind": "isa",
+      "impl_tasks": ["I-037"],
+      "verify_tasks": ["V-014"],
+      "spec_clause": "Instruction-fetch fence, ISA manual v20260120",
+      "isa_string_token": "zifencei"
+    },
+    {
+      "name": "Zicntr",
+      "min_profile": "p0",
+      "kind": "isa",
+      "impl_tasks": ["I-019", "I-076"],
+      "verify_tasks": ["V-012"],
+      "spec_clause": "Base counters (cycle/time/instret), implied by Zicsr, ISA manual v20260120",
+      "isa_string_token": "zicntr"
+    },
+    {
+      "name": "Zihpm",
+      "min_profile": "p0",
+      "kind": "isa",
+      "impl_tasks": ["I-019", "I-020"],
+      "verify_tasks": ["V-012"],
+      "spec_clause": "Hardware performance counters, read-only zero when no counters are implemented",
+      "isa_string_token": "zihpm"
+    },
+    {
+      "name": "A",
+      "min_profile": "p1",
+      "kind": "isa",
+      "impl_tasks": ["I-039", "I-040"],
+      "verify_tasks": ["V-016", "V-020"],
+      "spec_clause": "Atomic memory operations incl. LR/SC, ISA manual v20260120",
+      "isa_string_token": "a"
+    },
+    {
+      "name": "C",
+      "min_profile": "p1",
+      "kind": "isa",
+      "impl_tasks": ["I-041"],
+      "verify_tasks": ["V-015"],
+      "spec_clause": "Compressed instructions, ISA manual v20260120",
+      "isa_string_token": "c"
+    },
+    {
+      "name": "S",
+      "min_profile": "p1",
+      "kind": "privilege",
+      "impl_tasks": ["I-044"],
+      "verify_tasks": ["V-017"],
+      "spec_clause": "Supervisor privilege, privileged spec v1.12",
+      "isa_string_token": null
+    },
+    {
+      "name": "U",
+      "min_profile": "p1",
+      "kind": "privilege",
+      "impl_tasks": ["I-044"],
+      "verify_tasks": ["V-017"],
+      "spec_clause": "User privilege, privileged spec v1.12",
+      "isa_string_token": null
+    },
+    {
+      "name": "PMP",
+      "min_profile": "p1",
+      "kind": "privilege",
+      "impl_tasks": ["I-044"],
+      "verify_tasks": ["V-017"],
+      "spec_clause": "Physical memory protection, privileged spec v1.12",
+      "isa_string_token": null
+    },
+    {
+      "name": "Sv39",
+      "min_profile": "p1",
+      "kind": "mmu",
+      "impl_tasks": ["I-045", "I-046"],
+      "verify_tasks": ["V-018"],
+      "spec_clause": "Sv39 address translation, privileged spec v1.12",
+      "isa_string_token": null
+    },
+    {
+      "name": "Sv48",
+      "min_profile": "p3",
+      "kind": "mmu",
+      "impl_tasks": ["I-097"],
+      "verify_tasks": ["V-090"],
+      "spec_clause": "Sv48 address translation; S64 option, only claimed if explicitly selected",
+      "isa_string_token": null
+    },
+    {
+      "name": "F",
+      "min_profile": "p2",
+      "kind": "isa",
+      "impl_tasks": ["I-049", "I-050"],
+      "verify_tasks": ["V-060", "V-061"],
+      "spec_clause": "Single-precision floating point, ISA manual v20260120",
+      "isa_string_token": "f"
+    },
+    {
+      "name": "D",
+      "min_profile": "p2",
+      "kind": "isa",
+      "impl_tasks": ["I-049", "I-050"],
+      "verify_tasks": ["V-060", "V-061"],
+      "spec_clause": "Double-precision floating point, ISA manual v20260120",
+      "isa_string_token": "d"
+    },
+    {
+      "name": "V",
+      "min_profile": "p2",
+      "kind": "isa",
+      "impl_tasks": ["I-051", "I-052", "I-053", "I-054", "I-055", "I-056", "I-057", "I-058", "I-059"],
+      "verify_tasks": ["V-062", "V-063", "V-064"],
+      "spec_clause": "Vector extension 1.0, VLEN>=128, ISA manual v20260120",
+      "isa_string_token": "v"
+    },
+    {
+      "name": "Zve64d",
+      "min_profile": "p2",
+      "kind": "isa",
+      "impl_tasks": ["I-054", "I-055"],
+      "verify_tasks": ["V-062"],
+      "spec_clause": "Embedded vector profile implied by V with ELEN=64; advertised only with V",
+      "isa_string_token": null
+    },
+    {
+      "name": "Zicsr_Zifencei_pairing",
+      "min_profile": "p0",
+      "kind": "constraint",
+      "impl_tasks": ["I-019", "I-037"],
+      "verify_tasks": ["V-014"],
+      "spec_clause": "RVA23 requires both Zicsr and Zifencei; neither may be claimed alone",
+      "isa_string_token": null
+    },
+    {
+      "name": "Zkt",
+      "min_profile": "p2",
+      "kind": "rva23_mandatory",
+      "impl_tasks": ["I-093"],
+      "verify_tasks": ["V-085"],
+      "spec_clause": "Data-independent execution latency, scalar subset; ISA manual v20260120",
+      "isa_string_token": "zkt"
+    },
+    {
+      "name": "Zvkt",
+      "min_profile": "p2",
+      "kind": "rva23_mandatory",
+      "impl_tasks": ["I-093"],
+      "verify_tasks": ["V-085", "V-086"],
+      "spec_clause": "Data-independent execution latency for implemented vector instructions",
+      "isa_string_token": "zvkt"
+    },
+    {
+      "name": "Zicfilp",
+      "min_profile": "p3",
+      "kind": "rva23_optional",
+      "impl_tasks": ["I-095"],
+      "verify_tasks": ["V-088"],
+      "spec_clause": "Code integrity: landing pad (LFENCE/branch target enforcement)",
+      "isa_string_token": "zicfilp"
+    },
+    {
+      "name": "Zicfiss",
+      "min_profile": "p3",
+      "kind": "rva23_optional",
+      "impl_tasks": ["I-095"],
+      "verify_tasks": ["V-088"],
+      "spec_clause": "Code integrity: shadow stack",
+      "isa_string_token": "zicfiss"
+    },
+    {
+      "name": "Zimop",
+      "min_profile": "p3",
+      "kind": "rva23_mandatory",
+      "impl_tasks": ["I-093"],
+      "verify_tasks": ["V-086"],
+      "spec_clause": "May-Be-Operations; RVA23U64 mandatory",
+      "isa_string_token": "zimop"
+    },
+    {
+      "name": "Zcmop",
+      "min_profile": "p3",
+      "kind": "rva23_mandatory",
+      "impl_tasks": ["I-093"],
+      "verify_tasks": ["V-086"],
+      "spec_clause": "Compressed May-Be-Operations; RVA23U64 mandatory",
+      "isa_string_token": "zcmop"
+    },
+    {
+      "name": "Zaamo",
+      "min_profile": "p1",
+      "kind": "rva23_mandatory",
+      "impl_tasks": ["I-039"],
+      "verify_tasks": ["V-016"],
+      "spec_clause": "Atomic memory ordering for address-only operations; mandatory when A is claimed",
+      "isa_string_token": "zaamo"
+    },
+    {
+      "name": "Zalrsc",
+      "min_profile": "p1",
+      "kind": "rva23_mandatory",
+      "impl_tasks": ["I-040"],
+      "verify_tasks": ["V-016"],
+      "spec_clause": "Atomic memory ordering for LR/SC; mandatory when A is claimed",
+      "isa_string_token": "zalrsc"
+    },
+    {
+      "name": "Zicbom",
+      "min_profile": "p1",
+      "kind": "rva23_mandatory",
+      "impl_tasks": ["I-042", "I-043"],
+      "verify_tasks": ["V-019"],
+      "spec_clause": "Cache block management operations (CBO.INVAL/CLEAN/FLUSH/ZAO)",
+      "isa_string_token": "zicbom"
+    },
+    {
+      "name": "Zicbop",
+      "min_profile": "p1",
+      "kind": "rva23_mandatory",
+      "impl_tasks": ["I-042", "I-043"],
+      "verify_tasks": ["V-019"],
+      "spec_clause": "Cache block prefetch operations",
+      "isa_string_token": "zicbop"
+    },
+    {
+      "name": "Zicond",
+      "min_profile": "p1",
+      "kind": "rva23_mandatory",
+      "impl_tasks": ["I-011"],
+      "verify_tasks": ["V-086"],
+      "spec_clause": "Integer conditional move instructions",
+      "isa_string_token": "zicond"
+    },
+    {
+      "name": "Zmmul",
+      "min_profile": "p1",
+      "kind": "rva23_mandatory",
+      "impl_tasks": ["I-012"],
+      "verify_tasks": ["V-086"],
+      "spec_clause": "Low-width multiply only; subset of M",
+      "isa_string_token": "zmmul"
+    },
+    {
+      "name": "PMLEN0",
+      "min_profile": "p3",
+      "kind": "rva23_mandatory",
+      "impl_tasks": ["I-094"],
+      "verify_tasks": ["V-087"],
+      "spec_clause": "Supm/Ssnpm pointer masking with PMLEN=0, mandatory minimum",
+      "isa_string_token": null
+    },
+    {
+      "name": "PMLEN7",
+      "min_profile": "p3",
+      "kind": "rva23_mandatory",
+      "impl_tasks": ["I-094"],
+      "verify_tasks": ["V-087"],
+      "spec_clause": "Supm/Ssnpm pointer masking with PMLEN=7, mandatory minimum",
+      "isa_string_token": null
+    },
+    {
+      "name": "CMO",
+      "min_profile": "p1",
+      "kind": "rva23_mandatory",
+      "impl_tasks": ["I-038", "I-042"],
+      "verify_tasks": ["V-019", "V-085"],
+      "spec_clause": "Cache management operations with coherent PMA, RVA23U64 mandatory",
+      "isa_string_token": null
+    },
+    {
+      "name": "Sha",
+      "min_profile": "p3",
+      "kind": "rva23_s64_mandatory",
+      "impl_tasks": ["I-093"],
+      "verify_tasks": ["V-085"],
+      "spec_clause": "Hypervisor extension: eight separately accepted sub-obligations, tracked per sub-item in I-092",
+      "isa_string_token": null
+    }
+  ]
+}
