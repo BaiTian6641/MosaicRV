@@ -12,7 +12,7 @@
 3. [细粒度实施计划](docs/implementation-plan.md)：91 个 I 工作包；profile、接口、文件布局、未来 CLI、跨文档依赖和 release gates。
 4. [验证计划](docs/validation-plan.md)：84 个 V 工作包；锁定的 XiangShan/Difftest/NEMU 候选来源链、Verilator 接入、独立参考、负控制、有限测试集、formal/litmus 与失败复现。
 5. [平台及 ASIC 计划](docs/platform-plan.md)：49 个 H 工作包；公共 RAM/clock/reset/CDC 合同，三个独立板级 flow、真实证据协议与 ASIC SRAM/DFT/STA/physical signoff。
-7. 十个团队执行指南：[第0阶段](docs/stage-0-contracts-bringup.md)、[第1阶段](docs/stage-1-scalar-control.md)、[第2阶段](docs/stage-2-execution-fabric.md)、[第3阶段](docs/stage-3-memory-system.md)、[第4阶段](docs/stage-4-vector-locality.md)、[第5阶段](docs/stage-5-multihart-aggregation.md)、[第6阶段](docs/stage-6-verification-quality.md)、[第7阶段](docs/stage-7-fpga-hardware.md)、[第8阶段](docs/stage-8-asic-release.md)、[第9阶段](docs/stage-9-lockstep-safety.md)。每份含用途、设计、Mermaid、微步骤、阻塞、团队进度表和 Track Log。
+7. 十个团队执行指南：[第0阶段](docs/stage-0-contracts-bringup.md)、[第1阶段](docs/stage-1-scalar-control.md)、[第2阶段](docs/stage-2-execution-fabric.md)、[第3阶段](docs/stage-3-memory-system.md)、[第4阶段](docs/stage-4-vector-locality.md)、[第5阶段](docs/stage-5-multihart-aggregation.md)、[第6阶段](docs/stage-6-verification-quality.md)、[第7阶段](docs/stage-7-fpga-hardware.md)、[第8阶段](docs/stage-8-asic-release.md)、[第9阶段](docs/stage-9-lockstep-safety.md)。每份含用途、设计、Mermaid、微步骤、阻塞、团队进度表和 Track Log；每张任务卡还含自然语言的执行者目标、建议工作顺序、停止求助条件和交付说明，便于人类或较小模型接手。
 8. [本轮验证与重跑指令](docs/verification.md)：文档 hash/覆盖、224 个任务字段、十个指南的结构、合并依赖图、引用/链接和 Git 跟踪检查；不包含伪造的 CPU 测试成绩。
 
 

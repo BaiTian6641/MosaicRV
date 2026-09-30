@@ -77,7 +77,7 @@ flowchart TD
 
 ## 5. 可跟踪任务卡
 
-每张卡含实现接口、数据、设计取舍、步骤、交接、验证和回退。完成定义：对应 `Pass` 全部有直接证据，相关负控制也工作；不是“代码写完”或“仿真曾跑过”。
+每张卡先给设计者/审查者看的工程合同，再给执行者看的自然语言说明。说明不是替代规格，而是告诉执行者如何按规格工作：先做什么、不能猜什么、什么时候停下来、拿什么证据证明完成。完成定义：对应 `Pass` 全部有直接证据，相关负控制也工作；不是“代码写完”或“仿真曾跑过”。
 
 ### I-049 — 选择并封装 F/D 运算实现
 
@@ -92,6 +92,13 @@ flowchart TD
 - **验收证据**：所有 F/D operations 有真实 implementation path、明确 latency/backpressure 和 license 来源。；验证口径：directed FP + license audit
 - **失败/回退动作**：F/D deferred
 - **来源覆盖**：FP datapath, reuse, licensing。；来源 IR-001, validation-plan.md。
+- **执行者目标**：把“选择并封装 F/D 运算”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先做合同和最小正确实现，再做优化。不要从相邻任务猜字段；所有身份、credit、reset、flush和背压边界必须来自本任务及implementation-plan。完成前至少覆盖一个正常路径、一个资源冲突和一个取消/恢复路径。
+- **建议工作顺序**：列全部F/D operation需求；评估候选实现的语义与许可；封装标准tagged handshake；验证rounding/denormal/NaN路径；综合资源/时序反馈；由V-050复核；无合法路径则阻断F/D广告。
+- **可接受完成**：所有 F/D operations 有真实 implementation path、明确 latency/backpressure 和 license 来源。
+- **何时停止求助**：主要风险是license、subnormal/NaN、后台回退。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：FPU adapter、capability matrix；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：IR-001, validation-plan.md。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### I-050 — 实现 FP rename/state/fflags 精确提交
@@ -107,6 +114,13 @@ flowchart TD
 - **验收证据**：被 squash 的 FP operation 不改变 flags；F/D bits 与规范允许的 NaN 处理一致。；验证口径：bit/flags precise suites
 - **失败/回退动作**：禁动态frm写入
 - **来源覆盖**：F/D precise state, numerical edge cases。；来源 IR-001, validation-plan.md。
+- **执行者目标**：把“FP rename/state/fflags 精确提交”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先做合同和最小正确实现，再做优化。不要从相邻任务猜字段；所有身份、credit、reset、flush和背压边界必须来自本任务及implementation-plan。完成前至少覆盖一个正常路径、一个资源冲突和一个取消/恢复路径。
+- **建议工作顺序**：扩展rename/commit至FP regs；实现fcsr read/write/suppression；每operation捕获local flags；commit顺序合并flags；测试NaN/signed zero/subnormal；覆盖长延迟kill；由V-050/V-051验收。
+- **可接受完成**：被 squash 的 FP operation 不改变 flags；F/D bits 与规范允许的 NaN 处理一致。
+- **何时停止求助**：主要风险是wrong-path flags、host近似、NaN payload错。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：FP state control；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：IR-001, validation-plan.md。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### I-051 — 冻结 RVV descriptor 与 profile
@@ -122,6 +136,13 @@ flowchart TD
 - **验收证据**：每种合法/非法组合有确定处理和用例；运行 lane 数变化不改变 hart 的 VLEN/architectural state。；验证口径：legality matrix、state width
 - **失败/回退动作**：禁V广告
 - **来源覆盖**：RVV first-class fabric, macro expansion。；来源 IR-001, architecture-review.md。
+- **执行者目标**：把“冻结 RVV descriptor 与 profile”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先做合同和最小正确实现，再做优化。不要从相邻任务猜字段；所有身份、credit、reset、flush和背压边界必须来自本任务及implementation-plan。完成前至少覆盖一个正常路径、一个资源冲突和一个取消/恢复路径。
+- **建议工作顺序**：固定VLEN/ELEN和依赖扩展；列所有instruction families/legal configs；定义descriptor identity/progress/fault；定义v0/group overlap规则；生成capacity/queue bounds；未实现行显式deferred；由V-052验收。
+- **可接受完成**：每种合法/非法组合有确定处理和用例；运行 lane 数变化不改变 hart 的 VLEN/architectural state。
+- **何时停止求助**：主要风险是只实现子集称full V、group overlap、运行中改vlenb。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：V profile and descriptor contract；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：IR-001, architecture-review.md。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### I-052 — 实现 vsetvl/vsetvli/vsetivli 与 vector CSRs
@@ -137,6 +158,13 @@ flowchart TD
 - **验收证据**：vl 的规范允许选择固定可重现，后续指令 descriptor 获得正确配置快照。；验证口径：vset boundaries、reference
 - **失败/回退动作**：禁V配置指令
 - **来源覆盖**：RVV configuration, speculative context。；来源 IR-001, validation-plan.md。
+- **执行者目标**：把“vsetvl/vsetvli/vsetivli 与 vector CSRs”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先做合同和最小正确实现，再做优化。不要从相邻任务猜字段；所有身份、credit、reset、flush和背压边界必须来自本任务及implementation-plan。完成前至少覆盖一个正常路径、一个资源冲突和一个取消/恢复路径。
+- **建议工作顺序**：实现AVL区间和rd/rs1特例；实现vtype编码/vill；保存每instruction配置快照；处理VS权限/context；覆盖vstart非零/reset；由V-053验收；接入reference state。
+- **可接受完成**：vl 的规范允许选择固定可重现，后续指令 descriptor 获得正确配置快照。
+- **何时停止求助**：主要风险是非法vtype执行、replay使用新vtype、vstart规则混。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：vector config unit；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：IR-001, validation-plan.md。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### I-053 — 实现 banked VRF 与 lane 映射
@@ -152,6 +180,13 @@ flowchart TD
 - **验收证据**：同一 logical vector 在不同 lane 数实现上读写一致；mask/source overlap 不覆盖尚未读取元素。；验证口径：mapping alias matrix
 - **失败/回退动作**：减少并行lane但固定映射
 - **来源覆盖**：lane scalability, vector operand lifetime。；来源 IR-001, architecture-review.md, platform-plan.md。
+- **执行者目标**：把“banked VRF 与 lane 映射”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先做合同和最小正确实现，再做优化。不要从相邻任务猜字段；所有身份、credit、reset、flush和背压边界必须来自本任务及implementation-plan。完成前至少覆盖一个正常路径、一个资源冲突和一个取消/恢复路径。
+- **建议工作顺序**：定义element→bank/lane mapping；实现VRF synchronous read/write；处理register groups/alias；收集多source与mask版本；覆盖LMUL fractions/overlap；lane数参数化；由V-054复核。
+- **可接受完成**：同一 logical vector 在不同 lane 数实现上读写一致；mask/source overlap 不覆盖尚未读取元素。
+- **何时停止求助**：主要风险是fractional LMUL、source overwrite、平台读延迟。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：VRF banks；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：IR-001, architecture-review.md, platform-plan.md。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### I-054 — 实现 vector integer/mask/permute/reduction
@@ -167,6 +202,13 @@ flowchart TD
 - **验收证据**：每个声明 family 的边界/重叠/masked-off 元素行为通过 V suite，未完成 family 不进入 p2 gate。；验证口径：element-wise rules
 - **失败/回退动作**：内部子集不广告V
 - **来源覆盖**：complete declared RVV integer semantics。；来源 IR-001, validation-plan.md。
+- **执行者目标**：把“vector integer/mask/permute/reduction”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先做合同和最小正确实现，再做优化。不要从相邻任务猜字段；所有身份、credit、reset、flush和背压边界必须来自本任务及implementation-plan。完成前至少覆盖一个正常路径、一个资源冲突和一个取消/恢复路径。
+- **建议工作顺序**：按family实现arithmetic/logic/shift；实现mask/tail/undisturbed规则；实现saturation/rounding flags；实现permute/reduction合法顺序；跨SEW/LMUL/mask矩阵；由V-054/V-055验收；deferred family阻断p2。
+- **可接受完成**：每个声明 family 的边界/重叠/masked-off 元素行为通过 V suite，未完成 family 不进入 p2 gate。
+- **何时停止求助**：主要风险是inactive异常、carry/lane分配、reduction顺序。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：vector integer lanes；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：IR-001, validation-plan.md。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### I-055 — 实现 vector FP 与逐元素异常标志
@@ -182,6 +224,13 @@ flowchart TD
 - **验收证据**：不活跃元素不污染 flags；确定性与规范允许差异由 comparator 显式处理而非粗略浮点容差。；验证口径：flags/reduction suites
 - **失败/回退动作**：vector FP子集不宣称full V
 - **来源覆盖**：RVV FP, precise flags。；来源 IR-001, validation-plan.md。
+- **执行者目标**：把“vector FP 与逐元素异常标志”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先做合同和最小正确实现，再做优化。不要从相邻任务猜字段；所有身份、credit、reset、flush和背压边界必须来自本任务及implementation-plan。完成前至少覆盖一个正常路径、一个资源冲突和一个取消/恢复路径。
+- **建议工作顺序**：把FPU接入vector lanes；按active element收集flags；实现ordered reduction顺序；定义unordered合法集合/关系；测mask sNaN/转换/widen；由V-055/V-058复核；保留FP状态隔离。
+- **可接受完成**：不活跃元素不污染 flags；确定性与规范允许差异由 comparator 显式处理而非粗略浮点容差。
+- **何时停止求助**：主要风险是inactive污染flags、unordered结果误判、NaN。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：vector FP path；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：IR-001, validation-plan.md。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### I-056 — 实现 vector memory packetizer
@@ -197,6 +246,13 @@ flowchart TD
 - **验收证据**：每活跃 element 的地址/数据/异常属于正确 macro，ordered-indexed 的顺序要求不被网络破坏。；验证口径：memory mode matrix
 - **失败/回退动作**：禁复杂vector memory子集
 - **来源覆盖**：vector memory, packetization。；来源 IR-001, architecture-review.md。
+- **执行者目标**：把“vector memory packetizer”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先做合同和最小正确实现，再做优化。不要从相邻任务猜字段；所有身份、credit、reset、flush和背压边界必须来自本任务及implementation-plan。完成前至少覆盖一个正常路径、一个资源冲突和一个取消/恢复路径。
+- **建议工作顺序**：生成每element address/mask/identity；按指令族处理ordering；接入translation/PMA/permissions；处理跨line/page；先逐项事务，后line packet；返回保留element关系；由V-056验收。
+- **可接受完成**：每活跃 element 的地址/数据/异常属于正确 macro，ordered-indexed 的顺序要求不被网络破坏。
+- **何时停止求助**：主要风险是跨权限合并、element fault丢失、ordered index破坏。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：vector LSU descriptors；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：IR-001, architecture-review.md。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### I-057 — 实现 vector partial trap、vstart 与 FOF
@@ -212,6 +268,13 @@ flowchart TD
 - **验收证据**：已发生的合法 store/element 更新不被伪回滚，重启不重复不可逆副作用，trap/vstart/vl 与 spec 一致。；验证口径：partial fault matrix
 - **失败/回退动作**：禁V直到重启正确
 - **来源覆盖**：RVV precise exception refinement, restart。；来源 IR-001, architecture-review.md, validation-plan.md。
+- **执行者目标**：把“vector partial trap、vstart 与 FOF”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先做合同和最小正确实现，再做优化。不要从相邻任务猜字段；所有身份、credit、reset、flush和背压边界必须来自本任务及implementation-plan。完成前至少覆盖一个正常路径、一个资源冲突和一个取消/恢复路径。
+- **建议工作顺序**：记录连续prefix和element bitmap；fault时选择允许状态/边界；设置epc/vstart/vl规则；修复后从同instruction恢复；区分FOF element0/later/masked；覆盖每packet边界；由V-057/V-058验收。
+- **可接受完成**：已发生的合法 store/element 更新不被伪回滚，重启不重复不可逆副作用，trap/vstart/vl 与 spec 一致。
+- **何时停止求助**：主要风险是全指令原子错误、重复side effect、FOF首元素规则。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：vector restart controller；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：IR-001, architecture-review.md, validation-plan.md。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### I-058 — 实现 vector chaining 与执行-提交解耦
@@ -227,6 +290,13 @@ flowchart TD
 - **验收证据**：开关 chaining 的 defined architectural state 一致；WAR 源还未读完不能因其他 lane 完成而释放。；验证口径：hazard/rollback suites
 - **失败/回退动作**：禁用chaining
 - **来源覆盖**：sustained vector throughput, operand lifetime。；来源 IR-002, IR-003, architecture-review.md。
+- **执行者目标**：把“vector chaining 与执行-提交解耦”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先做合同和最小正确实现，再做优化。不要从相邻任务猜字段；所有身份、credit、reset、flush和背压边界必须来自本任务及implementation-plan。完成前至少覆盖一个正常路径、一个资源冲突和一个取消/恢复路径。
+- **建议工作顺序**：跟踪每个element producer/generation；consumer只读已完成合法元素；fault/kill传播给dependent packets；保留mask/source lifetime；乱序packet stress；由V-059复核；对照no-chain。
+- **可接受完成**：开关 chaining 的 defined architectural state 一致；WAR 源还未读完不能因其他 lane 完成而释放。
+- **何时停止求助**：主要风险是partial producer fault、stale packet、v0 alias。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：vector chaining network；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：IR-002, IR-003, architecture-review.md。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### I-059 — 实现运行时 lane 配额重分配
@@ -242,6 +312,13 @@ flowchart TD
 - **验收证据**：单 workload×8 与两个 workload×4 等配置的各自输出相同；旧 lane state 清理/转移有 ack。；验证口径：metamorphic configs
 - **失败/回退动作**：禁运行中lane切换
 - **来源覆盖**：dynamic RVV aggregation, resource leasing。；来源 SRC-03, architecture-review.md。
+- **执行者目标**：把“运行时 lane 配额重分配”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先做合同和最小正确实现，再做优化。不要从相邻任务猜字段；所有身份、credit、reset、flush和背压边界必须来自本任务及implementation-plan。完成前至少覆盖一个正常路径、一个资源冲突和一个取消/恢复路径。
+- **建议工作顺序**：记录active descriptor progress；冻结新vector dispatch；drain/结算旧lane packets；发布新lane ownership generation；恢复后续elements；同ELF多配置对照；由V-060验收。
+- **可接受完成**：单 workload×8 与两个 workload×4 等配置的各自输出相同；旧 lane state 清理/转移有 ack。
+- **何时停止求助**：主要风险是丢element、VLEN变化、mask/vstart迁移。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：lane reallocation FSM；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：SRC-03, architecture-review.md。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### I-060 — 实现严格受限的 LLB
@@ -257,6 +334,13 @@ flowchart TD
 - **验收证据**：concurrent writer/alias/ASID 切换后不得返回 stale value；invalidations 与 in-flight hits 的序列规则可证明。；验证口径：freshness race matrix
 - **失败/回退动作**：只保留return buffer
 - **来源覆盖**：lane-local memory, coherence correctness。；来源 SRC-03, architecture-review.md。
+- **执行者目标**：把“严格受限的 LLB”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先做合同和最小正确实现，再做优化。不要从相邻任务猜字段；所有身份、credit、reset、flush和背压边界必须来自本任务及implementation-plan。完成前至少覆盖一个正常路径、一个资源冲突和一个取消/恢复路径。
+- **建议工作顺序**：实现return buffer作为基础；为新-load LLB建立L1授权/invalidation；绑定PA/permissions/owner；处理hit/invalidate同拍；覆盖lane reassignment/DMA；由V-061验收；默认关闭模式2。
+- **可接受完成**：concurrent writer/alias/ASID 切换后不得返回 stale value；invalidations 与 in-flight hits 的序列规则可证明。
+- **何时停止求助**：主要风险是clean副本stale、DMA/ASID、version wrap。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：LLB modes and protocol；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：SRC-03, architecture-review.md。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### I-061 — 实现同 hart line coalescing
@@ -272,6 +356,13 @@ flowchart TD
 - **验收证据**：coalesced/uncoalesced 下所有 defined values/faults 一致，重复地址 store 的规则来自指令类型而非 lane 编号臆断。；验证口径：merge equivalence matrix
 - **失败/回退动作**：全请求不合并
 - **来源覆盖**：memory coalescing, vector semantics。；来源 IR-001, architecture-review.md。
+- **执行者目标**：把“同 hart line coalescing”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先做合同和最小正确实现，再做优化。不要从相邻任务猜字段；所有身份、credit、reset、flush和背压边界必须来自本任务及implementation-plan。完成前至少覆盖一个正常路径、一个资源冲突和一个取消/恢复路径。
+- **建议工作顺序**：按PA line/attribute匹配请求；保留每request mask/fault/consumer；禁止AMO/MMIO/不兼容order合并；返回分发且不丢consumer；重复地址store独立规则；由V-062/V-070验收；记录transaction reduction。
+- **可接受完成**：coalesced/uncoalesced 下所有 defined values/faults 一致，重复地址 store 的规则来自指令类型而非 lane 编号臆断。
+- **何时停止求助**：主要风险是跨MMIO/权限、重复地址store、丢fault。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：coalescer/distributor；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：IR-001, architecture-review.md。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### I-062 — 实现 criticality/QoS memory 仲裁
@@ -287,6 +378,13 @@ flowchart TD
 - **验收证据**：各类在声明的 service assumptions 下满足 finite progress bound；数据结果不受优先级影响。；验证口径：progress/latency suites
 - **失败/回退动作**：静态配额
 - **来源覆盖**：CPU/GPU coexistence, latency versus throughput。；来源 SRC-03, architecture-review.md。
+- **执行者目标**：把“criticality/QoS memory 仲裁”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先做合同和最小正确实现，再做优化。不要从相邻任务猜字段；所有身份、credit、reset、flush和背压边界必须来自本任务及implementation-plan。完成前至少覆盖一个正常路径、一个资源冲突和一个取消/恢复路径。
+- **建议工作顺序**：为请求分类latency/throughput/prefetch；实现age escalation和reserved service；接入bank/return backpressure；运行持续bulk+critical压力；计算并验证服务上界；由V-063复核；不修改ordering。
+- **可接受完成**：各类在声明的 service assumptions 下满足 finite progress bound；数据结果不受优先级影响。
+- **何时停止求助**：主要风险是bulk被吞、prefetch抢占、QoS改语义。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：memory scheduler；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：SRC-03, architecture-review.md。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### I-063 — 实现 reuse predictor 与可关闭预取
@@ -302,6 +400,13 @@ flowchart TD
 - **验收证据**：错预测只增加延迟/流量，不引入 architectural fault或不可逆 device read；报告有用/无用/取消请求。；验证口径：fault/pollution suites
 - **失败/回退动作**：禁用预测
 - **来源覆盖**：execution/memory locality prediction, hypothesis testing。；来源 SRC-03, IR-002。
+- **执行者目标**：把“reuse predictor 与可关闭预取”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先做合同和最小正确实现，再做优化。不要从相邻任务猜字段；所有身份、credit、reset、flush和背压边界必须来自本任务及implementation-plan。完成前至少覆盖一个正常路径、一个资源冲突和一个取消/恢复路径。
+- **建议工作顺序**：收集PC/stride/reuse特征；实现有界prefetch queue；预取仍检查permission/PMA；记录有用/无用/取消；on/off/cold/warm对照；由V-063/V-076复核；负收益不默认开启。
+- **可接受完成**：错预测只增加延迟/流量，不引入 architectural fault或不可逆 device read；报告有用/无用/取消请求。
+- **何时停止求助**：主要风险是错误fault/device read、污染、把命中当能耗。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：locality predictor；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：SRC-03, IR-002。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### V-050 — 验收 F/D 数值与舍入
@@ -317,6 +422,13 @@ flowchart TD
 - **验收证据**：确定结果与 IEEE/RISC-V 指定行为一致，合法 NaN 选择按精确规则比较；所有必需操作有定向与 ACT 证据。；验证口径：确定结果与 IEEE/RISC-V 指定行为一致，合法 NaN 选择按精确规则比较；所有必需操作有定向与 ACT 证据。
 - **失败/回退动作**：使用 host double 默认舍入当全部 oracle、FTZ 偷改语义、只比较近似误差不比较 architectural bits/fflags。
 - **来源覆盖**：SRC-03 §FP/FMA slices、§共享 datapath。；来源 VR-006, VR-007, VR-012。
+- **执行者目标**：把“验收 F/D 数值与舍入”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先证明检查器能抓到真实错误，再接受正例。每个测试必须物化输入/seed/期望和排除账本；不可用空套件、mock echo或静默skip取得通过。完成前加入一个负控制并保存首个差异。
+- **建议工作顺序**：冻结该任务输入、版本与capability交集；展开有限case/seed/budget manifest；实现真实检查器并接入负控制；执行正控制和故障注入；闭合计划/执行/通过/失败/unsupported计数；最小化失败并建立replay；阶段负责人签收或阻断后续gate。
+- **可接受完成**：确定结果与 IEEE/RISC-V 指定行为一致，合法 NaN 选择按精确规则比较；所有必需操作有定向与 ACT 证据。
+- **何时停止求助**：主要风险是静默skip、mock echo、空覆盖率、把deferred当成功。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：数值/flags/rounding 功能矩阵。；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：VR-006, VR-007, VR-012。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### V-051 — 验收 FP 状态、异常与共享隔离
@@ -332,6 +444,13 @@ flowchart TD
 - **验收证据**：fflags/frm/FS 归属准确、被取消 FP 不更新 architectural flags，allowed Dirty 关系不屏蔽数值错误。；验证口径：fflags/frm/FS 归属准确、被取消 FP 不更新 architectural flags，allowed Dirty 关系不屏蔽数值错误。
 - **失败/回退动作**：跨 hart frm 串扰、错误路径累计 flags、CSR 更新顺序取决于物理完成。
 - **来源覆盖**：SRC-03 §Execution resources shared retirement local。；来源 VR-003, VR-007, VR-012。
+- **执行者目标**：把“验收 FP 状态、异常与共享隔离”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先证明检查器能抓到真实错误，再接受正例。每个测试必须物化输入/seed/期望和排除账本；不可用空套件、mock echo或静默skip取得通过。完成前加入一个负控制并保存首个差异。
+- **建议工作顺序**：冻结该任务输入、版本与capability交集；展开有限case/seed/budget manifest；实现真实检查器并接入负控制；执行正控制和故障注入；闭合计划/执行/通过/失败/unsupported计数；最小化失败并建立replay；阶段负责人签收或阻断后续gate。
+- **可接受完成**：fflags/frm/FS 归属准确、被取消 FP 不更新 architectural flags，allowed Dirty 关系不屏蔽数值错误。
+- **何时停止求助**：主要风险是静默skip、mock echo、空覆盖率、把deferred当成功。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：每 hart FP state 与 event trace。；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：VR-003, VR-007, VR-012。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### V-052 — 冻结 V 完整能力与宽状态传输
@@ -347,6 +466,13 @@ flowchart TD
 - **验收证据**：全 32 个 vector register 的完整 VLEN 均可比较；lane 数变化不改 vlenb；未完成完整 V 只能称明确子集实验。；验证口径：全 32 个 vector register 的完整 VLEN 均可比较；lane 数变化不改 vlenb；未完成完整 V 只能称明确子集实验。
 - **失败/回退动作**：只实现 vadd 就广告 RVV、默认任何 NEMU 构建支持任意 VLEN、忽略高位、把 lane 数写成 VLEN。
 - **来源覆盖**：SRC-03 §RVV 第一等公民、§runtime lane aggregation。；来源 VR-003, VR-005, VR-007, VR-013。
+- **执行者目标**：把“冻结 V 完整能力与宽状态传输”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先证明检查器能抓到真实错误，再接受正例。每个测试必须物化输入/seed/期望和排除账本；不可用空套件、mock echo或静默skip取得通过。完成前加入一个负控制并保存首个差异。
+- **建议工作顺序**：冻结该任务输入、版本与capability交集；展开有限case/seed/budget manifest；实现真实检查器并接入负控制；执行正控制和故障注入；闭合计划/执行/通过/失败/unsupported计数；最小化失败并建立replay；阶段负责人签收或阻断后续gate。
+- **可接受完成**：全 32 个 vector register 的完整 VLEN 均可比较；lane 数变化不改 vlenb；未完成完整 V 只能称明确子集实验。
+- **何时停止求助**：主要风险是静默skip、mock echo、空覆盖率、把deferred当成功。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：V capability manifest 与高位负控制证据。；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：VR-003, VR-005, VR-007, VR-013。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### V-053 — 验证 vset、vl/vtype 与重启入口
@@ -362,6 +488,13 @@ flowchart TD
 - **验收证据**：选择满足规范并在同配置要求下可重放；非法 vtype 按 vill/vl 规则；vstart 重置/保留符合指令规定。；验证口径：选择满足规范并在同配置要求下可重放；非法 vtype 按 vill/vl 规则；vstart 重置/保留符合指令规定。
 - **失败/回退动作**：以参考某个合法 vl 选择强迫所有实现完全相同、非法配置静默当 m1、配置动作更改 architectural VLEN。
 - **来源覆盖**：SRC-03 §VectorDescriptor 中 vl/sew/mask、§RVV lane allocation。；来源 VR-007, VR-013。
+- **执行者目标**：把“vset、vl/vtype 与重启入口”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先证明检查器能抓到真实错误，再接受正例。每个测试必须物化输入/seed/期望和排除账本；不可用空套件、mock echo或静默skip取得通过。完成前加入一个负控制并保存首个差异。
+- **建议工作顺序**：冻结该任务输入、版本与capability交集；展开有限case/seed/budget manifest；实现真实检查器并接入负控制；执行正控制和故障注入；闭合计划/执行/通过/失败/unsupported计数；最小化失败并建立replay；阶段负责人签收或阻断后续gate。
+- **可接受完成**：选择满足规范并在同配置要求下可重放；非法 vtype 按 vill/vl 规则；vstart 重置/保留符合指令规定。
+- **何时停止求助**：主要风险是静默skip、mock echo、空覆盖率、把deferred当成功。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：vl 选择合法区间、vtype/vstart/异常状态表。；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：VR-007, VR-013。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### V-054 — 验证 RVV 算术、mask 与 tail
@@ -377,6 +510,13 @@ flowchart TD
 - **验收证据**：active 值准确，tu/mu/prestart 保留，agnostic 仅接受规范允许值；无效元素不产生 memory fault；flags 正确。；验证口径：active 值准确，tu/mu/prestart 保留，agnostic 仅接受规范允许值；无效元素不产生 memory fault；flags 正确。
 - **失败/回退动作**：inactive 全不比较、vl=0 仍改 tail、v0 位顺序错误、以“vector 宏提交”跳过 element 结果。
 - **来源覆盖**：SRC-03 §Vector Macro-uOP、§packet completion semantics。；来源 VR-013。
+- **执行者目标**：把“RVV 算术、mask 与 tail”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先证明检查器能抓到真实错误，再接受正例。每个测试必须物化输入/seed/期望和排除账本；不可用空套件、mock echo或静默skip取得通过。完成前加入一个负控制并保存首个差异。
+- **建议工作顺序**：冻结该任务输入、版本与capability交集；展开有限case/seed/budget manifest；实现真实检查器并接入负控制；执行正控制和故障注入；闭合计划/执行/通过/失败/unsupported计数；最小化失败并建立replay；阶段负责人签收或阻断后续gate。
+- **可接受完成**：active 值准确，tu/mu/prestart 保留，agnostic 仅接受规范允许值；无效元素不产生 memory fault；flags 正确。
+- **何时停止求助**：主要风险是静默skip、mock echo、空覆盖率、把deferred当成功。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：active/inactive/tail/prestart 分区逐元素结果。；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：VR-013。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### V-055 — 验证跨 lane 排列、归约与重叠
@@ -392,6 +532,13 @@ flowchart TD
 - **验收证据**：index 边界与 illegal overlap 正确，ordered reduction 顺序精确；unordered 不被错误要求与另一树 bitwise 相同但仍满足规范算法约束。；验证口径：index 边界与 illegal overlap 正确，ordered reduction 顺序精确；unordered 不被错误要求与另一树 bitwise 相同但仍满足规范算法约束。
 - **失败/回退动作**：动态 lane 分配丢 carry/排列、mask tail 普通化、非零 vstart 对不支持重启的指令被随意接受。
 - **来源覆盖**：SRC-03 §lane groups、§chaining/forwarding、§shared ALU/FMA。；来源 VR-007, VR-013。
+- **执行者目标**：把“跨 lane 排列、归约与重叠”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先证明检查器能抓到真实错误，再接受正例。每个测试必须物化输入/seed/期望和排除账本；不可用空套件、mock echo或静默skip取得通过。完成前加入一个负控制并保存首个差异。
+- **建议工作顺序**：冻结该任务输入、版本与capability交集；展开有限case/seed/budget manifest；实现真实检查器并接入负控制；执行正控制和故障注入；闭合计划/执行/通过/失败/unsupported计数；最小化失败并建立replay；阶段负责人签收或阻断后续gate。
+- **可接受完成**：index 边界与 illegal overlap 正确，ordered reduction 顺序精确；unordered 不被错误要求与另一树 bitwise 相同但仍满足规范算法约束。
+- **何时停止求助**：主要风险是静默skip、mock echo、空覆盖率、把deferred当成功。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：跨 lane 数据映射及合法结果集合检查。；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：VR-007, VR-013。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### V-056 — 验证 vector memory packet 与权限
@@ -407,6 +554,13 @@ flowchart TD
 - **验收证据**：每 active 元素读取/写入其允许值，inactive/tail 不访问禁区；fault 归属正确；同址写入按该指令定义的顺序/无序范围检查。；验证口径：每 active 元素读取/写入其允许值，inactive/tail 不访问禁区；fault 归属正确；同址写入按该指令定义的顺序/无序范围检查。
 - **失败/回退动作**：coalescing 丢元素、误合跨权限请求、将 unordered 结果硬排成参考顺序或任意放行。
 - **来源覆盖**：SRC-03 §Memory Operation 也应该成为 Packet、§VectorDescriptor。；来源 VR-013, VR-014。
+- **执行者目标**：把“vector memory packet 与权限”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先证明检查器能抓到真实错误，再接受正例。每个测试必须物化输入/seed/期望和排除账本；不可用空套件、mock echo或静默skip取得通过。完成前加入一个负控制并保存首个差异。
+- **建议工作顺序**：冻结该任务输入、版本与capability交集；展开有限case/seed/budget manifest；实现真实检查器并接入负控制；执行正控制和故障注入；闭合计划/执行/通过/失败/unsupported计数；最小化失败并建立replay；阶段负责人签收或阻断后续gate。
+- **可接受完成**：每 active 元素读取/写入其允许值，inactive/tail 不访问禁区；fault 归属正确；同址写入按该指令定义的顺序/无序范围检查。
+- **何时停止求助**：主要风险是静默skip、mock echo、空覆盖率、把deferred当成功。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：instruction→element→memory transaction→result 的可逆映射。；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：VR-013, VR-014。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### V-057 — 验证 fault-only-first 的三种终局
@@ -422,6 +576,13 @@ flowchart TD
 - **验收证据**：元素 0 同步 fault 保留 vl 并 trap；后续同步 fault 按规范截短 vl 不取同类 trap；mask 不造 fault；IRQ 与同步缩短分开处理，spurious writes 仅限允许范围。；验证口径：元素 0 同步 fault 保留 vl 并 trap；后续同步 fault 按规范截短 vl 不取同类 trap；mask 不造 fault；IRQ 与同步缩短分开处理，spurious writes 仅限允许范围。
 - **失败/回退动作**：所有 fault 都 suppress、错把“首个 active 元素”普遍替代规范元素 0、vl=0 被当成功处理所有错误、非幂等访问可重做。
 - **来源覆盖**：SRC-03 §RVV packet completion 的 ISA 例外修正。；来源 VR-013。
+- **执行者目标**：把“fault-only-first 的三种终局”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先证明检查器能抓到真实错误，再接受正例。每个测试必须物化输入/seed/期望和排除账本；不可用空套件、mock echo或静默skip取得通过。完成前加入一个负控制并保存首个差异。
+- **建议工作顺序**：冻结该任务输入、版本与capability交集；展开有限case/seed/budget manifest；实现真实检查器并接入负控制；执行正控制和故障注入；闭合计划/执行/通过/失败/unsupported计数；最小化失败并建立replay；阶段负责人签收或阻断后续gate。
+- **可接受完成**：元素 0 同步 fault 保留 vl 并 trap；后续同步 fault 按规范截短 vl 不取同类 trap；mask 不造 fault；IRQ 与同步缩短分开处理，spurious writes 仅限允许范围。
+- **何时停止求助**：主要风险是静默skip、mock echo、空覆盖率、把deferred当成功。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：FOF 的 trap/vl-trim/正常完成分类与部分写入证据。；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：VR-013。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### V-058 — 验证部分完成、vstart 与精确重启
@@ -437,6 +598,13 @@ flowchart TD
 - **验收证据**：older 指令已提交、younger 无影响，完整重启结果符合规范；store/非幂等副作用不非法重复；合法部分状态没有被 reference 全指令 step 覆盖。；验证口径：older 指令已提交、younger 无影响，完整重启结果符合规范；store/非幂等副作用不非法重复；合法部分状态没有被 reference 全指令 step 覆盖。
 - **失败/回退动作**：宣称 vector instruction 全有或全无、清空整个 destination 后重跑、丢失 vstart、借 mask 屏蔽 fault element 错误。
 - **来源覆盖**：SRC-03 §一个 ROB Entry/VectorDescriptor、§precise vector completion 修正。；来源 VR-013。
+- **执行者目标**：把“部分、vstart 与精确重启”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先证明检查器能抓到真实错误，再接受正例。每个测试必须物化输入/seed/期望和排除账本；不可用空套件、mock echo或静默skip取得通过。完成前加入一个负控制并保存首个差异。
+- **建议工作顺序**：冻结该任务输入、版本与capability交集；展开有限case/seed/budget manifest；实现真实检查器并接入负控制；执行正控制和故障注入；闭合计划/执行/通过/失败/unsupported计数；最小化失败并建立replay；阶段负责人签收或阻断后续gate。
+- **可接受完成**：older 指令已提交、younger 无影响，完整重启结果符合规范；store/非幂等副作用不非法重复；合法部分状态没有被 reference 全指令 step 覆盖。
+- **何时停止求助**：主要风险是静默skip、mock echo、空覆盖率、把deferred当成功。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：trap 前后及 restart 后 vector/memory 的三阶段证据。；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：VR-013。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### V-059 — 验证 vector chaining 与回滚隔离
@@ -452,6 +620,13 @@ flowchart TD
 - **验收证据**：只有同代合法已可用元素可 forwarding；bitmap 不能因重复 packet 提前完成；squash 不污染新 descriptor。；验证口径：只有同代合法已可用元素可 forwarding；bitmap 不能因重复 packet 提前完成；squash 不污染新 descriptor。
 - **失败/回退动作**：一个 packet done 当整条指令 done、partial producer fault 后 younger 退休、跨 hart vector tag alias。
 - **来源覆盖**：SRC-03 §Vector completion bitmap、§chaining/forwarding、§No wrong-epoch update。；来源 SRC-03:449-539, SRC-03:2078-2128, VR-013。
+- **执行者目标**：把“vector chaining 与回滚隔离”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先证明检查器能抓到真实错误，再接受正例。每个测试必须物化输入/seed/期望和排除账本；不可用空套件、mock echo或静默skip取得通过。完成前加入一个负控制并保存首个差异。
+- **建议工作顺序**：冻结该任务输入、版本与capability交集；展开有限case/seed/budget manifest；实现真实检查器并接入负控制；执行正控制和故障注入；闭合计划/执行/通过/失败/unsupported计数；最小化失败并建立replay；阶段负责人签收或阻断后续gate。
+- **可接受完成**：只有同代合法已可用元素可 forwarding；bitmap 不能因重复 packet 提前完成；squash 不污染新 descriptor。
+- **何时停止求助**：主要风险是静默skip、mock echo、空覆盖率、把deferred当成功。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：element-ready/producer 关系及 fault/kill trace。；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：SRC-03:449-539, SRC-03:2078-2128, VR-013。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### V-060 — 验证 lane partition 与迁移语义不变
@@ -467,6 +642,13 @@ flowchart TD
 - **验收证据**：规定 architectural 结果关系不变，VLEN/ELEN 不变化，少 lane 只是更多时间片；重配不丢 mask/vstart。；验证口径：规定 architectural 结果关系不变，VLEN/ELEN 不变化，少 lane 只是更多时间片；重配不丢 mask/vstart。
 - **失败/回退动作**：2 lanes 不够就缩小 vlenb、迁移时 vector state 混 hart、只比较吞吐不检查部分故障。
 - **来源覆盖**：SRC-03 §RVV 第一等公民、§one×8 vs two×4 vs four×2。；来源 SRC-03:396-448, SRC-03:2078-2128, VR-013。
+- **执行者目标**：把“lane partition 与迁移语义不变”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先证明检查器能抓到真实错误，再接受正例。每个测试必须物化输入/seed/期望和排除账本；不可用空套件、mock echo或静默skip取得通过。完成前加入一个负控制并保存首个差异。
+- **建议工作顺序**：冻结该任务输入、版本与capability交集；展开有限case/seed/budget manifest；实现真实检查器并接入负控制；执行正控制和故障注入；闭合计划/执行/通过/失败/unsupported计数；最小化失败并建立replay；阶段负责人签收或阻断后续gate。
+- **可接受完成**：规定 architectural 结果关系不变，VLEN/ELEN 不变化，少 lane 只是更多时间片；重配不丢 mask/vstart。
+- **何时停止求助**：主要风险是静默skip、mock echo、空覆盖率、把deferred当成功。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：vector metamorphic 64 组结果与 lane/VRF ownership 记录。；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：SRC-03:396-448, SRC-03:2078-2128, VR-013。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### V-061 — 验证 LLB 新鲜性、失效与 ownership
@@ -482,6 +664,13 @@ flowchart TD
 - **验收证据**：每次 hit 都能证明与允许 memory observation 一致；失效确认/版本检查完整；不可缓存与非幂等地址不进入 LLB。；验证口径：每次 hit 都能证明与允许 memory observation 一致；失效确认/版本检查完整；不可缓存与非幂等地址不进入 LLB。
 - **失败/回退动作**：clean copy 被误当无需一致性、重配后旧 owner 数据泄漏、predictor 错误导致错误值而非仅延迟变化。
 - **来源覆盖**：SRC-03 §LLB 最适合作为非 coherent structure、§reuse-directed routing。；来源 SRC-03:790-1041, VR-014。
+- **执行者目标**：把“LLB 新鲜性、失效与 ownership”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先证明检查器能抓到真实错误，再接受正例。每个测试必须物化输入/seed/期望和排除账本；不可用空套件、mock echo或静默skip取得通过。完成前加入一个负控制并保存首个差异。
+- **建议工作顺序**：冻结该任务输入、版本与capability交集；展开有限case/seed/budget manifest；实现真实检查器并接入负控制；执行正控制和故障注入；闭合计划/执行/通过/失败/unsupported计数；最小化失败并建立replay；阶段负责人签收或阻断后续gate。
+- **可接受完成**：每次 hit 都能证明与允许 memory observation 一致；失效确认/版本检查完整；不可缓存与非幂等地址不进入 LLB。
+- **何时停止求助**：主要风险是静默skip、mock echo、空覆盖率、把deferred当成功。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：LLB 数据来源/版本链与对照结果。；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：SRC-03:790-1041, VR-014。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### V-062 — 验证 coalescer 拆合与地址域边界
@@ -497,6 +686,13 @@ flowchart TD
 - **验收证据**：合并前后 architectural observation 等价；MMIO/AMO/不兼容排序不合并；取消一消费者不取消其他合法消费者。；验证口径：合并前后 architectural observation 等价；MMIO/AMO/不兼容排序不合并；取消一消费者不取消其他合法消费者。
 - **失败/回退动作**：只按 VA/低地址匹配、丢 byte-enable、把请求减少当正确性、错误消费者共享 fault。
 - **来源覆盖**：SRC-03 §Memory Packetizer、§Cross-Hart Coalescing。；来源 SRC-03:1042-1160, VR-013, VR-014。
+- **执行者目标**：把“coalescer 拆合与地址域边界”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先证明检查器能抓到真实错误，再接受正例。每个测试必须物化输入/seed/期望和排除账本；不可用空套件、mock echo或静默skip取得通过。完成前加入一个负控制并保存首个差异。
+- **建议工作顺序**：冻结该任务输入、版本与capability交集；展开有限case/seed/budget manifest；实现真实检查器并接入负控制；执行正控制和故障注入；闭合计划/执行/通过/失败/unsupported计数；最小化失败并建立replay；阶段负责人签收或阻断后续gate。
+- **可接受完成**：合并前后 architectural observation 等价；MMIO/AMO/不兼容排序不合并；取消一消费者不取消其他合法消费者。
+- **何时停止求助**：主要风险是静默skip、mock echo、空覆盖率、把deferred当成功。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：merge/split 关系及多播逐消费者校验。；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：SRC-03:1042-1160, VR-013, VR-014。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### V-063 — 验证 MEF QoS 不饥饿及关键负载
@@ -512,6 +708,13 @@ flowchart TD
 - **验收证据**：critical path 获得规定服务；非 critical 合法需求也在公平合同内完成；无请求被优先级永久饿死。；验证口径：critical path 获得规定服务；非 critical 合法需求也在公平合同内完成；无请求被优先级永久饿死。
 - **失败/回退动作**：CPU 延迟改善靠吞 vector 请求、无限 prefetch 抢占、平均等待掩盖单项 starvation。
 - **来源覆盖**：SRC-03 §Memory Fabric 三层调度、§Critical Load、§Ara-Opt 归因假设。；来源 SRC-03:1161-1272, VR-014。
+- **执行者目标**：把“MEF QoS 不饥饿及关键负载”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先证明检查器能抓到真实错误，再接受正例。每个测试必须物化输入/seed/期望和排除账本；不可用空套件、mock echo或静默skip取得通过。完成前加入一个负控制并保存首个差异。
+- **建议工作顺序**：冻结该任务输入、版本与capability交集；展开有限case/seed/budget manifest；实现真实检查器并接入负控制；执行正控制和故障注入；闭合计划/执行/通过/失败/unsupported计数；最小化失败并建立replay；阶段负责人签收或阻断后续gate。
+- **可接受完成**：critical path 获得规定服务；非 critical 合法需求也在公平合同内完成；无请求被优先级永久饿死。
+- **何时停止求助**：主要风险是静默skip、mock echo、空覆盖率、把deferred当成功。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：每类请求等待界、实际服务次序、结果正确性。；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：SRC-03:1161-1272, VR-014。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### V-076 — 分离正确性 gate 与性能归因
@@ -527,6 +730,13 @@ flowchart TD
 - **验收证据**：每个性能点附相同输入的正确性证据；注明 Verilator cycle 不等于板上频率、toggle proxy 不等于真实能耗；负收益同样保留。；验证口径：每个性能点附相同输入的正确性证据；注明 Verilator cycle 不等于板上频率、toggle proxy 不等于真实能耗；负收益同样保留。
 - **失败/回退动作**：比较不同资源/时钟却声称调度改进、把源报告 1.33/1.38/95% 等未复现实验变本项目 gate。
 - **来源覆盖**：SRC-03 §IPC/Throughput、§Ara-Opt/SEAM-V 论据、§各 FPGA A/B 方案。；来源 SRC-03:1596-1877, SRC-03:2017-2270；外部性能原始文献由架构/参考总账核验。
+- **执行者目标**：把“分离正确性 gate 与性能归因”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先证明检查器能抓到真实错误，再接受正例。每个测试必须物化输入/seed/期望和排除账本；不可用空套件、mock echo或静默skip取得通过。完成前加入一个负控制并保存首个差异。
+- **建议工作顺序**：冻结该任务输入、版本与capability交集；展开有限case/seed/budget manifest；实现真实检查器并接入负控制；执行正控制和故障注入；闭合计划/执行/通过/失败/unsupported计数；最小化失败并建立replay；阶段负责人签收或阻断后续gate。
+- **可接受完成**：每个性能点附相同输入的正确性证据；注明 Verilator cycle 不等于板上频率、toggle proxy 不等于真实能耗；负收益同样保留。
+- **何时停止求助**：主要风险是静默skip、mock echo、空覆盖率、把deferred当成功。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：带置信边界和失败样例的因果实验矩阵。；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：SRC-03:1596-1877, SRC-03:2017-2270；外部性能原始文献由架构/参考总账核验。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### V-078 — 生成分阶段验收证据与阻断结论
@@ -542,6 +752,13 @@ flowchart TD
 - **验收证据**：baseline 必需项全过且零未登记 exclusions；后续 V/C/A/priv/FP/cohort/pod/硬件阶段各引用对应 V 任务证据后才放行。；验证口径：baseline 必需项全过且零未登记 exclusions；后续 V/C/A/priv/FP/cohort/pod/硬件阶段各引用对应 V 任务证据后才放行。
 - **失败/回退动作**：以本任务 Depends 的最小基础列表代替后续阶段全部义务、未完成任务说成 future optional、任何未知状态被统计为通过。
 - **来源覆盖**：SRC-03 全部架构与验证路线；完整交付边界。；来源 SRC-03:1-2528, VR-001–VR-015。
+- **执行者目标**：把“生成分阶段验收证据与阻断结论”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先证明检查器能抓到真实错误，再接受正例。每个测试必须物化输入/seed/期望和排除账本；不可用空套件、mock echo或静默skip取得通过。完成前加入一个负控制并保存首个差异。
+- **建议工作顺序**：冻结该任务输入、版本与capability交集；展开有限case/seed/budget manifest；实现真实检查器并接入负控制；执行正控制和故障注入；闭合计划/执行/通过/失败/unsupported计数；最小化失败并建立replay；阶段负责人签收或阻断后续gate。
+- **可接受完成**：baseline 必需项全过且零未登记 exclusions；后续 V/C/A/priv/FP/cohort/pod/硬件阶段各引用对应 V 任务证据后才放行。
+- **何时停止求助**：主要风险是静默skip、mock echo、空覆盖率、把deferred当成功。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：阶段验收报告、可复现命令和 artifact hash 索引。；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：SRC-03:1-2528, VR-001–VR-015。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### V-080 — 防止扩展广告超出实际验收
@@ -557,6 +774,13 @@ flowchart TD
 - **验收证据**：所有声明均有对应阶段完整证据；非法/保留行为符合冻结规范；完整 V/Linux 所需能力不由少数 demo 推断。；验证口径：所有声明均有对应阶段完整证据；非法/保留行为符合冻结规范；完整 V/Linux 所需能力不由少数 demo 推断。
 - **失败/回退动作**：提前标 RV64GCV/RVA profile、misa 与编译器/设备树互相矛盾、缺少必选 V 指令仍声明 V、把 deferred 当 rejected 消失。
 - **来源覆盖**：SRC-03 §保持标准 software model、§最终 EAF-V/MosaicRV 架构。；来源 VR-007, VR-009, VR-012, VR-013。
+- **执行者目标**：把“防止扩展广告超出实际验收”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先证明检查器能抓到真实错误，再接受正例。每个测试必须物化输入/seed/期望和排除账本；不可用空套件、mock echo或静默skip取得通过。完成前加入一个负控制并保存首个差异。
+- **建议工作顺序**：冻结该任务输入、版本与capability交集；展开有限case/seed/budget manifest；实现真实检查器并接入负控制；执行正控制和故障注入；闭合计划/执行/通过/失败/unsupported计数；最小化失败并建立replay；阶段负责人签收或阻断后续gate。
+- **可接受完成**：所有声明均有对应阶段完整证据；非法/保留行为符合冻结规范；完整 V/Linux 所需能力不由少数 demo 推断。
+- **何时停止求助**：主要风险是静默skip、mock echo、空覆盖率、把deferred当成功。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：软件可发现能力与验证证据的闭合矩阵。；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：VR-007, VR-009, VR-012, VR-013。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ## 6. 阶段级阻塞清单
@@ -574,3 +798,4 @@ flowchart TD
 | 日期 | 事件 | 证据 | 负责人 | 下一步 |
 |---|---|---|---|---|
 | 2026-09-29 | 初始团队指南由完整架构/验证/平台计划生成 | 本文件、source-inventory、references | 规划集成 | 各团队冻结输入并更新上表 |
+| 2026-09-29 | 面向较小模型/新工程师补充自然语言执行说明 | 本文件任务卡的执行者目标/须知/建议顺序/停止条件 | 规划集成 | 实施团队按卡执行并回填证据 |

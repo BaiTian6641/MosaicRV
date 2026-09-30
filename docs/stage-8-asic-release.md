@@ -55,7 +55,7 @@ flowchart TD
 
 ## 5. 可跟踪任务卡
 
-每张卡含实现接口、数据、设计取舍、步骤、交接、验证和回退。完成定义：对应 `Pass` 全部有直接证据，相关负控制也工作；不是“代码写完”或“仿真曾跑过”。
+每张卡先给设计者/审查者看的工程合同，再给执行者看的自然语言说明。说明不是替代规格，而是告诉执行者如何按规格工作：先做什么、不能猜什么、什么时候停下来、拿什么证据证明完成。完成定义：对应 `Pass` 全部有直接证据，相关负控制也工作；不是“代码写完”或“仿真曾跑过”。
 
 ### H-036 — 冻结 ASIC 产品/工艺输入
 
@@ -70,6 +70,13 @@ flowchart TD
 - **验收证据**：每必需库/模型可合法取得且覆盖目标corner；缺项有明确owner/action而不是伪fallback。；验证口径：每必需库/模型可合法取得且覆盖目标corner；缺项有明确owner/action而不是伪fallback。
 - **失败/回退动作**：FPGA成功直接推断ASIC可制造，或把教学PDK运行当production signoff。
 - **来源覆盖**：later real-design conversion, ASIC prerequisites。；来源 HR-009, HR-012。
+- **执行者目标**：把“冻结 ASIC 产品/工艺输入”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先锁定exact part/tool/license和接口，再构建。所有bitstream、约束、时序报告和板卡日志必须对应同一source hash；禁止用仿真或另一family代替实板证据。
+- **建议工作顺序**：核对exact board/part/tool/license输入；冻结source/constraints/image与可复现脚本；执行单元/构建/时序或对应工艺任务；核对真实报告和设备/映像ID；运行共同corpus与negative controls；归档hash、日志、限制和恢复步骤；未满足门槛则明确blocked并反馈架构。
+- **可接受完成**：每必需库/模型可合法取得且覆盖目标corner；缺项有明确owner/action而不是伪fallback。
+- **何时停止求助**：主要风险是错误part、旧bitstream、PS/DDR/coherence假设、报告缺失仍绿灯。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：ASIC technology manifest、corner/mode/signoff matrix、外部依赖。；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：HR-009, HR-012。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### H-037 — 实现 SRAM macro adapter 与 BIST 访问合同
@@ -85,6 +92,13 @@ flowchart TD
 - **验收证据**：所有合法memory访问与generic模型一致；macro不可支持模式通过明确逻辑解决且面积时序计入。；验证口径：所有合法memory访问与generic模型一致；macro不可支持模式通过明确逻辑解决且面积时序计入。
 - **失败/回退动作**：继续依赖FPGA INIT或BRAM read-first默认行为。
 - **来源覆盖**：ASIC memory portability, MBIST foundation。；来源 implementation-plan.md, HR-009。
+- **执行者目标**：把“SRAM macro adapter 与 BIST 访问合同”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先锁定exact part/tool/license和接口，再构建。所有bitstream、约束、时序报告和板卡日志必须对应同一source hash；禁止用仿真或另一family代替实板证据。
+- **建议工作顺序**：核对exact board/part/tool/license输入；冻结source/constraints/image与可复现脚本；执行单元/构建/时序或对应工艺任务；核对真实报告和设备/映像ID；运行共同corpus与negative controls；归档hash、日志、限制和恢复步骤；未满足门槛则明确blocked并反馈架构。
+- **可接受完成**：所有合法memory访问与generic模型一致；macro不可支持模式通过明确逻辑解决且面积时序计入。
+- **何时停止求助**：主要风险是错误part、旧bitstream、PS/DDR/coherence假设、报告缺失仍绿灯。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：SRAM/ROM adapters、macro placement list、functional equivalence cases。；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：implementation-plan.md, HR-009。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### H-038 — 定义 ASIC clock/reset/DFT modes
@@ -100,6 +114,13 @@ flowchart TD
 - **验收证据**：functional/scan/reset模式无时钟毛刺、每域解除受控，所有clock crossing有策略。；验证口径：functional/scan/reset模式无时钟毛刺、每域解除受控，所有clock crossing有策略。
 - **失败/回退动作**：普通组合门代替ICG或DFT模式未纳入时序。
 - **来源覆盖**：ASIC clocks, reset, CDC/RDC。；来源 HR-009, platform-plan.md。
+- **执行者目标**：把“定义 ASIC clock/reset/DFT modes”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先锁定exact part/tool/license和接口，再构建。所有bitstream、约束、时序报告和板卡日志必须对应同一source hash；禁止用仿真或另一family代替实板证据。
+- **建议工作顺序**：核对exact board/part/tool/license输入；冻结source/constraints/image与可复现脚本；执行单元/构建/时序或对应工艺任务；核对真实报告和设备/映像ID；运行共同corpus与negative controls；归档hash、日志、限制和恢复步骤；未满足门槛则明确blocked并反馈架构。
+- **可接受完成**：functional/scan/reset模式无时钟毛刺、每域解除受控，所有clock crossing有策略。
+- **何时停止求助**：主要风险是错误part、旧bitstream、PS/DDR/coherence假设、报告缺失仍绿灯。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：clock/reset architecture、mode table、gating checks。；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：HR-009, platform-plan.md。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### H-039 — 进行 technology-mapped synthesis 与等价
@@ -115,6 +136,13 @@ flowchart TD
 - **验收证据**：等价范围闭合、没有用blackbox屏蔽架构状态；综合资源映射与合同一致。；验证口径：等价范围闭合、没有用blackbox屏蔽架构状态；综合资源映射与合同一致。
 - **失败/回退动作**：只verilog编译成功或数百unproven points仍称等价。
 - **来源覆盖**：ASIC functional preservation, synthesis correctness。；来源 HR-009, validation-plan.md。
+- **执行者目标**：把“进行 technology-mapped synthesis 与等价”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先锁定exact part/tool/license和接口，再构建。所有bitstream、约束、时序报告和板卡日志必须对应同一source hash；禁止用仿真或另一family代替实板证据。
+- **建议工作顺序**：核对exact board/part/tool/license输入；冻结source/constraints/image与可复现脚本；执行单元/构建/时序或对应工艺任务；核对真实报告和设备/映像ID；运行共同corpus与negative controls；归档hash、日志、限制和恢复步骤；未满足门槛则明确blocked并反馈架构。
+- **可接受完成**：等价范围闭合、没有用blackbox屏蔽架构状态；综合资源映射与合同一致。
+- **何时停止求助**：主要风险是错误part、旧bitstream、PS/DDR/coherence假设、报告缺失仍绿灯。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：gate netlist、area/timing、equivalence proof/failed obligations。；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：HR-009, validation-plan.md。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### H-040 — 插入 scan 并验证模式隔离
@@ -130,6 +158,13 @@ flowchart TD
 - **验收证据**：所有目标flops有明确scan/合法例外，chain连接和capture可达；scan改动不改变functional逻辑。；验证口径：所有目标flops有明确scan/合法例外，chain连接和capture可达；scan改动不改变functional逻辑。
 - **失败/回退动作**：仅OpenROAD插入chain就宣称ATPG/制造测试完成。
 - **来源覆盖**：DFT, scan, functional/test separation。；来源 HR-009。
+- **执行者目标**：把“插入 scan 并模式隔离”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先锁定exact part/tool/license和接口，再构建。所有bitstream、约束、时序报告和板卡日志必须对应同一source hash；禁止用仿真或另一family代替实板证据。
+- **建议工作顺序**：核对exact board/part/tool/license输入；冻结source/constraints/image与可复现脚本；执行单元/构建/时序或对应工艺任务；核对真实报告和设备/映像ID；运行共同corpus与negative controls；归档hash、日志、限制和恢复步骤；未满足门槛则明确blocked并反馈架构。
+- **可接受完成**：所有目标flops有明确scan/合法例外，chain连接和capture可达；scan改动不改变functional逻辑。
+- **何时停止求助**：主要风险是错误part、旧bitstream、PS/DDR/coherence假设、报告缺失仍绿灯。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：scan netlist、chain map、DFT DRC与功能等价结果。；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：HR-009。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### H-041 — 制定 ATPG/MBIST/repair 验收
@@ -145,6 +180,13 @@ flowchart TD
 - **验收证据**：数值目标在运行前按产品要求冻结且实际报告达标；所有排除有理由，repair后功能复验。；验证口径：数值目标在运行前按产品要求冻结且实际报告达标；所有排除有理由，repair后功能复验。
 - **失败/回退动作**：只pattern数量非零即通过，或把functional程序跑通代替manufacturing coverage。
 - **来源覆盖**：real ASIC manufacturing test。；来源 HR-009, H-036。
+- **执行者目标**：把“制定 ATPG/MBIST/repair 验收”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先锁定exact part/tool/license和接口，再构建。所有bitstream、约束、时序报告和板卡日志必须对应同一source hash；禁止用仿真或另一family代替实板证据。
+- **建议工作顺序**：核对exact board/part/tool/license输入；冻结source/constraints/image与可复现脚本；执行单元/构建/时序或对应工艺任务；核对真实报告和设备/映像ID；运行共同corpus与negative controls；归档hash、日志、限制和恢复步骤；未满足门槛则明确blocked并反馈架构。
+- **可接受完成**：数值目标在运行前按产品要求冻结且实际报告达标；所有排除有理由，repair后功能复验。
+- **何时停止求助**：主要风险是错误part、旧bitstream、PS/DDR/coherence假设、报告缺失仍绿灯。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：ATPG/MBIST报告、fault coverage目标与签核阈值、pattern provenance。；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：HR-009, H-036。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### H-042 — 实施 floorplan/PDN/macro placement
@@ -160,6 +202,13 @@ flowchart TD
 - **验收证据**：无macro重叠/未供电cell/不可布区域，预计长路径与协议pipeline一致。；验证口径：无macro重叠/未供电cell/不可布区域，预计长路径与协议pipeline一致。
 - **失败/回退动作**：用零wire延迟推定fabric Fmax或只看standard-cell面积忽略RAM/路由。
 - **来源覆盖**：ASIC physical architecture, locality cost。；来源 HR-012, architecture-review.md。
+- **执行者目标**：把“实施 floorplan/PDN/macro placement”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先锁定exact part/tool/license和接口，再构建。所有bitstream、约束、时序报告和板卡日志必须对应同一source hash；禁止用仿真或另一family代替实板证据。
+- **建议工作顺序**：核对exact board/part/tool/license输入；冻结source/constraints/image与可复现脚本；执行单元/构建/时序或对应工艺任务；核对真实报告和设备/映像ID；运行共同corpus与negative controls；归档hash、日志、限制和恢复步骤；未满足门槛则明确blocked并反馈架构。
+- **可接受完成**：无macro重叠/未供电cell/不可布区域，预计长路径与协议pipeline一致。
+- **何时停止求助**：主要风险是错误part、旧bitstream、PS/DDR/coherence假设、报告缺失仍绿灯。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：floorplan/PDN数据库、拥塞/连接报告、面积分解。；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：HR-012, architecture-review.md。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### H-043 — 完成 CTS、route 与多角 STA
@@ -175,6 +224,13 @@ flowchart TD
 - **验收证据**：所有签核mode/corner达冻结目标，intended paths无未约束，例外有结构证明。；验证口径：所有签核mode/corner达冻结目标，intended paths无未约束，例外有结构证明。
 - **失败/回退动作**：只typical corner满足、pre-route timing冒充signoff或为绿灯放宽真实路径。
 - **来源覆盖**：ASIC STA, timing closure。；来源 HR-012, H-036。
+- **执行者目标**：把“CTS、route 与多角 STA”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先锁定exact part/tool/license和接口，再构建。所有bitstream、约束、时序报告和板卡日志必须对应同一source hash；禁止用仿真或另一family代替实板证据。
+- **建议工作顺序**：核对exact board/part/tool/license输入；冻结source/constraints/image与可复现脚本；执行单元/构建/时序或对应工艺任务；核对真实报告和设备/映像ID；运行共同corpus与negative controls；归档hash、日志、限制和恢复步骤；未满足门槛则明确blocked并反馈架构。
+- **可接受完成**：所有签核mode/corner达冻结目标，intended paths无未约束，例外有结构证明。
+- **何时停止求助**：主要风险是错误part、旧bitstream、PS/DDR/coherence假设、报告缺失仍绿灯。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：routed netlist/parasitics、全corner timing与clock reports。；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：HR-012, H-036。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### H-044 — 验证 power intent、IR/EM 与热边界
@@ -190,6 +246,13 @@ flowchart TD
 - **验收证据**：按所选工艺/封装限制全部达标；未使用多电源时明确not applicable并提供单域结构证据。；验证口径：按所选工艺/封装限制全部达标；未使用多电源时明确not applicable并提供单域结构证据。
 - **失败/回退动作**：FPGA板功耗直接当ASIC功耗，或隔离单元缺失仍允许运行时power gating。
 - **来源覆盖**：ASIC power integrity, dynamic resource safety。；来源 H-036, architecture-review.md。
+- **执行者目标**：把“power intent、IR/EM 与热边界”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先锁定exact part/tool/license和接口，再构建。所有bitstream、约束、时序报告和板卡日志必须对应同一source hash；禁止用仿真或另一family代替实板证据。
+- **建议工作顺序**：核对exact board/part/tool/license输入；冻结source/constraints/image与可复现脚本；执行单元/构建/时序或对应工艺任务；核对真实报告和设备/映像ID；运行共同corpus与negative controls；归档hash、日志、限制和恢复步骤；未满足门槛则明确blocked并反馈架构。
+- **可接受完成**：按所选工艺/封装限制全部达标；未使用多电源时明确not applicable并提供单域结构证据。
+- **何时停止求助**：主要风险是错误part、旧bitstream、PS/DDR/coherence假设、报告缺失仍绿灯。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：power/IR/EM/thermal reports、UPF equivalence与power-state tests（适用时）。；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：H-036, architecture-review.md。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### H-045 — 完成 DRC/LVS/ERC 与 post-route 等价
@@ -205,6 +268,13 @@ flowchart TD
 - **验收证据**：无未批准的signoff error/waiver，layout与提交netlist/库一致，新增buffer/scan不破坏功能。；验证口径：无未批准的signoff error/waiver，layout与提交netlist/库一致，新增buffer/scan不破坏功能。
 - **失败/回退动作**：开源flow的“flow complete”替代foundry认可签核。
 - **来源覆盖**：real physical-design conversion, tapeout boundary。；来源 HR-009, HR-012, H-036。
+- **执行者目标**：把“DRC/LVS/ERC 与 post-route 等价”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先锁定exact part/tool/license和接口，再构建。所有bitstream、约束、时序报告和板卡日志必须对应同一source hash；禁止用仿真或另一family代替实板证据。
+- **建议工作顺序**：核对exact board/part/tool/license输入；冻结source/constraints/image与可复现脚本；执行单元/构建/时序或对应工艺任务；核对真实报告和设备/映像ID；运行共同corpus与negative controls；归档hash、日志、限制和恢复步骤；未满足门槛则明确blocked并反馈架构。
+- **可接受完成**：无未批准的signoff error/waiver，layout与提交netlist/库一致，新增buffer/scan不破坏功能。
+- **何时停止求助**：主要风险是错误part、旧bitstream、PS/DDR/coherence假设、报告缺失仍绿灯。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：foundry-required signoff reports、GDS/netlist checksum闭合。；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：HR-009, HR-012, H-036。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### H-046 — 冻结封装、板测与首硅 bring-up 计划
@@ -220,6 +290,13 @@ flowchart TD
 - **验收证据**：每个制造/功能/时序目标有测点与pass/fail，工具/板/样片access明确；样片未回则状态仅为计划。；验证口径：每个制造/功能/时序目标有测点与pass/fail，工具/板/样片access明确；样片未回则状态仅为计划。
 - **失败/回退动作**：FPGA实板测试被称为真实ASIC硅后验证。
 - **来源覆盖**：later physical silicon validation, processor lifecycle。；来源 H-036, validation-plan.md。
+- **执行者目标**：把“冻结封装、板测与首硅 bring-up 计划”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先锁定exact part/tool/license和接口，再构建。所有bitstream、约束、时序报告和板卡日志必须对应同一source hash；禁止用仿真或另一family代替实板证据。
+- **建议工作顺序**：核对exact board/part/tool/license输入；冻结source/constraints/image与可复现脚本；执行单元/构建/时序或对应工艺任务；核对真实报告和设备/映像ID；运行共同corpus与negative controls；归档hash、日志、限制和恢复步骤；未满足门槛则明确blocked并反馈架构。
+- **可接受完成**：每个制造/功能/时序目标有测点与pass/fail，工具/板/样片access明确；样片未回则状态仅为计划。
+- **何时停止求助**：主要风险是错误part、旧bitstream、PS/DDR/coherence假设、报告缺失仍绿灯。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：silicon bring-up runbook、tester/board需求、acceptance matrix。；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：H-036, validation-plan.md。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### H-047 — 审核 ASIC-ready 与 tapeout 声明
@@ -235,6 +312,13 @@ flowchart TD
 - **验收证据**：每声明不超证据范围；未获PDK/许可/硅样品的阶段明确阻断而非伪完成。；验证口径：每声明不超证据范围；未获PDK/许可/硅样品的阶段明确阻断而非伪完成。
 - **失败/回退动作**：把某工具返回0作为跨阶段总完成标准。
 - **来源覆盖**：portability to real design, honest end-to-end evidence。；来源 references.md, verification.md。
+- **执行者目标**：把“审核 ASIC-ready 与 tapeout 声明”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先锁定exact part/tool/license和接口，再构建。所有bitstream、约束、时序报告和板卡日志必须对应同一source hash；禁止用仿真或另一family代替实板证据。
+- **建议工作顺序**：核对exact board/part/tool/license输入；冻结source/constraints/image与可复现脚本；执行单元/构建/时序或对应工艺任务；核对真实报告和设备/映像ID；运行共同corpus与negative controls；归档hash、日志、限制和恢复步骤；未满足门槛则明确blocked并反馈架构。
+- **可接受完成**：每声明不超证据范围；未获PDK/许可/硅样品的阶段明确阻断而非伪完成。
+- **何时停止求助**：主要风险是错误part、旧bitstream、PS/DDR/coherence假设、报告缺失仍绿灯。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：release readiness report、已完成/外部阻断清单。；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：references.md, verification.md。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### I-085 — 完成 ASIC-ready portability gate
@@ -250,12 +334,19 @@ flowchart TD
 - **验收证据**：每个必需 ASIC gate 有真报告；若 PDK/库/许可未提供，明确该阶段 blocked 且不声称 tapeout-ready。；验证口径：signoff report bundle
 - **失败/回退动作**：报告外部依赖未完成
 - **来源覆盖**：portable real design, later ASIC conversion。；来源 platform-plan.md。
+- **执行者目标**：把“ASIC-ready portability gate”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先做合同和最小正确实现，再做优化。不要从相邻任务猜字段；所有身份、credit、reset、flush和背压边界必须来自本任务及implementation-plan。完成前至少覆盖一个正常路径、一个资源冲突和一个取消/恢复路径。
+- **建议工作顺序**：取得合法技术输入；转换SRAM/clock/reset/DFT；完成synthesis/equivalence/DFT；完成物理/STA/power/DRC-LVS；制定bring-up和acceptance；逐项审核claim等级；由H-047验收。
+- **可接受完成**：每个必需 ASIC gate 有真报告；若 PDK/库/许可未提供，明确该阶段 blocked 且不声称 tapeout-ready。
+- **何时停止求助**：主要风险是FPGA timing外推、开源flow误当foundry、scan不完整。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：ASIC conversion evidence；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：platform-plan.md。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### I-086 — 交付可复现 processor release
 
 - **负责/门禁**：release负责人；可复现发布。
-- **前置依赖**：I-085；仍受 implementation-plan 集成依赖表约束。
+- **前置依赖**：I-085, I-091；仍受 implementation-plan 集成依赖表约束。
 - **做什么**：从零重建各支持配置、重放有限验收集，归档 Git commit、submodule closure、日志、失败排除理由与用户操作手册；未达 gate 的功能不标 supported。
 - **输入数据/接口**：Git/submodules/tools/artifacts/licenses/limits
 - **输出与交接**：final release bundle
@@ -265,6 +356,13 @@ flowchart TD
 - **验收证据**：独立执行者能用锁定输入得到相同 architectural signatures；每 hardware/ASIC claim 可追溯到具体产物。；验证口径：clean reproduction
 - **失败/回退动作**：保持candidate而非release
 - **来源覆盖**：end-to-end deliverable, reproducibility, reference tracking。；来源 validation-plan.md, platform-plan.md, references.md。
+- **执行者目标**：把“交付可复现 processor release”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先做合同和最小正确实现，再做优化。不要从相邻任务猜字段；所有身份、credit、reset、flush和背压边界必须来自本任务及implementation-plan。完成前至少覆盖一个正常路径、一个资源冲突和一个取消/恢复路径。
+- **建议工作顺序**：收集所有profile/manifests/source locks；从零重建与重放有限集合；审计第三方license和可发布性；写操作/恢复/限制手册；归档失败和deferred状态；独立执行者验证命令；发布release。
+- **可接受完成**：独立执行者能用锁定输入得到相同 architectural signatures；每 hardware/ASIC claim 可追溯到具体产物。
+- **何时停止求助**：主要风险是依赖本机环境、浮upstream、无恢复能力。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：final release bundle；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：validation-plan.md, platform-plan.md, references.md。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ## 6. 阶段级阻塞清单
@@ -282,3 +380,4 @@ flowchart TD
 | 日期 | 事件 | 证据 | 负责人 | 下一步 |
 |---|---|---|---|---|
 | 2026-09-29 | 初始团队指南由完整架构/验证/平台计划生成 | 本文件、source-inventory、references | 规划集成 | 各团队冻结输入并更新上表 |
+| 2026-09-29 | 面向较小模型/新工程师补充自然语言执行说明 | 本文件任务卡的执行者目标/须知/建议顺序/停止条件 | 规划集成 | 实施团队按卡执行并回填证据 |

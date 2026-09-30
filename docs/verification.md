@@ -144,6 +144,15 @@ for stage in stage_docs:
     assert text.count("## 1. 这个子系统是做什么的") == 1, ("ambiguous stage purpose heading", stage)
     assert text.count("### ") >= 2, ("stage guide has no task cards", stage)
     assert text.count("```mermaid") >= 1 and text.count("```") % 2 == 0, ("unbalanced code fence", stage)
+worker_fields = ["执行者目标", "执行者须知", "建议工作顺序", "可接受完成", "何时停止求助", "交付说明", "参考资料"]
+for stage in stage_docs:
+    text = texts[stage]
+    for match in re.finditer(r"^### ([IVH]-\d{3}) — ", text, re.M):
+        nxt = re.search(r"^### [IVH]-\d{3} — ", text[match.end():], re.M)
+        block = text[match.end():match.end() + (nxt.start() if nxt else len(text))]
+        for field in worker_fields:
+            assert f"- **{field}**" in block, ("missing worker field", stage, match[1], field)
+
 combined_stage_text = "\n".join(texts[stage] for stage in stage_docs)
 for task_id in tasks:
     assert re.search(r"^### " + task_id + r" — ", combined_stage_text, re.M), ("task missing team card", task_id)
@@ -169,6 +178,7 @@ print(json.dumps({"status":"PASS", "original_documents":3,
 ## 2. 语义与范围复核动作
 
 - 将source-inventory的102行逐项与实际原文标题/行范围比较；审查接受/纠正/分期是否有对应I/V/H任务。三个源文件hash必须不变。
+- 每张任务卡除规格字段外，还含自然语言的执行者目标、执行者须知、建议工作顺序、可接受完成、何时停止求助、交付说明和参考资料；检查器逐卡验证这些字段存在。语义审查仍由阶段负责人执行，字段存在不自动证明内容足够。
 - 交叉审查ISA profile、XLEN/VLEN、RAM延迟、per-hart ownership、macro/uOP/attempt、RVV partial trap、LLB freshness、MMIO/AMO、cohort eligibility、credit/drain/ABA在四份主计划中的合同一致性。
 - 十个stage指南均含用途、上游输入、Mermaid结构、团队进度表、任务卡（负责/输入/微步骤/风险/验收/回退）、阶段阻塞清单和Track Log；其中出现的每个224任务ID必须在主计划中定义，且指南覆盖了所有任务。Mermaid块只检查存在与基本闭合，不把渲染成功当架构正确。
 - 核对XiangShan是第二DUT，Difftest是框架，NEMU/Spike/Sail是各有能力边界的参考；候选SHA和upstream命令有primary来源，本轮未运行。多hart memory不由single-hart lockstep代替。

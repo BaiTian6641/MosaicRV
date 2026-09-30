@@ -81,7 +81,7 @@ flowchart TD
 
 ## 5. 可跟踪任务卡
 
-每张卡含实现接口、数据、设计取舍、步骤、交接、验证和回退。完成定义：对应 `Pass` 全部有直接证据，相关负控制也工作；不是“代码写完”或“仿真曾跑过”。
+每张卡先给设计者/审查者看的工程合同，再给执行者看的自然语言说明。说明不是替代规格，而是告诉执行者如何按规格工作：先做什么、不能猜什么、什么时候停下来、拿什么证据证明完成。完成定义：对应 `Pass` 全部有直接证据，相关负控制也工作；不是“代码写完”或“仿真曾跑过”。
 
 ### H-001 — 确认三板身份与电气边界
 
@@ -96,6 +96,13 @@ flowchart TD
 - **验收证据**：每个必需字段有来源且器件/板版本一致；接线电平无未决风险。；验证口径：每个必需字段有来源且器件/板版本一致；接线电平无未决风险。
 - **失败/回退动作**：只填写 family、猜测 package/pin、电压不明或把示例板当用户实板。
 - **来源覆盖**：GW5A, Zynq, Virtex UltraScale+, hardware decision gates。；来源 HR-001, HR-003, HR-005, HR-006。
+- **执行者目标**：把“确认三板身份与电气边界”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先锁定exact part/tool/license和接口，再构建。所有bitstream、约束、时序报告和板卡日志必须对应同一source hash；禁止用仿真或另一family代替实板证据。
+- **建议工作顺序**：核对exact board/part/tool/license输入；冻结source/constraints/image与可复现脚本；执行单元/构建/时序或对应工艺任务；核对真实报告和设备/映像ID；运行共同corpus与negative controls；归档hash、日志、限制和恢复步骤；未满足门槛则明确blocked并反馈架构。
+- **可接受完成**：每个必需字段有来源且器件/板版本一致；接线电平无未决风险。
+- **何时停止求助**：主要风险是错误part、旧bitstream、PS/DDR/coherence假设、报告缺失仍绿灯。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：三份 board manifest、合法访问文档清单、未提供项的阻断记录。；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：HR-001, HR-003, HR-005, HR-006。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### H-002 — 冻结工具、器件支持与许可
@@ -111,6 +118,13 @@ flowchart TD
 - **验收证据**：目标 part 可在工具中选择且 required IP 合法可用；container/host 依赖可复现。；验证口径：目标 part 可在工具中选择且 required IP 合法可用；container/host 依赖可复现。
 - **失败/回退动作**：假定免费版涵盖所有 UltraScale+，或用另一 part 完成综合代替目标。
 - **来源覆盖**：reproducible vendor flow, legal prerequisites。；来源 HR-001, HR-002, HR-010。
+- **执行者目标**：把“冻结工具、器件支持与许可”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先锁定exact part/tool/license和接口，再构建。所有bitstream、约束、时序报告和板卡日志必须对应同一source hash；禁止用仿真或另一family代替实板证据。
+- **建议工作顺序**：核对exact board/part/tool/license输入；冻结source/constraints/image与可复现脚本；执行单元/构建/时序或对应工艺任务；核对真实报告和设备/映像ID；运行共同corpus与negative controls；归档hash、日志、限制和恢复步骤；未满足门槛则明确blocked并反馈架构。
+- **可接受完成**：目标 part 可在工具中选择且 required IP 合法可用；container/host 依赖可复现。
+- **何时停止求助**：主要风险是错误part、旧bitstream、PS/DDR/coherence假设、报告缺失仍绿灯。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：per-family tool-lock、license/part support evidence。；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：HR-001, HR-002, HR-010。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### H-003 — 冻结 common top 与 wrapper 接口
@@ -126,6 +140,13 @@ flowchart TD
 - **验收证据**：common core 不要求 vendor library 即可 Verilator elaboration，wrapper 差异不改变 ISA/异常/顺序。；验证口径：common core 不要求 vendor library 即可 Verilator elaboration，wrapper 差异不改变 ISA/异常/顺序。
 - **失败/回退动作**：common PRF 直接依赖 RAMB/BSRAM primitive 或板名条件分支修改 instruction behavior。
 - **来源覆盖**：portable processor RTL, vendor isolation。；来源 implementation-plan.md, architecture-review.md。
+- **执行者目标**：把“冻结 common top 与 wrapper 接口”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先锁定exact part/tool/license和接口，再构建。所有bitstream、约束、时序报告和板卡日志必须对应同一source hash；禁止用仿真或另一family代替实板证据。
+- **建议工作顺序**：核对exact board/part/tool/license输入；冻结source/constraints/image与可复现脚本；执行单元/构建/时序或对应工艺任务；核对真实报告和设备/映像ID；运行共同corpus与negative controls；归档hash、日志、限制和恢复步骤；未满足门槛则明确blocked并反馈架构。
+- **可接受完成**：common core 不要求 vendor library 即可 Verilator elaboration，wrapper 差异不改变 ISA/异常/顺序。
+- **何时停止求助**：主要风险是错误part、旧bitstream、PS/DDR/coherence假设、报告缺失仍绿灯。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：platform interface contract、RTL/source file-list 分层。；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：implementation-plan.md, architecture-review.md。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### H-004 — 验证 RAM wrapper 的可观察一致性
@@ -141,6 +162,13 @@ flowchart TD
 - **验收证据**：允许交易的输出值/延迟一致，所有禁止情形可被 assertion 捕获；综合实际推断期望 RAM。；验证口径：允许交易的输出值/延迟一致，所有禁止情形可被 assertion 捕获；综合实际推断期望 RAM。
 - **失败/回退动作**：以 vendor simulation 的 X 被 Verilator 变零掩盖问题，或仅比较写后最后值。
 - **来源覆盖**：BRAM/BSRAM/VRF/cache portability。；来源 HR-003, HR-004, HR-011, implementation-plan.md。
+- **执行者目标**：把“RAM wrapper 的可观察一致性”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先锁定exact part/tool/license和接口，再构建。所有bitstream、约束、时序报告和板卡日志必须对应同一source hash；禁止用仿真或另一family代替实板证据。
+- **建议工作顺序**：核对exact board/part/tool/license输入；冻结source/constraints/image与可复现脚本；执行单元/构建/时序或对应工艺任务；核对真实报告和设备/映像ID；运行共同corpus与negative controls；归档hash、日志、限制和恢复步骤；未满足门槛则明确blocked并反馈架构。
+- **可接受完成**：允许交易的输出值/延迟一致，所有禁止情形可被 assertion 捕获；综合实际推断期望 RAM。
+- **何时停止求助**：主要风险是错误part、旧bitstream、PS/DDR/coherence假设、报告缺失仍绿灯。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：RAM semantics matrix、CASE=ram.collision_matrix 的三平台结果。；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：HR-003, HR-004, HR-011, implementation-plan.md。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### H-005 — 验证 clock/reset 与 CDC/RDC
@@ -156,6 +184,13 @@ flowchart TD
 - **验收证据**：每条 crossing 有正确同步策略，无未解释 critical CDC；reset 不产生伪 commit 或设备写。；验证口径：每条 crossing 有正确同步策略，无未解释 critical CDC；reset 不产生伪 commit 或设备写。
 - **失败/回退动作**：全局 set_false_path 代替同步器，或 gate clock 用普通 LUT 组合逻辑。
 - **来源覆盖**：safe physical clocks, reset, metastability boundaries。；来源 HR-010, platform-plan.md。
+- **执行者目标**：把“clock/reset 与 CDC/RDC”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先锁定exact part/tool/license和接口，再构建。所有bitstream、约束、时序报告和板卡日志必须对应同一source hash；禁止用仿真或另一family代替实板证据。
+- **建议工作顺序**：核对exact board/part/tool/license输入；冻结source/constraints/image与可复现脚本；执行单元/构建/时序或对应工艺任务；核对真实报告和设备/映像ID；运行共同corpus与negative controls；归档hash、日志、限制和恢复步骤；未满足门槛则明确blocked并反馈架构。
+- **可接受完成**：每条 crossing 有正确同步策略，无未解释 critical CDC；reset 不产生伪 commit 或设备写。
+- **何时停止求助**：主要风险是错误part、旧bitstream、PS/DDR/coherence假设、报告缺失仍绿灯。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：clock/reset diagram、CDC/RDC report、reset phase stress log。；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：HR-010, platform-plan.md。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### H-006 — 建立安全的 bring-up top
@@ -171,6 +206,13 @@ flowchart TD
 - **验收证据**：所有观察值来自本项目 PL core；诊断不修改正常 architectural state。；验证口径：所有观察值来自本项目 PL core；诊断不修改正常 architectural state。
 - **失败/回退动作**：heartbeat 仅由独立计数器输出却算 processor 执行成功。
 - **来源覆盖**：functional hardware prototype, minimal observability。；来源 implementation-plan.md, validation-plan.md。
+- **执行者目标**：把“建立安全的 bring-up top”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先锁定exact part/tool/license和接口，再构建。所有bitstream、约束、时序报告和板卡日志必须对应同一source hash；禁止用仿真或另一family代替实板证据。
+- **建议工作顺序**：核对exact board/part/tool/license输入；冻结source/constraints/image与可复现脚本；执行单元/构建/时序或对应工艺任务；核对真实报告和设备/映像ID；运行共同corpus与negative controls；归档hash、日志、限制和恢复步骤；未满足门槛则明确blocked并反馈架构。
+- **可接受完成**：所有观察值来自本项目 PL core；诊断不修改正常 architectural state。
+- **何时停止求助**：主要风险是错误part、旧bitstream、PS/DDR/coherence假设、报告缺失仍绿灯。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：BRAM-only top、boot image mapping、debug observation contract。；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：implementation-plan.md, validation-plan.md。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### H-007 — 固定 pin/clock/IO 时序约束
@@ -186,6 +228,13 @@ flowchart TD
 - **验收证据**：未定位 IO=0，intended clock/IO path 未约束项=0；任何例外与具体同步结构匹配。；验证口径：未定位 IO=0，intended clock/IO path 未约束项=0；任何例外与具体同步结构匹配。
 - **失败/回退动作**：用默认 pin 或 blanket async/false path 隐藏真实路径。
 - **来源覆盖**：physical constraints, portability safety。；来源 HR-001, HR-010。
+- **执行者目标**：把“固定 pin/clock/IO 时序约束”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先锁定exact part/tool/license和接口，再构建。所有bitstream、约束、时序报告和板卡日志必须对应同一source hash；禁止用仿真或另一family代替实板证据。
+- **建议工作顺序**：核对exact board/part/tool/license输入；冻结source/constraints/image与可复现脚本；执行单元/构建/时序或对应工艺任务；核对真实报告和设备/映像ID；运行共同corpus与negative controls；归档hash、日志、限制和恢复步骤；未满足门槛则明确blocked并反馈架构。
+- **可接受完成**：未定位 IO=0，intended clock/IO path 未约束项=0；任何例外与具体同步结构匹配。
+- **何时停止求助**：主要风险是错误part、旧bitstream、PS/DDR/coherence假设、报告缺失仍绿灯。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：versioned CST/SDC 或 XDC、constraint coverage 表。；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：HR-001, HR-010。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### H-008 — 实现实板 host runner 与签名比对
@@ -201,6 +250,13 @@ flowchart TD
 - **验收证据**：每 case 唯一 verdict，缺记录不算成功；host mismatch 负控制明确非零。；验证口径：每 case 唯一 verdict，缺记录不算成功；host mismatch 负控制明确非零。
 - **失败/回退动作**：只匹配一行 PASS、USB重枚举连错板仍通过或串口丢包后补猜数据。
 - **来源覆盖**：real-hardware correctness evidence, automated validation。；来源 validation-plan.md。
+- **执行者目标**：把“实板 host runner 与签名比对”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先锁定exact part/tool/license和接口，再构建。所有bitstream、约束、时序报告和板卡日志必须对应同一source hash；禁止用仿真或另一family代替实板证据。
+- **建议工作顺序**：核对exact board/part/tool/license输入；冻结source/constraints/image与可复现脚本；执行单元/构建/时序或对应工艺任务；核对真实报告和设备/映像ID；运行共同corpus与negative controls；归档hash、日志、限制和恢复步骤；未满足门槛则明确blocked并反馈架构。
+- **可接受完成**：每 case 唯一 verdict，缺记录不算成功；host mismatch 负控制明确非零。
+- **何时停止求助**：主要风险是错误part、旧bitstream、PS/DDR/coherence假设、报告缺失仍绿灯。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：host runner CLI、52-case manifest、evidence schema。；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：validation-plan.md。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### H-009 — 校准 timing/resource 报告验收器
@@ -216,6 +272,13 @@ flowchart TD
 - **验收证据**：缺报告/不识别字段/负 slack/critical error 均失败；报告对应同一已实现 netlist hash。；验证口径：缺报告/不识别字段/负 slack/critical error 均失败；报告对应同一已实现 netlist hash。
 - **失败/回退动作**：仅检测工具进程 code 0 或 synthesis utilization 即宣布 fit。
 - **来源覆盖**：deterministic physical acceptance。；来源 HR-010, HR-001。
+- **执行者目标**：把“校准 timing/resource 报告验收器”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先锁定exact part/tool/license和接口，再构建。所有bitstream、约束、时序报告和板卡日志必须对应同一source hash；禁止用仿真或另一family代替实板证据。
+- **建议工作顺序**：核对exact board/part/tool/license输入；冻结source/constraints/image与可复现脚本；执行单元/构建/时序或对应工艺任务；核对真实报告和设备/映像ID；运行共同corpus与negative controls；归档hash、日志、限制和恢复步骤；未满足门槛则明确blocked并反馈架构。
+- **可接受完成**：缺报告/不识别字段/负 slack/critical error 均失败；报告对应同一已实现 netlist hash。
+- **何时停止求助**：主要风险是错误part、旧bitstream、PS/DDR/coherence假设、报告缺失仍绿灯。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：per-vendor report parser、阈值与必要字段清单。；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：HR-010, HR-001。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### H-010 — 建立跨平台证据归档与负控制流程
@@ -231,6 +294,13 @@ flowchart TD
 - **验收证据**：所有错误类别均能归因且不能混作正常 PASS；设备最终处于记录的良好映像。；验证口径：所有错误类别均能归因且不能混作正常 PASS；设备最终处于记录的良好映像。
 - **失败/回退动作**：失败后覆盖旧日志、注入未触达或测试结束残留故障 boot image。
 - **来源覆盖**：reproducibility, validation credibility, hardware safety。；来源 validation-plan.md。
+- **执行者目标**：把“建立跨平台证据归档与负控制流程”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先锁定exact part/tool/license和接口，再构建。所有bitstream、约束、时序报告和板卡日志必须对应同一source hash；禁止用仿真或另一family代替实板证据。
+- **建议工作顺序**：核对exact board/part/tool/license输入；冻结source/constraints/image与可复现脚本；执行单元/构建/时序或对应工艺任务；核对真实报告和设备/映像ID；运行共同corpus与negative controls；归档hash、日志、限制和恢复步骤；未满足门槛则明确blocked并反馈架构。
+- **可接受完成**：所有错误类别均能归因且不能混作正常 PASS；设备最终处于记录的良好映像。
+- **何时停止求助**：主要风险是错误part、旧bitstream、PS/DDR/coherence假设、报告缺失仍绿灯。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：immutable run manifest、negative-control checklist、restoration record。；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：validation-plan.md。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### H-011 — 建立 exact-GW5A 工程与批处理入口
@@ -246,6 +316,13 @@ flowchart TD
 - **验收证据**：从空 build 目录可按记录重建同一输入集合，device/constraints 没有隐式 GUI 状态。；验证口径：从空 build 目录可按记录重建同一输入集合，device/constraints 没有隐式 GUI 状态。
 - **失败/回退动作**：GUI 工程漏文件，命令行用错误 part 或只在作者机器可用。
 - **来源覆盖**：GW5A reproducible build。；来源 HR-001, HR-011。
+- **执行者目标**：把“建立 exact-GW5A 工程与批处理入口”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先锁定exact part/tool/license和接口，再构建。所有bitstream、约束、时序报告和板卡日志必须对应同一source hash；禁止用仿真或另一family代替实板证据。
+- **建议工作顺序**：核对exact board/part/tool/license输入；冻结source/constraints/image与可复现脚本；执行单元/构建/时序或对应工艺任务；核对真实报告和设备/映像ID；运行共同corpus与negative controls；归档hash、日志、限制和恢复步骤；未满足门槛则明确blocked并反馈架构。
+- **可接受完成**：从空 build 目录可按记录重建同一输入集合，device/constraints 没有隐式 GUI 状态。
+- **何时停止求助**：主要风险是错误part、旧bitstream、PS/DDR/coherence假设、报告缺失仍绿灯。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：Gowin project/script、版本化 file list、运行说明。；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：HR-001, HR-011。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### H-012 — 验证 GW5A RAM/PLL 推断
@@ -261,6 +338,13 @@ flowchart TD
 - **验收证据**：没有意外全阵列 FF reset 或容量爆炸；所用模式都有可取得手册/模型证据。；验证口径：没有意外全阵列 FF reset 或容量爆炸；所用模式都有可取得手册/模型证据。
 - **失败/回退动作**：推断成 FF 后仍沿用 BRAM 预算，或从 GW1N RAM 推断 GW5A collision 语义。
 - **来源覆盖**：GW5A portability primitives。；来源 HR-001, HR-011。
+- **执行者目标**：把“GW5A RAM/PLL 推断”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先锁定exact part/tool/license和接口，再构建。所有bitstream、约束、时序报告和板卡日志必须对应同一source hash；禁止用仿真或另一family代替实板证据。
+- **建议工作顺序**：核对exact board/part/tool/license输入；冻结source/constraints/image与可复现脚本；执行单元/构建/时序或对应工艺任务；核对真实报告和设备/映像ID；运行共同corpus与negative controls；归档hash、日志、限制和恢复步骤；未满足门槛则明确blocked并反馈架构。
+- **可接受完成**：没有意外全阵列 FF reset 或容量爆炸；所用模式都有可取得手册/模型证据。
+- **何时停止求助**：主要风险是错误part、旧bitstream、PS/DDR/coherence假设、报告缺失仍绿灯。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：GW5A memory/clock mapping report、IP config hashes。；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：HR-001, HR-011。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### H-013 — 运行 GW5A 全核 synthesis
@@ -276,6 +360,13 @@ flowchart TD
 - **验收证据**：exact part 可容纳，两个 cluster 保留，未解释 latch/width/driver 错误=0。；验证口径：exact part 可容纳，两个 cluster 保留，未解释 latch/width/driver 错误=0。
 - **失败/回退动作**：工具优化掉整个 processor、ISA feature被条件编译移除或关键 warning 未处理。
 - **来源覆盖**：GW5A synthesizable processor。；来源 HR-001, implementation-plan.md。
+- **执行者目标**：把“运行 GW5A 全核 synthesis”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先锁定exact part/tool/license和接口，再构建。所有bitstream、约束、时序报告和板卡日志必须对应同一source hash；禁止用仿真或另一family代替实板证据。
+- **建议工作顺序**：核对exact board/part/tool/license输入；冻结source/constraints/image与可复现脚本；执行单元/构建/时序或对应工艺任务；核对真实报告和设备/映像ID；运行共同corpus与negative controls；归档hash、日志、限制和恢复步骤；未满足门槛则明确blocked并反馈架构。
+- **可接受完成**：exact part 可容纳，两个 cluster 保留，未解释 latch/width/driver 错误=0。
+- **何时停止求助**：主要风险是错误part、旧bitstream、PS/DDR/coherence假设、报告缺失仍绿灯。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：synthesis netlist、utilization/inference/warning reports。；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：HR-001, implementation-plan.md。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### H-014 — 运行 GW5A place/route/STA
@@ -291,6 +382,13 @@ flowchart TD
 - **验收证据**：§1.1 timing/route 门槛均满足，所有 clocks 为实际运行目标，无不实 timing exception。；验证口径：§1.1 timing/route 门槛均满足，所有 clocks 为实际运行目标，无不实 timing exception。
 - **失败/回退动作**：只降报告目标不降实际 oscillator/divider，或 skip hold/unconstrained 检查。
 - **来源覆盖**：GW5A physical feasibility。；来源 HR-001, HR-011。
+- **执行者目标**：把“运行 GW5A place/route/STA”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先锁定exact part/tool/license和接口，再构建。所有bitstream、约束、时序报告和板卡日志必须对应同一source hash；禁止用仿真或另一family代替实板证据。
+- **建议工作顺序**：核对exact board/part/tool/license输入；冻结source/constraints/image与可复现脚本；执行单元/构建/时序或对应工艺任务；核对真实报告和设备/映像ID；运行共同corpus与negative controls；归档hash、日志、限制和恢复步骤；未满足门槛则明确blocked并反馈架构。
+- **可接受完成**：§1.1 timing/route 门槛均满足，所有 clocks 为实际运行目标，无不实 timing exception。
+- **何时停止求助**：主要风险是错误part、旧bitstream、PS/DDR/coherence假设、报告缺失仍绿灯。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：routed netlist、timing/resource reports、完整决策日志。；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：HR-001, HR-011。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### H-015 — 生成并核对 GW5A 配置映像
@@ -306,6 +404,13 @@ flowchart TD
 - **验收证据**：映像 part 与硬件 ID 一致、输入来源闭合；不覆盖未知用户 flash 内容。；验证口径：映像 part 与硬件 ID 一致、输入来源闭合；不覆盖未知用户 flash 内容。
 - **失败/回退动作**：从旧输出目录取错 bitstream 或 programming 操作超出授权。
 - **来源覆盖**：GW5A programming safety, provenance。；来源 HR-001, H-001。
+- **执行者目标**：把“生成并核对 GW5A 配置映像”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先锁定exact part/tool/license和接口，再构建。所有bitstream、约束、时序报告和板卡日志必须对应同一source hash；禁止用仿真或另一family代替实板证据。
+- **建议工作顺序**：核对exact board/part/tool/license输入；冻结source/constraints/image与可复现脚本；执行单元/构建/时序或对应工艺任务；核对真实报告和设备/映像ID；运行共同corpus与negative controls；归档hash、日志、限制和恢复步骤；未满足门槛则明确blocked并反馈架构。
+- **可接受完成**：映像 part 与硬件 ID 一致、输入来源闭合；不覆盖未知用户 flash 内容。
+- **何时停止求助**：主要风险是错误part、旧bitstream、PS/DDR/coherence假设、报告缺失仍绿灯。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：image hash、configuration settings、programming recipe。；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：HR-001, H-001。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### H-016 — 执行 GW5A cold/warm board regression
@@ -321,6 +426,13 @@ flowchart TD
 - **验收证据**：每次每 case 结果匹配，无 hang/CRC/timeout；负控制检出并恢复良好映像。；验证口径：每次每 case 结果匹配，无 hang/CRC/timeout；负控制检出并恢复良好映像。
 - **失败/回退动作**：只有 simulation/log复制、LED心跳或单次 arithmetic demo。
 - **来源覆盖**：mandatory GW5A real-hardware validation。；来源 validation-plan.md, H-010。
+- **执行者目标**：把“执行 GW5A cold/warm board regression”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先锁定exact part/tool/license和接口，再构建。所有bitstream、约束、时序报告和板卡日志必须对应同一source hash；禁止用仿真或另一family代替实板证据。
+- **建议工作顺序**：核对exact board/part/tool/license输入；冻结source/constraints/image与可复现脚本；执行单元/构建/时序或对应工艺任务；核对真实报告和设备/映像ID；运行共同corpus与negative controls；归档hash、日志、限制和恢复步骤；未满足门槛则明确blocked并反馈架构。
+- **可接受完成**：每次每 case 结果匹配，无 hang/CRC/timeout；负控制检出并恢复良好映像。
+- **何时停止求助**：主要风险是错误part、旧bitstream、PS/DDR/coherence假设、报告缺失仍绿灯。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：GW5A physical evidence bundle、全部 expected/actual signatures。；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：validation-plan.md, H-010。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### H-017 — 扩展 GW5A 外部存储与高 profile
@@ -336,6 +448,13 @@ flowchart TD
 - **验收证据**：只有真实存在且验证过的 memory 才进平台描述；每新增 profile 重新跑 timing与corpus。；验证口径：只有真实存在且验证过的 memory 才进平台描述；每新增 profile 重新跑 timing与corpus。
 - **失败/回退动作**：calibration成功即当CPU正确，或额外存储不可用仍宣称Linux/RVV容量已满足。
 - **来源覆盖**：GW5A scaling, memory integration。；来源 HR-001, implementation-plan.md。
+- **执行者目标**：把“扩展 GW5A 外部存储与高 profile”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先锁定exact part/tool/license和接口，再构建。所有bitstream、约束、时序报告和板卡日志必须对应同一source hash；禁止用仿真或另一family代替实板证据。
+- **建议工作顺序**：核对exact board/part/tool/license输入；冻结source/constraints/image与可复现脚本；执行单元/构建/时序或对应工艺任务；核对真实报告和设备/映像ID；运行共同corpus与negative controls；归档hash、日志、限制和恢复步骤；未满足门槛则明确blocked并反馈架构。
+- **可接受完成**：只有真实存在且验证过的 memory 才进平台描述；每新增 profile 重新跑 timing与corpus。
+- **何时停止求助**：主要风险是错误part、旧bitstream、PS/DDR/coherence假设、报告缺失仍绿灯。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：external-memory adapter、memory-test evidence、per-profile fit matrix。；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：HR-001, implementation-plan.md。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### H-018 — 冻结 Zynq PS/PL 职责
@@ -351,6 +470,13 @@ flowchart TD
 - **验收证据**：不存在未启动PS却依赖其FCLK/DDR的隐含循环；branch特有boot组件明确。；验证口径：不存在未启动PS却依赖其FCLK/DDR的隐含循环；branch特有boot组件明确。
 - **失败/回退动作**：把Zynq-7000 FSBL与MPSoC PMU/firmware链路混用。
 - **来源覆盖**：Zynq-7000, Zynq UltraScale+ MPSoC decision gate。；来源 HR-005, HR-006。
+- **执行者目标**：把“冻结 Zynq PS/PL 职责”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先锁定exact part/tool/license和接口，再构建。所有bitstream、约束、时序报告和板卡日志必须对应同一source hash；禁止用仿真或另一family代替实板证据。
+- **建议工作顺序**：核对exact board/part/tool/license输入；冻结source/constraints/image与可复现脚本；执行单元/构建/时序或对应工艺任务；核对真实报告和设备/映像ID；运行共同corpus与negative controls；归档hash、日志、限制和恢复步骤；未满足门槛则明确blocked并反馈架构。
+- **可接受完成**：不存在未启动PS却依赖其FCLK/DDR的隐含循环；branch特有boot组件明确。
+- **何时停止求助**：主要风险是错误part、旧bitstream、PS/DDR/coherence假设、报告缺失仍绿灯。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：Zynq boot ownership diagram、PL/PS memory map。；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：HR-005, HR-006。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### H-019 — 建立 Zynq wrapper 与 RAM profile
@@ -366,6 +492,13 @@ flowchart TD
 - **验收证据**：synthesis绑定所选family的正确cells，不能把UltraScale-specific primitive带入Zynq-7000。；验证口径：synthesis绑定所选family的正确cells，不能把UltraScale-specific primitive带入Zynq-7000。
 - **失败/回退动作**：利用错误memory读延迟使模拟通过但实板失败。
 - **来源覆盖**：Zynq-specific portability。；来源 HR-003, HR-004, HR-005。
+- **执行者目标**：把“建立 Zynq wrapper 与 RAM profile”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先锁定exact part/tool/license和接口，再构建。所有bitstream、约束、时序报告和板卡日志必须对应同一source hash；禁止用仿真或另一family代替实板证据。
+- **建议工作顺序**：核对exact board/part/tool/license输入；冻结source/constraints/image与可复现脚本；执行单元/构建/时序或对应工艺任务；核对真实报告和设备/映像ID；运行共同corpus与negative controls；归档hash、日志、限制和恢复步骤；未满足门槛则明确blocked并反馈架构。
+- **可接受完成**：synthesis绑定所选family的正确cells，不能把UltraScale-specific primitive带入Zynq-7000。
+- **何时停止求助**：主要风险是错误part、旧bitstream、PS/DDR/coherence假设、报告缺失仍绿灯。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：selected-Zynq top、RAM/clock unit evidence。；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：HR-003, HR-004, HR-005。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### H-020 — 定义 Zynq AXI 与非一致性 handoff
@@ -381,6 +514,13 @@ flowchart TD
 - **验收证据**：host写入的镜像和core写出的签名真实可见；不存在PS stale cache掩盖core错误。；验证口径：host写入的镜像和core写出的签名真实可见；不存在PS stale cache掩盖core错误。
 - **失败/回退动作**：将HP等普通端口自动当coherent，或ARM执行期望值代替读PL结果。
 - **来源覆盖**：Zynq PS integration, memory visibility。；来源 HR-005, HR-008。
+- **执行者目标**：把“定义 Zynq AXI 与非一致性 handoff”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先锁定exact part/tool/license和接口，再构建。所有bitstream、约束、时序报告和板卡日志必须对应同一source hash；禁止用仿真或另一family代替实板证据。
+- **建议工作顺序**：核对exact board/part/tool/license输入；冻结source/constraints/image与可复现脚本；执行单元/构建/时序或对应工艺任务；核对真实报告和设备/映像ID；运行共同corpus与negative controls；归档hash、日志、限制和恢复步骤；未满足门槛则明确blocked并反馈架构。
+- **可接受完成**：host写入的镜像和core写出的签名真实可见；不存在PS stale cache掩盖core错误。
+- **何时停止求助**：主要风险是错误part、旧bitstream、PS/DDR/coherence假设、报告缺失仍绿灯。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：AXI adapter、CASE=zynq.ps_pl_handoff、cache-maintenance protocol。；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：HR-005, HR-008。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### H-021 — 建立 Zynq 可复现 Vivado 工程
@@ -396,6 +536,13 @@ flowchart TD
 - **验收证据**：干净目录重建所选branch相同逻辑配置，工具报告没有自动upgrade后未记录变化。；验证口径：干净目录重建所选branch相同逻辑配置，工具报告没有自动upgrade后未记录变化。
 - **失败/回退动作**：本地board_files未跟踪或预设隐含错误DDR/pin。
 - **来源覆盖**：reproducible Zynq implementation。；来源 HR-010, HR-005。
+- **执行者目标**：把“建立 Zynq 可复现 Vivado 工程”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先锁定exact part/tool/license和接口，再构建。所有bitstream、约束、时序报告和板卡日志必须对应同一source hash；禁止用仿真或另一family代替实板证据。
+- **建议工作顺序**：核对exact board/part/tool/license输入；冻结source/constraints/image与可复现脚本；执行单元/构建/时序或对应工艺任务；核对真实报告和设备/映像ID；运行共同corpus与negative controls；归档hash、日志、限制和恢复步骤；未满足门槛则明确blocked并反馈架构。
+- **可接受完成**：干净目录重建所选branch相同逻辑配置，工具报告没有自动upgrade后未记录变化。
+- **何时停止求助**：主要风险是错误part、旧bitstream、PS/DDR/coherence假设、报告缺失仍绿灯。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：Zynq build Tcl、IP locks、recreation instructions。；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：HR-010, HR-005。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### H-022 — 校准 Vivado build/report Tcl
@@ -411,6 +558,13 @@ flowchart TD
 - **验收证据**：checkpoint stage/hash与报告对应；缺run/时序失败不会因Tcl流程正常退出误报成功。；验证口径：checkpoint stage/hash与报告对应；缺run/时序失败不会因Tcl流程正常退出误报成功。
 - **失败/回退动作**：catch吞error、空设计report、仅synth report充当post-route证据。
 - **来源覆盖**：AMD implementation automation, timing evidence。；来源 HR-010。
+- **执行者目标**：把“校准 Vivado build/report Tcl”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先锁定exact part/tool/license和接口，再构建。所有bitstream、约束、时序报告和板卡日志必须对应同一source hash；禁止用仿真或另一family代替实板证据。
+- **建议工作顺序**：核对exact board/part/tool/license输入；冻结source/constraints/image与可复现脚本；执行单元/构建/时序或对应工艺任务；核对真实报告和设备/映像ID；运行共同corpus与negative controls；归档hash、日志、限制和恢复步骤；未满足门槛则明确blocked并反馈架构。
+- **可接受完成**：checkpoint stage/hash与报告对应；缺run/时序失败不会因Tcl流程正常退出误报成功。
+- **何时停止求助**：主要风险是错误part、旧bitstream、PS/DDR/coherence假设、报告缺失仍绿灯。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：validated Tcl runner、all mandatory reports、script failure controls。；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：HR-010。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### H-023 — 验收 Zynq routed design
@@ -426,6 +580,13 @@ flowchart TD
 - **验收证据**：§1.1门槛全部满足，PS/PL接口和真实core clock被约束。；验证口径：§1.1门槛全部满足，PS/PL接口和真实core clock被约束。
 - **失败/回退动作**：未约束FCLK路径、incorrect async grouping或physically unrouted design。
 - **来源覆盖**：Zynq physical implementation。；来源 HR-003, HR-005, HR-010。
+- **执行者目标**：把“验收 Zynq routed design”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先锁定exact part/tool/license和接口，再构建。所有bitstream、约束、时序报告和板卡日志必须对应同一source hash；禁止用仿真或另一family代替实板证据。
+- **建议工作顺序**：核对exact board/part/tool/license输入；冻结source/constraints/image与可复现脚本；执行单元/构建/时序或对应工艺任务；核对真实报告和设备/映像ID；运行共同corpus与negative controls；归档hash、日志、限制和恢复步骤；未满足门槛则明确blocked并反馈架构。
+- **可接受完成**：§1.1门槛全部满足，PS/PL接口和真实core clock被约束。
+- **何时停止求助**：主要风险是错误part、旧bitstream、PS/DDR/coherence假设、报告缺失仍绿灯。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：Zynq routed checkpoint、timing/resource/DRC bundle。；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：HR-003, HR-005, HR-010。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### H-024 — 下载 Zynq 并运行共同板测
@@ -441,6 +602,13 @@ flowchart TD
 - **验收证据**：52-case每次全过，真实PL cycles/retire前进且签名来自PL core；错误映像可恢复。；验证口径：52-case每次全过，真实PL cycles/retire前进且签名来自PL core；错误映像可恢复。
 - **失败/回退动作**：Linux在ARM上启动或软件host打印PASS被计为RISC-V验证。
 - **来源覆盖**：mandatory Zynq real-hardware validation。；来源 HR-005, HR-006, validation-plan.md。
+- **执行者目标**：把“下载 Zynq 并运行共同板测”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先锁定exact part/tool/license和接口，再构建。所有bitstream、约束、时序报告和板卡日志必须对应同一source hash；禁止用仿真或另一family代替实板证据。
+- **建议工作顺序**：核对exact board/part/tool/license输入；冻结source/constraints/image与可复现脚本；执行单元/构建/时序或对应工艺任务；核对真实报告和设备/映像ID；运行共同corpus与negative controls；归档hash、日志、限制和恢复步骤；未满足门槛则明确blocked并反馈架构。
+- **可接受完成**：52-case每次全过，真实PL cycles/retire前进且签名来自PL core；错误映像可恢复。
+- **何时停止求助**：主要风险是错误part、旧bitstream、PS/DDR/coherence假设、报告缺失仍绿灯。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：Zynq physical evidence bundle、reset/boot/serial记录。；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：HR-005, HR-006, validation-plan.md。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### H-025 — 扩展 Zynq DDR 与 OS/vector profile
@@ -456,6 +624,13 @@ flowchart TD
 - **验收证据**：RISC-V用户程序在PL核完成预期签名/退出；各profile fit和ISA支持逐项记录。；验证口径：RISC-V用户程序在PL核完成预期签名/退出；各profile fit和ISA支持逐项记录。
 - **失败/回退动作**：DDR可读就跳过cache coherence、以PS/Linux console冒充PL/OS日志。
 - **来源覆盖**：Zynq advanced system validation。；来源 HR-005, HR-008, implementation-plan.md。
+- **执行者目标**：把“扩展 Zynq DDR 与 OS/vector profile”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先锁定exact part/tool/license和接口，再构建。所有bitstream、约束、时序报告和板卡日志必须对应同一source hash；禁止用仿真或另一family代替实板证据。
+- **建议工作顺序**：核对exact board/part/tool/license输入；冻结source/constraints/image与可复现脚本；执行单元/构建/时序或对应工艺任务；核对真实报告和设备/映像ID；运行共同corpus与negative controls；归档hash、日志、限制和恢复步骤；未满足门槛则明确blocked并反馈架构。
+- **可接受完成**：RISC-V用户程序在PL核完成预期签名/退出；各profile fit和ISA支持逐项记录。
+- **何时停止求助**：主要风险是错误part、旧bitstream、PS/DDR/coherence假设、报告缺失仍绿灯。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：DDR/boot adapter、profile-specific timing和program evidence。；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：HR-005, HR-008, implementation-plan.md。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### H-026 — 冻结 Virtex 板级 clock/配置/SLR 路径
@@ -471,6 +646,13 @@ flowchart TD
 - **验收证据**：所有平台服务有该板真实提供路径，所需IP/工具授权匹配part。；验证口径：所有平台服务有该板真实提供路径，所需IP/工具授权匹配part。
 - **失败/回退动作**：复制VCU118 pinout到未知板，或假定每款器件有相同URAM/DDR能力。
 - **来源覆盖**：Virtex UltraScale+ board specificity。；来源 HR-002, HR-007, HR-004。
+- **执行者目标**：把“冻结 Virtex 板级 clock/配置/SLR 路径”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先锁定exact part/tool/license和接口，再构建。所有bitstream、约束、时序报告和板卡日志必须对应同一source hash；禁止用仿真或另一family代替实板证据。
+- **建议工作顺序**：核对exact board/part/tool/license输入；冻结source/constraints/image与可复现脚本；执行单元/构建/时序或对应工艺任务；核对真实报告和设备/映像ID；运行共同corpus与negative controls；归档hash、日志、限制和恢复步骤；未满足门槛则明确blocked并反馈架构。
+- **可接受完成**：所有平台服务有该板真实提供路径，所需IP/工具授权匹配part。
+- **何时停止求助**：主要风险是错误part、旧bitstream、PS/DDR/coherence假设、报告缺失仍绿灯。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：Virtex top contract、floorplan建议与pin/clock来源。；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：HR-002, HR-007, HR-004。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### H-027 — 验证 Virtex BRAM/URAM adapter
@@ -486,6 +668,13 @@ flowchart TD
 - **验收证据**：每种允许memory实现均满足core contract；不支持模式通过外置逻辑实现或拒绝配置。；验证口径：每种允许memory实现均满足core contract；不支持模式通过外置逻辑实现或拒绝配置。
 - **失败/回退动作**：将URAM当任意多口BRAM的直接替代。
 - **来源覆盖**：Virtex storage scaling, RAM portability。；来源 HR-004, platform-plan.md。
+- **执行者目标**：把“Virtex BRAM/URAM adapter”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先锁定exact part/tool/license和接口，再构建。所有bitstream、约束、时序报告和板卡日志必须对应同一source hash；禁止用仿真或另一family代替实板证据。
+- **建议工作顺序**：核对exact board/part/tool/license输入；冻结source/constraints/image与可复现脚本；执行单元/构建/时序或对应工艺任务；核对真实报告和设备/映像ID；运行共同corpus与negative controls；归档hash、日志、限制和恢复步骤；未满足门槛则明确blocked并反馈架构。
+- **可接受完成**：每种允许memory实现均满足core contract；不支持模式通过外置逻辑实现或拒绝配置。
+- **何时停止求助**：主要风险是错误part、旧bitstream、PS/DDR/coherence假设、报告缺失仍绿灯。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：memory mapping/inference report、adapter equivalence cases。；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：HR-004, platform-plan.md。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### H-028 — 构建 Virtex Vivado flow 与约束
@@ -501,6 +690,13 @@ flowchart TD
 - **验收证据**：无Zynq PS cell/地址依赖；build标识清楚区分Zynq/Virtex。；验证口径：无Zynq PS cell/地址依赖；build标识清楚区分Zynq/Virtex。
 - **失败/回退动作**：三个平台共用一个手改project而无法恢复各自配置。
 - **来源覆盖**：Virtex reproducibility, vendor wrapper reuse。；来源 HR-010, HR-007。
+- **执行者目标**：把“构建 Virtex Vivado flow 与约束”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先锁定exact part/tool/license和接口，再构建。所有bitstream、约束、时序报告和板卡日志必须对应同一source hash；禁止用仿真或另一family代替实板证据。
+- **建议工作顺序**：核对exact board/part/tool/license输入；冻结source/constraints/image与可复现脚本；执行单元/构建/时序或对应工艺任务；核对真实报告和设备/映像ID；运行共同corpus与negative controls；归档hash、日志、限制和恢复步骤；未满足门槛则明确blocked并反馈架构。
+- **可接受完成**：无Zynq PS cell/地址依赖；build标识清楚区分Zynq/Virtex。
+- **何时停止求助**：主要风险是错误part、旧bitstream、PS/DDR/coherence假设、报告缺失仍绿灯。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：reproducible Virtex batch flow、constraints、IP locks。；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：HR-010, HR-007。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### H-029 — 验收 Virtex route 与网络时序
@@ -516,6 +712,13 @@ flowchart TD
 - **验收证据**：§1.1门槛满足，physical增加latency后architectural suites仍通过。；验证口径：§1.1门槛满足，physical增加latency后architectural suites仍通过。
 - **失败/回退动作**：高IPC但实际时钟失守、跨SLR关键路径被错标false path。
 - **来源覆盖**：Virtex physical scalability。；来源 HR-010, architecture-review.md。
+- **执行者目标**：把“验收 Virtex route 与网络时序”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先锁定exact part/tool/license和接口，再构建。所有bitstream、约束、时序报告和板卡日志必须对应同一source hash；禁止用仿真或另一family代替实板证据。
+- **建议工作顺序**：核对exact board/part/tool/license输入；冻结source/constraints/image与可复现脚本；执行单元/构建/时序或对应工艺任务；核对真实报告和设备/映像ID；运行共同corpus与negative controls；归档hash、日志、限制和恢复步骤；未满足门槛则明确blocked并反馈架构。
+- **可接受完成**：§1.1门槛满足，physical增加latency后architectural suites仍通过。
+- **何时停止求助**：主要风险是错误part、旧bitstream、PS/DDR/coherence假设、报告缺失仍绿灯。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：routed/timing/resource/CDC report、pipeline与配置hash。；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：HR-010, architecture-review.md。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### H-030 — 下载 Virtex 并执行共同板测
@@ -531,6 +734,13 @@ flowchart TD
 - **验收证据**：完整回归零mismatch/timeout，证据属于该板该bitstream且host独立核对。；验证口径：完整回归零mismatch/timeout，证据属于该板该bitstream且host独立核对。
 - **失败/回退动作**：用其他UltraScale+板日志、软件仿真或只跑CoreMark作为完整证明。
 - **来源覆盖**：mandatory Virtex UltraScale+ real-hardware validation。；来源 validation-plan.md, HR-007。
+- **执行者目标**：把“下载 Virtex 并执行共同板测”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先锁定exact part/tool/license和接口，再构建。所有bitstream、约束、时序报告和板卡日志必须对应同一source hash；禁止用仿真或另一family代替实板证据。
+- **建议工作顺序**：核对exact board/part/tool/license输入；冻结source/constraints/image与可复现脚本；执行单元/构建/时序或对应工艺任务；核对真实报告和设备/映像ID；运行共同corpus与negative controls；归档hash、日志、限制和恢复步骤；未满足门槛则明确blocked并反馈架构。
+- **可接受完成**：完整回归零mismatch/timeout，证据属于该板该bitstream且host独立核对。
+- **何时停止求助**：主要风险是错误part、旧bitstream、PS/DDR/coherence假设、报告缺失仍绿灯。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：Virtex physical evidence bundle。；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：validation-plan.md, HR-007。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### H-031 — 扩展 Virtex DDR 与宽 fabric
@@ -546,6 +756,13 @@ flowchart TD
 - **验收证据**：每个被宣称支持profile有对应硬件/时序/correctness记录，失败配置保持失败状态。；验证口径：每个被宣称支持profile有对应硬件/时序/correctness记录，失败配置保持失败状态。
 - **失败/回退动作**：单个小profile成功后外推所有宽度线性扩展。
 - **来源覆盖**：Virtex advanced fabric/DDR validation。；来源 HR-007, HR-010, implementation-plan.md。
+- **执行者目标**：把“扩展 Virtex DDR 与宽 fabric”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先锁定exact part/tool/license和接口，再构建。所有bitstream、约束、时序报告和板卡日志必须对应同一source hash；禁止用仿真或另一family代替实板证据。
+- **建议工作顺序**：核对exact board/part/tool/license输入；冻结source/constraints/image与可复现脚本；执行单元/构建/时序或对应工艺任务；核对真实报告和设备/映像ID；运行共同corpus与negative controls；归档hash、日志、限制和恢复步骤；未满足门槛则明确blocked并反馈架构。
+- **可接受完成**：每个被宣称支持profile有对应硬件/时序/correctness记录，失败配置保持失败状态。
+- **何时停止求助**：主要风险是错误part、旧bitstream、PS/DDR/coherence假设、报告缺失仍绿灯。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：advanced-profile fit表、DDR/controller与程序证据。；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：HR-007, HR-010, implementation-plan.md。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### H-032 — 比较三平台共同 corpus
@@ -561,6 +778,13 @@ flowchart TD
 - **验收证据**：三family全部52-case及cold/warm集合闭合；几何差异不产生architectural差异。；验证口径：三family全部52-case及cold/warm集合闭合；几何差异不产生architectural差异。
 - **失败/回退动作**：少一family、静默删不通过case或只比较不同程序的PASS字符串。
 - **来源覆盖**：end-to-end portability validation, user three-platform criterion。；来源 validation-plan.md, implementation-plan.md。
+- **执行者目标**：把“比较三平台共同 corpus”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先锁定exact part/tool/license和接口，再构建。所有bitstream、约束、时序报告和板卡日志必须对应同一source hash；禁止用仿真或另一family代替实板证据。
+- **建议工作顺序**：核对exact board/part/tool/license输入；冻结source/constraints/image与可复现脚本；执行单元/构建/时序或对应工艺任务；核对真实报告和设备/映像ID；运行共同corpus与negative controls；归档hash、日志、限制和恢复步骤；未满足门槛则明确blocked并反馈架构。
+- **可接受完成**：三family全部52-case及cold/warm集合闭合；几何差异不产生architectural差异。
+- **何时停止求助**：主要风险是错误part、旧bitstream、PS/DDR/coherence假设、报告缺失仍绿灯。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：three-family portability evidence matrix。；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：validation-plan.md, implementation-plan.md。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### H-033 — 测量板上性能而非推断功耗
@@ -576,6 +800,13 @@ flowchart TD
 - **验收证据**：useful-work/second与完整成本同报，所有energy结论有真实measurement来源或明确estimate标签。；验证口径：useful-work/second与完整成本同报，所有energy结论有真实measurement来源或明确estimate标签。
 - **失败/回退动作**：IPC×假定Fmax、vendor power estimate冒充实测、删除负收益样本。
 - **来源覆盖**：performance hypotheses, physical evidence integrity。；来源 SRC-02:932-1032, architecture-review.md。
+- **执行者目标**：把“测量板上性能而非推断功耗”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先锁定exact part/tool/license和接口，再构建。所有bitstream、约束、时序报告和板卡日志必须对应同一source hash；禁止用仿真或另一family代替实板证据。
+- **建议工作顺序**：核对exact board/part/tool/license输入；冻结source/constraints/image与可复现脚本；执行单元/构建/时序或对应工艺任务；核对真实报告和设备/映像ID；运行共同corpus与negative controls；归档hash、日志、限制和恢复步骤；未满足门槛则明确blocked并反馈架构。
+- **可接受完成**：useful-work/second与完整成本同报，所有energy结论有真实measurement来源或明确estimate标签。
+- **何时停止求助**：主要风险是错误part、旧bitstream、PS/DDR/coherence假设、报告缺失仍绿灯。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：reproducible performance与可选power报告。；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：SRC-02:932-1032, architecture-review.md。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### H-034 — 定义可选 DFX 研究 gate
@@ -591,6 +822,13 @@ flowchart TD
 - **验收证据**：决策明确功能/资源收益与切换成本；任何实现需证明旧事务排空、隔离与恢复后签名相同。；验证口径：决策明确功能/资源收益与切换成本；任何实现需证明旧事务排空、隔离与恢复后签名相同。
 - **失败/回退动作**：为instruction N动态生成ALU的说法、在有inflight memory时直接重配区域。
 - **来源覆盖**：SRC-02 partial reconfiguration, advanced research preservation。；来源 architecture-review.md, SRC-02:1033-1070。
+- **执行者目标**：把“定义可选 DFX 研究 gate”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先锁定exact part/tool/license和接口，再构建。所有bitstream、约束、时序报告和板卡日志必须对应同一source hash；禁止用仿真或另一family代替实板证据。
+- **建议工作顺序**：核对exact board/part/tool/license输入；冻结source/constraints/image与可复现脚本；执行单元/构建/时序或对应工艺任务；核对真实报告和设备/映像ID；运行共同corpus与negative controls；归档hash、日志、限制和恢复步骤；未满足门槛则明确blocked并反馈架构。
+- **可接受完成**：决策明确功能/资源收益与切换成本；任何实现需证明旧事务排空、隔离与恢复后签名相同。
+- **何时停止求助**：主要风险是错误part、旧bitstream、PS/DDR/coherence假设、报告缺失仍绿灯。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：DFX architecture decision、isolated-region contract或有据拒绝结果。；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：architecture-review.md, SRC-02:1033-1070。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### H-035 — 冻结 FPGA release evidence
@@ -606,6 +844,13 @@ flowchart TD
 - **验收证据**：每claim可定位同part/tool/image/ELF/signature，未知板/未fit profile不算成功。；验证口径：每claim可定位同part/tool/image/ELF/signature，未知板/未fit profile不算成功。
 - **失败/回退动作**：仅一份bitstream无源配置，或使用未经授权的第三方IP归档。
 - **来源覆盖**：reproducible real prototype deliverable。；来源 references.md, validation-plan.md。
+- **执行者目标**：把“冻结 FPGA release evidence”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先锁定exact part/tool/license和接口，再构建。所有bitstream、约束、时序报告和板卡日志必须对应同一source hash；禁止用仿真或另一family代替实板证据。
+- **建议工作顺序**：核对exact board/part/tool/license输入；冻结source/constraints/image与可复现脚本；执行单元/构建/时序或对应工艺任务；核对真实报告和设备/映像ID；运行共同corpus与negative controls；归档hash、日志、限制和恢复步骤；未满足门槛则明确blocked并反馈架构。
+- **可接受完成**：每claim可定位同part/tool/image/ELF/signature，未知板/未fit profile不算成功。
+- **何时停止求助**：主要风险是错误part、旧bitstream、PS/DDR/coherence假设、报告缺失仍绿灯。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：FPGA release manifest、board operation guide、完整已知限制。；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：references.md, validation-plan.md。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### V-077 — 将同一证据协议带到真实 FPGA
@@ -621,6 +866,13 @@ flowchart TD
 - **验收证据**：真实器件运行可确认、trace 无丢失或显式 overflow 失败，结果与仿真及 reference 一致；无法全 trace 的结论范围明确降为已观察窗口/签名。；验证口径：真实器件运行可确认、trace 无丢失或显式 overflow 失败，结果与仿真及 reference 一致；无法全 trace 的结论范围明确降为已观察窗口/签名。
 - **失败/回退动作**：只综合便称板测、JTAG 下载成功当程序通过、带宽不足无声抽样却声称完整差分。
 - **来源覆盖**：SRC-03 §FPGA 原型与验证路线；GW5A/Zynq/Virtex UltraScale+ 用户平台要求。；来源 VR-003, VR-008；具体器件与工具主源见 platform-plan.md。
+- **执行者目标**：把“将同一证据协议带到真实 FPGA”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先证明检查器能抓到真实错误，再接受正例。每个测试必须物化输入/seed/期望和排除账本；不可用空套件、mock echo或静默skip取得通过。完成前加入一个负控制并保存首个差异。
+- **建议工作顺序**：冻结该任务输入、版本与capability交集；展开有限case/seed/budget manifest；实现真实检查器并接入负控制；执行正控制和故障注入；闭合计划/执行/通过/失败/unsupported计数；最小化失败并建立replay；阶段负责人签收或阻断后续gate。
+- **可接受完成**：真实器件运行可确认、trace 无丢失或显式 overflow 失败，结果与仿真及 reference 一致；无法全 trace 的结论范围明确降为已观察窗口/签名。
+- **何时停止求助**：主要风险是静默skip、mock echo、空覆盖率、把deferred当成功。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：平台/run/profile 关联的硬件证据包。；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：VR-003, VR-008；具体器件与工具主源见 platform-plan.md。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### V-079 — 验证观测逻辑可移除与平台可移植
@@ -636,6 +888,13 @@ flowchart TD
 - **验收证据**：观测不反馈功能路径，wrapper 实现满足同一逻辑合同；厂商特定能力显式封装，不进入 core 语义。；验证口径：观测不反馈功能路径，wrapper 实现满足同一逻辑合同；厂商特定能力显式封装，不进入 core 语义。
 - **失败/回退动作**：仿真 DPI RAM 隐藏 FPGA collision 行为、删探针改变 arbitration、将 Verilator 测试当 ASIC equivalence/timing proof。
 - **来源覆盖**：SRC-03 §same architectural machine/dynamic physical substrate；可移植性与 ASIC 后续转换。；来源 VR-003, VR-008, VR-011。
+- **执行者目标**：把“观测逻辑可移除与平台可移植”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **执行者须知**：先证明检查器能抓到真实错误，再接受正例。每个测试必须物化输入/seed/期望和排除账本；不可用空套件、mock echo或静默skip取得通过。完成前加入一个负控制并保存首个差异。
+- **建议工作顺序**：冻结该任务输入、版本与capability交集；展开有限case/seed/budget manifest；实现真实检查器并接入负控制；执行正控制和故障注入；闭合计划/执行/通过/失败/unsupported计数；最小化失败并建立replay；阶段负责人签收或阻断后续gate。
+- **可接受完成**：观测不反馈功能路径，wrapper 实现满足同一逻辑合同；厂商特定能力显式封装，不进入 core 语义。
+- **何时停止求助**：主要风险是静默skip、mock echo、空覆盖率、把deferred当成功。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
+- **交付说明**：交接时提供输出：instrumentation noninterference 与跨 wrapper 行为报告。；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **参考资料**：VR-003, VR-008, VR-011。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ## 6. 阶段级阻塞清单
@@ -653,3 +912,4 @@ flowchart TD
 | 日期 | 事件 | 证据 | 负责人 | 下一步 |
 |---|---|---|---|---|
 | 2026-09-29 | 初始团队指南由完整架构/验证/平台计划生成 | 本文件、source-inventory、references | 规划集成 | 各团队冻结输入并更新上表 |
+| 2026-09-29 | 面向较小模型/新工程师补充自然语言执行说明 | 本文件任务卡的执行者目标/须知/建议顺序/停止条件 | 规划集成 | 实施团队按卡执行并回填证据 |
