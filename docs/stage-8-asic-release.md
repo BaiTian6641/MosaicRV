@@ -4,12 +4,12 @@
 
 ## 1. 这个子系统是做什么的
 
-将最终候选common RTL转换为有真实技术输入、DFT/STA/物理签核边界的ASIC设计，并发布能力不超出证据的可复现release。
+将本次已验收的 common RTL 候选按声明等级转换为有真实技术输入、DFT/STA/物理签核边界的 ASIC 设计，并独立发布证据不越界的可复现 release；最终高性能候选另由 I-084 的实测决策选定。
 
 ## 2. 为什么存在 / 上游输入
 
-- 上游输入：S1-S7最终候选与全部correctness/hardware证据。
-- 已有依赖：最终架构候选、合法PDK/libraries/SRAM/IO/DFT/foundry规则。
+- 上游输入：I-080 功能正确性候选、同版 ASIC H-036–H-046 物理链；联合广告三板时另收 S7/H-035，最终高性能声明另收 I-084。
+- 已有依赖：已选 RTL/profile、合法 PDK/libraries/SRAM/IO/DFT/foundry 规则，不以 FPGA 三板作为 ASIC 的先决条件。
 - 本阶段输出：本次规划不承诺流片；缺PDK/硅样品则相应阶段blocked。
 - 首要原则：ASIC不是FPGA wrapper替换。PDK/SRAM/scan/STA/power/DRC-LVS每个都真实gate；没有foundry认可的signoff不能叫tapeout-ready。
 
@@ -19,15 +19,15 @@
 
 ```mermaid
 flowchart TD
-  CAND[Final Correct Candidate] --> TECH[PDK/Libraries/SRAM/IO]
+  CAND[Selected Correct RTL/Profile Candidate] --> TECH[PDK/Libraries/SRAM/IO]
   TECH --> SYNTH[ASIC Synthesis + Equivalence]
   SYNTH --> DFT[Scan/MBIST/ATPG]
   DFT --> PHYS[Floorplan/CTS/Route]
   PHYS --> SIGN[STA/Power/IR-EM/DRC-LVS]
   SIGN --> BRINGUP[Silicon Bring-up Runbook]
   BRINGUP --> READY[H-047 Claim Audit]
-  FPGA[Three-FPGA Evidence] --> CAND
-  READY --> RELEASE[I-086 Reproducible Release]
+  FPGA[Optional Three-FPGA Evidence] -. only combined board claim .-> RELEASE[I-086 Reproducible Release]
+  READY --> RELEASE
 ```
 
 图中的箭头是数据/控制依赖；性能策略不得在正确性前打开。每个分支可以分给不同负责人，但跨接口字段以 [implementation-plan.md](implementation-plan.md) §1.3 和本文件任务卡为准，不能各团队私改。
@@ -302,66 +302,66 @@ flowchart TD
 ### H-047 — 审核 ASIC-ready 与 tapeout 声明
 
 - **负责/门禁**：ASIC负责人；物理/转换证据闭合。
-- **前置依赖**：H-046, H-035；仍受 implementation-plan 集成依赖表约束。
-- **做什么**：逐claim检查对应artifact/责任人/approval；区分portable RTL、ASIC synthesized、routed、signoff complete、taped out、silicon validated六种状态。
-- **输入数据/接口**：RTL/profile/source locks、三板证据、全部ASIC signoff与license记录。
-- **输出与交接**：release readiness report、已完成/外部阻断清单。
-- **设计取舍**：先最小安全物理路径，再扩展容量；FPGA和ASIC证据不互替
-- **实现微步骤**：核对exact board/part/tool/license输入；冻结source/constraints/image与可复现脚本；执行单元/构建/时序或对应工艺任务；核对真实报告和设备/映像ID；运行共同corpus与negative controls；归档hash、日志、限制和恢复步骤；未满足门槛则明确blocked并反馈架构。
-- **主要阻塞风险**：错误part、旧bitstream、PS/DDR/coherence假设、报告缺失仍绿灯；阻断规则：把某工具返回0作为跨阶段总完成标准。
-- **验收证据**：每声明不超证据范围；未获PDK/许可/硅样品的阶段明确阻断而非伪完成。；验证口径：每声明不超证据范围；未获PDK/许可/硅样品的阶段明确阻断而非伪完成。
-- **失败/回退动作**：把某工具返回0作为跨阶段总完成标准。
+- **前置依赖**：H-046；只在联合广告 FPGA 三板时另收 H-035，不把 FPGA 验收作为 ASIC 审核的无条件前置。
+- **做什么**：对同一 ASIC candidate 的 source/profile/工艺/mode/许可逐声明审核，区分 portable RTL、ASIC synthesized、routed、signoff complete、taped out、silicon validated。
+- **输入数据/接口**：H-036–H-046 原始报告和批准记录、候选 RTL/config/netlist/layout hash、foundry 许可与 waiver；联合三板 claim 才附 H-035。
+- **输出与交接**：逐等级 PASS/BLOCKED/NOT_CLAIMED 的 ASIC readiness report、缺口及责任人交 I-085。
+- **设计取舍**：板卡证据与 ASIC 工艺证据相互独立；下级已证明等级可列出，但不能借此称流片完成。
+- **实现微步骤**：锁 candidate/hash 与声明等级→检查库/PDK 权限→逐 mode/corner 核 H-039–H-045 与 H-046 bring-up 测点→审 waivers 和 reviewer signoff→按等级出结论及原始 artifact 路径。
+- **主要阻塞风险**：错候选报告、缺工艺许可、把开源综合视为签核、把尚未制造/收到的样片称已验收；只阻断受影响 ASIC 声明。
+- **验收证据**：所广告等级的每项同版物理/DFT/许可门禁真实 PASS；缺 PDK/许可/硅样本的高等级保持 BLOCKED 或 NOT_CLAIMED。
+- **失败/回退动作**：阻断缺报告/许可/批准的 ASIC 等级，保留已有可证明的更低等级与 candidate hash；不回填伪 PASS。
 - **来源覆盖**：portability to real design, honest end-to-end evidence。；来源 references.md, verification.md。
-- **执行者目标**：把“审核 ASIC-ready 与 tapeout 声明”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
-- **执行者须知**：先锁定exact part/tool/license和接口，再构建。所有bitstream、约束、时序报告和板卡日志必须对应同一source hash；禁止用仿真或另一family代替实板证据。
-- **建议工作顺序**：核对exact board/part/tool/license输入；冻结source/constraints/image与可复现脚本；执行单元/构建/时序或对应工艺任务；核对真实报告和设备/映像ID；运行共同corpus与negative controls；归档hash、日志、限制和恢复步骤；未满足门槛则明确blocked并反馈架构。
-- **可接受完成**：每声明不超证据范围；未获PDK/许可/硅样品的阶段明确阻断而非伪完成。
-- **何时停止求助**：主要风险是错误part、旧bitstream、PS/DDR/coherence假设、报告缺失仍绿灯。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
-- **交付说明**：交接时提供输出：release readiness report、已完成/外部阻断清单。；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **执行者目标**：审核实际声称的 ASIC 等级并给 I-085 一份可复查的逐级证据结论。
+- **执行者须知**：报告必须来自同一候选工艺与版本；H-035 只用于另外声称的 FPGA 三板，不把跨技术平台的成功拼作一个 ASIC 签核。
+- **建议工作顺序**：冻结声明/候选→核许可→按等级查签核项目与批准人→核哈希/waiver→逐声明 PASS 或阻断。
+- **可接受完成**：真实报告支撑每个广告等级；缺失外部输入有负责人与恢复动作但不能签通过。
+- **何时停止求助**：库/PDK、签核模式、审批者或候选身份缺失时保存具体缺口并交 owner，不能臆测通过。
+- **交付说明**：交付 candidate/mode/corner 索引、逐等级 verdict、原始报告与 blocker ledger 给 I-085；更新 Track Log。
 - **参考资料**：references.md, verification.md。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### I-085 — 完成 ASIC-ready portability gate
 
 - **负责/门禁**：ASIC集成负责人；技术转换证据。
-- **前置依赖**：I-081, I-084；仍受 implementation-plan 集成依赖表约束。
-- **做什么**：对最终 common RTL 实施 wrapper 替换与等价、ASIC synthesis/physical flow；逐 gate 审核，不从 FPGA Fmax 外推 silicon。
-- **输入数据/接口**：PDK/libraries/SRAM/DFT/STA/physical/signoff
-- **输出与交接**：ASIC conversion evidence
-- **设计取舍**：缺PDK/signoff即阻断，不叫tapeout-ready
-- **实现微步骤**：取得合法技术输入；转换SRAM/clock/reset/DFT；完成synthesis/equivalence/DFT；完成物理/STA/power/DRC-LVS；制定bring-up和acceptance；逐项审核claim等级；由H-047验收。
-- **主要阻塞风险**：FPGA timing外推、开源flow误当foundry、scan不完整；阻断规则：仅成功运行 open-source synthesis 就宣称可流片。
-- **验收证据**：每个必需 ASIC gate 有真报告；若 PDK/库/许可未提供，明确该阶段 blocked 且不声称 tapeout-ready。；验证口径：signoff report bundle
-- **失败/回退动作**：报告外部依赖未完成
-- **来源覆盖**：portable real design, later ASIC conversion。；来源 platform-plan.md。
-- **执行者目标**：把“ASIC-ready portability gate”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
-- **执行者须知**：先做合同和最小正确实现，再做优化。不要从相邻任务猜字段；所有身份、credit、reset、flush和背压边界必须来自本任务及implementation-plan。完成前至少覆盖一个正常路径、一个资源冲突和一个取消/恢复路径。
-- **建议工作顺序**：取得合法技术输入；转换SRAM/clock/reset/DFT；完成synthesis/equivalence/DFT；完成物理/STA/power/DRC-LVS；制定bring-up和acceptance；逐项审核claim等级；由H-047验收。
-- **可接受完成**：每个必需 ASIC gate 有真报告；若 PDK/库/许可未提供，明确该阶段 blocked 且不声称 tapeout-ready。
-- **何时停止求助**：主要风险是FPGA timing外推、开源flow误当foundry、scan不完整。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
-- **交付说明**：交接时提供输出：ASIC conversion evidence；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **前置依赖**：I-080；另经 implementation-plan 集成表要求 H-047；最终高性能 ASIC 配置另取 I-084，同一 ASIC 目标不依赖三板 I-081。
+- **做什么**：仅在广告ASIC-ready时对该候选common RTL做wrapper替换与等价、synthesis/DFT和目标工艺的physical/signoff；不以FPGA Fmax外推硅指标，也不作为普通p0发布前置。
+- **输入数据/接口**：声明等级及RTL/profile/source hash、授权PDK/libraries/SRAM/clock/DFT模型、SDC/modes/corners、H-036..H-047候选对应的报告。
+- **输出与交接**：按候选hash/工艺/mode索引的ASIC conversion evidence及声明等级/缺口账本，交I-086仅用于广告的ASIC claim。
+- **设计取舍**：portable RTL、synthesized、routed、signoff complete、taped out、silicon validated分别声明；缺PDK/signoff不能称tapeout-ready。
+- **实现微步骤**：冻结候选和授权输入；转换SRAM/clock/reset/DFT；核对等价与故障覆盖；逐mode核对多corner route STA、power/IR/EM、DRC/LVS/ERC/post-route等价及waivers；经H-047审阅每种声明的最高可证明等级。
+- **主要阻塞风险**：FPGA timing外推、open-source synthesis冒充foundry signoff、报告跨候选或scan遗漏；标明受影响ASIC claim与责任人，不转移到p0。
+- **验收证据**：对应宣传等级的每项必需ASIC gate均有同候选真实报告；缺PDK/库/许可时只保留可证明的较低等级，不宣传tapeout-ready。
+- **失败/回退动作**：标该ASIC claim blocked，附候选hash、具体工艺/许可/报告缺口和外部owner；普通p0 release独立推进。
+- **来源覆盖**：portable real design, later ASIC conversion；来源 platform-plan.md。
+- **执行者目标**：确定ASIC-ready声明实际由哪一级工艺证据支撑，而不是使ASIC转换成为软件/FPGA发布的必经关卡。
+- **执行者须知**：只对明确广告的ASIC候选审计；同一候选与corner/mode证据不得拼接其他版本。
+- **建议工作顺序**：锁候选/授权→逐gate核对报告→列waiver/缺口→H-047审计→交I-086声明等级。
+- **可接受完成**：广告的等级与H-047和逐项报告一致；缺失输入仅阻断相应ASIC claim。
+- **何时停止求助**：PDK、library、DFT/foundry报告或候选身份缺失时交上游owner并记录原始失败记录，不推测通过。
+- **交付说明**：提供候选/工艺/mode报告路径、hash、声明等级与阻断项；更新Track Log，不预填结果。
 - **参考资料**：platform-plan.md。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ### I-086 — 交付可复现 processor release
 
 - **负责/门禁**：release负责人；可复现发布。
-- **前置依赖**：I-085, I-091；仍受 implementation-plan 集成依赖表约束。
-- **做什么**：从零重建各支持配置、重放有限验收集，归档 Git commit、submodule closure、日志、失败排除理由与用户操作手册；未达 gate 的功能不标 supported。
-- **输入数据/接口**：Git/submodules/tools/artifacts/licenses/limits
-- **输出与交接**：final release bundle
-- **设计取舍**：不发布未证能力，证据不足即blocked
-- **实现微步骤**：收集所有profile/manifests/source locks；从零重建与重放有限集合；审计第三方license和可发布性；写操作/恢复/限制手册；归档失败和deferred状态；独立执行者验证命令；发布release。
-- **主要阻塞风险**：依赖本机环境、浮upstream、无恢复能力；阻断规则：引用工作目录未提交文件、变动 upstream branch 或无法恢复的本机环境。
-- **验收证据**：独立执行者能用锁定输入得到相同 architectural signatures；每 hardware/ASIC claim 可追溯到具体产物。；验证口径：clean reproduction
-- **失败/回退动作**：保持candidate而非release
-- **来源覆盖**：end-to-end deliverable, reproducibility, reference tracking。；来源 validation-plan.md, platform-plan.md, references.md。
-- **执行者目标**：把“交付可复现 processor release”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
-- **执行者须知**：先做合同和最小正确实现，再做优化。不要从相邻任务猜字段；所有身份、credit、reset、flush和背压边界必须来自本任务及implementation-plan。完成前至少覆盖一个正常路径、一个资源冲突和一个取消/恢复路径。
-- **建议工作顺序**：收集所有profile/manifests/source locks；从零重建与重放有限集合；审计第三方license和可发布性；写操作/恢复/限制手册；归档失败和deferred状态；独立执行者验证命令；发布release。
-- **可接受完成**：独立执行者能用锁定输入得到相同 architectural signatures；每 hardware/ASIC claim 可追溯到具体产物。
-- **何时停止求助**：主要风险是依赖本机环境、浮upstream、无恢复能力。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
-- **交付说明**：交接时提供输出：final release bundle；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **前置依赖**：I-080, V-080；仅广告的可选claim需另过其claim gate（例如三板FPGA H-035、RVA23三板H-050、ASIC-ready I-085、ASIC Secure H-051、DCLS I-091以及按目标H-048/H-049）；仍受 implementation-plan 集成依赖表约束。
+- **做什么**：从零重建实际支持的配置，重放有限验收集；对每个广告claim核对独立门禁，不让ASIC、RVA23或DCLS的可选失败阻断p0处理器发布。
+- **输入数据/接口**：I-080/V-080的p0验收、claim/profile矩阵、Git/submodules/tools/artifacts/licenses/limits；广告硬件或安全能力时加入对应实板/工艺/故障证据。
+- **输出与交接**：按profile/board/mode列广告声明、gate、证据hash和unsupported/blocked理由的final release bundle、操作/恢复指南。
+- **设计取舍**：静态Depends只列无条件先决；未过条件门禁的能力不得广告，p0 cacheless ordered-memory two-cluster RV64IM仍可独立发布。
+- **实现微步骤**：冻结p0与可选声明表；清洁重建/重放p0；按实际广告逐项审H-035/H-050/I-085/H-051/I-091/H-048/H-049适用门禁；核对同源part/tool/image/ELF/签名或ASIC candidate/mode/corner；审license，交独立执行者执行program/run/recover。
+- **主要阻塞风险**：浮动upstream、未提交文件、无恢复步骤、把模拟/其他板或其他候选代替目标证据；记录仅受影响的claim及owner。
+- **验收证据**：独立执行者用锁定输入重现p0 architectural signatures；每一广告硬件/安全/ASIC claim均有其对应门禁和可追溯产物，未广告能力不成为p0阻塞。
+- **失败/回退动作**：撤销未闭合可选claim及能力广告；p0未闭合则保留整体candidate而非release，并交出失败命令、hash、日志和owner。
+- **来源覆盖**：end-to-end deliverable, reproducibility, reference tracking；来源 validation-plan.md, platform-plan.md, references.md。
+- **执行者目标**：发布可复现p0，并只在附加门禁通过后发布各可选能力。
+- **执行者须知**：I-091是DCLS功能验收，不等于安全认证；RVA23 I-098是上板前验收，硬件声明还需H-050；ASIC-ready I-085不属于所有release的依赖。
+- **建议工作顺序**：冻结claim矩阵→重建p0→逐条匹配广告与gate→删未通过的广告→独立重放→归档许可、恢复和限制。
+- **可接受完成**：p0重放成立且广告仅覆盖已闭合gate；安全等级或硅后状态未经正式证据不得宣称。
+- **何时停止求助**：p0复现失败则整体阻断；可选证据缺失时只隔离对应claim，记证据位置、缺项与责任人。
+- **交付说明**：提交逐claim证据路径/版本/hash及撤销的广告清单，更新Track Log而不预填测试结果。
 - **参考资料**：validation-plan.md, platform-plan.md, references.md。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 

@@ -28,12 +28,13 @@ flowchart TD
   EVENT --> CHECK[Directed/Fuzz/ACT/Formal/Litmus]
   XS --> CHECK
   CHECK --> NEG[N01-N24 Negative Controls]
-  NEG --> TRIAGE[V-038/V-039 Minimize + Replay]
-  TRIAGE --> CLOSURE[V-078 Evidence Closure]
-  CLOSURE --> RELEASE[V-080 Capability-safe Release]
+  NEG --> TRIAGE[V-038 Minimize seeded V-021/V-022 RTL fault]
+  TRIAGE --> REPLAY[V-039 Reset + Snapshot Replay]
+  REPLAY --> CLOSURE[V-078 Evidence Closure]
+  CLOSURE --> RELEASE[I-086 Claim-scoped Release]
 ```
 
-图中的箭头是数据/控制依赖；性能策略不得在正确性前打开。每个分支可以分给不同负责人，但跨接口字段以 [implementation-plan.md](implementation-plan.md) §1.3 和本文件任务卡为准，不能各团队私改。
+图中的箭头是证据交接而非把可选阶段列成 p0 前提；无自然故障时，V-021 已激活的 RTL 注入负例可交给 V-038/039，V-024 仅校准 trace 完整性，不能替代 RTL mismatch。性能策略不得在正确性前打开。每个分支可分给不同负责人，但跨接口字段以 [implementation-plan.md](implementation-plan.md) §1.3 和本文件任务卡为准，不能各团队私改。
 
 ## 4. 团队分工与进度追踪
 
@@ -412,22 +413,22 @@ flowchart TD
 ### V-038 — 最小化失败而不改变故障性质
 
 - **负责/门禁**：验证负责人；验证证据闭合。
-- **前置依赖**：V-024, V-037；仍受 implementation-plan 集成依赖表约束。
-- **做什么**：删除无关指令/数据/刺激，保持目标 opcode、trap 前提、hart 数与调度故障可达；每次缩减用实际 DUT+REF 复核，禁止以改变 skip/mask 换取“复现”。
-- **输入数据/接口**：真实 mismatch case、首差异指纹与 immutable manifest。
-- **输出与交接**：最小 ELF、原始到最小化 provenance 与 reduction log。
+- **前置依赖**：V-021, V-024, V-037；V-022 注入路径可选，仍受 implementation-plan 集成依赖表约束。
+- **做什么**：固定 V-021 或 V-022 的已执行 RTL 注入 site/seed/build，先跑无注入 PASS 与真实 DUT+REF 注入 FAIL，再删除无关指令/数据/刺激；每次缩减保持 opcode/trap/hart/调度前提、同一首差异类别，不能靠修改 skip/mask。
+- **输入数据/接口**：V-021 p0 ALU/CSR（或 V-022 PC/trap）实际 RTL mismatch、原始 ELF/事件/seed、无注入正例、首差异与 immutable manifest；V-037 自然 fuzz 错误不是必需。
+- **输出与交接**：最小 ELF、注入 site/开关/hash、原始到最小化 provenance 与 reduction log，移交 V-039 双路径 replay。
 - **设计取舍**：有限集合/模型边界明确，不用样本数冒充形式证明
-- **实现微步骤**：冻结该任务输入、版本与capability交集；展开有限case/seed/budget manifest；实现真实检查器并接入负控制；执行正控制和故障注入；闭合计划/执行/通过/失败/unsupported计数；最小化失败并建立replay；阶段负责人签收或阻断后续gate。
-- **主要阻塞风险**：静默skip、mock echo、空覆盖率、把deferred当成功；阻断规则：mismatch 缩成另一个 timeout、只在 reference 运行、改平台/异常前提却宣称同一 bug。
-- **验收证据**：最小 case 在固定环境重复三次产生同一首差异类别和相关字段；原始 case 永久保留。；验证口径：最小 case 在固定环境重复三次产生同一首差异类别和相关字段；原始 case 永久保留。
-- **失败/回退动作**：mismatch 缩成另一个 timeout、只在 reference 运行、改平台/异常前提却宣称同一 bug。
+- **实现微步骤**：锁原始 ELF/seed/event/build/compare rule；运行无注入 PASS 和注入 FAIL；逐步缩减且每步重跑 DUT+REF；固定输入连续复现三次；封存原始与最小 artifact，移交 V-039。
+- **主要阻塞风险**：故障未到达 RTL 执行路径、trace-only 人造 mismatch、缩减成为另一个 timeout；阻断规则：只在 reference 运行、改平台/异常前提却宣称同一 bug。
+- **验收证据**：无注入正例通过，最小注入 case 在固定环境三次报告同一首差异类别和相关字段，原始 case 永久保留；无需等待自然 defect。
+- **失败/回退动作**：若故障未激活或指纹变化，撤销缩减，保留原始 mismatch 与首个失败缩减步骤，阻断 V-039 交接。
 - **来源覆盖**：SRC-03 §XiangShan 工程方法；failure triage。；来源 VR-003, VR-010。
 - **执行者目标**：把“最小化失败而不改变故障性质”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
 - **执行者须知**：先证明检查器能抓到真实错误，再接受正例。每个测试必须物化输入/seed/期望和排除账本；不可用空套件、mock echo或静默skip取得通过。完成前加入一个负控制并保存首个差异。
-- **建议工作顺序**：冻结该任务输入、版本与capability交集；展开有限case/seed/budget manifest；实现真实检查器并接入负控制；执行正控制和故障注入；闭合计划/执行/通过/失败/unsupported计数；最小化失败并建立replay；阶段负责人签收或阻断后续gate。
-- **可接受完成**：最小 case 在固定环境重复三次产生同一首差异类别和相关字段；原始 case 永久保留。
-- **何时停止求助**：主要风险是静默skip、mock echo、空覆盖率、把deferred当成功。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
-- **交付说明**：交接时提供输出：最小 ELF、原始到最小化 provenance 与 reduction log。；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **建议工作顺序**：锁输入和 RTL 注入；正/负例对照；逐次缩减并比较首差异；三次重复；交付两个 ELF/hash 和 reduction log。
+- **可接受完成**：无注入正例 PASS，最小注入 case 三次同类首差异，原始 case 可重放且保留。
+- **何时停止求助**：无 RTL 注入激活证据、比较器漏报或缩减更改故障类别时标 Blocked，向 V-021/V-022 owner 请求真实注入 site 与首差异，不以 V-024 trace 负例顶替。
+- **交付说明**：给 V-039 原始/最小 ELF、profile/seed/event/build/site/规则 hash、首差异 hart/event/field 和缩减日志；状态不因单次 mismatch 标 Accepted。
 - **参考资料**：VR-003, VR-010。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
@@ -435,21 +436,21 @@ flowchart TD
 
 - **负责/门禁**：验证负责人；验证证据闭合。
 - **前置依赖**：V-038；仍受 implementation-plan 集成依赖表约束。
-- **做什么**：对一个真实故障分别从 reset 和最近 snapshot 重放，比较事件 hash 直到首差异；若采用 LightSSS，遵循其禁止混用的 debug flags 并验证 fork/thread 行为。
-- **输入数据/接口**：DUT/reference/RAM/device/PRNG/lease/event cursor 状态、波形 ROI。
-- **输出与交接**：replay bundle 与状态完整性证明。
+- **做什么**：保持 V-038 的 RTL 注入开关/seed/site 与全部事件，分别从 reset 和首差异前的完整 snapshot 重放到同一首差异；关闭注入后两路径跑正例；若采用 LightSSS，遵循其禁止混用的 debug flags 并验证 fork/thread 行为。
+- **输入数据/接口**：V-038 最小 ELF/注入构建与原始事件、DUT/reference/RAM/device/PRNG/lease/event cursor/RTL 注入状态、波形 ROI。
+- **输出与交接**：reset/snapshot 正负双路径 replay bundle、event hashes 与状态完整性证明。
 - **设计取舍**：有限集合/模型边界明确，不用样本数冒充形式证明
-- **实现微步骤**：冻结该任务输入、版本与capability交集；展开有限case/seed/budget manifest；实现真实检查器并接入负控制；执行正控制和故障注入；闭合计划/执行/通过/失败/unsupported计数；最小化失败并建立replay；阶段负责人签收或阻断后续gate。
-- **主要阻塞风险**：静默skip、mock echo、空覆盖率、把deferred当成功；阻断规则：只保存 CPU register、fork 后线程丢失、device/host time 未固定、打开 trace 改变故障但无解释。
-- **验收证据**：两条重放路径复现同一首差异；snapshot 显式包括全部外部非确定性和事务状态。；验证口径：两条重放路径复现同一首差异；snapshot 显式包括全部外部非确定性和事务状态。
-- **失败/回退动作**：只保存 CPU register、fork 后线程丢失、device/host time 未固定、打开 trace 改变故障但无解释。
+- **实现微步骤**：锁 V-038 注入 site/seed 与事件；保存首差异前快照和 cursor；从 reset 与 snapshot 各跑注入/无注入；逐事件比对 hash 及首差异；保存四条路径的退出和状态证据。
+- **主要阻塞风险**：注入开关/PRNG/事务未入快照、fork 后线程丢失、device/host time 未固定、打开 trace 改变故障但无解释。
+- **验收证据**：reset/snapshot 两条注入路径同一首差异，无注入路径均 PASS；快照含 RTL 注入状态及全部外部非确定性/事务状态，无需自然 fuzz defect。
+- **失败/回退动作**：任一路径无法复现即停交接，回退 V-038 冻结输入并找首个 event hash 差异；不得把 reset-only 结果冒充 snapshot replay。
 - **来源覆盖**：SRC-03 §XiangShan 的工程方法很适合借鉴。；来源 VR-003, VR-008。
 - **执行者目标**：把“从零与 checkpoint 的 replay”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
 - **执行者须知**：先证明检查器能抓到真实错误，再接受正例。每个测试必须物化输入/seed/期望和排除账本；不可用空套件、mock echo或静默skip取得通过。完成前加入一个负控制并保存首个差异。
-- **建议工作顺序**：冻结该任务输入、版本与capability交集；展开有限case/seed/budget manifest；实现真实检查器并接入负控制；执行正控制和故障注入；闭合计划/执行/通过/失败/unsupported计数；最小化失败并建立replay；阶段负责人签收或阻断后续gate。
-- **可接受完成**：两条重放路径复现同一首差异；snapshot 显式包括全部外部非确定性和事务状态。
-- **何时停止求助**：主要风险是静默skip、mock echo、空覆盖率、把deferred当成功。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
-- **交付说明**：交接时提供输出：replay bundle 与状态完整性证明。；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **建议工作顺序**：冻结 V-038 证据；记录完整快照；分别重跑 reset/snapshot 的注入及无注入对照；比对首差异并归档。
+- **可接受完成**：双路径注入同一首差异、双路径无注入 PASS，全部 snapshot 状态有 hash。
+- **何时停止求助**：缺 event cursor、RTL 注入开关或设备状态、或快照与 reset 首差异不同，标 Blocked 并请求 V-038/harness owner 补字段，不降级成 reset-only。
+- **交付说明**：把四条路径的 ELF/build/site/seed/snapshot/event/输出 hash 与首差异 hart/event/field 交给 V-078，状态不因单次 replay 标 Accepted。
 - **参考资料**：VR-003, VR-008。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
@@ -567,21 +568,21 @@ flowchart TD
 
 - **负责/门禁**：多hart验证负责人；验证证据闭合。
 - **前置依赖**：V-012, V-024, V-039, V-075；仍受 implementation-plan 集成依赖表约束。
-- **做什么**：每个平台运行其容量 profile 的同一 ELF/输入；板上保存 signature、首末 commit、trap/IRQ、overflow flags，经 host 离线 reference replay；高带宽 trace 不足时分窗口重跑并保留窗口连接 checkpoint。
-- **输入数据/接口**：GW5A、Zynq、Virtex UltraScale+ 平台实现与板卡决策里程碑、硬件 trace/装载协议。
-- **输出与交接**：平台/run/profile 关联的硬件证据包。
+- **做什么**：逐个已声明目标（GW5A、Zynq、Virtex UltraScale+）运行其容量 profile 的同一 ELF/输入，保存 signature、首末 commit、trap/IRQ、overflow flags，经 host 离线 reference replay；不足带宽时分窗口重跑并保存连接 checkpoint。
+- **输入数据/接口**：此次声明目标的板卡/实现决议与硬件 trace/装载协议；其他目标保留 deferred，日后声明须分别补测。
+- **输出与交接**：逐目标板卡/run/profile 证据包及其余目标 deferred 账本；交 V-079 核对相应 wrapper。
 - **设计取舍**：有限集合/模型边界明确，不用样本数冒充形式证明
 - **实现微步骤**：冻结该任务输入、版本与capability交集；展开有限case/seed/budget manifest；实现真实检查器并接入负控制；执行正控制和故障注入；闭合计划/执行/通过/失败/unsupported计数；最小化失败并建立replay；阶段负责人签收或阻断后续gate。
 - **主要阻塞风险**：静默skip、mock echo、空覆盖率、把deferred当成功；阻断规则：只综合便称板测、JTAG 下载成功当程序通过、带宽不足无声抽样却声称完整差分。
-- **验收证据**：真实器件运行可确认、trace 无丢失或显式 overflow 失败，结果与仿真及 reference 一致；无法全 trace 的结论范围明确降为已观察窗口/签名。；验证口径：真实器件运行可确认、trace 无丢失或显式 overflow 失败，结果与仿真及 reference 一致；无法全 trace 的结论范围明确降为已观察窗口/签名。
+- **验收证据**：已声明器件各自真实运行可确认、trace 无丢失或显式 overflow 失败，结果与仿真及 reference 一致；无法全 trace 的结论范围降为已观察窗口/签名；未声明板卡不能从其他板卡结果推定通过。
 - **失败/回退动作**：只综合便称板测、JTAG 下载成功当程序通过、带宽不足无声抽样却声称完整差分。
 - **来源覆盖**：SRC-03 §FPGA 原型与验证路线；GW5A/Zynq/Virtex UltraScale+ 用户平台要求。；来源 VR-003, VR-008；具体器件与工具主源见 platform-plan.md。
 - **执行者目标**：把“将同一证据协议带到真实 FPGA”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
 - **执行者须知**：先证明检查器能抓到真实错误，再接受正例。每个测试必须物化输入/seed/期望和排除账本；不可用空套件、mock echo或静默skip取得通过。完成前加入一个负控制并保存首个差异。
 - **建议工作顺序**：冻结该任务输入、版本与capability交集；展开有限case/seed/budget manifest；实现真实检查器并接入负控制；执行正控制和故障注入；闭合计划/执行/通过/失败/unsupported计数；最小化失败并建立replay；阶段负责人签收或阻断后续gate。
-- **可接受完成**：真实器件运行可确认、trace 无丢失或显式 overflow 失败，结果与仿真及 reference 一致；无法全 trace 的结论范围明确降为已观察窗口/签名。
+- **可接受完成**：已声明目标每块真实板卡的运行、reference 一致与 trace 边界证据齐备；其余板卡单列 deferred。
 - **何时停止求助**：主要风险是静默skip、mock echo、空覆盖率、把deferred当成功。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
-- **交付说明**：交接时提供输出：平台/run/profile 关联的硬件证据包。；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **交付说明**：交给 V-079 所声明目标板卡/run/profile 的 ELF/trace/signature/hash/overflow 证据；同时更新 Track Log 与状态，不能拿一个目标替代其他板卡。
 - **参考资料**：VR-003, VR-008；具体器件与工具主源见 platform-plan.md。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
@@ -654,22 +655,22 @@ flowchart TD
 ### I-080 — 完成首次真正 p0 functional prototype gate
 
 - **负责/门禁**：p0集成负责人；首次真实p0 release。
-- **前置依赖**：I-020, I-029, I-037, I-038, I-047, I-076；仍受 implementation-plan 集成依赖表约束。
-- **做什么**：从干净配置执行 make sim PROFILE=p0 与 tools/verify.py 的 scalar-directed-v1、scalar-random-v1、metamorphic-v1、fabric-transition-v1 适用子集；检查 trace 中真实 remote route、WB collision、OoO completion。
-- **输入数据/接口**：两cluster OoO、precise memory、differential、negative controls
-- **输出与交接**：p0 release candidate
-- **设计取舍**：功能正确先于平台性能
-- **实现微步骤**：冻结p0代码和corpus；执行全部适用V任务；证明remote/WB/OoO/recovery实际命中；分析exclusion ledger零未登记；完成known-limit表；接受第三方复跑；通过后启动H物理flow。
-- **主要阻塞风险**：simplified path冒充、skip掩盖、动态路径未触发；阻断规则：只运行简化 I-008 路径，或靠禁用所有 remote/flush corner 获得通过。
-- **验收证据**：所有声明 p0 instructions/CSR/traps 通过、零 mismatch/未解释 skip，negative controls 正确失败；动态路径确被触发。；验证口径：full finite correctness bundle
+- **前置依赖**：I-020, I-029, I-035, I-037, I-038；另须 V-039、V-078，经 implementation-plan 集成表闭合。p0 不依赖 I-036/I-042/I-043/I-047/I-076。
+- **做什么**：从干净配置执行 `make sim PROFILE=p0` 和四套适用 suite，逐项证实有序 RAM/MMIO、双 cluster remote/OoO/WB 冲突、异常与 replay；V-039 采用已激活的真实 RTL 注入而非等待自然 bug。
+- **输入数据/接口**：p0 无 cache 配置、I-035 conservative LQ/forwarding、两 cluster、suite manifests、V-039 reset/snapshot 对照。
+- **输出与交接**：p0 功能 RTL 候选、suite 计数/hash、注入/无注入 replays 和限制矩阵，交 I-086 与三板 H 系列。
+- **设计取舍**：功能 correctness 先于可选 cache/PMU 和板级性能；p0 可单独发布为受限原型。
+- **实现微步骤**：冻结 p0 无 cache/无投机 load；核对 V 适用集；分别运行正例和已激活的 RTL 注入负例；统计每 suite 总数/排除项；定位双 cluster、remote、WB 冲突和顺序 retire；从空输出目录复跑、签收后才开启 H 物理 flow。
+- **主要阻塞风险**：顺序路径冒充 OoO、skip 掩盖、打开 cache 后才通过或动态路径未触发；失败则只阻断 p0，不把 p1 机制降级当补救。
+- **验收证据**：所有 p0 指令/CSR/trap/memory case 通过，零未解释 skip；注入版首次差异在 V-039 两路径可复现，无注入通过；动态路径实际命中。
 - **失败/回退动作**：回到失败子系统并禁止更高gate
 - **来源覆盖**：functional processor prototype, instruction correctness。；来源 validation-plan.md。
 - **执行者目标**：把“首次真正 p0 functional prototype gate”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
 - **执行者须知**：先做合同和最小正确实现，再做优化。不要从相邻任务猜字段；所有身份、credit、reset、flush和背压边界必须来自本任务及implementation-plan。完成前至少覆盖一个正常路径、一个资源冲突和一个取消/恢复路径。
-- **建议工作顺序**：冻结p0代码和corpus；执行全部适用V任务；证明remote/WB/OoO/recovery实际命中；分析exclusion ledger零未登记；完成known-limit表；接受第三方复跑；通过后启动H物理flow。
-- **可接受完成**：所有声明 p0 instructions/CSR/traps 通过、零 mismatch/未解释 skip，negative controls 正确失败；动态路径确被触发。
-- **何时停止求助**：主要风险是simplified path冒充、skip掩盖、动态路径未触发。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
-- **交付说明**：交接时提供输出：p0 release candidate；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **建议工作顺序**：冻结 p0 manifest→核实际 `Depends`→完成各 suite 与 V-039 正反例→核算计数/trace→独立重放→交板级 owner。
+- **可接受完成**：两真实 cluster、有序 memory、MMIO 与 p0 suites 均闭合；未建 cache 不构成阻断，但任何被广告的高阶行为须另验。
+- **何时停止求助**：观察不到 remote/冲突、正例失败、注入故障未激活或 replay 两路径不一致时，提交首差异与合同 owner；不靠缩 suite 求绿。
+- **交付说明**：交接 p0 RTL 功能候选、逐套 evidence-manifest、故障注入构建 hash、首差异与 known limits；更新 Track Log，不冒充三板证据。
 - **参考资料**：validation-plan.md。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
@@ -764,20 +765,20 @@ flowchart TD
 ### I-085 — 完成 ASIC-ready portability gate
 
 - **负责/门禁**：ASIC集成负责人；技术转换证据。
-- **前置依赖**：I-081, I-084；仍受 implementation-plan 集成依赖表约束。
-- **做什么**：对最终 common RTL 实施 wrapper 替换与等价、ASIC synthesis/physical flow；逐 gate 审核，不从 FPGA Fmax 外推 silicon。
-- **输入数据/接口**：PDK/libraries/SRAM/DFT/STA/physical/signoff
+- **前置依赖**：I-080；另经 implementation-plan 集成表要求 H-047，最终高性能 ASIC 配置另收 I-084，不用三板 I-081 作为同一 ASIC 候选的无条件前置。
+- **做什么**：对已选定的正确性候选实施 wrapper 替换与等价、ASIC synthesis/physical flow；逐 gate 审核，不从 FPGA Fmax 外推 silicon。
+- **输入数据/接口**：声明等级、同版 RTL/source/config、授权 PDK/libraries/SRAM/DFT/STA/physical/signoff；仅宣传最终高性能时另附同配置 I-084 对照。
 - **输出与交接**：ASIC conversion evidence
 - **设计取舍**：缺PDK/signoff即阻断，不叫tapeout-ready
 - **实现微步骤**：取得合法技术输入；转换SRAM/clock/reset/DFT；完成synthesis/equivalence/DFT；完成物理/STA/power/DRC-LVS；制定bring-up和acceptance；逐项审核claim等级；由H-047验收。
 - **主要阻塞风险**：FPGA timing外推、开源flow误当foundry、scan不完整；阻断规则：仅成功运行 open-source synthesis 就宣称可流片。
-- **验收证据**：每个必需 ASIC gate 有真报告；若 PDK/库/许可未提供，明确该阶段 blocked 且不声称 tapeout-ready。；验证口径：signoff report bundle
+- **验收证据**：仅目标 ASIC-ready 级别的 H-047 及对应工艺/物理/许可报告与候选 hash 全部齐备时 PASS；缺 PDK/库/许可记录 BLOCKED，不能把阻断记录当签核通过。
 - **失败/回退动作**：报告外部依赖未完成
 - **来源覆盖**：portable real design, later ASIC conversion。；来源 platform-plan.md。
 - **执行者目标**：把“ASIC-ready portability gate”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
 - **执行者须知**：先做合同和最小正确实现，再做优化。不要从相邻任务猜字段；所有身份、credit、reset、flush和背压边界必须来自本任务及implementation-plan。完成前至少覆盖一个正常路径、一个资源冲突和一个取消/恢复路径。
 - **建议工作顺序**：取得合法技术输入；转换SRAM/clock/reset/DFT；完成synthesis/equivalence/DFT；完成物理/STA/power/DRC-LVS；制定bring-up和acceptance；逐项审核claim等级；由H-047验收。
-- **可接受完成**：每个必需 ASIC gate 有真报告；若 PDK/库/许可未提供，明确该阶段 blocked 且不声称 tapeout-ready。
+- **可接受完成**：每个声明的 ASIC gate 均有同版真实报告；外部输入不齐只完成 blocker 记录，不关闭 I-085。
 - **何时停止求助**：主要风险是FPGA timing外推、开源flow误当foundry、scan不完整。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
 - **交付说明**：交接时提供输出：ASIC conversion evidence；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
 - **参考资料**：platform-plan.md。
@@ -786,26 +787,34 @@ flowchart TD
 ### I-086 — 交付可复现 processor release
 
 - **负责/门禁**：release负责人；可复现发布。
-- **前置依赖**：I-085, I-091；仍受 implementation-plan 集成依赖表约束。
-- **做什么**：从零重建各支持配置、重放有限验收集，归档 Git commit、submodule closure、日志、失败排除理由与用户操作手册；未达 gate 的功能不标 supported。
-- **输入数据/接口**：Git/submodules/tools/artifacts/licenses/limits
-- **输出与交接**：final release bundle
-- **设计取舍**：不发布未证能力，证据不足即blocked
-- **实现微步骤**：收集所有profile/manifests/source locks；从零重建与重放有限集合；审计第三方license和可发布性；写操作/恢复/限制手册；归档失败和deferred状态；独立执行者验证命令；发布release。
-- **主要阻塞风险**：依赖本机环境、浮upstream、无恢复能力；阻断规则：引用工作目录未提交文件、变动 upstream branch 或无法恢复的本机环境。
-- **验收证据**：独立执行者能用锁定输入得到相同 architectural signatures；每 hardware/ASIC claim 可追溯到具体产物。；验证口径：clean reproduction
-- **失败/回退动作**：保持candidate而非release
+- **前置依赖**：I-080、V-080；仅实际广告的 p1/p2/p3、FPGA/RVA23/Safety/ASIC claim 另受 implementation-plan §3.2 gate 约束，不无条件要求 I-085/I-091/I-098。
+- **做什么**：只对当前声明的 profile 从零重建和重放；逐声明核对必需 gate 为 PASS，归档 source/config/reference/tool/license/硬件报告与限制，未达到门槛的能力不广告。
+- **输入数据/接口**：p0 证据、V-080 能力表、此次声明矩阵、对应已验收的 H/I/V 产物及许可。
+- **输出与交接**：逐声明可复现发布包；仅 p0 时标注“受限 RTL 功能原型”，不得宣称完整高性能/RVA23/ASIC。
+- **设计取舍**：可选实验未完成不阻止 p0 正确性原型，但已广告能力缺证据必须 BLOCKED。
+- **实现微步骤**：冻结 claim 列表与必需 task ID；逐 claim 验 source/config/evidence hash；从空输出目录重放各适用 corpus 和负控制；独立复核授权/排除项；输出 PASS/BLOCKED/NOT_CLAIMED 与恢复指令。
+- **主要阻塞风险**：将未完成高阶 profile 写成已支持、从本机旧二进制构建或把板级/ASIC声明只靠模拟通过；只阻断有缺口的 claim。
+- **验收证据**：每个实际广告的能力有可恢复的版本/命令/签名，三板/RVA23/Safety/ASIC 声称各有对应物理/ISA/安全报告而非 p0 外推。
+- **失败/回退动作**：撤销证据不足的声明并保留最后已验收的 profile；p0 自身失败则不发布。
 - **来源覆盖**：end-to-end deliverable, reproducibility, reference tracking。；来源 validation-plan.md, platform-plan.md, references.md。
-- **执行者目标**：把“交付可复现 processor release”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
-- **执行者须知**：先做合同和最小正确实现，再做优化。不要从相邻任务猜字段；所有身份、credit、reset、flush和背压边界必须来自本任务及implementation-plan。完成前至少覆盖一个正常路径、一个资源冲突和一个取消/恢复路径。
-- **建议工作顺序**：收集所有profile/manifests/source locks；从零重建与重放有限集合；审计第三方license和可发布性；写操作/恢复/限制手册；归档失败和deferred状态；独立执行者验证命令；发布release。
-- **可接受完成**：独立执行者能用锁定输入得到相同 architectural signatures；每 hardware/ASIC claim 可追溯到具体产物。
+- **执行者目标**：把一组已有真实证据的处理器 profile 交给独立使用者复建，不为未知目标生成空证据。
+- **执行者须知**：以已声明集合而非全部规划目标为发布边界；不允许先发布商业/物理广告再让后续 H/V 卡补证据。
+- **建议工作顺序**：选 claim→查 §3.2 必需 gate→锁版本→独立重建→重放正反例→复核硬件/许可与限制→按每 claim 发布/阻断。
+- **可接受完成**：独立执行者对全部广告 profile 得到同签名，未达条件的仅写 NOT_CLAIMED/BLOCKED，不误导。
 - **何时停止求助**：主要风险是依赖本机环境、浮upstream、无恢复能力。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
 - **交付说明**：交接时提供输出：final release bundle；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
 - **参考资料**：validation-plan.md, platform-plan.md, references.md。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 
 ## 6. 阶段级阻塞清单
+
+**按广告 claim 签收而不是按任务编号全开。** 验证负责人接收 `validation-plan.md` 第 4 节的逐 case evidence-manifest（输入/构建/seed/event/规则/首差异与输出 hash、PASS/FAIL/UNSUPPORTED/INFRA_ERROR/TIMEOUT 闭合），对仅声明的 claim 签名；缺失证据只阻断关联 claim，不能把 deferred 记 PASS。交接者先复跑冻结正例与 V-021 RTL 注入负例、核对 V-038 缩减和 V-039 reset/snapshot 双路径。
+
+| 广告范围 | 须交付的 V-085–V-090 验收证据 | 不得推断的范围 |
+|---|---|---|
+| p0、p1 或 p0 DCLS | V-085–V-090 均不是无条件前置；p0 用 V-038/039 已激活 RTL 注入的无故障 PASS/有故障 FAIL/双路径 replay；单 hart p1 Linux 另须 V-073 用户程序/MMU/timer/context 证据；DCLS p0 用 V-081–V-083 | p0 无 I-036 late-alias replay、p1 无 SMP；DCLS RTL 证据不声称 FPGA/ASIC 故障覆盖，物理 DCLS 另需 V-084 与目标 H-048/H-049 |
+| RVA23 Core（V-085–V-087） | V-085 逐条 U64+S64 mandatory/完整 Sha 子项、Zkt/Zvkt DIEL、外部 reference/oracle 和动态 fabric 正反例；V-086 单 hart coherent PMA、16/32-bit 对齐 fetch 原子性、LR/SC 进展、misaligned load/store（不是可选 AMO 原子性）、64B CMO 与独立 agent；V-087 PMLEN=0/7、CPU 显式 MMIO mask 与 DMA/隐式 fetch/PTW 不 mask；multi-hart 声明才补 V-065/V-067 | Core 不代表可选 crypto/CFI、Server Platform、安全认证或多 hart coherence；缺任一 mandatory 不能降成 optional |
+| 可选项/项目安全组合（V-088–V-090） | I-092 保存完整 localized/development/expansion 台账，选定扩展分别验 V-088 CFI、V-089 Zvkng/Zvksg GHASH 与独立 Zvbc CLMUL、V-090 适用 VM/CSR/平台；reserved 与 illegal 分开，所选 Server Platform 另收 RoT/IOPMP 等外部 owner/证据 | 未宣称的选项保持 deferred；“Secure”是项目组合不是 ratified RVA23 profile，DIEL 不是完整侧信道免疫 |
 
 | Blocker | 触发条件 | 立即动作 | 责任升级 |
 |---|---|---|---|

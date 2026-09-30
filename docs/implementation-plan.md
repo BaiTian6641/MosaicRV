@@ -83,7 +83,7 @@ flowchart TD
 
 ### 3.1 跨文档集成依赖
 
-表中只增加依赖，不删除各任务自身前提。实现任务先交付可测试候选，V 任务验证该候选，release gate 再依赖验证；不会要求“已经 release 才允许验证”。某 V 任务覆盖后续阶段时，未启用部分必须显式保留 deferred 行，并阻断该扩展的 gate，不能阻断无关 p0 的合法基础集。I-048 是 single-hart OS 实现/冒烟，V-073 是后续含 SMP 的完整 OS 验收。
+表中只增加**无条件**依赖，不删除各任务自身前提；实现任务先交付可测试候选，V 任务验证该候选，release gate 再依赖验证。可选 profile、板级和 ASIC 的额外义务见 §3.2 的 **claim-scoped gate**，不以无条件 DAG 边阻断 p0。某 V 任务覆盖后续阶段时，未启用部分必须显式保留 deferred 行，并阻断该扩展的 gate，不能阻断无关 p0 的合法基础集。I-048 是 single-hart OS 实现/冒烟；V-073 的 single-hart Linux 验收先于其 SMP 增量。
 
 | Task | Additional Depends | 集成义务 |
 |---|---|---|
@@ -98,7 +98,7 @@ flowchart TD
 | V-015 | I-020 | 实际 interrupt/WFI |
 | V-016 | I-037 | 实际 fence.i |
 | V-017 | I-019 | CSR implementation table |
-| V-018 | I-036 | 实际 LSU/replay |
+| V-018 | I-035 | p0 保守 LQ、逐 byte forwarding 与 store visibility；启用 I-036 时另验 alias replay |
 | V-019 | I-038 | 不可推测 MMIO |
 | V-026 | I-012 | 真实 MUL/DIV |
 | V-027 | I-018 | rename/恢复候选 |
@@ -143,14 +143,14 @@ flowchart TD
 | V-074 | I-029, I-038 | 真实 fabric 与设备路径 |
 | V-076 | I-076 | 已校准 PMU |
 | V-077 | H-016, H-024, H-030 | 三家族真实板测，不依赖仿真替代 |
-| I-080 | V-039, V-078 | p0 有限正确性、负控制、replay/ACT/formal 证据 |
+| I-080 | V-039, V-078 | p0 有限正确性、真实故障注入 replay、ACT/formal 适用证据 |
 | I-081 | H-032, V-079 | 三板与观测逻辑可移除性 |
 | I-082 | V-060 | 完整声明的 F/D/V 验收链 |
 | I-083 | V-066, V-067, V-071, V-072, V-080 | memory/cohort/pod/能力广告闭合 |
 | I-084 | V-076 | 正确性先行的研究结论 |
-| H-039 | I-084 | 最终候选 common RTL 进入 ASIC 映射 |
-| I-085 | H-047 | ASIC 实际签核或明确外部阻断 |
-| I-086 | V-080 | release 不超出能力证据 |
+| H-039 | I-080 | 选定的已验收 common RTL 候选进入 ASIC 映射；宣称最终高性能配置时另需 I-084 |
+| I-085 | H-047 | 仅 ASIC claim；缺 PDK/许可不得宣称 ASIC-ready |
+| I-086 | V-080 | 基线发布的能力广告；其他 profile、物理和安全 claim 由 §3.2 单独阻断 |
 
 三类物理 flow 在 H-001–H-010 公共合同后可并行，H-022 是共享 Vivado runner 的校准，不要求 Virtex 等待 Zynq 实板。V-041/V-042 中有界形式证明只关闭所声明的实例/性质，不能把整个 p0 宣称为已形式化全证明。
 
@@ -158,30 +158,101 @@ flowchart TD
 | I-087 | I-001, I-002 | 可选lockstep profile与故障模型 |
 | I-088 | I-087, I-017, I-024 | main/shadow副本与公平资源grant |
 | I-089 | I-088, I-026, I-034, I-019 | architectural comparator与fail-closed发布 |
-| I-090 | I-089, I-047, I-006 | shared-domain保护与综合冗余存活 |
+| I-090 | I-089, I-006, I-038 | p0 无 cache shared-domain 保护；cache/LLB 存在时追加对应责任 |
 | V-081 | I-087, V-008, V-020, V-033 | lockstep观测点/延迟校准 |
 | V-082 | I-089, V-021, V-027, V-042 | replica fault injection与副作用阻断 |
 | V-083 | I-090, V-015, V-034 | reset/debug/reconfigure/公平 |
-| V-084 | I-090, V-067, V-079 | shared-domain与netlist冗余证据 |
-| H-048 | I-089, H-010 | 三家族物理lockstep证据 |
-| H-049 | I-090, H-038, H-041 | ASIC lockstep物理/DFT边界 |
-| I-091 | I-080, I-083, I-090, V-081, V-082, V-083, V-084 | 可选lockstep profile验收 |
+| V-084 | I-090, V-083 | 实际存在的 shared-domain 与综合冗余；p3 时补 V-067 的 coherence/LLB 路径 |
+| H-048 | I-089, H-010 | 三家族物理 lockstep 证据，仅对应 FPGA Safety claim |
+| H-049 | I-090, H-038, H-041, H-043, H-044, H-045 | ASIC DCLS 配置的 route/STA/IR-EM/DRC-LVS/DFT 证据 |
+| I-091 | I-080, I-090, V-081, V-082, V-083 | p0 DCLS 功能 gate；p3/板卡/ASIC 证据按 §3.2 逐 claim 加入 |
 
-| I-092 | I-001 | RVA23 compliance matrix |
+| I-092 | I-001 | ratified RVA23U64/S64 逐条 mandatory、Sha 子项与全部 ratified options 归属/能力矩阵 |
 | V-085 | I-092, V-002, V-020, V-043, V-080 | RVA23 mandatory verification manifest |
-| I-093 | I-092, I-041, I-048 | RVA23 mandatory implementation |
+| I-093 | I-092, I-041, I-048 | 含 Zkt、coherent PMA、Sha 子项的 RVA23 mandatory 实现；不能只在 ISA 字符串中启用 |
 | I-094 | I-093, I-045, I-046, I-056 | pointer masking implementation |
-| V-086 | I-093, V-018, V-045, V-065, V-085 | RVA23 cache/PMA/atomic evidence |
+| V-086 | I-093, V-018, V-045, V-085 | 单 hart Core Ziccif/Ziccrse/Ziccamoa/Zicclsm/Za64rs/CMO/PMA 与外部 agent；SMP claim 才另闭合 V-065/V-067 |
 | V-087 | I-094, V-049, V-056, V-085 | pointer masking coverage |
 | I-095 | I-093, I-045, I-047 | CFI implementation |
 | V-088 | I-095, V-016, V-044, V-047, V-087 | CFI evidence |
 | I-096 | I-082, I-093 | vector crypto implementation |
-| V-089 | I-096, V-052, V-059, V-076, V-085 | vector crypto/DIEL evidence |
-| I-097 | I-093, I-095, I-096 | commercial security/platform package |
-| V-090 | I-097, V-073, V-085, V-088, V-089 | RVA23 Secure verification |
-| I-098 | I-082, I-091, I-096, I-097, V-085, V-086, V-087, V-088, V-089, V-090 | RVA23 Core/Secure release gate |
-| H-050 | I-098, H-032 | 三家族 RVA23 物理执行证据 |
-| H-051 | I-097, I-098, H-049 | ASIC security/physical boundary |
+| V-089 | I-096, V-052, V-059, V-085 | 已选 crypto suite 与 DIEL 证据；仅广告性能/PMU 归因时需 V-076 |
+| I-097 | I-093 | 所选 commercial security/platform 项；选 CFI/crypto 时各追加 I-095/I-096 |
+| V-090 | I-097, V-073, V-085 | 所选 Secure 验证；选 CFI/crypto 时各追加 V-088/V-089 |
+| I-098 | I-082, I-093, I-094, V-085, V-086, V-087 | 同配置 RVA23U64+S64 所有 mandatory、Sha 子项、Zkt/Zvkt 的预硬件验收；选项与 Safety 独立追加 |
+| H-050 | I-098, H-032 | 三家族 RVA23 物理执行证据，不能反向作为 ISA 实施前提 |
+| H-051 | I-085, H-045, I-097, V-090, I-098 | ASIC Secure 同候选物理/DFT；仅宣称 ASIC DCLS 时追加 H-049 |
+
+### 3.2 声明驱动的验收矩阵：无条件 DAG 不等于发布许可
+
+下表的每一行是**未来能力声明**的额外 gate，不是把全部行串成一个大任务。某构建的 `config/profile` manifest 要逐项记录 `claim, scope, required_task_ids, evidence_hashes, verdict`；`verdict` 只能是 `PASS/FAIL/BLOCKED/NOT_CLAIMED`。未运行、缺板卡、缺 PDK、功能未 fit 均不得记 `PASS`；`NOT_CLAIMED` 只能用于真正可选的声明，不能把 p0 或已广告的 mandatory 项消失。升级能力时，从该行开始重跑受影响的旧 ISA/内存/异常/negative-control 路径。
+
+| 对外声明 | 额外必需证据（均须 PASS） | 不得偷换的结论 |
+|---|---|---|
+| p0 功能 RTL | I-080、V-001–V-043 的 p0 适用集合、V-074/V-075/V-078/V-080；I-080 经 V-039 校准 replay | 两个真实 cluster 与动态 remote/WB 冲突均命中；无 cache 的顺序内存、未宣称 Linux |
+| p1 单 hart Linux | I-048、V-044–V-049 中启用的 A/C/S/U/Sv39 条目、V-073 单 hart 路径、V-080 更新 | boot smoke 不代替用户态退出/IRQ/页表与设备证据；SMP 尚未声明 |
+| p2 F/D/V | I-082、V-050–V-060 适用矩阵、V-080 更新及基线回归 | 完整已宣称的 V 指令和部分陷阱；物理 lane 数不改 VLEN |
+| p3 多 hart/cohort/pod | I-083、V-064–V-072、V-073 SMP 路径、shared memory/RVWMO/litmus 与基线回归 | per-hart 正确性不替代 RVWMO；cohort/pod 的相容性逐项证明 |
+| 三家族 p0 FPGA | I-081、H-032/H-035、V-077/V-079，三块板每块一份 bitstream/运行证据 | p0 实板不证明 p2/p3；高阶配置另需 H-017/H-025/H-031 中适用项 |
+| RVA23U64/S64 mandatory ISA（非实板声明） | I-098、V-085/V-086/V-087、§3.2.1 每条 mandatory 含 Sha 展开、Zkt/Zvkt 和动态 fabric 回归 | 是版本冻结的预硬件 ISA/执行环境证据，不是 Linux/Server Platform、安全认证、三板或 ASIC 签核 |
+| ratified RVA23 可选项（逐项选择） | I-092 分类清单中**每个已广告扩展**的实现 owner、独立正/负例与发现证据；crypto/CFI 等按 I-095/I-096/I-097 和 V-088/V-089/V-090 适用项签收 | localized/development/expansion 不是 mandatory；项目自选“Secure”只是包名，不是 ratified RVA23 Secure profile；没选的扩展也必须保留待办归属 |
+| 项目自选安全/服务器组合 | 从上一行选择具体扩展，逐一收 I-095/I-096/I-097、V-088/V-089/V-090 的实际适用证据；若声称 Server Platform v1.0 再审独立平台规范及 owner | 内部简称 Secure 不属于 ratified RVA23 profile 名称；仅 Core PASS 不授权任一可选/平台能力 |
+| 三家族 RVA23 物理执行 | Core（若广告 Secure 则加 Secure）+ H-050，三块板各自资源/软件能力一致 | I-098 只是 H-050 的输入；三家族声明只能在 H-050 后发布 |
+| Safety/DCLS（所选 p0/p3、载体） | I-091、V-081–V-083；p3 加 I-083/V-067；FPGA 加 V-084/H-048；ASIC 加 V-084/H-049 | main/shadow 是一个 logical hart；未做真实物理证据不可宣传对应载体的检测覆盖 |
+| ASIC-ready／tapeout claim | I-085、H-047、V-079 ASIC wrapper/观测验证及完整物理/许可/签核链；ASIC Secure 再加 H-051，ASIC DCLS 再加 H-049 | FPGA Fmax/三板通过均不证明 ASIC；缺 PDK、DRC/LVS 或 foundry 批准时保持 BLOCKED |
+| 最终高性能/可扩展架构声明 | I-084、V-076 与 §3.4 同资源/多规模实测；若宣称 FPGA/ASIC 性能再加目标物理时序/资源/功率证据 | ASIC p0 可先验证可制造性，但不声称已达到最终性能目标；负收益也须归档 |
+
+I-086 是可复现**已声明集合**的发布/归档责任，不将未声明的可选研究当作完成；p0 RTL 可先发布带明确限制的功能原型。最终高性能、可扩展、商用 RVA23 与 ASIC 目标仍在本计划中，未闭合的行保持待办，不因 p0 发布而删去。I-084 的性能/分布式 ROB/core-fusion 决策是最终架构研究门槛，不能把试验未完成写为“处理器已达高性能目标”。
+
+### 3.2.1 Ratified RVA23S64 义务展开（I-092 冻结的唯一版本）
+
+主源：[ratified RVA23 v1.0](https://docs.riscv.org/reference/rva23/v1.0/index.html) 和 [profile source](https://raw.githubusercontent.com/riscv/riscv-profiles/rva23-rvb23-ratified/src/rva23-profile.adoc)。I-092 要锁定实际 source revision/条款和采用的 ISA 版本；下表仅列强制特性，RVA23S64 **继承全部 RVA23U64**。每个逗号分隔项（Sha 需继续逐子项）有单独 `spec_clause, impl_owner, verify_owner, config, software_discovery, positive_case, negative_case, verdict, evidence_hash`；一条缺口就阻断 **完整** Core，不可以 `unsupported` 或工具不支持代替 PASS。规范允许的实现选择须逐条给出可审计行为，不能用同一 Linux boot 覆盖整组。
+
+| 强制组与受影响模块 | 逐项义务；I/V 卡内最小交接点 | 不可由非常规 fabric 偷换的观察 |
+|---|---|---|
+| RVA23U64 base/scalar → I-001/I-093, V-085 | RV64I little-endian、M/A/F/D/C、B（Zba/Zbb/Zbs）、Zicsr、Zihintpause/Zihintntl、Zicond/Zimop/Zcmop/Zcb、Zfa/Zfhmin/Zawrs；逐 opcode/CSR 覆盖正常、边界、异常和软件发现 | remote FU/重定向/flush 不得破坏架构值、CSR/fflags、x0、trap 优先级；HINT/MOP 语义与未支持编码分开 |
+| RVA23U64 vector/计时 → I-050–I-058/I-093, V-050–V-059/V-085 | V（VLEN≥128、ELEN≥64、完整指令/状态）、Zvfhmin/Zvbb、Zicntr/Zihpm；每组追踪 `vl/vtype/vstart`、FP flags、计数权限/归属 | 物理 lane 迁移不改 VLEN/VRF、部分 vector trap 可恢复；uOP/element 不得代替 per-hart architectural retire/counter |
+| RVA23U64 timing → I-093/I-082, V-085 | **Zkt 与 Zvkt 均 mandatory**；按各自规范枚举实际已实现且在 DIEL 清单内的标量/向量指令，固定 opcode、控制量、竞争负载，只改变包括 masked inactive 在内的 data 值；记录可复现的指令延迟和波形/路径 | operand 值不得选择 FU 快慢、route、lease、replay、融合或不同完成策略；不把访存/分支/非清单指令及整个 SoC 伪称常时、DIEL 也不等于功率/EM 免疫 |
+| RVA23U64 memory → I-039/I-040/I-042/I-093, V-045/V-046/V-086 | Ziccif/Ziccrse/Ziccamoa/Zicclsm/Za64rs、Zic64b/Zicbom/Zicbop/Zicboz；外部 coherent agent、跨 line/page、错误权限/非幂等负例逐项 | coherent+cacheable main memory 的自然对齐 16/32-bit 取指原子性、RsrvEventual、A 原子、misaligned **load/store**、≤64B 连续 reservation 均必测；misaligned AMO 原子性属可选 Zama16b，不能强加到 Core |
+| RVA23U64/S64 masking → I-094, V-087 | Supm 与 Ssnpm 的有效权限配置，至少 PMLEN=0/7，检查 `senvcfg.PME`/`henvcfg.PME`、CPU 显式 MMIO、向量/CMO 与 DMA/隐式取指/PTW 反例 | 地址来源/有效 privilege/翻译顺序要在 packet 路由后仍正确；可选 Sspm 或 PMLEN=16 不是 Core 必选 |
+| RVA23S64 privileged → I-044–I-046/I-093, V-047–V-049/V-085 | Zifencei、Ss1p13、Svbare/Sv39/Svade/Svpbmt/Svinval/Svnapot、Ssccptr/Sstvecd/Sstvala/Sscounterenw/Sstc/Sscofpmf/Ssu64xl；guest/non-guest CSR 与 fault/translation 正反例 | instruction-cache 可见性、A/D fault、PTE 读权限、trap value/direct vector、counter overflow/timer 与 TLB generation 都按 hart/privilege 提交；Svadu 为可选更新路径，不能以此省掉 Svade |
+| RVA23S64 Sha → I-093, V-085 | Sha=H+Ssstateen+Shcounterenw+Shvstvala+Shtvala+Shvstvecd+Shvsatpa+Shgatpa；VS/VU/HS 下 guest two-stage fault、CSR WARL/权限、`vsatp` 与 `satp` 各模式匹配、`hgatp` SvNNx4 与 Bare 逐条测 | VMID/ASID/translation generation、guest exception `vstval/htval` 不可跨 hart/代次串扰；仅宿主 Linux 或 host Sv39 不证明 Sha |
+
+**完整 options 台账**也属 I-092 输出，不是 Core 强制依赖。Localized：Zvkng/Zvksg→I-096/V-089；development：Zabha/Zacas/Ziccamoc/Zama16b→I-039/I-040/I-093 与 V-045/V-086，Zvbc→I-096/V-089；U expansion：Zfh/Zbc/Zfbfmin→I-050/I-093 与 V-050/V-085，Zicfilp/Zicfiss→I-095/V-088，Zvfh/Zvfbfmin/Zvfbfwma→I-082 与 V-052–V-059/V-085；S expansion：Sv48/Sv57/Svadu/Svvptc→I-093 VM/V-085，Sspm→I-094/V-087，Zkr/Sdtrig/Ssstrict→I-097/V-090。V-090 审每个已选项的发现/配置/正反例整合，不代替其指令级 V 卡。`Ziccamoc` 的 PMA 只在同时声明 Zacas 时验收；`Ssstrict` 不禁止 custom encoding。逐扩展 `NOT_CLAIMED` 不是实现 PASS，但也不阻断完整 mandatory Core。Server Platform v1.0 的 AIA/secure boot/RoT 等是**另外的系统级声明**，不是 ratified RVA23U64/S64 optional 扩展。
+
+在同一个 Core 配置和 ELF 下把固定本地执行与两 cluster 远程派发、credit 饱和/回压、flush/replay、向量 lane 配额变化分别配对；按每 hart architectural boundary 比较合法结果与异常，非架构时序差异另记。DIEL 对照则保持控制量和竞争刺激不变，仅扫描数据；证据含每组负控制和先失败的首事件。该交叉矩阵在 V-085/I-098 闭合，不另造 p3/cohort/SMP 的强制前置。
+
+
+### 3.3 小模型任务交接与复核协议
+
+按 §3.1 并集 DAG 领取**一个 ready 的 I/V/H 任务 ID**，而不是要求执行者“完成整个 stage”。集成负责人交付一张最小任务卡：`task_id, profile/claim, source_commit, contract_version, passed_predecessors, owned_paths, interface_owner, finite_case_ids, expected_observation, time/resource_budget, artifact_dir, stop_condition`。任务卡中的字段是后续产物契约；当前仓库并无这些代码或测试。没有完整输入就登记 `BLOCKED` 与所缺字段，不从其他 LLM 输出猜测接口。共享 rename/ROB/LSQ/flush 状态只由一个集成 owner 改动，其他 owner 使用冻结 packet/event 合同；更改字段先回到 I-002/V-008，通知全部 consumer 重验。
+
+1. **接入检查**：对照 `Depends` 与 §3.2 核验前置 PASS 的版本/hash；以 I-001 的 profile 冻结 ISA、memory map、RAM 时序；列出将改的唯一模块/接口及相邻 owner。禁止拿已阻断的高阶证据给 p0 垫底。
+2. **最小纵切**：按任务卡已有 `Action` 拆为“接口/状态表→一个正常接受和完成→一次满/冲突背压→一次取消/异常/晚到→集成”五个可独立审查的 checkpoint；某任务不适用取消时写明理由及替代边界，不能用空测试过关。每个 checkpoint 在已有目录留输入、实际输出、预期与差异，未验证不标完成。
+3. **验收与移交**：执行卡中 `CASE`/suite 的确定性程序和负控制，记录工具及 ELF/RTL/config/reference 的 hash、首次差异、已运行数与未运行数；一个错字节、遗漏 ack、未达 budget 或未实现配置即 FAIL。下一 owner 只消费已签收的接口版本/产物，不能继承口述“应该能跑”。
+4. **失败升级**：保存可重放的最小真实激励（有真实 bug 用 V-038 缩减；校准用 V-021 注入版）；不改变 `misa`、屏蔽错误、缩小承诺测试或放宽约束来求绿。外部板卡/PDK/许可缺失时标明哪个 claim BLOCKED，已通过的较低 profile 不撤销。
+
+首次 p0 交接优先顺序：I-001/I-002 与 V-008 冻接口；I-004/I-007/I-008 做独立参考 bring-up；I-013–I-023 验证每 hart rename/ROB 与双 cluster；I-024–I-031 验证 credit/远程 completion/租约；I-033–I-035/I-037/I-038 接顺序 RAM 与精确 MMIO；I-080 合并 V 系列证据。缓存/MSHR/I-042/I-043、投机 load/I-036 与 I-047 的 cache/SoC 可随后并行开发，不是 p0 验收捷径。
+
+大型卡片不能一次交给小模型“把全部扩展实现”。下列**卡内交接点**不新增 I/V/H 任务 ID，也不单独授权上层能力；上一行的产物经模块 owner 签收后下一行才可消费，整张原卡及 §3.2 所属 gate 仍需全部完成。
+
+| 原卡／卡内纵切 | 输入与唯一 owner | 可交付的最小结果／拒绝条件 |
+|---|---|---|
+| I-093 标量 decode/执行 | I-092 逐 opcode + B 子集清单；frontend/FU owner | 对 B=Zba/Zbb/Zbs、Zicond、Zimop/Zcmop、Zcb、Zihintntl/Zihintpause/Zawrs 逐项交正常、边界、reserved/非法判定与 remote-FU/flush 对照；漏项阻断完整 Core |
+| I-093 FP/PMU/timing | I-050 F/D、I-076 PMU 及 I-092 Zkt 指令清单；FP/CSR/FU owner | Zfa/Zfhmin、Zicntr/Zihpm、Sstc/Sscofpmf 各有权限/overflow/精确 flags；已实现的 Zkt 清单指令固定控制仅变 data 的 DIEL 正反例，迭代 FU 不可按 operand 提前完成 |
+| I-082 vector/DIEL | I-051 完整 V 指令清单、I-093 与独立 mask/tail 输入；vector/VRF owner | VLEN≥128、Zvfhmin/Zvbb/Zvkt 每指令与合法配置签收；固定 vl/vtype/mask，仅改变活动/非活动 data 值，lane/route 切换前后依规范保 DIEL，不以可选 I-096 加密测试替代 |
+| I-093 coherence/PMA | I-039/I-040/I-042/I-047 及 RAM/独立外部 agent；LSU/cache owner | Ziccif/Ziccrse/Ziccamoa/Zicclsm/Za64rs、Zic64b/Zicbom/Zicbop/Zicboz 各出正常/负例、跨 line/page、外部一致性与故障 trace；不把可选 misaligned AMO/Zama16b 强加给 Core |
+| I-093 VM/guest CSR | I-045/I-046 与 guest CSR/异常表；MMU/privilege owner | Svnapot/Svinval/Svpbmt/Svade 及 mandatory S 与 Sha 八子项逐行映射；VS/VU/HS、`vsatp`/`hgatp` mode parity、`vstval`/`htval` 与 VMID/ASID 代次异常正负例，不能用 host Sv39 代替 |
+| I-094 地址来源矩阵 | I-093 与 CPU-explicit/implicit/device-origin 清单；AGU owner | scalar/FP/vector/AMO/CMO/SS 与 CPU→MMIO 的 transform 正例；fetch/PTW/DMA 反例、MXR/MPRV 与 fault `tval`；与 V-087 对齐后交给内存 owner |
+| I-096 可选 suite | I-082 向量状态和选定能力；vector owner | 先 Zvkg/GHASH 与选定 Zvkng/Zvksg 指令矩阵，再 KAT、DIEL/overlap/reserved/illegal；如另选 Zvbc，`vclmul[h]` 单列证据 |
+| I-083 多 hart 功能 | I-064–I-073 的逐 hart、coherence、cohort、pod 责任人 | V-064–V-072 分组关闭：先 hart isolation/RVWMO，再 coalescing/cohort 和 pod；任何 group 失败只阻断 p3，不把其误记成 p0 regressions 已消失 |
+| I-084 性能与扩展 | I-077–I-079 的资源相同对照；性能/架构 owner | 每次只换一个调度/局部性/融合变量，给合法 signature、area/Fmax、实际工作率和每 workload 负收益；distributed ROB 另附恢复/异常反例，不以纯 IPC 作 signoff |
+
+接收下一张卡前先检查 `source_commit`、ISA/capability manifest、接口版本、有限 case 清单和一份失败时可恢复的最小记录；任一不一致回退给**产生该合同的 owner**而非让后续小模型编造兼容层。板卡任务另按 H-001 的 exact-part manifest 分三份独立签收；不得并行写同一 shared SoC/ROB/LSQ 文件。
+
+### 3.4 性能与可扩展性必须有反例空间
+
+正确性通过后，I-077/I-078/I-079/I-084 逐次锁定**相同 ISA、可见内存、FU/PRF/cache 容量、程序输入和工作量**，只改变一个策略（固定 route、动态 route、LLB、cohort 或 pod）；每点同时报告周期、实现后实际频率、完成工作量、面积/BRAM/SRAM、网络 bytes、尾延迟、饥饿与温度/功率测量来源。`throughput = completed_work / elapsed_time`，必须按同频或实际 route 后时钟换算，不能仅比较 IPC。预先登记容量 1/2/4/8 slice 与本地/跨 cluster/跨 pod 路径、p50/p99 延迟和拥塞/背压矩阵；若较大配置时钟、面积或网络增长抹平吞吐收益，则将该策略从默认配置撤下并保留负面实验，**不**据此删除 RVV、多 hart、层次网络和 core-fusion 的研究任务。已有 TRIPS 与 Core Fusion 是结构和协议先例，不是 MosaicRV 性能数字（AR-017、IR-004）。
 
 ## 4. 工作包：合同、工具、可执行基线
 
@@ -988,12 +1059,12 @@ flowchart TD
 - Sources: SRC-01/SRC-02/SRC-03, IR-004。
 
 ### I-080 — 完成首次真正 p0 functional prototype gate
-- Depends: I-020, I-029, I-037, I-038, I-047, I-076
-- Inputs: V 系列 scalar directed/differential/negative-control gates、两个 cluster RTL、p0 corpus。
-- Action: 从干净配置执行 make sim PROFILE=p0 与 tools/verify.py 的 scalar-directed-v1、scalar-random-v1、metamorphic-v1、fabric-transition-v1 适用子集；检查 trace 中真实 remote route、WB collision、OoO completion。
-- Outputs: p0 release candidate、完整 correctness bundle、已知限制表。
-- Pass: 所有声明 p0 instructions/CSR/traps 通过、零 mismatch/未解释 skip，negative controls 正确失败；动态路径确被触发。
-- Fail: 只运行简化 I-008 路径，或靠禁用所有 remote/flush corner 获得通过。
+- Depends: I-020, I-029, I-035, I-037, I-038
+- Inputs: V 系列 p0 scalar directed/differential/negative-control 与真实注入 replay 证据；双 cluster RTL、顺序 RAM/MMIO endpoint、p0 corpus。
+- Action: 冻结 p0 无 cache 配置；从空构建执行 `make sim PROFILE=p0`，逐套运行 `scalar-directed-v1`、`scalar-random-v1`、`metamorphic-v1`、`fabric-transition-v1` 的适用 manifest；先核对总数/排除项，再在 trace 中确认至少一次两个 cluster 同时存活、remote route、WB collision、OoO completion 与同 hart 顺序 retire；交付 V-039 注入故障 reset/snapshot replay 的对照记录。
+- Outputs: p0 RTL 功能候选、逐 suite 的执行/通过/失败/阻断计数和 hash、负控制/重放 bundle、已知限制表。
+- Pass: p0 全部指令/CSR/trap/有序内存与 MMIO 检查通过，零 mismatch/未解释 skip；负控制正确失败，注入版首次差异可复现，双 cluster 动态路径确实发生；I-036/I-042/I-043/I-047/I-076 可以尚未实现但不能作为已支持功能广告。
+- Fail: 只运行 I-008 顺序路径、在 p0 开 cache 才能通过、静默启用投机 load/禁用 remote 或跳过 flush corner。
 - Covers: functional processor prototype, instruction correctness。
 - Sources: validation-plan.md。
 
@@ -1038,22 +1109,22 @@ flowchart TD
 - Sources: SRC-01/SRC-02/SRC-03, IR-004。
 
 ### I-085 — 完成 ASIC-ready portability gate
-- Depends: I-081, I-084
-- Inputs: H 系列 SRAM/CDC/reset/clock/DFT/STA/physical/signoff 产物、选定 PDK/library 法律访问条件。
-- Action: 对最终 common RTL 实施 wrapper 替换与等价、ASIC synthesis/physical flow；逐 gate 审核，不从 FPGA Fmax 外推 silicon。
-- Outputs: technology-neutral RTL release、ASIC integration/signoff evidence 或精确外部 prerequisite 状态。
-- Pass: 每个必需 ASIC gate 有真报告；若 PDK/库/许可未提供，明确该阶段 blocked 且不声称 tapeout-ready。
-- Fail: 仅成功运行 open-source synthesis 就宣称可流片。
+- Depends: I-080
+- Inputs: H 系列 SRAM/CDC/reset/clock/DFT/STA/physical/signoff 产物、选定 PDK/library 法律访问条件、冻结的正确性候选；宣称最终高性能配置时还需 I-084 的同配置决策。
+- Action: 对已选择的 common RTL 实施 wrapper 替换与等价、ASIC synthesis/physical flow；逐 gate 审核 source/profile/工艺/角点及报告身份，不从 FPGA Fmax 外推 silicon，不以三家族实板为 ASIC 前置。
+- Outputs: technology-neutral RTL 候选、ASIC integration/signoff evidence；缺外部前提时独立记录 BLOCKED 及所缺 PDK/库/许可，不产生通过证据。
+- Pass: 对所声明的 ASIC-ready 等级，每个必需 H-047/physical gate 均有真实、同版的报告且签核无未解释问题。
+- Fail: 缺 PDK/库/许可却把 BLOCKED 写作 PASS，或仅成功运行 open-source synthesis 就宣称可流片。
 - Covers: portable real design, later ASIC conversion。
 - Sources: platform-plan.md。
 
-### I-086 — 交付可复现 processor release
-- Depends: I-085, I-091, I-098
-- Inputs: 所有已声明 profile 的 RTL/software/tool/reference/license/hardware manifests。
-- Action: 从零重建各支持配置、重放有限验收集，归档 Git commit、submodule closure、日志、失败排除理由与用户操作手册；未达 gate 的功能不标 supported。
-- Outputs: 发布清单、可操作 rebuild/validate/program/run 指令、能力与限制矩阵。
-- Pass: 独立执行者能用锁定输入得到相同 architectural signatures；每 hardware/ASIC claim 可追溯到具体产物。
-- Fail: 引用工作目录未提交文件、变动 upstream branch 或无法恢复的本机环境。
+### I-086 — 交付可复现的已声明 processor profile
+- Depends: I-080
+- Inputs: §3.2 声明矩阵、p0 与本次**实际广告** profile 的 RTL/software/tool/reference/license/hardware manifests、V-080 能力闭合。
+- Action: 逐声明核对必要 gate 均为同 source/config 的 PASS；从零重建各已支持配置、重放其有限验收集，归档 Git commit、submodule closure、日志、失败/排除理由和操作手册；在 capability map 写明未宣称或阻断的高阶研究/物理目标。
+- Outputs: 仅包含已验收 profile 的发布清单、可操作 rebuild/validate/program/run 指令、逐声明 PASS/BLOCKED/NOT_CLAIMED 与限制矩阵。
+- Pass: 独立执行者用锁定输入得到相同 architectural signatures；若声明 FPGA/RVA23/Safety/ASIC，§3.2 对应额外证据全部可追溯。仅完成 p0 时只能称带明确限制的 RTL 功能原型，不能称完整高性能/商用成品。
+- Fail: 任何已广告能力缺证据、把被阻断可选项伪装成已支持、引用未提交文件或浮动 upstream branch。
 - Covers: end-to-end deliverable, reproducibility, reference tracking。
 - Sources: validation-plan.md, platform-plan.md, references.md。
 
@@ -1088,42 +1159,42 @@ flowchart TD
 - Sources: AR-019, AR-020, validation-plan.md。
 
 ### I-090 — 保护 shared domains 与防止冗余被优化移除
-- Depends: I-089, I-047, I-006
-- Inputs: shared I/D cache、RAM/LLB、PLL/clock、bus、reset/debug、综合工具属性。
-- Action: 对共享数据加ECC/parity/CRC/地址绑定或独立monitor；在replica边界加入可综合keep/dont_touch/size_only等工程约束或等效技术，并核对netlist；禁止lockstep与debug/DFT状态互相静默关闭。
-- Outputs: shared-domain protection map、survivability netlist evidence、CDC/reset/test matrix。
-- Pass: 所有shared architectural-data路径有明确保护或残留风险记录；综合后shadow与checker仍存在且可观测。
+- Depends: I-089, I-006, I-038
+- Inputs: p0 真实 shared RAM/clock/bus/reset/debug，启用后追加 cache/LLB、PLL、外部设备及综合工具属性。
+- Action: 对共享数据加 ECC/parity/CRC/地址绑定或独立 monitor；在 replica 边界采用目标技术支持的约束并核对 netlist；逐配置列保护/残余风险与 debug/DFT 状态。无 cache 的 p0 不需先实现 I-047；存在 cache/LLB 的配置必须纳入对应保护。
+- Outputs: 按构建配置的 shared-domain protection map、survivability netlist evidence、CDC/reset/test matrix。
+- Pass: 声明范围内的 shared architectural-data 路径均有保护或明确残余风险，综合后 shadow 与 checker 仍存在且可观测；未检查的高阶 shared 路径不得被广告为已保护。
 - Covers: common-mode faults, synthesis survivability, physical separation。
 - Sources: AR-020, HR-008, HR-009。
-- Fail: synthesis合并duplicate logic、shared RAM corruption污染两副本却无任何检测、debug/scan状态关闭检查仍宣称启用。
+- Fail: synthesis 合并副本、shared RAM corruption 污染两副本却无检测、debug/scan 关闭检查仍宣称启用。
 
 ### I-092 — 构建完整 RVA23 合规矩阵
 - Depends: I-001
-- Inputs: ratified RVA23 profile source、当前 profile 表、ISA/manual references。
-- Action: 逐项建立 RVA23U64/S64 mandatory/localized/development/expansion/extension matrix，标出每项的实现任务、验证任务、capability bit、软件发现方式和当前状态。
-- Outputs: RVA23 compliance matrix、capability contract、不得提前广告清单。
-- Pass: 每个mandatory extension有唯一实现和验证责任；RVA23不通过时没有任何binary发布宣称兼容。
-- Fail: 把p0/p1/p2误称RVA23，或把optional feature误列为mandatory。
+- Inputs: ratified RVA23 v1.0 U64/S64 source revision、§3.2.1 mandatory/optional 规范清单、当前配置/ISA/参考实现与软件发现接口。
+- Action: 按 §3.2.1 把 **每一条 mandatory、Sha 的八个子项与全部 ratified option** 分类并绑定唯一 I/V owner、spec clause、capability/source version、两条有限正反例；区分 U64 与 S64 继承、所选项目组合、未声明的扩展及与 Server Platform/安全认证的非等价关系。
+- Outputs: 逐条 RVA23U64/S64 合规矩阵、可机读 capability/ISA contract、尚缺规范 oracle/不可提前广告的 blocker 清单。
+- Pass: 所有 mandatory 行和 Sha 子项有签收 owner、对应规范版本、实现/验证/软件发现与负例；所有 ratified options 也有类别和未来/已选责任人，只有本次已选项进入其声明 gate。
+- Fail: 把 p0/p1/p2、Linux boot 或只含部分 V 的构建叫 RVA23；遗漏 Zkt/Zvkt 或 Sha 子项；误把 option 列 mandatory，或把项目 Secure 叫 ratified profile。
 - Covers: RVA23 Core, commercial ISA baseline。
 - Sources: AR-022, AR-023。
 
 ### I-093 — 实现 RVA23 mandatory scalar/privilege/cache 扩展
 - Depends: I-092, I-041, I-048
-- Inputs: B/Zicond/Zimop/Zcmop/Zcb/Zfa/Zfhmin/Zkt、CMO/Zic64b、misaligned/atomic PMA、Zicntr/Zihpm、Sv39/Svnapot/Svinval/Svpbmt/Sstc/Sscofpmf/Ssu64xl、Sha。
-- Action: 将RVA23强制但尚未覆盖的指令/CSR/PMA/计时/计数/缓存和虚拟化行为拆成实现项，接入现有frontend、memory、CSR、MMU和SoC合同。
-- Outputs: RVA23 mandatory implementation set、CSR/trap/PMA/PMU更新、Sha hypervisor候选。
-- Pass: 每项都有真实RTL和对应directed/reference检查；不是仅ISA字符串更新。
-- Fail: 只对齐编译器misa/ISA字符串，不实现指令；或忽略PMA/CSR/特权副作用。
+- Inputs: I-092 的完整 U64/S64 mandatory 矩阵与 §3.2.1 组清单、各基础 I-039–I-058/I-076 接口版本；包含 B 子集、Zkt/Zvkt（vector 在 I-082）、coherent PMA、Sha 八子项，不能以举例列表代替全集。
+- Action: 依 §3.3 的标量、FP/PMU/timing、vector、coherence/PMA、guest CSR 卡内纵切交付；在现有 frontend/FU/LSU/cache/CSR/MMU 接口实现未覆盖的 mandatory 路径，并校对 remote completion、取消、恢复、权限切换与 guest fault 记录。
+- Outputs: 逐条 RVA23 mandatory 的 RTL/CSR/trap/PMA/PMU/guest-mode 差异与签收版本、Sha 全量实现，交 V-085/V-086/V-087，不以 ISA 字符串代替。
+- Pass: 同一 Core 配置的每条必选行为有实际执行路径、相应正反例和独立 reference/条款关联；Zkt 对适用已实现指令的 operand data 不选快慢路径。
+- Fail: 只更新 compiler `-march`/misa、保留 p1 的旧 PMA/CSR、用 host Sv39 代替 guest H，或把必选 Zvkt 推给可选 crypto 包。
 - Covers: RVA23 mandatory extensions, hypervisor, cache management。
 - Sources: AR-022, AR-024, AR-027。
 
 ### I-094 — 实现 pointer masking 与地址传播边界
 - Depends: I-093, I-045, I-046, I-056
-- Inputs: Supm/Ssnpm/Sspm执行环境合同、Smnpm/Smmpm控制、PMLEN=0/7/16策略、Sv39/Sv48、scalar/FP/vector/AMO/CMO/CFI显式访问列表。
-- Action: 在AGU和memory packetizer统一执行ignore transform；排除implicit fetch/PTW/DMA；把mask后的地址用于TLB/PMP/PMA/debug trigger/stval/vector/CMO/SS访问；保留权限、地址空间和错误报告语义。
-- Outputs: pointer-mask transform unit、per-access coverage matrix、integration into LSU/MMU/debug。
-- Pass: 所有显式访问按当前 privilege/mode/PMM 转换；implicit access不被错误mask；跨misaligned/vector/CMO/shadow-stack的语义逐项通过。
-- Fail: 只在标量load/store加mask，或错误mask取指、PTW、DMA和trap handler地址。
+- Inputs: Supm/Ssnpm mandatory 执行环境合同、`senvcfg.PME`/`henvcfg.PME` 至少 PMLEN=0/7，Sspm/PMLEN=16 仅在另选时启用；Smnpm/Smmpm 控制、Sv39（Sv48 仅已选）、scalar/FP/vector/AMO/CMO/CFI 显式访问列表。
+- Action: 在 AGU 和 memory packetizer 对**CPU 指令产生的显式访问**执行规范 ignore transform，含 CPU 访问 MMIO 的 load/store/AMO/CMO；按有效 privilege、address mode 与 MXR/MPRV/SPVP 条款决定是否应用。CPU implicit fetch/PTW/trap handler 访问与设备/DMA 发起访问不作此变换；变换后才交给 TLB/PMP/PMA/debug trigger/stval，并处理 vector/SS/跨 misaligned beats。
+- Outputs: pointer-mask transform unit、CPU-explicit/implicit/device-origin 三列的访问覆盖矩阵、LSU/MMU/debug 连接合同。
+- Pass: 每个适用的 CPU 显式访问按规范得到正确地址/权限/fault/tval；CPU→MMIO 有正例，设备 DMA 有不 mask 反例，所有未启用条件按规范禁用；不同来源不能只凭目的地址是否为 MMIO 决定。
+- Fail: 只在标量 load/store 加 mask、错误地放过 CPU→MMIO、错误 mask 取指/PTW/DMA/trap handler，或忽略 MXR 例外。
 - Covers: pointer integrity, tagged addressing, memory safety。
 - Sources: AR-024。
 
@@ -1137,43 +1208,43 @@ flowchart TD
 - Covers: control-flow integrity, software security。
 - Sources: AR-025。
 
-### I-096 — 实现 vector crypto 与 data-independent latency
+### I-096 — 实现选定 vector crypto 与 data-independent latency
 - Depends: I-082, I-093
-- Inputs: Zvbb/Zvkt、Zvkng/Zvksg localized options、VLEN≥128、EGW/EEW/EGS/LMUL/vstart约束。
-- Action: 在RVV datapath上实现选定的NIST/ShangMi suites、GCM/GHASH、carryless multiply、SHA-2/SM3、AES/SM4及Zvkt DIEL规则；VLEN=128时用LMUL组合256-bit group。
-- Outputs: vector crypto units、operation matrix、constant-latency evidence hooks。
-- Pass: 每个声明suite的element grouping、overlap、illegal/reserved、vstart、mask/tail和结果正确；DIEL模式对数据值不表现可测时序差异。
-- Fail: 只实现AES/SHA子集却宣称Zvkng/Zvksg；VLEN<128仍宣称application vector crypto；允许masked inactive元素改变timing。
+- Inputs: mandatory Zvbb/Zvkt 已由 Core 覆盖，另选 Zvkng/Zvksg localized options、VLEN≥128、EGW/EEW/EGS/LMUL/vstart 约束；仅另行选定时加入 Zvbc。
+- Action: 在 RVV datapath 上逐 suite 实现 NIST/ShangMi 的 AES/SM4/SHA-2/SM3、Zvkg 的 GCM/GHASH 与适用 DIEL；VLEN=128 时用 LMUL 组合 256-bit group。`vclmul[h]` 属于独立 Zvbc（或 Zvknc/Zvksc），不能由 Zvkng/Zvksg 的 GHASH 冒充；依规范区分 reserved 操作数设置和**明确要求** illegal-instruction 的 LMUL×VLEN<EGW。
+- Outputs: per-extension opcode/capability matrix、vector crypto units、known-answer 与 timing evidence hooks。
+- Pass: 每个已广告 suite 的分组/overlap/vstart/mask/tail/结果与 DIEL 检查闭合，Zvbc 仅在实现并单独验收后广告；保留 reserved 情形的实现策略，不强制把全部 reserved 误判为 illegal trap。
+- Fail: 只实现 AES/SHA 子集却宣称 Zvkng/Zvksg、用 GHASH 宣称 `vclmul`、VLEN<128 冒充应用处理器向量加密，或数据值改变规定范围内 timing。
 - Covers: vector cryptography, side-channel-aware datapath。
 - Sources: AR-026。
 
 ### I-097 — 实现 commercial security/platform package
-- Depends: I-093, I-095, I-096
-- Inputs: RVA23 Secure选定项、Sv48/Svadu/Zkr/Sdtrig/Ssstrict/Ssaia、平台RoT/TPM/secure boot/IOPMP边界。
-- Action: 将core内扩展与SoC责任分离：实现/验证Sv48、Svadu、entropy CSR、debug triggers、AIA/APLIC/IMSIC接口；定义RoT/TPM/secure boot/IOPMP为平台任务，不把core能力冒充平台合规。
-- Outputs: commercial security integration package、platform responsibility matrix、selected capability manifest。
-- Pass: 每项core功能有实现/测试；平台功能有明确owner和接口；不声称无RoT/IOPMP实现的平台安全。
-- Fail: 用RVA23 Core宣称server-platform合规，或把未实现的CoVE/WorldGuard/IOPMP写成当前支持。
+- Depends: I-093
+- Inputs: **项目自选**安全/服务器组合及 ratified S expansion 中实际选定的 Sv48/Sv57/Svadu/Svvptc/Sspm/Zkr/Sdtrig/Ssstrict、平台 AIA/RoT/TPM/secure boot/IOPMP 边界；选 CFI/crypto 时另收 I-095/I-096 的已签收接口。
+- Action: 只实现所选 core 项的额外译码/CSR/VM/权限路径并保持 Svade/masking 等 Core 模式仍可用；选定 CFI/crypto 时按各自 owner 集成。Server Platform v1.0 的中断/启动/安全根等另列 SoC/软件 owner 与独立证据，不写作 RVA23S64 mandatory；未选项保留 I-092 归属而不伪装实现。
+- Outputs: 逐选项和逐平台 claim 的实现/验证/软件发现清单、责任矩阵、未选/受阻项。
+- Pass: 每个已广告扩展和平台接口都有对应规范条款、真实执行及负例；`Ssstrict` 仅要求标准/保留编码行为而不禁 custom encoding，选 `Svadu` 不删 mandatory `Svade`。
+- Fail: 用 RVA23 Core 宣称 server-platform 合规、跳过已选 CFI/crypto 门禁，或把未实现 CoVE/WorldGuard/IOPMP 写成当前支持。
 - Covers: security package, platform security, server requirements。
 - Sources: AR-027, HR-014。
 
-### I-098 — 完成 RVA23 Core/Secure 发布 gate
-- Depends: I-082, I-091, I-096, I-097
-- Inputs: 全部RVA23/RVV/crypto/CFI/pointer masking证据、reference coverage、platform manifests。
-- Action: 逐项闭合RVA23 mandatory与选定optional能力，运行应用/VM/RVV/crypto/CFI软件集合；生成合规性声明模板和已知限制。
-- Outputs: RVA23 Core/Secure acceptance bundle、binary compatibility evidence、capability map。
-- Pass: 所有宣称能力有实现、reference/formal/ACT/程序证据；binary compatibility从同profile软件运行结果证明。
-- Fail: 用build flag、ISA字符串或单个Linux boot代替profile闭合；未实现mandatory项仍发布RVA23。
-- Covers: commercial RVA23 release, security acceptance。
+### I-098 — 完成 RVA23 Core 软件可见 ISA 验收（非实板发布）
+- Depends: I-082, I-093, I-094
+- Inputs: 同 source/config 的 I-092 全 mandatory + Sha 子项矩阵、I-082/I-093/I-094 已实现配置、V-085/V-086/V-087 真实 reference/ACT/定向和 DIEL 证据；Linux/VM/RVV 工作负载只按实际声明给出。
+- Action: 将 RVA23S64 的 U64 继承项与 S64 增量逐条核对，并分别跑 B/FP/vector、coherent PMA/CMO、指针 masking、Zkt/Zvkt、guest two-stage VM/Sha 的正反例与动态两 cluster/metamorphic 路径；按 hart 软件发现输出 capability map。项目选定的扩展/服务器平台另由 I-095/I-096/I-097 与 V-088/V-089/V-090 逐项关闭，Safety/DCLS 则由 I-091 另管；H-050/H-051 后续提供物理证据。
+- Outputs: 预硬件完整 RVA23U64/S64 mandatory acceptance bundle、per-clause 版本/签名/负例与归因、optional/Server Platform 分列的广告和限制矩阵。
+- Pass: **同一实际构建**的全部 mandatory + Sha 子项逐条有执行与规范/独立 oracle 证据，DIEL 范围真实覆盖；只有已经验收的选项可额外广告，三板/ASIC 仍保持独立状态。
+- Fail: ISA string/单次 Linux boot/参考模拟器的 unsupported skip 当成闭合；未验必选 Zkt/Zvkt/Sha 或用可选 crypto/CFI/Server Platform 证据代替 Core，或无 H-050 宣称实板 RVA23。
+- Covers: RVA23 Core ISA acceptance, selected security handoff。
 - Sources: AR-022, AR-023, AR-024, AR-025, AR-026, AR-027。
 
-### I-091 — 完成 lockstep 安全 profile 验收 gate
-- Depends: I-080, I-083, I-090
-- Inputs: p0/p3功能基线、fault-injection结果、三板/ASIC可选物理证据、fault-controller安全状态。
-- Action: 对lockstep profile重新运行全部适用ISA/fabric/memory/cohort测试，再执行fault campaign和performance/area对照；安全claim按目标标准边界书写，不冒充认证。
-- Outputs: lockstep acceptance bundle、安全/性能/面积tradeoff、残余故障清单。
-- Pass: normal与lockstep architectural traces合法一致，注入故障均在声明latency内检测/阻断，可选模式广告与证据闭合。
-- Fail: 把DCLS当TMR、以lockstep输出错误依旧提交、安全认证或ASIL/SIL结论无正式评估证据。
+### I-091 — 完成所选 lockstep 功能 profile 验收 gate
+- Depends: I-080, I-090
+- Inputs: 已声明的 p0 功能基线、V-081–V-083 fault-injection/对齐证据、fault-controller 安全状态；p3/物理证据在相应 claim 中追加。
+- Action: 对所选 p0 DCLS 重跑正常 ISA/fabric/memory 路径与定向故障 campaign，核对比较点、资源公平、mismatch 后尚未发布的 store/MMIO/CSR 及报错延迟；对 p3 DCLS 加 I-083/cohort/shared-memory 回归，对 FPGA/ASIC DCLS 加 V-084/H-048/H-049 的适用物理证据。
+- Outputs: 按 profile/载体分列的 DCLS 功能接受清单、性能/面积 tradeoff、残余 common-mode 故障清单。
+- Pass: 对**当前已验收范围** normal 与 DCLS trace 均合法，声明的 fault sites 在延迟界内检测/阻断；未验收载体保持 BLOCKED/NOT_CLAIMED，无安全认证结论。
+- Fail: DCLS 当 TMR、把 p0 模拟通过当 p3/三板/ASIC 检测证据、错误状态已对外可见仍宣传 fail-closed。
 - Covers: optional lockstep gate, fault containment, safety claim boundary。
 - Sources: AR-019, AR-020, AR-021, validation-plan.md。
 

@@ -153,16 +153,16 @@ flowchart TD
 
 - **负责/门禁**：平台负责人；物理/转换证据闭合。
 - **前置依赖**：H-002, H-003；仍受 implementation-plan 集成依赖表约束。
-- **做什么**：对每个 wrapper 执行全地址 walking pattern、byte mask、同址 read/write、双 port collision、enable/output latency；未定义 collision 由上层仲裁禁止并断言。
-- **输入数据/接口**：I-006、target RAM guides、generic/vendor simulation models。
-- **输出与交接**：RAM semantics matrix、CASE=ram.collision_matrix 的三平台结果。
+- **做什么**：先对p0 RAM wrapper执行地址walking、byte mask、同址读写、双port collision、enable与延迟检查；vector/cache RAM只在广告其profile时追加，未定义collision由仲裁禁止并断言。
+- **输入数据/接口**：I-006的p0 RAM合同、目标板RAM手册、generic/vendor模型；可选VRF/cache配置另取其合同。
+- **输出与交接**：按board/profile索引的RAM semantics matrix和CASE=ram.collision_matrix原始结果，交该板H-016/H-024/H-030。
 - **设计取舍**：先最小安全物理路径，再扩展容量；FPGA和ASIC证据不互替
 - **实现微步骤**：核对exact board/part/tool/license输入；冻结source/constraints/image与可复现脚本；执行单元/构建/时序或对应工艺任务；核对真实报告和设备/映像ID；运行共同corpus与negative controls；归档hash、日志、限制和恢复步骤；未满足门槛则明确blocked并反馈架构。
 - **主要阻塞风险**：错误part、旧bitstream、PS/DDR/coherence假设、报告缺失仍绿灯；阻断规则：以 vendor simulation 的 X 被 Verilator 变零掩盖问题，或仅比较写后最后值。
-- **验收证据**：允许交易的输出值/延迟一致，所有禁止情形可被 assertion 捕获；综合实际推断期望 RAM。；验证口径：允许交易的输出值/延迟一致，所有禁止情形可被 assertion 捕获；综合实际推断期望 RAM。
-- **失败/回退动作**：以 vendor simulation 的 X 被 Verilator 变零掩盖问题，或仅比较写后最后值。
-- **来源覆盖**：BRAM/BSRAM/VRF/cache portability。；来源 HR-003, HR-004, HR-011, implementation-plan.md。
-- **执行者目标**：把“RAM wrapper 的可观察一致性”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
+- **验收证据**：p0允许交易的值和延迟一致，禁止碰撞断言捕获且综合推断预期RAM；广告可选profile时另证明相应RAM。
+- **失败/回退动作**：隔离语义不符的board/profile并提交操作/预期/实际波形和owner，不把缺cache计为p0失败。
+- **来源覆盖**：BRAM/BSRAM portability、可选VRF/cache；来源 HR-003, HR-004, HR-011, implementation-plan.md。
+- **执行者目标**：先关闭p0 RAM语义，后按声明扩展其它memory profile。
 - **执行者须知**：先锁定exact part/tool/license和接口，再构建。所有bitstream、约束、时序报告和板卡日志必须对应同一source hash；禁止用仿真或另一family代替实板证据。
 - **建议工作顺序**：核对exact board/part/tool/license输入；冻结source/constraints/image与可复现脚本；执行单元/构建/时序或对应工艺任务；核对真实报告和设备/映像ID；运行共同corpus与negative controls；归档hash、日志、限制和恢复步骤；未满足门槛则明确blocked并反馈架构。
 - **可接受完成**：允许交易的输出值/延迟一致，所有禁止情形可被 assertion 捕获；综合实际推断期望 RAM。
@@ -329,19 +329,19 @@ flowchart TD
 
 - **负责/门禁**：平台负责人；物理/转换证据闭合。
 - **前置依赖**：H-011, H-004, H-005；仍受 implementation-plan 集成依赖表约束。
-- **做什么**：单独综合 PRF/cache/boot-RAM/PLL 小实例，检查资源类型、读延迟、mask 粒度和 reset inference；必要的 native IP 只留 wrapper 内。
-- **输入数据/接口**：exact-part BSRAM/SSRAM/PLL 文档、wrapper unit results。
-- **输出与交接**：GW5A memory/clock mapping report、IP config hashes。
-- **设计取舍**：先最小安全物理路径，再扩展容量；FPGA和ASIC证据不互替
-- **实现微步骤**：核对exact board/part/tool/license输入；冻结source/constraints/image与可复现脚本；执行单元/构建/时序或对应工艺任务；核对真实报告和设备/映像ID；运行共同corpus与negative controls；归档hash、日志、限制和恢复步骤；未满足门槛则明确blocked并反馈架构。
+- **做什么**：先单独综合 p0 PRF/boot-RAM/PLL 小实例并检查同步读、mask、collision 与 reset 推断；仅声明 cache 容量配置时额外综合 cache RAM；native IP 留在 wrapper 内。
+- **输入数据/接口**：GW5A exact-part BSRAM/SSRAM/PLL 文档、p0 PRF/boot-RAM wrapper 及单元测试；声明 cache 时另附 cache RAM 合同。
+- **输出与交接**：按 profile 的 GW5A memory/clock mapping report、IP config hashes，交 H-013。
+- **设计取舍**：最小 p0 无 cache 物理路径先过；可选容量不占用早期 H-013 的前置。
+- **实现微步骤**：冻结 exact part/tool 和 wrapper/config hash；综合 PRF、boot-RAM、PLL 独立小实例；核资源类型、读延迟、byte mask、collision 与 reset；只对广告容量配置综合 cache 单元；记录原始 report/IP 参数和冲突负例。
 - **主要阻塞风险**：错误part、旧bitstream、PS/DDR/coherence假设、报告缺失仍绿灯；阻断规则：推断成 FF 后仍沿用 BRAM 预算，或从 GW1N RAM 推断 GW5A collision 语义。
-- **验收证据**：没有意外全阵列 FF reset 或容量爆炸；所用模式都有可取得手册/模型证据。；验证口径：没有意外全阵列 FF reset 或容量爆炸；所用模式都有可取得手册/模型证据。
+- **验收证据**：p0 无意外 FF 全阵列 reset 或容量爆炸；每个实际广告模式均有手册/模型及单元映射结果；没有 cache 不阻断 p0。
 - **失败/回退动作**：推断成 FF 后仍沿用 BRAM 预算，或从 GW1N RAM 推断 GW5A collision 语义。
 - **来源覆盖**：GW5A portability primitives。；来源 HR-001, HR-011。
 - **执行者目标**：把“GW5A RAM/PLL 推断”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
 - **执行者须知**：先锁定exact part/tool/license和接口，再构建。所有bitstream、约束、时序报告和板卡日志必须对应同一source hash；禁止用仿真或另一family代替实板证据。
-- **建议工作顺序**：核对exact board/part/tool/license输入；冻结source/constraints/image与可复现脚本；执行单元/构建/时序或对应工艺任务；核对真实报告和设备/映像ID；运行共同corpus与negative controls；归档hash、日志、限制和恢复步骤；未满足门槛则明确blocked并反馈架构。
-- **可接受完成**：没有意外全阵列 FF reset 或容量爆炸；所用模式都有可取得手册/模型证据。
+- **建议工作顺序**：冻结 p0 RAM/PLL 合同→独立综合→核器件原语与读写语义→审 reset/容量→仅对已声明的 cache 扩展重复→交 H-013。
+- **可接受完成**：p0 PRF/boot-RAM/PLL 实际资源与语义已签收；额外容量配置仅在广告时签收。
 - **何时停止求助**：主要风险是错误part、旧bitstream、PS/DDR/coherence假设、报告缺失仍绿灯。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
 - **交付说明**：交接时提供输出：GW5A memory/clock mapping report、IP config hashes。；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
 - **参考资料**：HR-001, HR-011。
@@ -660,7 +660,7 @@ flowchart TD
 - **负责/门禁**：平台负责人；物理/转换证据闭合。
 - **前置依赖**：H-026, H-004；仍受 implementation-plan 集成依赖表约束。
 - **做什么**：先BRAM实现共同profile；URAM作为独立容量优化，显式处理其端口/byte write/reset/读延迟限制，不以同一wrapper名字隐藏额外cycle。
-- **输入数据/接口**：selected-part memory resources、p0 PRF/cache latency contract。
+- **输入数据/接口**：selected-part RAM resources、p0 PRF/ordered-memory读写和延迟合同；URAM/cache仅在宣传相应容量profile时另取合同。
 - **输出与交接**：memory mapping/inference report、adapter equivalence cases。
 - **设计取舍**：先最小安全物理路径，再扩展容量；FPGA和ASIC证据不互替
 - **实现微步骤**：核对exact board/part/tool/license输入；冻结source/constraints/image与可复现脚本；执行单元/构建/时序或对应工艺任务；核对真实报告和设备/映像ID；运行共同corpus与negative controls；归档hash、日志、限制和恢复步骤；未满足门槛则明确blocked并反馈架构。
@@ -834,22 +834,22 @@ flowchart TD
 ### H-035 — 冻结 FPGA release evidence
 
 - **负责/门禁**：平台负责人；物理/转换证据闭合。
-- **前置依赖**：H-032, H-033, H-017, H-025, H-031；仍受 implementation-plan 集成依赖表约束。
-- **做什么**：独立重建与重放每family，列supported/blocked/failed profile；文档写明program/run/recover步骤，不发布许可证/受限IP源。
-- **输入数据/接口**：common与已支持advanced profiles、全部锁定输入/报告/physical logs。
-- **输出与交接**：FPGA release manifest、board operation guide、完整已知限制。
-- **设计取舍**：先最小安全物理路径，再扩展容量；FPGA和ASIC证据不互替
-- **实现微步骤**：核对exact board/part/tool/license输入；冻结source/constraints/image与可复现脚本；执行单元/构建/时序或对应工艺任务；核对真实报告和设备/映像ID；运行共同corpus与negative controls；归档hash、日志、限制和恢复步骤；未满足门槛则明确blocked并反馈架构。
-- **主要阻塞风险**：错误part、旧bitstream、PS/DDR/coherence假设、报告缺失仍绿灯；阻断规则：仅一份bitstream无源配置，或使用未经授权的第三方IP归档。
-- **验收证据**：每claim可定位同part/tool/image/ELF/signature，未知板/未fit profile不算成功。；验证口径：每claim可定位同part/tool/image/ELF/signature，未知板/未fit profile不算成功。
-- **失败/回退动作**：仅一份bitstream无源配置，或使用未经授权的第三方IP归档。
-- **来源覆盖**：reproducible real prototype deliverable。；来源 references.md, validation-plan.md。
-- **执行者目标**：把“冻结 FPGA release evidence”做成一个可复核的小交付：接收明确输入，产出可验证证据，并在失败时给出可回退的安全状态。
-- **执行者须知**：先锁定exact part/tool/license和接口，再构建。所有bitstream、约束、时序报告和板卡日志必须对应同一source hash；禁止用仿真或另一family代替实板证据。
-- **建议工作顺序**：核对exact board/part/tool/license输入；冻结source/constraints/image与可复现脚本；执行单元/构建/时序或对应工艺任务；核对真实报告和设备/映像ID；运行共同corpus与negative controls；归档hash、日志、限制和恢复步骤；未满足门槛则明确blocked并反馈架构。
-- **可接受完成**：每claim可定位同part/tool/image/ELF/signature，未知板/未fit profile不算成功。
-- **何时停止求助**：主要风险是错误part、旧bitstream、PS/DDR/coherence假设、报告缺失仍绿灯。遇到缺失输入、互相矛盾的合同、工具/板卡不可用或验证无法区分错误时，不要猜测；把任务标为Blocked，记录最小事实和需要的上游决定。
-- **交付说明**：交接时提供输出：FPGA release manifest、board operation guide、完整已知限制。；同时更新Track Log、状态、证据hash/commit和下一步。不要把未验证的半成品标成Evidence complete。
+- **前置依赖**：H-032；H-017（GW5A）、H-025（Zynq）、H-031（Virtex）仅为该板advanced声明的条件门禁，H-033仅为实测性能/功耗声明的条件门禁；均不阻断p0；仍受 implementation-plan 集成依赖表约束。
+- **做什么**：逐family重建并实板重放cacheless ordered-memory two-cluster RV64IM p0；仅针对明确广告的board/profile/测量性能另核对相应证据，逐项列supported/blocked/failed。
+- **输入数据/接口**：H-032三板共同corpus、每板确切part/tool/license与锁定source/constraints/bitstream/ELF、设备ID和运行日志；广告advanced声明另取该板H-017/H-025/H-031，广告实测性能/功耗另取H-033。
+- **输出与交接**：board/profile矩阵、同源hash和时序/资源/设备签名的FPGA release manifest、每板program/run/recover命令及限制；交给I-086对应claim审计。
+- **设计取舍**：p0三板先闭合；未支持p1/p2/p3或未证明的性能/功耗声明不广告，不让I-077的cache/MLP研究传递为p0前置。
+- **实现微步骤**：按GW5A→Zynq→Virtex逐板锁part/tool/license、source/constraints/image/ELF；清洁重建并核对timing/fit、device/build ID；加载同一p0测试和预期signature，保存原始日志；仅对广告advanced配置复用相同步骤并核对应H-017/H-025/H-031，对性能/功耗实测声明核H-033；由另一执行者按操作指南恢复好映像重放。
+- **主要阻塞风险**：旧bitstream、不同source hash、错误part/PS-DDR假设、无授权IP或无实板；按board/profile记录实际失败阶段及owner，不以另一板/仿真补证。
+- **验收证据**：p0三板各有实际设备ID、source/constraint/bitstream/ELF hash、fit/timing、程序与signature日志、重放结果；每个advanced或实测性能/功耗宣传另有对应门禁通过。
+- **失败/回退动作**：撤销缺证的board/profile声明、保留好映像及恢复命令，向对应平台owner交付失败日志和缺少的part/tool/license/报告；可选先进配置失败不撤销已通过的p0。
+- **来源覆盖**：reproducible real prototype deliverable；来源 references.md, validation-plan.md。
+- **执行者目标**：把三家族p0发布证据与各板可选先进声明分别冻结为可重放产物。
+- **执行者须知**：只归档许可允许分发的产物；没有实板的某family不能声称“三家族p0”通过。
+- **建议工作顺序**：锁清单→逐板重建/fit→读设备ID→运行/比对signature→记录恢复→针对广告advanced逐板审门禁→交独立执行者重放。
+- **可接受完成**：三家族p0各自闭合；每条额外支持声明匹配该板H-017/H-025/H-031或实测H-033及同源实板记录，未知板/未fit配置不标supported。
+- **何时停止求助**：part/tool/license或板不可得、fit/timing不闭合、签名不一致时停止该board/profile；提供最小失败命令、source和artifact hash、报告、请求决定的owner。
+- **交付说明**：manifest及board operation guide逐行给出claimed profile、证据路径、blocked原因和恢复命令；更新Track Log，但不预填测试结果。
 - **参考资料**：references.md, validation-plan.md。
 - **进度日志**：2026-09-29 规划生成——未开始；后续每次状态变化追加日期、commit/artifact、证据和下一步。
 

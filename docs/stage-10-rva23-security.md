@@ -1,37 +1,50 @@
-# 第10阶段：RVA23 Core / RVA23 Secure 商业化能力
+# 第10阶段：RVA23 Core / 项目选定「RVA23 Secure」选项包
 
-状态：**规划，不是已实现 RVA23 处理器**。本阶段把用户新增的 RV64/RVA23/RVV/安全需求作为最终商业目标。早期 p0/p1/p2 仍是 bring-up 阶段；只有本阶段证据闭合后，才能对外宣称 RVA23 Core 或 RVA23 Secure。
+状态：**规划，不是已实现 RVA23 处理器**。「RVA23 Secure」是项目自选扩展包，**不是 ratified profile**；ratified profile 只有 RVA23U64/RVA23S64。本阶段目标是两者全部 mandatory 条款，而非只跑 Linux 或少数指令。I-098 签预硬件 ISA/能力证据；H-050 后续逐板验证，H-051 仅为所选 ASIC 安全声明提供物理证据；I-091/lockstep 为独立可选 Safety 路径。
 
 ## 1. 这个子系统是做什么的
 
-把非常规 execution fabric 包装成软件可依赖的标准应用处理器：RV64 little-endian、RVA23S64 完整 mandatory能力、VLEN≥128 的 RVV、pointer masking、hypervisor、cache/atomic/misaligned PMA、CMO、timer/counter、虚拟化和 Linux；再分层加入 vector crypto、CFI、Sv48/Zkr/Sdtrig/Ssstrict/Ssaia 与可选 lockstep。
+把非常规 execution fabric 包装成软件可依赖的标准 64-bit little-endian 应用处理器：完整 RVA23U64/RVA23S64 mandatory（含 V、Zkt/Zvkt、Supm/Ssnpm、Sha、PMA/VM/CSR），并按**每个选项**决定实现、发现和声明。Linux/Server Platform、RoT/TPM/secure boot/IOPMP、Ssaia 平台接口不是 RVA23 profile 的同义词，也不能由 ISA 门禁代替平台证明。
 
 ## 2. 为什么存在 / 上游输入
 
-- 上游输入：用户明确要求 RV64、RVA23、RVV 与社区接受的安全功能；ratified RVA23 profile；ISA pointer masking/CFI/vector crypto；server-platform安全边界。
-- 已有依赖：S0-S9 的基础处理器、memory/RVV/multihart、验证质量、三FPGA、ASIC、lockstep。
-- 本阶段输出：RVA23 Core、可选 RVA23 Secure、三家族物理执行证据、ASIC安全边界。
-- 首要原则：不把 p0/p1/p2 当 RVA23；RVV是 mandatory；可选安全功能逐项证据闭合后才宣称；RoT/TPM/secure boot/IOPMP是平台责任。
+- 上游输入：ratified RVA23 profile（AR-022/AR-023）、现有 ISA/特权/指针/向量规范与选项发现约定；任何与 profile 不一致的产品愿望单独列项目选项。
+- 已有依赖：S0-S9 基础处理器、memory/RVV/multihart、验证质量、三 FPGA、ASIC、可选 lockstep。
+- 本阶段输出：I-098 Core 预硬件义务签收、每个所选选项单独签收、H-050 三家族物理执行证据、所选 ASIC 声明的 H-051 证据。
+- 首要原则：p0/p1/p2/p3 不是 RVA23 证明；任一 mandatory 缺失阻断 Core；未选/未闭合选项只撤对应广告，不用可选项补 mandatory。
 
 ## 3. 总体结构
 
 ```mermaid
 flowchart TD
-  ISA[RVA23 Ratified Profile] --> MATRIX[I-092 Compliance Matrix]
+  ISA[RVA23 Ratified Profile] --> MATRIX[I-092 Mandatory/Optional Matrix]
   MATRIX --> CORE[I-093 Mandatory ISA/Privilege/Cache/VM]
-  CORE --> PM[I-094 Pointer Masking]
-  CORE --> CFI[I-095 LPAD + Shadow Stack]
-  CORE --> VCRYPT[I-096 Vector Crypto + DIEL]
-  CORE --> PLATFORM[I-097 Security/Platform Boundary]
-  PM --> VERIFY[V-085..V-090 Verification]
-  CFI --> VERIFY
-  VCRYPT --> VERIFY
-  PLATFORM --> VERIFY
-  VERIFY --> GATE[I-098 RVA23 Core/Secure Gate]
-  GATE --> FPGA[H-050 Three-family Hardware]
-  GATE --> ASIC[H-051 ASIC Security Boundary]
-  LOCK[Optional MosaicRV Safety / Lockstep] --> GATE
+  CORE --> PM[I-094 Core Pointer Masking]
+  CORE --> VCORE[V-085/V-086/V-087 Core Evidence]
+  PM --> VCORE
+  VCORE --> GATE[I-098 Pre-hardware Core ISA/Capability Acceptance]
+  CORE --> CFI[I-095 Selected CFI]
+  CORE --> VCRYPT[I-096 Selected Vector Crypto]
+  CFI --> VSEC[V-088/V-089/V-090 Per-option Evidence]
+  VCRYPT --> VSEC
+  PLATFORM[I-097 Selected Options/Platform Boundary] --> VSEC
+  VSEC -. only selected option claims .-> GATE
+  GATE --> FPGA[H-050 Three-family Physical Execution]
+  GATE --> ASIC[H-051 Selected ASIC Security Evidence]
+  PHYS[I-085/H-045 ASIC Physical Signoff] --> ASIC
+  LOCK[Optional I-091/V-084/H-049 ASIC Safety/Lockstep] -. only selected ASIC Safety claim .-> ASIC
 ```
+
+### 本阶段小模型执行核对表（每个声明单独一行）
+
+| 声明/目标 | 先作决定与输入 | 必交证据/下游交接 | 失败时的处理 |
+|---|---|---|---|
+| RVA23 Core 预硬件 | I-092 冻结 U64+S64 全部 mandatory 和发现值；I-093/I-094/I-082 逐条实现，V-085/V-086/V-087 逐条实测，Zkt/Zvkt DIEL 单列 | 条款→owner→执行与 oracle→正反例→hash 的 ledger、应用/VM/RVV 实际运行交 I-098；明确标注预硬件；H-050 对每板重测 mandatory Zkt/Zvkt 数据值 DIEL | 任一 mandatory 缺路径/证据阻断 Core；某板 DIEL 失败只阻断该板物理 Core 声明；可选 crypto/CFI/Safety 不代偿 |
+| 项目「RVA23 Secure」各选项 | I-092 逐项记录选/未选及软件发现：CFI→I-095/V-088，Zvkng/Zvksg→I-096/V-089，其余所选项→对应 I/V 实现与 V-090 集成 | 每项的规范行为/负例、适用 KAT/DIEL/CSR/PMA/VM 与独立 claim 交 I-098；Ssaia 和平台组件另写责任与边界 | 缺证据只撤对应选项声明；不得因此写「Secure ratified profile」或以 Server Platform 代替 RVA23 |
+| 三家族 RVA23 FPGA | 每家族单独选 Core/所选项，读取 I-098 bundle、板能力、device tree 与软件 hash | H-050 各板真实运行、发现与负例交 I-086 | 缺板或板上能力阻断该家族对应声明，I-098 不是板证据 |
+| ASIC 安全 | 选择 ASIC 安全/物理声明；收 I-098、同候选 I-085/H-045 与所需选项/平台证据 | H-051 DFT/故障/侧信道/残余风险交 I-086；另选 ASIC Safety 才收 I-091/V-084/H-049 | 缺物理证据仅阻断对应 ASIC 声明，既不撤 Core 预硬件也不强制 Safety |
+
+操作顺序：逐行登记 profile 类别、选择/未选、软件发现、负责人与可观察的正反例；保存原始报告 hash。未闭合必需项维持 blocked，不把静态 Depends 当可选门禁。
 
 ## 4. 团队分工与进度追踪
 
@@ -41,9 +54,9 @@ flowchart TD
 | RVA23实现负责人 | I-093 | Not started | 待定 | 待填 artifact/commit | 实现mandatory扩展 | 待填 |
 | Pointer masking负责人 | I-094 | Not started | 待定 | 待填 artifact/commit | 定义地址transform边界 | 待填 |
 | CFI负责人 | I-095 | Not started | 待定 | 待填 artifact/commit | 实现LPAD/SS | 待填 |
-| Vector crypto负责人 | I-096 | Not started | 待定 | 待填 artifact/commit | 实现Zvkt/Zvkng/Zvksg | 待填 |
+| Vector crypto负责人 | I-096 | Not started | 待定 | 待填 artifact/commit | 逐套件选择Zvkng/Zvksg；Zvbc单独选 | 待填 |
 | 平台安全负责人 | I-097 | Not started | 待定 | 待填 artifact/commit | 定义core/平台责任 | 待填 |
-| RVA23发布负责人 | I-098 | Not started | 待定 | 待填 artifact/commit | 闭合发布证据 | 待填 |
+| RVA23验收负责人 | I-098 | Not started | 待定 | 待填 artifact/commit | Core预硬件ISA/能力验收；所选Secure项分别签收 | 待填 |
 | RVA23验证负责人 | V-085 | Not started | 待定 | 待填 artifact/commit | 建立mandatory验证manifest | 待填 |
 | Memory验证负责人 | V-086 | Not started | 待定 | 待填 artifact/commit | 验证CMO/PMA/misaligned | 待填 |
 | Pointer验证负责人 | V-087 | Not started | 待定 | 待填 artifact/commit | 验证全部显式访问 | 待填 |
@@ -57,15 +70,38 @@ flowchart TD
 
 ### I-092 — 构建完整 RVA23 合规矩阵
 
-- **负责/门禁**：RVA23合规负责人；商业profile冻结。
+- **负责/门禁**：RVA23合规负责人；ratified RVA23U64/S64 条款与逐选项声明冻结。
 - **前置依赖**：I-001。
-- **做什么**：逐项建立 RVA23U64/S64 mandatory/localized/development/expansion/extension matrix，标出每项的实现任务、验证任务、capability bit、软件发现方式和当前状态。
-- **输入数据/接口**：ratified RVA23 profile source、当前 profile 表、ISA/manual references。
-- **输出与交接**：RVA23 compliance matrix、capability contract、不得提前广告清单。
-- **设计取舍**：先建立完整义务，再实现；可选与mandatory严格分开。
-- **实现微步骤**：读取ratified RVA23 source；逐项列mandatory/localized/development/expansion；映射实现/验证任务和capability；冻结软件发现与广告规则；建立负例：未完成项广告必须失败；由架构/验证/软件负责人签收。
-- **主要阻塞风险**：把p0当RVA23、把可选当mandatory、reference覆盖缺口；阻断规则：把p0/p1/p2误称RVA23，或把optional feature误列为mandatory。
-- **验收证据**：每个mandatory extension有唯一实现和验证责任；RVA23不通过时没有任何binary发布宣称兼容。
+- **做什么**：把下表每个名称展开为**独立一行**（不按套件合并）记录 profile 类别、spec 条款、owner、实现/验证任务、适用配置、软件发现值、选择状态、证据 hash、未完成时广告负例；逐行对比 ratified 原文，不从「Secure」营销名称推导义务。
+- **输入数据/接口**：AR-022 ratified source、AR-023 官方 profile、现有 ISA/manual 与编译器/OS 发现机制、拟发布目标/配置。
+- **输出与交接**：逐声明 U64/S64 mandatory ledger 交 I-093/V-085/I-098；逐选项 decision/发现/正反例和独立 owner 交对应 I/V 卡、V-090/I-098。
+- **设计取舍**：S64 叠加 U64 mandatory；仅 ratified 原文属 profile。选项分类只描述未来/可选性质，不产生当前 Core 义务。
+- **实现微步骤**：逐行抄录下面的基线与选项；按目标配置填 owner/输入/输出/负例和 I/V/H handoff；比对 U/S 发现值和失效配置；逐个所选项冻结 claim；让架构、验证、软件负责人分别签收 missing-coverage ledger。
+- **主要阻塞风险**：遗漏一个 mandatory、把开发选项写成当前 mandatory、把 Ssaia/Server Platform 混进 profile；阻断规则：任一 mandatory 无 owner/证据路径或软件发现与实装冲突则 Core blocked。
+- **验收证据**：下表所有 mandatory 名称均有逐条 owner/输入/可观察输出/失败负例与 V 卡；每个 ratified 选项都有独立可发现选择/未选行及 claim 边界。
+
+I-092 **mandatory 分母**（斜线仅节省印刷空间，交接 ledger 必须按名称拆行；每行 owner=I-093 或 I-082/I-094，验证=V-085 加相应 V-086/V-087；输入=该条规范与目标配置；输出=执行 trace/oracle/hash 和发现值；负例=非法/权限/失效配置不得仍广告，任一缺口阻断 Core）：
+
+| Profile | 必须逐项登记的原文名称 | 特别交接与反例 |
+|---|---|---|
+| RVA23U64 基础/标量 | RV64I little-endian；M、A、F、D、C、B、Zicsr、Zicntr、Zihpm、Zihintpause、Zfhmin、Zkt；Zihintntl、Zicond、Zimop、Zcmop、Zcb、Zfa、Zawrs | FU/PRF/FP 状态、解码与错误编码；Zkt 的数据值无关延迟为 Core，不移交可选 crypto DIEL |
+| RVA23U64 memory/PMA | Ziccif、Ziccrse、Ziccamoa、Zicclsm、Za64rs、Zic64b、Zicbom、Zicbop、Zicboz | V-086：coherent+cacheable 主存取指至 32 bit 自然对齐原子、LR/SC RsrvEventual、全部 A atomics、misaligned **loads/stores**（非 misaligned AMO）、≤64B 连续自然对齐 reservation、64B cache block；负例跨 PMA/权限/非 coherent agent |
+| RVA23U64 vector/pointer | V（完整 V、VLEN≥128）、Zvfhmin、Zvbb、Zvkt、Supm | I-082/V-085：VRF/掩码/重启和 Zvkt DIEL；I-094/V-087：Supm 环境至少可选 PMLEN=0/7；负例取指/DMA 错误掩码 |
+| RVA23S64 叠加 | Zifencei、Ss1p13、Svbare、Sv39、Svade、Ssccptr、Sstvecd、Sstvala、Sscounterenw、Svpbmt、Svinval、Svnapot、Sstc、Sscofpmf、Ssnpm、Ssu64xl | VM/CSR/中断、I-cache 可见性、PTE/PTW、fault address/instruction；Ssnpm 的 senvcfg.PME/henvcfg.PME 至少 0/7；负例 guest/S 权限与 A/D fault |
+| RVA23S64 Sha 分解 | H、Ssstateen、Shcounterenw、Shvstvala、Shtvala、Shvstvecd、Shvsatpa、Shgatpa | S/VS/HS guest CSR 与两阶段翻译；sstateen0–3/hstateen0–3、可写 hcounteren、vstval/htval、vstvec Direct、vsatp 同 satp modes、hgatp 同 SvNNx4 加 Bare；任一 guest mode/陷阱/CSR 缺口阻断 Core |
+
+I-092 **ratified 可选库存**：以下每个单元格中的名称各为独立选项，**不是**一项联合要求；为每项单列选择、发现、实现 owner、验证 owner、输入/可观察输出/失败负例（未选不得广告，已选失败只阻断该项）。U 指 RVA23U64；S 指 RVA23S64 额外特权项；S 继承 U 选项。
+
+| 类别 | 独立选项（每个逗号隔开的名称各建 ledger 行） | 被选时实现→验证/负例交接 |
+|---|---|---|
+| U localized | Zvkng，Zvksg | I-096→V-089；各自完整 suite/KAT/DIEL，错 GHASH/宣称未选 suite 单项 blocked |
+| U development | Zabha，Zacas，Ziccamoc，Zvbc，Zama16b | Zabha/Zacas/Ziccamoc/Zama16b：I-093 memory→V-086（Ziccamoc 与 Zacas 相关 PMA，Zama16b 16B granule 原子边界）；Zvbc：I-082/I-096→V-085/V-089 CLMUL；错误原子性/异常或冒充 suite 只阻断相应选项 |
+| U expansion | Zfh，Zbc，Zicfilp，Zicfiss，Zvfh，Zfbfmin，Zvfbfmin，Zvfbfwma | Zfh/Zbc/Zfbfmin→I-093/V-085；Zicfilp/Zicfiss→I-095/V-088 各自选择与发现；Zvfh/Zvfbfmin/Zvfbfwma→I-082/V-085；结果/权限/异常负例按项交 V-090/I-098，不能凭 Zfh 代替 Zfhmin |
+| S localized/development | **无特权选项** | 不虚构扩展或发现位 |
+| S expansion | Sv48，Sv57，Zkr，Svadu，Sdtrig，Ssstrict，Svvptc，Sspm | Sv48/Sv57/Svadu/Svvptc→I-093 VM/V-085；Zkr/Sdtrig/Ssstrict→I-097/V-090；Sspm→I-094/V-087；每项检查 CSR/模式/故障或保留编码负例、发现与所选配置一致 |
+| U/S transitory | **无** | 不生成假义务 |
+
+Ssaia、RoT/TPM/secure boot/IOPMP、Server Platform 要求是**profile 之外**的项目/平台决策，若选择在 I-097/V-090 独立记录 owner、接口与证据；安全或 Server Platform 不能作为上表类别。Zkt/Zvkt 是 mandatory，不能挪到 Zvkng/Zvksg 可选项。
 - **失败/回退动作**：退回已有p2/p3能力，不发布RVA23声明。
 - **来源覆盖**：RVA23 Core, commercial ISA baseline；来源 AR-022, AR-023。
 - **执行者目标**：把RVA23从“一个名字”变成一张可以逐项打勾的义务表。
@@ -81,21 +117,35 @@ flowchart TD
 
 - **负责/门禁**：RVA23实现负责人；mandatory扩展实现。
 - **前置依赖**：I-092, I-041, I-048。
-- **做什么**：将RVA23强制但尚未覆盖的指令/CSR/PMA/计时/计数/缓存和虚拟化行为拆成实现项，接入现有frontend、memory、CSR、MMU和SoC合同。
-- **输入数据/接口**：B/Zicond/Zimop/Zcmop/Zcb/Zfa/Zfhmin/Zkt、CMO/Zic64b、misaligned/atomic PMA、Zicntr/Zihpm、Sv39/Svnapot/Svinval/Svpbmt/Sstc/Sscofpmf/Ssu64xl、Sha。
-- **输出与交接**：RVA23 mandatory implementation set、CSR/trap/PMA/PMU更新、Sha hypervisor候选。
-- **设计取舍**：逐项真实实现，不只改ISA字符串。
-- **实现微步骤**：按compliance matrix拆任务；实现标量/压缩/FP/计时扩展；实现CMO/PMA/misaligned/atomic；实现Sv39/Svnapot/Svinval/Svpbmt；实现Sstc/Sscofpmf/PMU；实现Sha hypervisor；接directed/reference测试并回归。
-- **主要阻塞风险**：CSR/PMA/虚拟化副作用遗漏、CMO权限错误、hypervisor状态不完整；阻断规则：只对齐编译器misa/ISA字符串，不实现指令；或忽略PMA/CSR/特权副作用。
-- **验收证据**：每项都有真实RTL和对应directed/reference检查；不是仅ISA字符串更新。
-- **失败/回退动作**：禁未完成扩展并阻断RVA23广告。
+- **做什么**：逐行实现 I-092 的完整 U64+S64 mandatory，已有模块必须复核实际结果，不因旧 stage 已标 done 而免测。非常规 fabric 必须让 frontend/FU/PRF/VRF/LSU/CSR/VM 与 packet replay/reconfiguration 保存同一架构语义。
+- **输入数据/接口**：I-092 每项规范、已有 decode/rename/packet/commit、FU/PRF/VRF/LSU/MMU/PMA/CSR 配置与软件发现值。
+- **输出与交接**：每组配置、指令/CSR/PMA 差异、成功执行 trace 和故障 trace 交 V-085/V-086；I-082 向量清单与 I-094 pointer 路径分别交 V-085/V-087，再交 I-098。
+- **设计取舍**：spec 条款驱动实现，不只改 ISA 字符串；每一项的 decode、退休、副作用和能力发现必须对应同一硬件配置。
+- **实现微步骤**：逐项认领 I-092 行；对下面每批记录 owner、规范输入、可观测输出、失败负例；先核成功/故障路径再查 replay/reconfiguration 中途的唯一提交；交对应 V 卡；最后对全矩阵逐行查缺。
+
+I-093 内部子交付（只拆执行批次，不增任务 ID；下表每行 owner=I-093 RVA23 实现负责人，标出的外部 owner 分别交接；任何 mandatory 行失败均阻断 Core）：
+
+| 子交付及输入 | 实现/交接的可观测输出 | 失败负例/阻断 |
+|---|---|---|
+| 基础标量与 FU/PRF：RV64I little-endian、M/A/B、C、Zicond、Zimop/Zcmop、Zcb、Zawrs、Zihintntl/Zihintpause | frontend 对齐/压缩展开，FU 运算、PRF 重命名与结果提交；hint/MOP 按规范执行，不把未选 CFI 指令错误变成保护；reservation 等待唤醒、非法编码 trap/软件发现交 V-085 | FU 争用、speculation flush/packet replay 或更换映射时不可重复副作用/丢结果；不支持编码/未授权路径不能假装已实现 |
+| FP 与 vector 接口：F/D/Zfhmin/Zfa/Zicsr；I-082 的完整 V（VLEN≥128）、Zvfhmin、Zvbb、Zvkt | FPR/PRF 舍入、NaN、fflags/frm 与向量 VRF vtype/vl/vstart、mask/tail/restart 的逐条结果交 V-085；Zkt **已实现且列入 Zkt 清单**的标量指令及 Zvkt 清单中的向量指令另列 mandatory DIEL 观测点 | 错舍入/flags、replay 后重复 FP flag、向量部分写错误、操作数数据值改变适用指令延迟都阻断 Core；loads/stores/条件分支不在 Zkt 范围，可选 crypto DIEL 不代替 |
+| 取指与缓存：Ziccif、Zic64b、Zicbom/Zicbop/Zicboz、S64 Zifencei | coherent+cacheable 主存自然对齐至 32-bit 取指原子；64B 自然对齐 block，CBO 权限/PMA/ordering 与写代码后 FENCE.I 可见性，前端 invalidate 与 packet 取消交 V-086 | torn fetch、陈旧指令跨 FENCE.I、noop CBO、错误权限上发生 cache 副作用均阻断 Core |
+| LSU/原子/PMA：A、Ziccrse、Ziccamoa、Zicclsm、Za64rs、Ssccptr | 主存双 PMA 下 LR/SC RsrvEventual、A 全部 AMO、misaligned **load/store** 支持（不擅自宣称原子）、≤64B 连续自然对齐 reservation、PTW 主存读；跨 packet 的原子/异常/取消及独立 agent 观测交 V-086 | starvation 或 reservation 跨界、misaligned 访问错误值/越权、错误 PMA 上合法化操作即阻断 Core；misaligned AMO/Zama16b **不是** mandatory |
+| Counter/CSR：Zicntr/Zihpm、Sscounterenw、Sstc/Sscofpmf、Ssu64xl | read/write 权限、WARL、counter 过滤/overflow、timer pending/interrupt 与 sstatus.UXL=2 trace 交 V-085 | 错 mode、只更新 shadow CSR、replay 双计数、不可写适用 scounteren bit 阻断 Core |
+| S64 VM/trap：Ss1p13、Svbare/Sv39/Svade/Svpbmt/Svinval/Svnapot、Sstvecd/Sstvala | satp Bare/Sv39、A/D fault、NAPOT/PBMT、地址翻译缓存失效与 stvec Direct/有效四字节对齐 BASE、stval fault address/指令；翻译/异常优先级交 V-085/V-086 | 错 PTE 或负例权限仍可访问、旧翻译跨 reconfiguration/replay 存活、stval/异常优先级错阻断 Core；Sv48/Svadu 是可选 |
+| Sha 各组成：H、Ssstateen、Shcounterenw、Shvstvala、Shtvala、Shvstvecd、Shvsatpa、Shgatpa | VS/HS 两阶段 VM 与 guest exit，sstateen0–3/hstateen0–3，适用 hcounteren 可写，vstval/htval 故障地址，vstvec Direct BASE，vsatp 同 satp modes，hgatp 对应 SvNNx4 及 Bare；逐个 CSR/guest 配置交 V-085 | 只支持 H decode、缺一个 CSR/VS/guest 翻译 mode、guest fault 错归宿或跨 packet/reconfiguration 泄露前一 VM 状态均阻断 Core |
+| Pointer：I-094 owner 实现 Supm/Ssnpm 最少 PMLEN=0/7 | 有效 privilege/PMM 与 scalar/FP/vector/AMO/CMO CPU 显式访存（含 MMIO）变换接口交 V-087 | CPU 显式 MMIO 漏 mask、取指/PTW/DMA 错 mask、fault/tval/debug 未同步则阻断 Core |
+
+- **主要阻塞风险**：遗漏矩阵条款、CSR/PMA/VM 副作用或把可选项混入 mandatory；阻断规则：ISA 字符串过关却无执行路径、未完成 mandatory 项仍广告 Core。
+- **验收证据**：每个子交付及 I-092 其余 mandatory 行均有 RTL、能力发现值、对应 V 卡实际执行/reference 或独立 oracle 结果，零未分配义务。
+- **失败/回退动作**：未闭合 mandatory 任一项则阻断 Core 预硬件验收；独立可选扩展失败只撤其单项广告。
 - **来源覆盖**：RVA23 mandatory extensions, hypervisor, cache management；来源 AR-022, AR-024, AR-027。
-- **执行者目标**：让RVA23要求的每个软件可见行为都有真实硬件路径。
-- **执行者须知**：不要从编译器支持的指令反推硬件义务；每个mandatory项按规范条款实现和测试。
-- **建议工作顺序**：读矩阵；按模块分组；先标量/CSR，再cache/PMA，再MMU/hypervisor；逐项写测试；回归。
-- **可接受完成**：每项有RTL和reference证据，RVA23矩阵可打勾。
-- **何时停止求助**：规范行为、CSR WARL或PMA不明确时停止并升级。
-- **交付说明**：提交实现、测试证据和更新后的矩阵；更新Track Log。
+- **执行者目标**：让 RVA23 每个软件可见 mandatory 行有真实路径与可移交的细粒度证据。
+- **执行者须知**：只按 ratified source/I-092 定 Core 义务；不要从编译器支持猜硬件义务，I-094 负责地址 transform 实现。
+- **建议工作顺序**：逐行认领矩阵；按表八组小批实现并交 V-085/V-086/V-087；核对 I-082 vector 结果；独立查缺漏与广告值。
+- **可接受完成**：全部 mandatory（含未展示的基础义务）分配、实现和验证闭合，I-098 可逐行打勾。
+- **何时停止求助**：规范行为、CSR WARL、PMA 或 VM 合同不明时标阻断项，不猜测替代。
+- **交付说明**：提交八组实现/结果链接和完整 mandatory 矩阵交 V-085/I-098；更新 Track Log。
 - **参考资料**：AR-022, AR-024, AR-027。
 - **进度日志**：2026-09-29 用户新增RVA23商业目标后规划——未开始。
 
@@ -103,19 +153,19 @@ flowchart TD
 
 - **负责/门禁**：Pointer masking负责人；地址mask语义。
 - **前置依赖**：I-093, I-045, I-046, I-056。
-- **做什么**：在AGU和memory packetizer统一执行ignore transform；排除implicit fetch/PTW/DMA；把mask后的地址用于TLB/PMP/PMA/debug trigger/stval/vector/CMO/SS访问；保留权限、地址空间和错误报告语义。
-- **输入数据/接口**：Supm/Ssnpm/Sspm执行环境合同、Smnpm/Smmpm控制、PMLEN=0/7/16策略、Sv39/Sv48、scalar/FP/vector/AMO/CMO/CFI显式访问列表。
-- **输出与交接**：pointer-mask transform unit、per-access coverage matrix、integration into LSU/MMU/debug。
-- **设计取舍**：统一AGU转换，不逐指令临时修补。
-- **实现微步骤**：定义PMLEN和privilege配置；实现ignore transform；接入scalar/FP/vector/AMO/CMO/SS；接入TLB/PMP/PMA/debug/stval；排除fetch/PTW/DMA；覆盖misaligned和guest/physical边界；与reference/规范矩阵验收。
-- **主要阻塞风险**：只测标量、错误mask implicit/vector/CMO/SS/debug路径；阻断规则：只在标量load/store加mask，或错误mask取指、PTW、DMA和trap handler地址。
-- **验收证据**：所有显式访问按当前 privilege/mode/PMM 转换；implicit access不被错误mask；跨misaligned/vector/CMO/shadow-stack的语义逐项通过。
-- **失败/回退动作**：禁pointer masking profile。
+- **做什么**：在 CPU 指令显式 memory access 的 AGU/memory packetizer 统一执行 ignore transform，包括访问 MMIO 的显式 load/store/AMO/CMO 等；排除取指、PTW、IOMMU、DMA/设备自产生的访问；以变换后地址供 TLB/PMP/PMA/debug trigger/stval/vector/CMO/SS 使用，不改变权限和异常语义。
+- **输入数据/接口**：Supm/Ssnpm/Sspm 执行环境合同、Smnpm/Smmpm 控制、PMLEN=0/7/16 策略、Bare/Sv39/Sv48、CPU 显式访问与设备来源列表（含 MMIO）。
+- **输出与交接**：pointer-mask transform unit、按发起者/访问类型划分的覆盖矩阵，交 V-087 与 LSU/MMU/debug 集成。
+- **设计取舍**：统一 CPU 显式访问转换，不以目标为 MMIO 作为免 mask 理由；设备自产生访问不转换。
+- **实现微步骤**：定义 PMLEN/有效 privilege；接入 CPU scalar/FP/vector/AMO/CMO/SS 和 CPU 指令访问 MMIO；核对 TLB/PMP/PMA/debug/stval；排除取指/PTW/IOMMU/DMA/设备访问；覆盖 misaligned、MPRV/MXR 与 guest/physical；与规范矩阵验收。
+- **主要阻塞风险**：只测标量、误按目标地址排除 MMIO、误 mask 设备来源；阻断规则：CPU 对 MMIO 的显式访问漏 mask，或取指/PTW/DMA/设备来源被 mask。
+- **验收证据**：所有适用 CPU 显式访问按当前有效 privilege/mode/PMM 转换；隐式与设备来源不被错误 mask；MMIO/misaligned/vector/CMO/SS 边界通过。
+- **失败/回退动作**：阻断 RVA23 Core mandatory pointer masking 签收；不得仅关闭广告而仍称 Core。
 - **来源覆盖**：pointer integrity, tagged addressing, memory safety；来源 AR-024。
 - **执行者目标**：让所有需要mask的地址路径都走同一套规则，所有不该mask的路径都明确排除。
-- **执行者须知**：pointer masking不是tag check本身；不要改变权限语义，也不要对取指/PTW/DMA应用mask。
-- **建议工作顺序**：定义配置；实现transform；枚举访问类型；接入每路径；测misaligned/vector/CMO/SS；测fault/tval/debug。
-- **可接受完成**：全部显式访问矩阵通过，implicit路径负例通过。
+- **执行者须知**：pointer masking 不是 tag check；CPU 指令对 MMIO 的显式访问仍受 mask，DMA/设备自己产生的访问不受 mask；不要改变权限或取指/PTW 的地址。
+- **建议工作顺序**：定义配置和 transform；按发起者与指令列访问；接入每路径；测 CPU→MMIO 与 DMA→MMIO 对照、misaligned/vector/CMO/SS；测 fault/tval/debug。
+- **可接受完成**：CPU 显式访问和设备/隐式排除矩阵均通过。
 - **何时停止求助**：某类访问是否受mask不明确时停止查规范，不要假设。
 - **交付说明**：提交transform实现、矩阵和证据；更新Track Log。
 - **参考资料**：AR-024。
@@ -145,67 +195,67 @@ flowchart TD
 
 ### I-096 — 实现 vector crypto 与 data-independent latency
 
-- **负责/门禁**：Vector crypto负责人；Zvkng/Zvksg/DIEL。
+- **负责/门禁**：Vector crypto负责人；仅对选定的 Zvkng/Zvksg 等扩展分别验收。
 - **前置依赖**：I-082, I-093。
-- **做什么**：在RVV datapath上实现选定的NIST/ShangMi suites、GCM/GHASH、carryless multiply、SHA-2/SM3、AES/SM4及Zvkt DIEL规则；VLEN=128时用LMUL组合256-bit group。
-- **输入数据/接口**：Zvbb/Zvkt、Zvkng/Zvksg localized options、VLEN≥128、EGW/EEW/EGS/LMUL/vstart约束。
-- **输出与交接**：vector crypto units、operation matrix、constant-latency evidence hooks。
-- **设计取舍**：先完整suite语义，再性能；DIEL是明确范围不是全侧信道免疫。
-- **实现微步骤**：实现Zvbb/Zvkt基础；实现AES/SM4/SHA/SM3/GHASH/CLMUL；处理EGW/LMUL/vstart/overlap；加DIEL时序观测；用KAT和边界矩阵验证；比较VLEN=128/256路径；决定localized suite广告。
-- **主要阻塞风险**：只实现AES/SHA子集、VLEN/EGW错误、masked inactive影响timing；阻断规则：只实现AES/SHA子集却宣称Zvkng/Zvksg；VLEN<128仍宣称application vector crypto；允许masked inactive元素改变timing。
-- **验收证据**：每个声明suite的element grouping、overlap、illegal/reserved、vstart、mask/tail和结果正确；DIEL模式对数据值不表现可测时序差异。
+- **做什么**：在 RVV datapath 上实现选定的 NIST/ShangMi 套件：Zvkng=Zvkn+Zvkg，Zvksg=Zvks+Zvkg；Zvkg 提供 GHASH/GCM，Zvbc 提供另行选择的 CLMUL（不是两套件的隐含要求）；实现各自规范要求的数据独立执行延迟，VLEN=128 时用 LMUL 组成 256-bit element group。
+- **输入数据/接口**：Core 的 Zvbb/Zvkt、选定的 Zvkng/Zvksg/Zvbc、VLEN≥128、EGW/EEW/EGS/LMUL/vstart 与每条指令的 reserved/illegal 规则。
+- **输出与交接**：按选定 suite 展开的操作矩阵、vector crypto units、延迟观测点，交 V-089/I-098。
+- **设计取舍**：先完整 suite 语义再性能；DIEL 是限定的数据值时序保证，不是全侧信道免疫；未选 Zvbc 不阻断 Zvkng/Zvksg。
+- **实现微步骤**：先查官方 suite 成员并选择广告；实现各自 AES/SHA 或 SM4/SM3 与共同 Zvkg GHASH；Zvbc CLMUL 仅在单独选择时实现；逐指令处理 EGW/LMUL/vstart/overlap 与 reserved/illegal；接 KAT、边界及 DIEL 观测；比较 VLEN=128/256。
+- **主要阻塞风险**：子集冒充 suite、混淆 GHASH/CLMUL、把 reserved 一律强制 trap、VLEN/EGW 或数据时序错误；阻断规则：未完整实现选定 suite 却广告，或按 Zvbc 替代必需的 Zvkg。
+- **验收证据**：选定 suite 全部指令的结果、element grouping、overlap、vstart、mask/tail 和规范规定的非法异常通过；reserved 组合仅按规范处理，不额外要求一律 trap；规定范围内延迟不依赖数据值。
 - **失败/回退动作**：不发布vector crypto suite。
 - **来源覆盖**：vector cryptography, side-channel-aware datapath；来源 AR-026。
 - **执行者目标**：把RVA23 Secure的crypto能力做成完整套件，而不是几个演示指令。
-- **执行者须知**：crypto指令有EGW/EGS/EEW约束；masked/tail/inactive元素也不能改变声明的时序行为。
-- **建议工作顺序**：先实现基础vector crypto；再AES/SHA/GCM/SM；处理LMUL/EGW；跑KAT；测DIEL；审查广告。
-- **可接受完成**：声明suite全部指令通过，DIEL证据清楚，VLEN约束明确。
-- **何时停止求助**：KAT缺失、规范约束不清或时序差异无法消除时停止。
-- **交付说明**：提交crypto单元、KAT/DIEL报告和矩阵；更新Track Log。
+- **执行者须知**：Zvkg 的 GHASH 与 Zvbc 的 CLMUL 分开列；vstart/vl/SEW 等 reserved 不自动等于 mandatory illegal-instruction，LMUL×VLEN<EGW 明确要求非法指令异常。
+- **建议工作顺序**：锁定 suite 成员；实现 AES/SHA 或 SM4/SM3 与 Zvkg；可选实现 Zvbc；测 LMUL/EGW 和 KAT；测 DIEL；逐项审广告。
+- **可接受完成**：仅声明且完整验证所选 suite，Zvbc 单独决策，DIEL 范围与 VLEN 约束明确。
+- **何时停止求助**：KAT 缺失、reserved/illegal 规则不清或延迟差异无法消除时停止并撤回相应声明。
+- **交付说明**：提交 suite 展开表、crypto 实现、KAT/DIEL 报告给 V-089/I-098；更新 Track Log。
 - **参考资料**：AR-026。
 - **进度日志**：2026-09-29 用户新增RVA23商业目标后规划——未开始。
 
 ### I-097 — 实现 commercial security/platform package
 
 - **负责/门禁**：平台安全负责人；RVA23 Secure边界。
-- **前置依赖**：I-093, I-095, I-096。
-- **做什么**：将core内扩展与SoC责任分离：实现/验证Sv48、Svadu、entropy CSR、debug triggers、AIA/APLIC/IMSIC接口；定义RoT/TPM/secure boot/IOPMP为平台任务，不把core能力冒充平台合规。
-- **输入数据/接口**：RVA23 Secure选定项、Sv48/Svadu/Zkr/Sdtrig/Ssstrict/Ssaia、平台RoT/TPM/secure boot/IOPMP边界。
-- **输出与交接**：commercial security integration package、platform responsibility matrix、selected capability manifest。
-- **设计取舍**：core内功能与平台责任分开；没有外部组件不宣称平台安全。
-- **实现微步骤**：选择RVA23 Secure项；实现Sv48/Svadu/Zkr/Sdtrig/Ssstrict/Ssaia接口；定义RoT/TPM/secure boot owner；定义IOPMP集成边界；写platform responsibility matrix；综合Linux/VM/crypto/CFI软件；审阅claim边界。
-- **主要阻塞风险**：把RVA23 Core当server安全、把IOPMP/CoVE/WorldGuard写成已实现；阻断规则：用RVA23 Core宣称server-platform合规，或把未实现的CoVE/WorldGuard/IOPMP写成当前支持。
-- **验收证据**：每项core功能有实现/测试；平台功能有明确owner和接口；不声称无RoT/IOPMP实现的平台安全。
-- **失败/回退动作**：只发布RVA23 Core，不发布Secure平台声明。
+- **前置依赖**：I-093。
+- **做什么**：把 I-092 的**所有**所选 ratified 选项交由各专属实现/验证 owner（含 Sv57、Svvptc、Sspm、各 U 开发/扩展项），本卡只为所选 Zkr/Sdtrig/Ssstrict 等集成及项目另选 Ssaia/平台边界补接口，不将平台接口冒充 RVA23 扩展。
+- **输入数据/接口**：I-092 逐选项 ledger 与对应 I-093/I-082/I-094/I-095/I-096 证据；Sv48/Sv57/Svadu/Svvptc/Zkr/Sdtrig/Ssstrict/Sspm 规范；独立项目 Ssaia 和平台 RoT/TPM/secure boot/IOPMP 责任。
+- **输出与交接**：每项名称/类别/选择/发现/owner/实现与负例引用的集成包，平台独立责任矩阵，交 V-090/I-098；不输出未选项的成功声明。
+- **设计取舍**：ratified RVA23 option 与 Server Platform/项目 bundle 两套声明边界；CFI/crypto 或平台组件仅在分别选择并宣称时要求其证据。
+- **实现微步骤**：沿 I-092 逐个选项取专属 owner 结果，给 Zkr/Sdtrig/Ssstrict 补 CSR/debug/编码边界；另选 Ssaia 才接 AIA/APLIC/IMSIC；平台组件逐个标 owner/输入/输出/失败负例，运行匹配 VM/crypto/CFI 软件并核广告。
+- **主要阻塞风险**：把 RVA23 Core 当 Server Platform 安全、把 Ssaia 当 ratified RVA23 选项、把 I-095/I-096 当所有可选项前置，或未实现的选项仍广告。
+- **验收证据**：每个所选项实现/验证与发现一致，失效配置的负例不广告；宣称的外部平台项有 owner/接口/执行证据。
+- **失败/回退动作**：撤回缺证据的对应 Secure/平台声明，已闭合的 Core 和其他独立可选项继续独立验收。
 - **来源覆盖**：security package, platform security, server requirements；来源 AR-027, HR-014。
 - **执行者目标**：把“核心能做”和“平台必须提供”分开，避免商业声明越界。
-- **执行者须知**：RVA23 profile不等于server platform；RoT、TPM、Secure Boot、IOPMP都不是一条core指令。
-- **建议工作顺序**：列core项；实现/验证；列平台owner；定义接口；跑综合软件；审阅claim。
-- **可接受完成**：每项功能有归属和证据，平台缺失不被隐藏。
-- **何时停止求助**：平台组件不可用或安全声明需要正式评估时停止。
-- **交付说明**：提交security package、responsibility matrix和claim审查；更新Track Log。
+- **执行者须知**：RVA23 profile 不等于 server platform；RoT、TPM、Secure Boot、IOPMP 都不是 core 指令；只选一项不自动选择整套 Secure。
+- **建议工作顺序**：列所选 core 项；逐项实现/验证；列平台 owner；定义接口；跑匹配软件；审广告。
+- **可接受完成**：所选功能逐项有归属和证据，未选项不广告，平台缺失不隐藏。
+- **何时停止求助**：所宣称的平台组件不可用或正式安全评估缺失时仅阻断对应声明。
+- **交付说明**：提交逐选项 security package、责任矩阵和 claim 审查交 V-090/I-098；更新 Track Log。
 - **参考资料**：AR-027, HR-014。
 - **进度日志**：2026-09-29 用户新增RVA23商业目标后规划——未开始。
 
-### I-098 — 完成 RVA23 Core/Secure 发布 gate
+### I-098 — 完成 RVA23 Core ISA/能力预硬件验收与选定 Secure 项签收
 
-- **负责/门禁**：RVA23发布负责人；RVA23 Core/Secure发布。
-- **前置依赖**：I-082, I-091, I-096, I-097。
-- **做什么**：逐项闭合RVA23 mandatory与选定optional能力，运行应用/VM/RVV/crypto/CFI软件集合；生成合规性声明模板和已知限制。
-- **输入数据/接口**：全部RVA23/RVV/crypto/CFI/pointer masking证据、reference coverage、platform manifests。
-- **输出与交接**：RVA23 Core/Secure acceptance bundle、binary compatibility evidence、capability map。
-- **设计取舍**：二进制兼容由实际软件集合证明，不由profile名称推断。
-- **实现微步骤**：闭合mandatory矩阵；闭合选定Secure项；运行应用/VM/RVV/crypto/CFI集合；核对capability discovery；审阅已知限制和claim；独立执行者复跑；发布或阻断。
-- **主要阻塞风险**：缺mandatory项、reference不支持、单个Linux boot冒充完整合规；阻断规则：用build flag、ISA字符串或单个Linux boot代替profile闭合；未实现mandatory项仍发布RVA23。
-- **验收证据**：所有宣称能力有实现、reference/formal/ACT/程序证据；binary compatibility从同profile软件运行结果证明。
-- **失败/回退动作**：阻断RVA23发布。
-- **来源覆盖**：commercial RVA23 release, security acceptance；来源 AR-022, AR-023, AR-024, AR-025, AR-026, AR-027。
-- **执行者目标**：只有当证据完整时才把MosaicRV标成RVA23 Core或RVA23 Secure。
-- **执行者须知**：发布不是“大部分能跑”；每个mandatory项都要闭合，每个可选项都要明确是否支持。
-- **建议工作顺序**：收证据；核对矩阵；跑软件集合；审查广告；复跑；写已知限制；签收。
-- **可接受完成**：所有宣称能力证据闭合，未知/失败项明确。
-- **何时停止求助**：缺mandatory证据或reference无法证明时停止。
-- **交付说明**：提交acceptance bundle、capability map和限制清单；更新Track Log。
+- **负责/门禁**：RVA23验收负责人；Core mandatory ISA/能力预硬件验收，所选 Secure 项分别签收；不是最终物理硬件发布 gate。
+- **前置依赖**：I-082, I-092, I-093, I-094, V-085, V-086, V-087。
+- **做什么**：严格以 I-092 ratified 分母逐行签 RVA23U64+S64 完整 mandatory（含 Sha 八组成、Zkt/Zvkt、atomic fetch/LR-SC/misaligned load/store、VLEN≥128、PMLEN=0/7）；另为每个**选定** ratified 选项或独立项目/平台选项签一行，不产生统一 ratified「RVA23 Secure」证书。
+- **输入数据/接口**：I-092 按项发现/选择/claim ledger、I-093/I-082/I-094 配置及 V-085/V-086/V-087 原始 Core traces/oracles/负例、被选项对应 I/V 证据；I-091 仅在另选 Safety 时适用。
+- **输出与交接**：owner=I-098；Core 预硬件 acceptance bundle（逐条输入、观察结果、失败负例、hash/限制造册）交 H-050 逐家族物理验证与 I-086 目标声明；所选 ASIC 安全声明**才**交 H-051，未选/缺证据的选项各记 blocked，不混入 Core。
+- **设计取舍**：I-098 签 ISA/能力而非板级/ASIC、Server Platform 或正式安全认证；H-050 必须随后对各板实际执行，H-051 只为实际选择的 ASIC 安全声明，I-091/H-049 仅为独立 Safety/lockstep。
+- **实现微步骤**：逐行比 I-092 的 U/S mandatory 与 V-085–087 是否齐全，核 FU/PRF/VRF/LSU/CSR/VM/packet replay/reconfiguration trace；运行实际 U/S 程序、VM/guest、向量和错误权限/失效配置负例；缺任一 Core 行立刻阻断 Core；再按每个选项逐行核选择值/发现/对应 I/V/KAT/异常负例；标未选不得广告、所选缺证据只撤该项；交 H-050 和条件 H-051。
+- **主要阻塞风险**：Linux boot/ISA 字符串冒充全条款、引用模拟器无 oracle、H-050 未跑先作物理宣称；Core mandatory 失败不能用 CFI/crypto/可选 Safety 掩盖。
+- **验收证据**：U64/S64 mandatory 每行有输入配置、owner、规范期望/实际结果、负例与 oracle/hash；所选选项每行有独立记录与限制，明确标记 H-050/H-051 未完成，不声称物理通过。
+- **失败/回退动作**：Core 缺口阻断 Core 声明；所选 Secure 项缺口只撤回对应可选声明；I-091 不通过只阻断另行选择的 Safety 声明。
+- **来源覆盖**：commercial RVA23 ISA acceptance, security capability acceptance；来源 AR-022, AR-023, AR-024, AR-025, AR-026, AR-027。
+- **执行者目标**：预硬件 Core 全部 mandatory 真实闭合，且每个选定 Secure 项可追溯，后续硬件仍需单独证明。
+- **执行者须知**：本门禁不承诺三家族/ASIC 已通过；I-091 是独立 Safety 路径，不是 Core 完成条件。
+- **建议工作顺序**：定声明；签 Core；逐项签所选 Secure；核软件发现；复跑；标后续 H-050/H-051；交 I-086。
+- **可接受完成**：Core 预硬件证据完整，所选 Secure 与未选能力边界明确，物理门禁标为待办而非已通过。
+- **何时停止求助**：任何 Core mandatory 无可核查证据时阻断 Core；某选项无证据时仅阻断该选项。
+- **交付说明**：提交 acceptance bundle、逐声明 capability map/限制及 H-050/H-051 handoff；更新 Track Log。
 - **参考资料**：AR-022, AR-023, AR-024, AR-025, AR-026, AR-027。
 - **进度日志**：2026-09-29 用户新增RVA23商业目标后规划——未开始。
 
@@ -213,41 +263,64 @@ flowchart TD
 
 - **负责/门禁**：RVA23验证负责人；RVA23覆盖闭合。
 - **前置依赖**：V-002, V-020, V-043, V-080。
-- **做什么**：逐项生成RVA23U64/S64测试义务，覆盖mandatory scalar/FP/vector/privilege/cache/PMA/PMU/hypervisor行为；为reference不支持的项建立第二oracle或形式/定向证据。
-- **输入数据/接口**：RVA23 compliance matrix、每个mandatory extension的实现里程碑、ACT/Sail/Spike/NEMU能力表。
-- **输出与交接**：RVA23 verification manifest、capability intersection、missing coverage ledger。
-- **设计取舍**：reference不支持时用第二oracle/形式证据，不blanket skip。
-- **实现微步骤**：生成RVA23义务；对照各参考能力；为缺口选第二oracle；跑directed/ACT/程序；闭合排除账本；审阅mandatory项；签收或阻断。
-- **主要阻塞风险**：ISA字符串通过但无执行证据；阻断规则：ISA字符串/build flag通过但指令/CSR/PMA无执行证据。
-- **验收证据**：每项mandatory capability有至少一个真实执行证据和对应spec条款；没有未登记排除。
-- **失败/回退动作**：阻断RVA23 gate。
+- **做什么**：用 I-092 每个 U64/S64 mandatory 条款作分母，按下列非 ID 小批跑实际程序/CSR/内存访问与正反例；reference 不支持时补独立 oracle/formal/定向证明，不能 skip 为 pass。
+- **输入数据/接口**：I-092 ledger、I-093 的八批接口、I-082 完整 V/Zvfhmin/Zvbb/Zvkt、ACT/Sail/Spike/NEMU 支持清单；V-086/V-087 消费本任务的 case manifest，而非其前置。
+- **输出与交接**：owner=V-085；逐行输入配置、程序、期望/RTL 结果、oracle、负例、hash 与缺口 ledger；memory 交 V-086，pointer 交 V-087，基础及汇总交 I-098。
+- **设计取舍**：旧基础条款也必须运行；以参数化模式覆盖成功、权限/非法、flush/replay、重配置，不把 optional 随 Core 检查。
+- **实现微步骤**：下表每批分别建固定种子程序、oracle 与负例，逐行存结果/发现值；交换目标配置和 guest 模式复跑；审 skip 与证据 hash；缺一行标 blocked 并反馈实现 owner。
+
+V-085 内部验证批次（不增 ID；每行 owner=V-085 RVA23 验证负责人，所列 V-086/V-087 为独立细项 owner；任一 mandatory 未闭合阻断 Core）：
+
+| 输入批次 | 可观测输出与交接 | 失败负例 |
+|---|---|---|
+| RV64I little-endian、M/A/B/C/Zicond/Zimop/Zcmop/Zcb/Zawrs/hints；I-093 FU/PRF | 逐指令值、PC/trap 与物理寄存器提交/packet flush/replay 对照 oracle 交 I-098 | 非法编码错误提交、flush 后错结果或同一次 AMO 重复退休 |
+| F/D/Zicsr/Zfhmin/Zfa 与 I-082 完整 V（VLEN≥128）/Zvfhmin/Zvbb | 舍入/flags、vtype/vl/vstart、mask/tail、vector load/store/重启状态与 VRF 结果交 I-098 | FP flags 重复、向量部分退休错、以仅 Zve 或可选 Zvfh 代替 mandatory |
+| Zkt、Zvkt mandatory DIEL；I-093 标量 FU、I-082 VRF/FU | 对 Zkt **已实现且列入清单**的标量指令和 Zvkt 已实现清单的向量指令，固定配置逐数据值比较延迟；OoO fuse/crack/route 可变但不得由 operand data 决定；Zvkt 包括非活动 data operand，vl/vtype/作为执行控制的 mask 不在保证内；交 I-098 | 数据值依赖的 FU/route/replay 时延阻断 Core；Zkt 不约束 loads/stores/条件分支，不冒充整机 constant-time 或 V-089 可选 crypto DIEL（[Zkt](https://docs.riscv.org/reference/isa/v20260120/unpriv/scalar-crypto.html#crypto_scalar_zkt)、[Zvkt](https://docs.riscv.org/reference/isa/v20260120/unpriv/vector-crypto.html#zvkt)） |
+| Ziccif/Ziccrse/Ziccamoa/Zicclsm/Za64rs/Zic64b/CMO/Ssccptr/Zifencei | 取指原子性、LR/SC eventual progress、misaligned load/store、PMA/CMO、PTW 与 FENCE.I case manifest 和基础 oracle 交 V-086 | torn fetch、reservation 不前进、PMA 错授权、陈旧取指；Zama16b/misaligned AMO 不属于此 mandatory |
+| Zicntr/Zihpm/Sscounterenw/Sstc/Sscofpmf/Ssu64xl | CSR WARL/权限、非零 counter enable 可写性、中断/溢出及 replay 后计数 trace 交 I-098 | wrong-mode 访问被接纳、timer 丢失、CSR shadow 更新而读回错误 |
+| Ss1p13/Svbare/Sv39/Svade/Ssccptr/Svpbmt/Svinval/Svnapot/Sstvecd/Sstvala | Bare/paged PTE/PBMT/NAPOT、TLB 失效、fault address/指令和 guest 负例 oracle 交 I-098/V-086 | 旧 TLB surviving reconfiguration、A/D 未 fault、stval 错误 |
+| Sha：H/Ssstateen/Shcounterenw/Shvstvala/Shtvala/Shvstvecd/Shvsatpa/Shgatpa | VS/HS/guest 两阶段、stateen 与 counter WARL、vstval/htval、vstvec、vsatp/hgatp Bare/SvNNx4 的各项 case 交 I-098 | 任一 guest mode/CSR/trap 缺失、fault 归属混乱、VM 跨 packet 泄露 |
+| Supm/Ssnpm（最少 PMLEN=0/7） | effective privilege/PMM、CPU RAM/MMIO 显式访问与 DMA 对照的 case manifest 交 V-087，最终 V-087 证据交 I-098 | CPU MMIO 漏 mask 或 fetch/PTW/DMA 错 mask，缺 V-087 不可签 Core |
+
+- **主要阻塞风险**：ISA 字符串/flag 有值但无运行证据，或用 optional 覆盖 mandatory 缺口；阻断规则：指令/CSR/PMA 条款未执行而仍称 Core。
+- **验收证据**：每个 mandatory 能力有规范条款、实际执行结果与可信 oracle；八批次和基础 mandatory 项均无未登记排除。
+- **失败/回退动作**：任一 Core mandatory 行无证据则阻断 I-098 Core 预硬件验收；optional 证据另走 V-088..090。
 - **来源覆盖**：RVA23 Core verification, binary compatibility；来源 AR-022, AR-023, VR-005, VR-007, VR-009。
-- **执行者目标**：证明每个RVA23 mandatory项真的被执行并检查，而不是只被编译器认识。
-- **执行者须知**：参考模型不支持不是自动通过；要选择第二oracle、formal或定向证据。
-- **建议工作顺序**：读矩阵；列reference能力；生成case；跑程序；审计skip；写覆盖账本。
-- **可接受完成**：每个mandatory项有证据和条款，零未登记排除。
-- **何时停止求助**：无法找到任何可信oracle或条款冲突时停止。
-- **交付说明**：提交verification manifest和missing coverage ledger；更新Track Log。
+- **执行者目标**：以小批次证明每个 mandatory 项在真实执行中被检查，不只是编译器识别。
+- **执行者须知**：参考模型不支持不是通过；为该行选第二 oracle/formal/定向证据并写缺口账本。
+- **建议工作顺序**：读矩阵；分八批建 case；核 oracle 交集；跑程序；审 skip；签小批与总矩阵。
+- **可接受完成**：所有 mandatory 行有条款、oracle、执行证据，零未登记排除。
+- **何时停止求助**：找不到可信 oracle 或规范条款冲突时阻断对应行并反馈 I-093/I-092。
+- **交付说明**：提交八批 verification manifest 和逐条 missing coverage ledger 交 I-098；更新 Track Log。
 - **参考资料**：AR-022, AR-023, VR-005, VR-007, VR-009。
 - **进度日志**：2026-09-29 用户新增RVA23商业目标后规划——未开始。
 
 ### V-086 — 验证 RVA23 cache/PMA/atomic/misaligned 合同
 
 - **负责/门禁**：Memory验证负责人；RVA23 memory/PMA。
-- **前置依赖**：V-018, V-045, V-065, V-085。
-- **做什么**：测试CBO.INVAL/CLEAN/FLUSH/ZERO/PREFETCH、misaligned load/store/AMO、64-byte block、跨cache/非coherent agent和错误权限；记录PPO/load-value规则与trap。
-- **输入数据/接口**：CMO/Zic64b、misaligned/atomic PMA、coherence agents、cache hierarchy。
-- **输出与交接**：CMO/PMA evidence、memory execution traces、negative controls。
-- **设计取舍**：CMO权限和ordering单独测，不把cache命中当一致性。
-- **实现微步骤**：生成CMO/PMA矩阵；测INVAL/CLEAN/FLUSH/ZERO/PREFETCH；测misaligned load/store/AMO；测64-byte block；测非coherent/错误权限；记录PPO/load-value证据；跑负控制。
-- **主要阻塞风险**：CMO noop、权限绕过、misaligned/atomic只测标量；阻断规则：CMO当noop忽略权限、misaligned只测标量不测vector/atomic、把cache hit当一致性证明。
-- **验收证据**：每个CMO按PMA/权限/ordering执行；misaligned/atomic能力与profile广告一致；错误权限和非幂等路径被拒绝。
-- **失败/回退动作**：禁对应PMA/CMO能力。
+- **前置依赖**：I-093, V-018, V-045, V-085；仅多 hart 共享内存声明增加 V-065/V-067。
+- **做什么**：Core 单 hart 以独立外部 agent 验证 cacheable+coherent 主存 PMA 的四条**不同** mandatory 义务：Ziccif 自然对齐至 32-bit 原子取指、Ziccrse LR/SC RsrvEventual、Ziccamoa 全 A AMO、Zicclsm misaligned **load/store**；再验 Za64rs、Zic64b、CMO、Zifencei、Ssccptr。多 hart claim 另收 V-065/V-067 的跨 hart 一致性/PPO，不以 cache hit 作证明。
+- **输入数据/接口**：I-093/I-092 属性图及 V-085 memory manifest、FU→LSU packet/retire/replay 路径、coherent/noncoherent 外部 agent、PMA/权限表；Zama16b/Zacas/Ziccamoc 等只有各自**被选**时另建测试行。
+- **输出与交接**：owner=V-086；下表每行输入/期望/实测 transaction 与外部 agent trace、负例/hash，连同独立多 hart 状态交 I-098；可选原子项单独交 I-098 选项记录。
+- **设计取舍**：misaligned AMO **不是** Zicclsm 强制项；主存 PMA 与非主存/MMIO 的合法性分开；LR/SC 进展不能由单次成功替代，CMO 权限和 ordering 不能由最终值替代。
+- **实现微步骤**：固定 PMA/权限与两种 agent；分别跑下表正反例并比较请求、响应、重试、退休及取指结果；插入 packet flush/replay/reconfiguration，确保无幽灵 store/AMO/CBO 与 reservation 泄漏；保存 trace 和 oracle。
+
+| mandatory 输入/owner | 可观察输出与交接 | 失败负例 |
+|---|---|---|
+| V-086：Ziccif + Zifencei；双 PMA 主存/代码自修改 | 自然对齐且至 32-bit 的每种 power-of-two fetch 大小均不撕裂，按适用同步/FENCE.I 后新指令可见、front-end 清除过期 packet；交 I-098 | 已同步并执行 FENCE.I 后仍退休旧/混合编码，或错误权限依然取指 |
+| V-086：Ziccrse/Za64rs/A；与竞争 agent 的受约束 LR/SC | reservation 连续/自然对齐且 ≤64B，指定主存满足 RsrvEventual；replay/竞争情况下保存进展与唯一 commit trace | 符合规范的受约束 LR/SC 序列持续无进展、reservation 超界、flush 后重复写；非 coherent/MMIO 不冒充主存承诺 |
+| V-086：Ziccamoa/Zicclsm/Ssccptr；双 PMA 主存 | A 全 AMO 和 scalar/FP/vector misaligned load/store、PTW 读；跨边界拆分仍符合权限/异常和数据观察，允许规范未保证原子性的合法撕裂 | 错误值/丢失/重复 load/store、错误 PMA/PTW 或部分访问侧作用被隐藏；misaligned AMO 不作 mandatory，不能无依据要求 misaligned load/store 原子 |
+| V-086：Zic64b/Zicbom/Zicbop/Zicboz | 64B 自然对齐 block，INVAL/CLEAN/FLUSH/PREFETCH/ZERO 的 PMA/权限、可见数据、ordering 与 agent 结果 | CMO noop、错误权限仍写零/污染 cache、packet replay 重复 side effect |
+| V-086：独立被选 Zabha/Zacas/Ziccamoc/Zama16b | 每项独立输入与发现值；byte/halfword AMO、CAS/PMA 或 16B granule 原子边界实际输出 | 任一选项负例失败只撤**该项**，不可反向阻断完整 Core |
+
+- **主要阻塞风险**：把单次 LR/SC 成功当 eventual progress、把 cache hit 当 coherence、把 misaligned AMO 当 Core 或漏掉 fetch 原子性；Core PMA 义务缺一即 blocked。
+- **验收证据**：每个 mandatory 输入均有独立 agent 下正反例与 oracle、packet replay 一次性 side effect 及权限/ordering trace。
+- **失败/回退动作**：任一 mandatory memory/PMA 行失败阻断 I-098 Core；可选行失败仅撤对应发现/claim。
 - **来源覆盖**：RVA23 memory contract, CMO, PMA；来源 AR-022, AR-024, VR-014。
-- **执行者目标**：证明缓存管理、原子、misaligned访问和PMA规则在真实memory路径中一致。
-- **执行者须知**：CMO不是nop；misaligned不是只对齐标量load；cache行为必须和权限/ordering一起测。
-- **建议工作顺序**：列CMO/PMA矩阵；实现每类访问；测权限；测ordering；测错误路径；保存memory trace。
-- **可接受完成**：每个CMO/PMA组合有证据，负控制有效。
+- **执行者目标**：在真实 LSU/fetch 路径分别证明原子取指、LR/SC 进展、misaligned load/store、A atomics 与缓存管理。
+- **执行者须知**：CMO 不是 nop；Zama16b/misaligned AMO 可选，必须和 Zicclsm 区分；错误权限及 agent 行为不可凭 cache 内部命中猜测。
+- **建议工作顺序**：列 PMA/权限矩阵；逐行跑 agent 正反例；施加 replay/重配置；保存 traces 交 I-098。
+- **可接受完成**：上述每个 mandatory case 和负控制均闭合，选项各记各的状态。
 - **何时停止求助**：无法判断memory ordering或PMA语义时停止。
 - **交付说明**：提交CMO/PMA矩阵和memory traces；更新Track Log。
 - **参考资料**：AR-022, AR-024, VR-014。
@@ -257,19 +330,19 @@ flowchart TD
 
 - **负责/门禁**：Pointer验证负责人；pointer masking覆盖。
 - **前置依赖**：V-049, V-056, V-085。
-- **做什么**：覆盖scalar/FP/vector/AMO/CMO/CFI/SS、debug trigger、stval、MPRV/MXR、Bare/Sv39/Sv48、guest/physical边界；验证implicit fetch/PTW/DMA不被mask。
-- **输入数据/接口**：pointer masking implementation、PMLEN配置、全部显式访问类型。
-- **输出与交接**：pointer masking case matrix、address transform evidence。
-- **设计取舍**：按指令族覆盖，不只测普通load/store。
-- **实现微步骤**：配置PMLEN/privilege；逐访问类型生成地址；验证transform结果；排除fetch/PTW/DMA；测MPRV/MXR和guest/physical；测stval/debug；跑负例。
-- **主要阻塞风险**：implicit被mask、debug trigger错、tval错、vector/CMO/SS遗漏；阻断规则：只测普通load/store，或对implicit/设备访问应用mask。
-- **验收证据**：每个适用指令的transformed address、fault、tval和debug匹配符合规范；错误mask路径被检测。
-- **失败/回退动作**：禁pointer masking。
+- **做什么**：覆盖 CPU 指令 scalar/FP/vector/AMO/CMO/CFI/SS（含显式访问 MMIO）、debug trigger、stval、MPRV/MXR、Bare/Sv39/Sv48 与 guest/physical；验证隐式 fetch/PTW 和 IOMMU/DMA/设备自行生成的访问不被 mask，不能仅因目标是 MMIO 就排除 CPU 显式访问。
+- **输入数据/接口**：pointer masking 实现、PMLEN/有效 privilege 配置、按发起者区分的显式访问列表及 MMIO/RAM memory map。
+- **输出与交接**：CPU→MMIO 与设备→MMIO 对照的 pointer masking case matrix、transform/fault/debug 证据交 I-098。
+- **设计取舍**：按发起者和指令族覆盖，不以目标地址是否 MMIO 决定 mask。
+- **实现微步骤**：配置 PMLEN/privilege；逐 CPU 显式访问生成 RAM/MMIO 地址并比对 transform；以同一 MMIO 目标检查 DMA/设备自产生请求不变；排除 fetch/PTW/IOMMU；测 MPRV/MXR、guest/physical、misaligned、stval/debug 和负例。
+- **主要阻塞风险**：CPU→MMIO 漏 mask、设备来源误 mask、debug/tval、vector/CMO/SS 漏测；阻断规则：只测 load/store，或按 MMIO 目的地址直接排除 mask。
+- **验收证据**：每个适用 CPU 指令（包括 MMIO）的变换地址、fault、tval/debug 符合规范；隐式与设备发起路径不被变换。
+- **失败/回退动作**：撤回 pointer masking/Core 声明直至 mandatory 缺口闭合。
 - **来源覆盖**：pointer masking, tagged addressing, security；来源 AR-024。
-- **执行者目标**：确保每一个需要mask和不需要mask的路径都被实际测试。
-- **执行者须知**：不要只看普通load/store；vector、CMO、CFI、shadow stack、debug、stval都有独立规则。
-- **建议工作顺序**：列访问类型；配置PMLEN；跑transform；测排除路径；测fault/debug；保存矩阵。
-- **可接受完成**：显式/隐式边界全部闭合，错误路径被检测。
+- **执行者目标**：区分 CPU 显式 MMIO 访问与设备自行产生的 MMIO/DMA 访问，保证每条正反路径实际被测。
+- **执行者须知**：目标为 MMIO 不豁免 CPU 指令；IOMMU/DMA/设备自产生的地址不是 CPU 显式访问。
+- **建议工作顺序**：列发起者/指令矩阵；测 PMLEN 与 transform；同目标测 CPU 和设备；测 fault/debug；保存证据。
+- **可接受完成**：CPU 显式/隐式/设备来源的边界全部闭合。
 - **何时停止求助**：某类访问的规范归属不明确时停止。
 - **交付说明**：提交pointer masking矩阵和证据；更新Track Log。
 - **参考资料**：AR-024。
@@ -300,20 +373,20 @@ flowchart TD
 ### V-089 — 验证 vector crypto 结果与 DIEL
 
 - **负责/门禁**：Crypto验证负责人；vector crypto/DIEL。
-- **前置依赖**：V-052, V-059, V-076, V-085。
-- **做什么**：逐指令跑AES/SM4/SHA/SM3/GHASH/CLMUL和Zvbb/Zvkt覆盖，检查EGW/EEW/EGS、LMUL/vstart/mask/tail/overlap；对数据值扫描执行时间，验证DIEL不在数据上变化。
-- **输入数据/接口**：vector crypto units、官方known-answer/KAT来源、DIEL instrumentation。
-- **输出与交接**：crypto correctness matrix、DIEL evidence、side-channel limitation statement。
-- **设计取舍**：DIEL只覆盖定义的数据时序，不宣称全侧信道免疫。
-- **实现微步骤**：跑AES/SM4/SHA/SM3/GHASH/CLMUL KAT；测EGW/EGS/LMUL/vstart/mask/tail；扫输入值时序；比较VLEN=128/256；测reserved constraints；记录side-channel限制；闭合suite广告。
-- **主要阻塞风险**：KAT不足、masked inactive影响timing、VLEN错误；阻断规则：用少数AES KAT宣称完整Zvkng/Zvksg；masked inactive数据影响timing；DIEL被宣传为完整侧信道免疫。
-- **验收证据**：声明suite全部通过，reserved constraints正确拒绝，数据值不改变声明范围内时序。
-- **失败/回退动作**：不发布vector crypto。
+- **前置依赖**：I-096, V-052, V-059, V-085；仅宣称性能归因/PMU 时另验 V-076。
+- **做什么**：按所选套件逐指令跑 AES/SHA 或 SM4/SM3 与 Zvkg GHASH KAT；Zvbc CLMUL 单独选择/测试，不作为 Zvkng/Zvksg 必需条件；检查 EGW/EEW/EGS、LMUL/vstart/vl/mask/tail/overlap 和规范要求的非法异常；扫描数据值验证规范范围内 DIEL。
+- **输入数据/接口**：I-096 选定 suite/单独 Zvbc 清单、官方 KAT 来源、逐指令 reserved/illegal 约束、DIEL instrumentation。
+- **输出与交接**：分套件 crypto correctness/KAT 矩阵、DIEL 与 reserved/illegal 记录、side-channel 限制交 I-098。
+- **设计取舍**：DIEL 不宣称全侧信道免疫；不把 reserved 编码默认等同必须 trap。
+- **实现微步骤**：展开 Zvkng=Zvkn+Zvkg、Zvksg=Zvks+Zvkg；跑各自 AES/SHA/SM4/SM3 和 GHASH KAT；仅选 Zvbc 时跑 CLMUL KAT；按规范分别测 LMUL×VLEN<EGW 的 illegal-instruction 与 reserved vl/vstart/SEW（不得无依据要求 trap）；测 overlap、mask/tail；扫输入值时序，比较 VLEN=128/256；记录限制。
+- **主要阻塞风险**：少数 AES KAT 冒充套件、混淆 GHASH 与 CLMUL、reserved 误判成必 trap、masked inactive 影响时序；阻断规则：Zvkg 缺失却广告 Zvkng/Zvksg，或 DIEL 冒充完整侧信道免疫。
+- **验收证据**：选定 suite 全部指令结果/合法边界通过；要求非法的条件正确抛异常、reserved 不设额外 trap 门槛；声明范围内延迟不依赖数据值；可选 Zvbc 单独记账。
+- **失败/回退动作**：撤回未闭合的对应 crypto 扩展广告，不阻断 Core。
 - **来源覆盖**：vector crypto, side-channel timing, RVA23 Secure；来源 AR-026。
-- **执行者目标**：证明crypto指令结果正确，并在规定范围内不随秘密数据改变时间。
-- **执行者须知**：DIEL不是“无侧信道”；只证明规范定义的数据独立时序范围。
-- **建议工作顺序**：跑KAT；测EGW/LMUL/vstart/mask；扫数据值时序；比较VLEN配置；写限制说明。
-- **可接受完成**：结果和时序证据都闭合，广告不越界。
+- **执行者目标**：证明所选套件的 GHASH 和逐指令结果，而不是用 CLMUL 替代 Zvkg；按规范而非猜测处理 reserved。
+- **执行者须知**：Zvkng/Zvksg 要 Zvkg；Zvbc 是另一种 CLMUL 路径；reserved 不自动要求非法指令异常。
+- **建议工作顺序**：核 suite 成员；跑 KAT；核 LMUL illegal 与 reserved 约束；测 DIEL；交所选项签收。
+- **可接受完成**：所选 suite 的正确性与时序证据闭合，未选 Zvbc 不影响对应套件。
 - **何时停止求助**：KAT来源不足或时序差异无法解释时停止。
 - **交付说明**：提交KAT/DIEL矩阵和限制说明；更新Track Log。
 - **参考资料**：AR-026。
@@ -321,38 +394,38 @@ flowchart TD
 
 ### V-090 — 验证 RVA23 Secure platform 边界
 
-- **负责/门禁**：平台安全验证负责人；RVA23 Secure边界。
-- **前置依赖**：V-073, V-085, V-088, V-089。
-- **做什么**：对core内扩展逐项验证；对平台项核对owner、接口和证据；禁止把缺失平台组件写成core能力；运行server-style boot/VM/vector/crypto/CFI综合程序。
-- **输入数据/接口**：Sv48/Svadu/Zkr/Sdtrig/Ssstrict/Ssaia实现、平台RoT/TPM/secure boot/IOPMP owner。
-- **输出与交接**：RVA23 Secure verification bundle、platform responsibility matrix、综合程序证据。
-- **设计取舍**：core和平台证据分开，不互相替代。
-- **实现微步骤**：验证core内扩展；核对平台owner和证据；运行server-style boot/VM/RVV/crypto/CFI程序；审查capability广告；闭合残余风险；发布或阻断Secure。
-- **主要阻塞风险**：缺RoT/IOPMP却宣称平台安全；阻断规则：用RVA23 profile通过代替server platform安全、把未实现扩展写成已支持。
-- **验收证据**：core与平台责任分离，所有宣称功能有真实证据；没有RoT/IOPMP时不宣称平台安全合规。
-- **失败/回退动作**：只发布Core或阻断。
+- **负责/门禁**：平台安全验证负责人；仅所选 RVA23 Secure 能力与平台声明边界。
+- **前置依赖**：V-073, V-085。
+- **做什么**：owner=V-090 平台安全验证负责人；收 I-092 **每个所选选项**的输入配置、真实实现/专属验证 trace、软件发现与失效配置负例，逐项签收；对项目另选 Ssaia/平台服务另列 owner/接口/负例。未选项不运行来伪称已选，其他已闭合项不因一个选项失败作废。
+- **输入数据/接口**：I-092 每项决策与 I-097 实现；CFI 选 Zicfilp/Zicfiss 时各取 I-095/V-088，Zvkng/Zvksg 时各取 I-096/V-089；其他选项按 I-092 表的实现→验证 handoff 收 V-085/V-086/V-087/V-090 对应条款；平台 RoT/TPM/secure boot/IOPMP 与 Ssaia 另取 owner、接口、独立证据。
+- **输出与交接**：逐项选择/未选发现值、正反例、oracles/hash、限制与平台责任表交 I-098；仅实际所选 ASIC 安全声明的相应项转 H-051。
+- **设计取舍**：「RVA23 Secure」是项目所选选项包，**非 ratified profile**；Server Platform 与 RVA23 分离。V-090 聚合不覆盖各专属验证 owner，未选 crypto/CFI 不成为别的项门槛。
+- **实现微步骤**：逐条对 I-092 category/name/软件发现；每个选项冻结输入与 owner，按 handoff 取正反例、执行日志/hash，再以错误配置/未选发现负例复核；选 Sv48/Sv57 查相应 satp/vsatp/hgatp mode，选 Svadu/Svvptc 查 A/D/PTE 可见性，选 Zkr/Sdtrig/Ssstrict 查 CSR/debug/标准及保留编码 contained trap，选 Sspm 查 pointer PMM；Ssaia 仅按独立平台选择查中断接口；逐项交 I-098。
+- **主要阻塞风险**：把 Ssaia 说成 ratified expansion、把缺平台组件的 Core 写成 Server Platform、或一个选项失败强制撤销 Core；按名称独立 blocked/撤广告。
+- **验收证据**：每个所选项均有具体 owner、输入、规范期望/实测、负例/发现值，未选项发现不广告；平台声明须有独立组件 owner 与可执行证据。
+- **失败/回退动作**：撤回不合格的 Secure/平台项；Core 的 mandatory 证据不因可选项失败作废。
 - **来源覆盖**：commercial security acceptance, server boundary；来源 AR-027, HR-014。
-- **执行者目标**：确保RVA23 Secure声明只覆盖实际存在的core和平台能力。
-- **执行者须知**：core通过不等于平台安全；平台缺失必须写出来，不能藏在“后续支持”。
-- **建议工作顺序**：验证core项；核对平台owner；跑综合程序；审广告；写残余风险；签收或阻断。
-- **可接受完成**：core/平台责任矩阵闭合，声明不越界。
-- **何时停止求助**：平台组件或正式安全评估缺失时停止。
+- **执行者目标**：确保所选 RVA23 Secure 声明只覆盖真实存在的 core/平台能力。
+- **执行者须知**：Core 通过不等于平台安全；未选扩展不成为必过门槛，平台缺失必须明确写出。
+- **建议工作顺序**：定项；验 core；仅按选项核 CFI/crypto；核平台 owner；跑综合程序；签证据。
+- **可接受完成**：所选项的 core/平台责任矩阵闭合，未选项不广告。
+- **何时停止求助**：所宣称的平台组件或正式安全评估缺失时只阻断相应声明。
 - **交付说明**：提交Secure verification bundle和平台矩阵；更新Track Log。
 - **参考资料**：AR-027, HR-014。
 - **进度日志**：2026-09-29 用户新增RVA23商业目标后规划——未开始。
 
 ### H-050 — 验证 RVA23 软件包在三家族的物理执行
 
-- **负责/门禁**：RVA23硬件负责人；三家族RVA23物理证据。
+- **负责/门禁**：RVA23硬件负责人；I-098 之后逐家族物理执行，不是 Core 预硬件验收的前置。
 - **前置依赖**：H-032, I-098。
-- **做什么**：在每块真实板执行RVA23-directed corpus、Linux应用、RVV workloads、pointer masking、CFI、vector crypto和故障负例；记录binary hash、device tree、capability discovery和性能。
-- **输入数据/接口**：RVA23 Core/Secure acceptance bundle、Linux/RVV/crypto/CFI/PM软件包、三家族实际资源和memory map。
-- **输出与交接**：three-family RVA23 evidence bundles、capability/runtime logs。
-- **设计取舍**：每板独立验证软件发现与执行，不用host模拟替代。
-- **实现微步骤**：选board profile；部署RVA23软件包；跑Linux/RVV/crypto/CFI/PM；核对capability discovery；跑负例；记录性能/限制；三家族闭合。
-- **主要阻塞风险**：不支持VLEN/crypto/CFI却宣称完整profile；阻断规则：只在host模拟器运行RVA23，或用不支持VLEN/crypto/CFI的板宣称完整commercial profile。
-- **验收证据**：每家族支持声明与实际执行一致；软件发现机制读到真实能力；无RVA23能力时不能运行profile binary并称成功。
-- **失败/回退动作**：该family RVA23 profile blocked。
+- **做什么**：在三家族**每块真实板**执行签收 Core 的 U/S corpus、VM guest、Linux 应用、完整 RVV/pointer、异常负例，且对 mandatory Zkt/Zvkt 做板上数据值延迟复测；只有该板选择的选项才运行对应 CFI/crypto/其他专项测试。
+- **输入数据/接口**：owner=H-050 RVA23 硬件负责人；I-098 各条款程序、V-085 Zkt/Zvkt 清单与受约束 DIEL 比较方法、板的硬件计时/执行观测点、binary hash、device tree/能力发现/内存图及固定控制/竞争配置。
+- **输出与交接**：每家族各板 Core 与所选选项物理结果、opcode/control/数据值/latency 原始记录、负例与能力发现/软件 hash，交 I-086 对应家族发布声明；H-051 不以板结果代 ASIC 证据。
+- **设计取舍**：每板单独验证，不把 simulator 或另一家族替代；DIEL 只对 Zkt 已实现清单与 Zvkt 已实现清单的受保障指令/数据操作数，**不**宣称整个处理器/应用恒时或物理侧信道免疫。
+- **实现微步骤**：逐板选择 claim 与部署一致的 binary；跑 Core corpus/VM/向量/权限负例；固定 opcode、vl/vtype/作为控制的 mask、竞争负载与路由环境，改变适用标量 operand 和向量 active/**inactive data operands**，分别采板上 latency/route/replay 结果及噪声/仪器限制；不把控制值变化混作 DIEL；核选项发现与负例后逐板签收。
+- **主要阻塞风险**：VLEN/guest/mandatory 缺失、Zkt/Zvkt 板上数据值依赖仍广告 Core、host 模拟冒充板或某板结果冒充全三家族；所选 crypto DIEL 失败仅撤该板对应 crypto 选项。
+- **验收证据**：每板 mandatory Core 程序与 Zkt/Zvkt 受保障数据值 DIEL 比较、发现值/故障负例均有板上可复查记录；仅各板所选选项另有专项证据，绝不据此宣称无侧信道。
+- **失败/回退动作**：该 family 对应 RVA23/Secure 声明 blocked，不抹去别的家族或 I-098 预硬件结论。
 - **来源覆盖**：RVA23 hardware portability, real-board commercial evidence；来源 AR-022, AR-023, AR-024, AR-025, AR-026。
 - **执行者目标**：证明RVA23软件在真实FPGA上能发现并使用正确能力。
 - **执行者须知**：不要用host模拟器代替板；每块板的能力可能不同，device tree必须反映真实硬件。
@@ -365,22 +438,22 @@ flowchart TD
 
 ### H-051 — 验证 ASIC security features 的物理与制造边界
 
-- **负责/门禁**：ASIC安全负责人；ASIC安全物理边界。
-- **前置依赖**：H-049, I-097, I-098。
-- **做什么**：把pointer masking、CFI、vector crypto、entropy、debug trigger、AIA和lockstep纳入ASIC physical/DFT/security审查；明确RoT/TPM/secure boot/IOPMP的外部owner；执行综合后故障和side-channel观测。
-- **输入数据/接口**：RVA23 Secure候选、RoT/IOPMP/AIA接口、SRAM/ECC、DFT/scan、物理安全约束。
-- **输出与交接**：ASIC security signoff bundle、platform dependency ledger、residual risk report。
-- **设计取舍**：FPGA软件通过不能代替ASIC signoff；DIEL不等于物理免疫。
-- **实现微步骤**：审查RoT/IOPMP/AIA边界；审查SRAM/ECC/clock/power；纳入scan/MBIST/ATPG；跑综合后故障/侧信道观测；审阅STA/等价/物理报告；写残余风险；签收或阻断。
-- **主要阻塞风险**：共享SRAM/clock未保护、DFT漏replica、安全claim越界；阻断规则：用FPGA软件通过代替ASIC安全验证，或把vector crypto DIEL说成完整物理侧信道免疫。
-- **验收证据**：core内功能有硅级证据路径，平台责任明确；无正式side-channel/security evaluation时不宣称合规。
-- **失败/回退动作**：ASIC Secure profile blocked。
+- **负责/门禁**：ASIC安全负责人；仅所选 ASIC Secure/安全物理声明的后续证据门禁，不阻塞预硬件 Core。
+- **前置依赖**：I-085, H-045, I-097, V-090, I-098。
+- **做什么**：在所选 ASIC Secure 候选对应的工艺签核基础上，把所选 pointer masking、CFI、vector crypto、entropy、debug trigger、AIA 等声明纳入 physical/DFT/security 审查；仅在另选 ASIC Safety/lockstep 声明时依 I-091/V-084/H-049 补证据；明确 RoT/TPM/secure boot/IOPMP 外部 owner；执行综合后故障和 side-channel 观测。
+- **输入数据/接口**：I-098 所选 Secure 候选及 I-085/H-045 同候选物理签核、I-097/V-090 平台边界、SRAM/ECC/DFT/scan 与物理安全约束；所选 ASIC Safety 才加 I-091/V-084/H-049，H-048 仅用于另行声明的 FPGA Safety。
+- **输出与交接**：同候选 ASIC security signoff bundle、platform dependency ledger、residual risk report，交相应 I-086 ASIC 声明。
+- **设计取舍**：FPGA 软件不替代 ASIC signoff；DIEL 不等于物理免疫；不选 Safety 就不要求 lockstep/ H-049。
+- **实现微步骤**：列 ASIC 安全声明；审 RoT/IOPMP/AIA 边界；核 SRAM/ECC/clock/power、scan/MBIST/ATPG；仅选 ASIC lockstep 时审 I-091/V-084/H-049；跑综合后故障/侧信道观测；审 STA/等价/物理报告；签残余风险或阻断。
+- **主要阻塞风险**：共享 SRAM/clock 未保护、DFT 漏 replica、安全声明越界；阻断规则：用 FPGA 软件替代 ASIC 安全验证，或把 crypto DIEL 当完整物理侧信道免疫。
+- **验收证据**：每项声明的 core 内安全机制有 ASIC 物理/制造证据路径，平台责任明确；无正式 side-channel/security evaluation 不宣称相关合规。
+- **失败/回退动作**：仅相应 ASIC Secure/Safety 声明 blocked；不撤销独立 Core 预硬件验收。
 - **来源覆盖**：ASIC commercial security, physical signoff boundary；来源 AR-024, AR-025, AR-026, AR-027, HR-014。
-- **执行者目标**：把ASIC安全声明限制在真正经过物理/制造/安全证据支持的范围。
-- **执行者须知**：FPGA结果不能替代ASIC signoff；DIEL也不是完整物理侧信道证明。
-- **建议工作顺序**：列平台边界；审查SRAM/ECC/clock；纳入DFT；跑综合后测试；写残余风险；审claim。
-- **可接受完成**：每个声明机制有证据路径，缺失项明确blocked。
-- **何时停止求助**：PDK/library/tester/安全评估不可用时停止。
+- **执行者目标**：把 ASIC 安全声明限制在真正经过物理/制造/安全证据支持的范围。
+- **执行者须知**：H-051 在 I-098 之后；I-091/H-049 只服务选定 Safety/lockstep，不是 Core prerequisite。
+- **建议工作顺序**：选 ASIC claim；核平台、SRAM/ECC/clock 和 DFT；适用时收 Safety 证据；跑物理观测；签风险。
+- **可接受完成**：每个已声明机制有物理证据，缺失项只阻断对应 ASIC 声明。
+- **何时停止求助**：所选 ASIC 物理证据所需 PDK/library/tester/安全评估不可用时阻断对应声明。
 - **交付说明**：提交ASIC security bundle和claim边界；更新Track Log。
 - **参考资料**：AR-024, AR-025, AR-026, AR-027, HR-014。
 - **进度日志**：2026-09-29 用户新增RVA23商业目标后规划——未开始。
@@ -389,12 +462,13 @@ flowchart TD
 
 | Blocker | 触发条件 | 立即动作 | 责任升级 |
 |---|---|---|---|
-| RVA23矩阵缺口 | mandatory项没有实现/验证责任 | 停止RVA23发布，补任务并重跑 | RVA23合规负责人 |
-| 可选功能误称mandatory | crypto/CFI/Sv48/Zkr等被写成无条件强制 | 修正profile文档和广告 | RVA23发布负责人 |
-| 地址安全边界错误 | pointer masking/CFI/shadow stack/vector memory互相绕过 | 冻结相关功能并重跑memory/CFI矩阵 | Memory/CFI负责人 |
-| Crypto时序不满足DIEL | 数据值影响声明指令latency | 修实现或撤回suite广告 | Vector crypto负责人 |
-| 平台安全责任缺失 | RoT/TPM/IOPMP/secure boot没有owner或证据 | 不宣称平台安全，只发布core能力 | 平台安全负责人 |
-| 商业声明越界 | ISA字符串/单次Linux boot被当RVA23合规 | 阻断release，重跑完整证据 | RVA23发布负责人 |
+| RVA23矩阵缺口 | Core mandatory 项没有实现/验证责任或证据 | 阻断 Core 预硬件签收及其目标声明，补任务并重跑 | RVA23合规负责人 |
+| 可选功能误称 mandatory | crypto/CFI/Sv48/Zkr/Safety 被写成无条件 Core 前置 | 修正逐声明矩阵和广告；不反向阻断已闭合 Core | RVA23验收负责人 |
+| 地址安全边界错误 | CPU 显式 MMIO 漏 mask 或设备/DMA 来源误 mask；mandatory vector 绕过 | 阻断 pointer masking/Core 并重跑 V-087；选定 CFI/SS 的绕过仅阻断相应 CFI 选项 | Memory/CFI负责人 |
+| Mandatory Zkt/Zvkt DIEL 失败 | 规范覆盖的已实现标量/向量指令延迟依赖 operand data（含 Zvkt 非活动数据） | 修 FU/VRF/route 后重跑 V-085；阻断 Core，不用可选 crypto 结果代替 | RVA23实现/验证负责人 |
+| 所选 crypto DIEL 失败 | 数据值影响选定 Zvkng/Zvksg 指令 latency | 修实现或撤回相应 suite 广告，不阻断已闭合 Core | Vector crypto负责人 |
+| 平台安全责任缺失 | 宣称的 RoT/TPM/IOPMP/secure boot 没有 owner 或证据 | 不宣称对应平台安全，保留独立 Core 能力 | 平台安全负责人 |
+| 商业声明越界 | ISA 字符串/单次 Linux boot 或 I-098 被当物理 signoff | 阻断相应 release 声明，完成 H-050 或 H-051 的目标证据 | RVA23验收负责人 |
 
 ## 7. 阶段 Track Log（持续追加）
 

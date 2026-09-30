@@ -104,6 +104,34 @@ def visit(key):
 for key in sorted(tasks):
     visit(key)
 assert len(order) == len(tasks)
+def ancestors(key):
+    result, pending = set(), list(deps[key])
+    while pending:
+        predecessor = pending.pop()
+        if predecessor not in result:
+            result.add(predecessor)
+            pending.extend(deps[predecessor])
+    return result
+
+# Acyclicity alone does not prove that an optional future profile is absent
+# from the unconditional p0/Core/FPGA publication path.
+claim_guards = {
+    "I-080": {"I-036","I-042","I-043","I-047","I-076","I-083","I-091","I-095","I-096","I-097","I-098","V-065","V-067","V-076"},
+    "I-086": {"I-083","I-085","I-091","I-095","I-096","I-097","I-098","H-032","H-035","H-045","H-050","H-051"},
+    "I-098": {"I-083","I-091","I-095","I-096","I-097","V-065","V-067","V-088","V-089","V-090","H-050","H-051"},
+    "H-035": {"I-036","I-042","I-043","I-076","I-077","H-017","H-025","H-031","H-033"},
+    "I-091": {"I-083","V-067","V-084","H-048","H-049"},
+    "H-047": {"H-032","H-035","I-081","I-084"},
+    "I-085": {"H-032","H-035","I-081","I-084","I-083"},
+}
+for gate, optional in claim_guards.items():
+    assert not (blocked := ancestors(gate) & optional), ("optional task blocks baseline gate", gate, sorted(blocked))
+assert {"I-080","V-080"} <= (ancestors("I-086") | deps["I-086"]), "baseline release lost functional/advertisement gate"
+assert {"I-098","H-032"} <= deps["H-050"], "RVA23 board proof must follow ISA acceptance"
+assert {"H-043","H-044","H-045"} <= deps["H-049"], "ASIC DCLS proof lacks physical signoff"
+assert {"I-085","H-045","I-097","V-090","I-098"} <= deps["H-051"], "ASIC Secure proof lacks candidate/evidence"
+assert "H-049" not in deps["H-051"], "ASIC Secure must not require optional DCLS"
+
 for _,_,disposition,task_refs in rows:
     ids = set(re.findall(r"\b[IVH]-\d{3}\b", task_refs))
     assert ids and ids <= tasks.keys() and disposition.strip(), ("unmapped source", task_refs)
@@ -170,8 +198,9 @@ print(json.dumps({"status":"PASS", "original_documents":3,
     "local_links_checked":local_links, "external_urls_catalogued":len(external_urls),
     "tracked_documents":len(expected_files), "stage_guides":len(stage_docs),
     "stage_task_cards":sum(1 for task_id in tasks if re.search(r"^### " + task_id + r" — ", combined_stage_text, re.M)),
+    "claim_gate_checks":len(claim_guards)+5,
     "git_whitespace":"PASS",
-    "verification_scope":"documentation/provenance/graph; no processor simulation or hardware run"}, ensure_ascii=False, indent=2))
+    "verification_scope":"documentation/provenance/graph/claim boundaries; no processor simulation or hardware run"}, ensure_ascii=False, indent=2))
 
 ```
 <!-- DOC-CHECK-END -->
@@ -180,7 +209,7 @@ print(json.dumps({"status":"PASS", "original_documents":3,
 
 - 将source-inventory的102行逐项与实际原文标题/行范围比较；审查接受/纠正/分期是否有对应I/V/H任务。三个源文件hash必须不变。
 - 交叉审查ISA profile、XLEN/VLEN、RAM延迟、per-hart ownership、macro/uOP/attempt、RVV partial trap、LLB freshness、MMIO/AMO、cohort eligibility、credit/drain/ABA在四份主计划中的合同一致性。
-- 十个stage指南均含用途、上游输入、Mermaid结构、团队进度表、任务卡（负责/输入/微步骤/风险/验收/回退）、阶段阻塞清单和Track Log；其中出现的每个239任务ID必须在主计划中定义，且指南覆盖了所有任务。Mermaid块只检查存在与基本闭合，不把渲染成功当架构正确。
+- 十一个 stage 指南均含用途、上游输入、Mermaid 结构、团队进度表、任务卡（负责/输入/微步骤/风险/验收/回退）、阶段阻塞清单和 Track Log；239 个任务 ID 在主计划有定义且指南覆盖全部。Mermaid 仅检查存在与基本闭合，**不**证明架构正确。合并 DAG 之外的声明矩阵须人工核对能力与真实证据；新增的 p0/Core/ASIC 祖先检查只防止已知“可选项目无条件阻塞”的回归。
 - 核对XiangShan是第二DUT，Difftest是框架，NEMU/Spike/Sail是各有能力边界的参考；候选SHA和upstream命令有primary来源，本轮未运行。多hart memory不由single-hart lockstep代替。
 - 三family都有exact-part/工具/约束/route/编程/reset/program/signature/负控制/证据任务；Zynq分支不混用，ARM PS执行不能冒充PL RISC-V执行。
 - ASIC的PDK/library/SRAM/DFT/ATPG/MBIST/STA/PDN/IR-EM/DRC-LVS/封装/首硅分开gate，FPGA验证不越权证明ASIC。
@@ -196,11 +225,10 @@ print(json.dumps({"status":"PASS", "original_documents":3,
 
 ## 4. 验证记录
 
-
-## 4. 验证记录
-
-下方记录由实际检查结果更新；本轮review/check完整循环最多10次。任何失败保留原因与修正，不能减少检查范围使其通过。本轮没有执行RTL测试、Verilator程序、FPGA工具、板测或ASIC工具。
+下方记录必须由实际检查结果更新。任何失败保留原因并修正规划，不减少检查范围使其通过。本文没有执行 RTL 测试、Verilator 程序、FPGA 工具、板测或 ASIC 工具。
 
 ## 5. 当前检查结果
 
-2026-09-29 增加 RVA23 Core/Secure、pointer masking、CFI、vector crypto、平台安全边界后重新执行检查并通过：239个任务（98 I、90 V、51 H）、62个引用ID、21份Markdown、10个stage指南；具体当前数值由嵌入式检查器输出。原报告hash不变，检查范围不代表CPU/板级/ASIC已验证。
+2026-09-29 本轮执行 §1 嵌入式检查器：`PASS`；三份原文 hash 保持不变，102 个原文标题全覆盖，239 个任务（98 I/90 V/51 H）、90 行跨文档集成依赖、641 条依赖边无环，62 个引用 ID、110 个本地链接、22 份已跟踪文档和 11 份 stage 指南/239 张任务卡通过；12 项 claim gate 检查与 Git whitespace 检查通过。另以同一图实跑六组依赖闭包正反例：无 cache p0、有序三板 p0、独立 ASIC、RVA23 Core、ASIC Secure、ASIC DCLS 物理；所需祖先存在且各自可选项目未被无条件串入。此为文档/来源/图检查，不代表任何 RTL、CPU 仿真、实板或 ASIC 测试已运行。
+
+2026-09-30 RVA23 细查后复核：§1 嵌入式检查器再次 `PASS`；仍是 239 个任务（98 I/90 V/51 H）、90 行集成依赖、642 条无环依赖边、62 个引用、111 个本地链接、22 份文档、11 份指南与 239 张任务卡，Git whitespace 为 PASS。另以针对脚本核对 RVA23U64/S64 的 59 个 mandatory/Sha 名称与 23 个 ratified option 在实施、验证、RVA23 阶段指南中均有归属，并在平台/README 中明确 Core、项目选项组合与 Server Platform 边界。此证据只覆盖规划文档完整性，不声称任何 CPU 功能、DIEL 实测、板测或 ASIC 结果。

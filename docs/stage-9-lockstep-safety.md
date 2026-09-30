@@ -124,44 +124,44 @@ flowchart TD
 ### I-090 — 保护 shared domains 与防止冗余被优化移除
 
 - **负责/门禁**：物理冗余负责人；common-mode和综合存活。
-- **前置依赖**：I-089, I-047, I-006。
-- **做什么**：保护shared cache/RAM/LLB/clock/bus/debug；加synthesis barriers；验证netlist中冗余仍存在。
-- **输入数据/接口**：shared-domain图、ECC/parity/CRC、keep/dont_touch/size_only约束、CDC/reset/test状态。
-- **输出与交接**：protection map、netlist survivability证据、物理测试矩阵。
-- **设计取舍**：共享结构可接受但必须显式保护或列为残余风险。
-- **实现微步骤**：列共享资源；加错误检测；审查综合属性；核对post-synthesis/post-route；测debug/scan关闭行为。
-- **主要阻塞风险**：综合合并重复逻辑、共享memory错误同时污染两副本、debug关闭检测。
-- **验收证据**：每个shared path有证据；冗余不被移除；故障注入覆盖保护路径。
-- **失败/回退动作**：修改wrapper/约束或标记该profile不支持。
+- **前置依赖**：I-089, I-006, I-038；cache/LLB 等仅在相应 advanced profile 出现时另取 I-047 及相关证据。
+- **做什么**：从p0共享RAM/clock/bus/debug开始分类保护域及残余风险，规定冗余保留的综合约束；若声明具体FPGA/ASIC物理DCLS，另由V-084和H-048/H-049实证post-synthesis/post-route存活。
+- **输入数据/接口**：按profile共享域图、ECC/parity/CRC方案、keep/dont_touch/size_only约束、CDC/reset/test状态；可选cache/LLB只按广告加入。
+- **输出与交接**：按模式保护图、综合约束与可验证生存条件、共享故障的残余风险；物理门禁接收具体target的约束/报告。
+- **设计取舍**：功能DCLS验收识别保护与残余风险，不能冒充FPGA/ASIC实物安全证据。
+- **实现微步骤**：枚举p0共享路径并定保护/风险；检查副本与checker保留约束；为每个可选物理target记录所需netlist/placement检查；注入共享故障并核对阻断；仅在支持advanced时扩展cache/LLB图。
+- **主要阻塞风险**：共享memory错误同时污染副本、工具合并冗余、debug关闭检测；物理证明缺口隔离到相应target。
+- **验收证据**：p0每个共享路径有保护或明确风险及故障检查；广告物理DCLS时另以对应V-084/H-048/H-049证明综合/布局存活。
+- **失败/回退动作**：不能保证功能比较/阻断则关闭DCLS；物理报告缺失只阻断该target的物理声明。
 - **来源覆盖**：common-mode faults, synthesis survivability；来源 AR-020, HR-008, HR-009。
-- **执行者目标**：证明冗余不是纸面结构，而是经过综合/布局后仍真实存在且共享资源有保护。
-- **执行者须知**：RTL仿真不能证明synthesis没有合并副本；shared RAM不在lockstep comparator内时，必须有ECC/parity/monitor。
-- **建议工作顺序**：画shared-domain图；为每路径选择保护；加barrier/约束；检查netlist；运行fault campaign；记录残余风险。
-- **可接受完成**：所有共享architectural-data路径有证据，综合后副本与checker存在。
-- **何时停止求助**：工具或器件无法保留冗余、无法保护共享memory时停止并标记不支持。
-- **交付说明**：提交protection map、netlist证据、fault结果和限制；更新Track Log。
+- **执行者目标**：建立p0共享资源和冗余保留的明确合同，并将具体板/工艺的物理证明交给目标门禁。
+- **执行者须知**：RTL仿真不能证明最终副本没有被合并；也不能以可选cache的缺失阻断p0。
+- **建议工作顺序**：列p0共享域→选择保护/残余风险→约束副本保留→故障检查→交物理target审计。
+- **可接受完成**：功能模式有保护图和故障结果；广告物理模式另有同目标netlist和布局证据。
+- **何时停止求助**：功能共享路径无可验证保护或故障阻断失败时停止DCLS功能验收；特定工具不能保留冗余则阻断该物理target，提交工具/netlist与owner。
+- **交付说明**：提交p0保护图、故障记录及可选target所需约束；物理存活报告由V-084/H-048/H-049各自交付；更新Track Log。
 - **参考资料**：AR-020, HR-008, HR-009。
 - **进度日志**：2026-09-29 新增用户需求后规划——未开始。
 
 ### I-091 — 完成 lockstep 安全 profile 验收 gate
 
-- **负责/门禁**：安全验收负责人；最终安全证据闭合。
-- **前置依赖**：I-080, I-083, I-090。
-- **做什么**：重跑全部适用功能/形式/物理测试，执行fault campaign和performance/area对照，限定安全claim。
-- **输入数据/接口**：p0/p3基线、fault结果、三板/ASIC证据、fault-controller状态。
-- **输出与交接**：lockstep acceptance bundle、残余故障、能力广告。
-- **设计取舍**：安全证据是独立gate，不能替代普通ISA正确性。
-- **实现微步骤**：无故障等价；故障检测/阻断；资源/频率/面积对照；残余故障列表；claim审计；release签名。
-- **主要阻塞风险**：把DCLS当TMR、把原型当认证、隐藏不支持模式。
-- **验收证据**：所有声明模式均有对应证据，ASIL/SIL未正式评估则不宣称。
-- **失败/回退动作**：保留normal profile，不发布lockstep能力。
+- **负责/门禁**：安全验收负责人；可选p0 DCLS功能验收，不是安全认证。
+- **前置依赖**：I-080, I-090, V-081, V-082, V-083。
+- **做什么**：在已通过的普通p0上重放无故障和注入故障的DCLS modes，检查比较、可见副作用阻断、reset/debug/reconfigure恢复与资源/性能代价；只为明确广告的目标另收物理门禁。
+- **输入数据/接口**：p0 I-080、D/模式manifest、V-081观测/对齐、V-082故障矩阵及V-083状态转换证据、I-090共享域保护/残余风险；若广告具体FPGA/ASIC DCLS则取V-084和H-048/H-049相应target证据。
+- **输出与交接**：按mode/target索引的DCLS功能acceptance bundle、fault seed/site/time/观测/恢复日志、代价及残余风险、可广告范围；交I-086。
+- **设计取舍**：p0功能DCLS门禁独立于normal p0；三板物理或ASIC声称独立加门禁，不把功能通过称ASIL/SIL、TMR纠错或物理认证。
+- **实现微步骤**：锁定p0与D配置；回放无故障normal/DCLS签名；逐故障注入核对检测延迟和store/MMIO等副作用阻断；回放reset/debug/reconfigure；比较资源/性能；对照每个广告target的V-084、H-048/H-049；记录残余故障并审广告。
+- **主要阻塞风险**：未经注入便声称故障覆盖、把DCLS当TMR、某target缺物理证据或无法阻断副作用。
+- **验收证据**：p0功能模式有确定性故障/无故障/恢复证据；声称某family物理DCLS须该family H-048通过，声称ASIC DCLS须同候选H-049通过；未正式评估不得宣称ASIL/SIL。
+- **失败/回退动作**：功能阻断失败则不启用DCLS，保留normal p0；某target证据不足仅撤销该target物理声明。
 - **来源覆盖**：optional lockstep gate；来源 AR-019, AR-020, AR-021。
-- **执行者目标**：把lockstep从“有代码”变成“有证据的可选能力”，并明确哪些安全结论不能说。
-- **执行者须知**：先收齐基础正确性，再收lockstep证据；不要省略性能/面积代价；不要代替认证机构下结论。
-- **建议工作顺序**：核对基础gates；汇总fault campaign；汇总三平台/ASIC证据；比较资源与性能；审阅claim；发布或阻断。
-- **可接受完成**：所有声明模式证据闭合，残余风险和安全边界清楚。
-- **何时停止求助**：任何证据缺口、认证边界不清或副作用阻断失败时停止。
-- **交付说明**：提交acceptance bundle、已知限制和release decision；更新Track Log。
+- **执行者目标**：先验收DCLS检测与fail-closed功能，再逐target判断是否能广告物理冗余。
+- **执行者须知**：I-091不等于认证；三板/ASIC数据仅对实际广告的物理target必需，不能用另一板或FPGA替ASIC。
+- **建议工作顺序**：锁p0→重放无故障→故障/副作用→状态恢复→代价对照→目标证据核对→缩小或发布可广告范围。
+- **可接受完成**：声明的mode有闭合功能证据，声明的target另有独立物理证据，所有残余风险明确。
+- **何时停止求助**：比较失配或副作用泄漏先阻断整个DCLS模式；target报告缺失时列target/mode、所缺hash/报告及owner，不影响normal p0。
+- **交付说明**：向I-086交付模式/目标claim矩阵、原始故障replay与阻断项；更新Track Log，不预填故障结果。
 - **参考资料**：AR-019, AR-020, AR-021。
 - **进度日志**：2026-09-29 新增用户需求后规划——未开始。
 
@@ -256,44 +256,44 @@ flowchart TD
 ### H-048 — 验证三家族 lockstep 物理分离与故障注入
 
 - **负责/门禁**：FPGA平台负责人；三家族物理证据。
-- **前置依赖**：H-010, I-089。
-- **做什么**：为GW5A/Zynq/Virtex分别约束main/shadow分区和共同资源，执行真实fault注入。
-- **输入数据/接口**：lockstep build、fault controller、placement/clock/reset约束。
-- **输出与交接**：每family lockstep bundle、placement/timing/fault report。
-- **设计取舍**：每个family独立证明，不能以任一板代替。
-- **实现微步骤**：选择lockstep profile；约束冗余区域；生成bitstream；核对ID；执行corpus与fault campaign；记录资源/时序/检测延迟。
-- **主要阻塞风险**：资源不足、shadow被优化、比较器不能阻断设备写。
-- **验收证据**：三家族都有真实检测与阻断证据。
-- **失败/回退动作**：该family profile blocked，不发布lockstep支持。
+- **前置依赖**：H-010, I-089；本卡按实际广告的family/mode产出物理证据，不是normal p0的前置。
+- **做什么**：逐GW5A、Zynq、Virtex目标板/mode约束main/shadow分区与共同资源，实板执行正常corpus和定点故障注入。
+- **输入数据/接口**：锁定的part/tool/source、I-089 D/模式与fault model、fault controller、placement/clock/reset约束、已知无故障ELF/signature。
+- **输出与交接**：按board/mode索引的source/constraints/bitstream/ELF hash、fit/timing与netlist/placement、device ID、fault seed/site/time、检测/副作用/恢复trace；交I-091及I-086。
+- **设计取舍**：每个广告目标独立证明；三家族广告才要求三家族闭合，不能以任一板替另一板。
+- **实现微步骤**：冻结每板part/tool和DCLS模式；保留副本并检查综合/布局；生成bitstream，核对设备与build ID；运行无故障基线；注入目标故障并检查检测延迟、store/MMIO授权、reset/recovery；保存资源、时序与原始日志。
+- **主要阻塞风险**：某板资源/时序不够、shadow被优化、比较器不能阻断设备写、只见host注入而没有设备观测。
+- **验收证据**：每个广告的board/mode均有真实物理冗余、正常/故障负控制、未发布副作用和恢复的同源证据；三家族声明须三个bundle。
+- **失败/回退动作**：撤销受影响board/mode DCLS声明，恢复normal image并交该板owner提供fit、故障trace与缺少输入；normal p0不因此阻断。
 - **来源覆盖**：FPGA lockstep；来源 AR-019, AR-020, platform-plan.md。
-- **执行者目标**：在每个目标FPGA上证明冗余真实存在，而不是只在Verilator里存在。
-- **执行者须知**：不能用另一family的结果替代；每个板的bitstream、约束、故障注入和签名都要同源。
-- **建议工作顺序**：冻结part；布局冗余；构建；核对device/build ID；运行正常corpus；注入故障；恢复好映像。
-- **可接受完成**：三家族各有完整bundle和negative controls。
-- **何时停止求助**：器件放不下、约束无法保护或设备不可用。
-- **交付说明**：提交build/log/fault evidence；更新Track Log。
+- **执行者目标**：在声称的实际设备上证明冗余确实存在且可检测并阻断故障。
+- **执行者须知**：RTL/Verilator结果不能代替实板故障和同源bitstream证据。
+- **建议工作顺序**：锁设备/映像→route并查冗余→核设备ID→跑正常→注故障→核副作用→恢复→交付按board/mode矩阵。
+- **可接受完成**：所有广告板/mode的fit/timing、netlist、signature、fault、recovery日志闭合。
+- **何时停止求助**：设备/许可证缺失或fit、时序、物理分区、阻断失败时停止该claim，附报告hash及目标owner。
+- **交付说明**：提交逐目标构建/故障/恢复证据及blocked列表；更新Track Log。
 - **参考资料**：AR-019, AR-020, platform-plan.md。
 - **进度日志**：2026-09-29 新增用户需求后规划——未开始。
 
 ### H-049 — 审核 ASIC lockstep 的物理与制造测试边界
 
 - **负责/门禁**：ASIC负责人；物理/DFT/安全边界。
-- **前置依赖**：H-038, H-041, I-090。
-- **做什么**：审查replica floorplan/clock/power/shared SRAM；把lockstep纳入scan/MBIST/ATPG、STA、等价和安全分析。
-- **输入数据/接口**：floorplan、shared macros、scan/MBIST/ATPG、fault model。
-- **输出与交接**：ASIC lockstep signoff report、fault coverage scope、残余风险。
-- **设计取舍**：没有正式安全评估就不能发布ASIL/SIL结论。
-- **实现微步骤**：检查物理分离；覆盖replica/checker scan；验证shared memories ECC；多mode STA；post-route等价；审阅waiver；记录认证边界。
-- **主要阻塞风险**：共享SRAM/clock未保护、DFT漏掉replica、把FPGA fault campaign当ASIC signoff。
-- **验收证据**：每个安全机制有设计和验证/制造测试证据。
-- **失败/回退动作**：保持ASIC lockstep blocked。
+- **前置依赖**：H-038, H-041, H-043, H-044, H-045, I-090；只在广告ASIC DCLS时作为该声明门禁。
+- **做什么**：对同一DCLS候选审查replica/checker floorplan、clock/power/shared SRAM；把function/test/power模式纳入DFT、routed多corner STA、IR/EM/热及post-route等价和DRC/LVS/ERC。
+- **输入数据/接口**：候选hash、routed netlist/寄生参数、shared-domain保护图、fault模型、scan/MBIST/ATPG故障分母、H-043各corner STA、H-044 power/IR/EM/thermal、H-045 post-route和foundry检查报告及waivers。
+- **输出与交接**：以候选/mode/corner索引的ASIC DCLS signoff报告、故障覆盖排除项和残余风险，交I-091和ASIC声明owner。
+- **设计取舍**：H-038/H-041只是时钟/DFT前提，不能替代H-043..H-045的已布线实证；没有正式认证不得广告ASIL/SIL。
+- **实现微步骤**：核副本/checker物理分离；检查shared domains；复核scan/MBIST/ATPG；逐mode/corner核routed STA与power；核DRC/LVS/ERC及post-route等价、waiver和候选hash；复查fault阻断及残余风险。
+- **主要阻塞风险**：跨候选拼报告、共享RAM/clock无保护、DFT漏副本、FPGA fault campaign冒充ASIC signoff。
+- **验收证据**：同一DCLS候选H-043、H-044、H-045全套报告闭合，副本/checker与共享域的DFT/物理/故障边界明确。
+- **失败/回退动作**：ASIC DCLS声明blocked，标具体candidate/mode/corner/waiver缺口与负责工艺/DFT owner；不阻断normal p0或未广告DCLS的ASIC声明。
 - **来源覆盖**：ASIC lockstep, DFT；来源 AR-019, AR-020, AR-021, HR-009。
-- **执行者目标**：把ASIC安全边界写清楚：哪些由RTL/验证证明，哪些由DFT/制造测试证明，哪些仍需正式安全评估。
-- **执行者须知**：FPGA fault injection不是ASIC signoff；scan、MBIST、ATPG、STA、power和DRC各自独立。
-- **建议工作顺序**：审查物理分离；检查共享memory保护；验证scan/MBIST；跑STA/等价；写残余风险；审阅安全claim。
-- **可接受完成**：每个声明机制有对应证据；没有证据的阶段明确blocked。
-- **何时停止求助**：PDK/library/tester/安全评估不可用或发现无法签核的风险。
-- **交付说明**：提交signoff bundle和claim boundary；更新Track Log。
+- **执行者目标**：证实DCLS候选的布线后时序/电源/物理/制造测试边界，不能只交RTL fault结果。
+- **执行者须知**：H-043..H-045报告须对应同一DCLS候选；没有PDK/foundry授权不得推断signoff完成。
+- **建议工作顺序**：锁候选与授权→核物理分离/共享域→DFT→MCMM STA→power/IR/EM→DRC/LVS/ERC/等价→waiver/残余风险。
+- **可接受完成**：仅同候选全gate和故障证据齐备时允许ASIC DCLS claim，不自动给ASIL/SIL结论。
+- **何时停止求助**：缺PDK/library/tester、任一corner/mode不闭合或风险不可接受时移交具体报告与owner。
+- **交付说明**：提交同候选signoff bundle和claim boundary；更新Track Log，不预填结果。
 - **参考资料**：AR-019, AR-020, AR-021, HR-009。
 - **进度日志**：2026-09-29 新增用户需求后规划——未开始。
 

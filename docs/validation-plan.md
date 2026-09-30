@@ -147,6 +147,12 @@ build/<profile>/eaf-sim --elf <path> --platform <json> --ref <so> --seed <u64> -
 
 每个 run 输出 schema：`source_lock, profile_hash, suite_hash, case_id, seed, input_hashes, command_argv, tool_versions, env_digest, started/completed, exit_status, retire_count_per_hart, event_count_per_kind, compared_fields, semantic_relations_used, skip_ledger, functional_bins_hit/missed, first_mismatch, logs_hashes`。功能 coverage 追踪 requirement×事件×异常×重配的义务；line/toggle coverage 仅定位遗漏，不能替代这些义务。负控制和 timeout 注入与普通功能回归是独立套件，结果不能混在“成功率”分母内。
 
+#### 小模型验证交接协议（实施时逐任务执行）
+
+1. **先定范围，不先运行。** 接单者写明任务 ID、目标 claim/profile、前置 `Depends` 的 artifact hash、实现里程碑、冻结规范条款与 capability 交集；从 V-036 的 `suite-manifest.json` 选定适用 case/seed/预算/预期退出，未支持的功能登记原因和受影响 claim，不从 p0 负例推断可选扩展已通过。输入不齐则记 `Blocked` 并请求明确 owner/决议，不能猜默认配置。
+2. **成对验证。** 按 manifest 跑无注入正例并检查退出协议/最终状态，再在相同 ELF、seed、事件和规则下跑真实 RTL 路径故障负例（按任务指定 V-021/022/023）；保存注入 site、激活证据、首次异常 architectural event 与非零退出。只有 timeout、mock compare、被 skip 的故障不是 mismatch；若正例失败先保留现场，不能删 case 或改规则凑 PASS。
+3. **闭合并交给下一人。** 每一交付附 `evidence-manifest`：`task_id, claim, profile_hash, source_lock, suite_hash, case_id, seed, elf_hash, external_events_hash, injected_rtl_hash/site(or none), snapshot_hash(or none), command_argv, env_digest, reference_config, compare_rule_hash, exit_status, first_difference(hart/event/field), output_hashes, exclusion_ledger_hash, counts(PASS/FAIL/UNSUPPORTED/INFRA_ERROR/TIMEOUT), upstream_artifact_hashes, downstream_owner`。核对计数等于冻结总数；负控制在单独分母中核对预期被抓，不把其非零误记正常 FAIL。交接方从空输出目录用锁定输入重放选中的正/负例并核对首差异；不能重放、字段/哈希缺失或必须能力被 UNSUPPORTED 时只阻断受影响 claim，回退最后一个已验收配置/规则并附最小事实。
+
 ## 5. 细粒度验证任务
 
 下面每项是一项未来可执行工作；`Inputs` 中的“实现里程碑”由父实施计划连接，不表示该实现现在存在。任务不要求现在执行工具。每项继承第 4 节证据 schema，`Fail` 为阻断条件而非可以自动忽略的 warning。
@@ -323,11 +329,11 @@ build/<profile>/eaf-sim --elf <path> --platform <json> --ref <so> --seed <u64> -
 
 ### V-018 — 分开 architectural memory 与可见 store
 - Depends: V-011, V-013
-- Inputs: LSU/store-buffer 实现、memory-operation schema。
-- Action: 覆盖所有 load/store 宽度、符号扩展、部分 byte mask、forwarding、跨行、错误路径 store；记录 store commit 与真正 drain，比较 reference memory 及最后 byte signature。
-- Outputs: 有因果 ID 的 load/store/visibility trace。
-- Pass: 每个可见 byte 有合法已提交 producer，load 返回值与允许来源相符，取消 store 不外泄。
-- Fail: 仅比较 rd 漏掉错误 store、将 cache refill 当 load effect、重复 drain、用 DUT memory 覆盖 reference 后宣称一致。
+- Inputs: p0 ordered LSU/store-buffer（I-035）、memory-operation schema；若启用可选 speculative load replay（I-036），另附 late-alias/回滚里程碑。
+- Action: p0 覆盖所有 load/store 宽度、符号扩展、部分 byte mask、同 hart forwarding、跨行、错误路径 store；记录 store commit 与真正 drain，比较 reference memory 及最后 byte signature。I-036 启用时重跑这些检查并注入 late-alias replay/kill，与 V-029 的 stale completion 证据交叉核对。
+- Outputs: 有因果 ID 的 load/store/visibility trace；可选 I-036 另附 replay/rollback trace。
+- Pass: p0 每个可见 byte 有合法已提交 producer，load 返回值与允许来源相符，取消 store 不外泄；声明 I-036 时还须证明 late alias 重放后无旧 load/错误 store 可见。
+- Fail: 仅比较 rd 漏掉错误 store、将 cache refill 当 load effect、重复 drain、用 DUT memory 覆盖 reference 后宣称一致；可选 replay 失败不得阻断已验收的保守 p0 配置。
 - Covers: SRC-03 §Memory Operation 也应该成为 Packet、§Store visibility obeys selected model。
 - Sources: VR-003, VR-014。
 
@@ -522,22 +528,22 @@ build/<profile>/eaf-sim --elf <path> --platform <json> --ref <so> --seed <u64> -
 - Sources: VR-010；若不用 UVM，项目生成器必须另行独立校准。
 
 ### V-038 — 最小化失败而不改变故障性质
-- Depends: V-024, V-037
-- Inputs: 真实 mismatch case、首差异指纹与 immutable manifest。
-- Action: 删除无关指令/数据/刺激，保持目标 opcode、trap 前提、hart 数与调度故障可达；每次缩减用实际 DUT+REF 复核，禁止以改变 skip/mask 换取“复现”。
-- Outputs: 最小 ELF、原始到最小化 provenance 与 reduction log。
-- Pass: 最小 case 在固定环境重复三次产生同一首差异类别和相关字段；原始 case 永久保留。
-- Fail: mismatch 缩成另一个 timeout、只在 reference 运行、改平台/异常前提却宣称同一 bug。
+- Depends: V-021, V-024, V-037
+- Inputs: V-021 或 V-022 已激活 RTL 注入路径的真实 mismatch（p0 可选 V-021 ALU/CSR），原始 ELF/seed/事件、注入构建 hash/site、首差异指纹与 immutable manifest；V-037 的自然失败不是必要输入。
+- Action: 固定注入版本/开关与比较规则，先以同一输入跑无注入正例 PASS、有注入负例在目标 architectural event FAIL；删除无关指令/数据/刺激，保持目标 opcode、trap 前提、hart 数与调度故障可达；每次缩减用实际 DUT+REF 复核，禁止以改变 skip/mask 换取“复现”。
+- Outputs: 最小 ELF、原始到最小化 provenance、注入 site/seed/首差异与 reduction log。
+- Pass: 最小 case 的无注入正例通过、有注入负例在固定环境重复三次产生同一首差异类别和相关字段；原始 case 永久保留。无自然 fuzz 缺陷时仍可凭可重放的 RTL 注入完成 p0 此项。
+- Fail: mismatch 缩成另一个 timeout、只在 reference 运行、只改比较器或 trace、改平台/异常前提却宣称同一 bug。
 - Covers: SRC-03 §XiangShan 工程方法；failure triage。
 - Sources: VR-003, VR-010。
 
 ### V-039 — 验证从零与 checkpoint 的 replay
 - Depends: V-038
-- Inputs: DUT/reference/RAM/device/PRNG/lease/event cursor 状态、波形 ROI。
-- Action: 对一个真实故障分别从 reset 和最近 snapshot 重放，比较事件 hash 直到首差异；若采用 LightSSS，遵循其禁止混用的 debug flags 并验证 fork/thread 行为。
-- Outputs: replay bundle 与状态完整性证明。
-- Pass: 两条重放路径复现同一首差异；snapshot 显式包括全部外部非确定性和事务状态。
-- Fail: 只保存 CPU register、fork 后线程丢失、device/host time 未固定、打开 trace 改变故障但无解释。
+- Inputs: V-038 固定的已激活 RTL 注入构建/site、无注入正例、最小 ELF/seed/外部事件、DUT/reference/RAM/device/PRNG/lease/event cursor 状态、波形 ROI。
+- Action: 对同一个注入故障分别从 reset 和首差异之前最近 snapshot 重放；固定注入开关及事件 cursor，逐事件比较 event hash 到同一首差异；关闭注入后两路径都须完成正例；若采用 LightSSS，遵循其禁止混用的 debug flags 并验证 fork/thread 行为。
+- Outputs: reset/snapshot 双路径 replay bundle、正负对照与状态完整性证明。
+- Pass: 两条注入重放路径复现同一首差异，关闭注入均 PASS；snapshot 显式包括 RTL 注入状态及全部外部非确定性和事务状态；p0 无自然故障仍可凭此负控制通过。
+- Fail: 只保存 CPU register、遗漏注入开关/seed、fork 后线程丢失、device/host time 未固定、打开 trace 改变故障但无解释。
 - Covers: SRC-03 §XiangShan 的工程方法很适合借鉴。
 - Sources: VR-003, VR-008。
 
@@ -871,13 +877,13 @@ build/<profile>/eaf-sim --elf <path> --platform <json> --ref <so> --seed <u64> -
 - Covers: SRC-03 §Slice/Tile/Pod hierarchy、§最后才做 Pod Aggregation。
 - Sources: SRC-03:1537-1595, SRC-03:2235-2270, VR-014。
 
-### V-073 — 验证后续 Linux 启动与运行环境
-- Depends: V-043, V-044, V-046, V-047, V-049, V-064
-- Inputs: 满足选定 Linux/OpenSBI ISA/平台需求的实现里程碑、锁定 firmware/kernel/rootfs/DTB。
-- Action: 先审计实际二进制所需扩展及设备，再从 reset 启动到 init，运行固定用户程序、异常/系统调用、timer、进程切换与 SMP 同步；保存 boot milestone 与退出签名。
-- Outputs: 可重放 OS 镜像闭包和程序结果；必要额外扩展用 capability gate 补齐。
-- Pass: boot 到用户程序终止且差分/设备检查有效；进程上下文、页表和 IRQ 正确；没有把日志出现 Linux 字样当成功。
-- Fail: 在 p0 宣称 Linux、使用未审计 prebuilt linux.bin、屏蔽 boot 全段差分、不支持必要硬件仍声称可运行。
+### V-073 — 验证 p1 单 hart Linux 与可选 SMP 运行环境
+- Depends: V-043, V-044, V-046, V-047, V-049
+- Inputs: 满足选定 Linux/OpenSBI ISA/平台需求的实现里程碑、锁定 firmware/kernel/rootfs/DTB；声明 SMP Linux 时另附 V-064/V-065/V-067 多 hart memory/coherence 证据。
+- Action: 先审计实际二进制所需扩展及设备，p1 单 hart 从 reset 启动到 init，运行固定用户程序、异常/系统调用、timer、进程切换及页表/上下文切换；保存 boot milestone 与退出签名。仅当声明 SMP Linux 时增加多 hart 启动、同步、共享内存观测与 RVWMO/coherence 检查。
+- Outputs: 单 hart 可重放 OS 镜像闭包和程序结果；SMP claim 另附多 hart 同步/内存证据；必要额外扩展用 capability gate 补齐。
+- Pass: 对所声明 Linux claim，boot 到用户程序终止且差分/设备检查有效；进程上下文、页表和 IRQ 正确；SMP 需 V-064/V-065/V-067 及真实同步程序证据，不能用单 hart 结果代替。
+- Fail: 在 p0 宣称 Linux、只靠 I-048 启动烟测宣称 p1 Linux 已验收、使用未审计 prebuilt linux.bin、屏蔽 boot 全段差分、单 hart 证据冒充 SMP。
 - Covers: SRC-03 §normal Linux/virtual memory、多线程软件路线。
 - Sources: VR-004, VR-005, VR-007, VR-012。
 
@@ -913,10 +919,10 @@ build/<profile>/eaf-sim --elf <path> --platform <json> --ref <so> --seed <u64> -
 
 ### V-077 — 将同一证据协议带到真实 FPGA
 - Depends: V-012, V-024, V-039, V-075
-- Inputs: GW5A、Zynq、Virtex UltraScale+ 平台实现与板卡决策里程碑、硬件 trace/装载协议。
-- Action: 每个平台运行其容量 profile 的同一 ELF/输入；板上保存 signature、首末 commit、trap/IRQ、overflow flags，经 host 离线 reference replay；高带宽 trace 不足时分窗口重跑并保留窗口连接 checkpoint。
-- Outputs: 平台/run/profile 关联的硬件证据包。
-- Pass: 真实器件运行可确认、trace 无丢失或显式 overflow 失败，结果与仿真及 reference 一致；无法全 trace 的结论范围明确降为已观察窗口/签名。
+- Inputs: 此次广告的 GW5A、Zynq 或 Virtex UltraScale+ 目标及其平台实现/板卡决议、硬件 trace/装载协议；其他目标留待各自 claim 前单独运行。
+- Action: 对每个此次声明的真实平台分别运行其容量 profile 的同一 ELF/输入；板上保存 signature、首末 commit、trap/IRQ、overflow flags，经 host 离线 reference replay；高带宽 trace 不足时分窗口重跑并保留窗口连接 checkpoint。
+- Outputs: 按目标板卡/run/profile 关联的硬件证据包与未声明目标的 deferred 账本。
+- Pass: 每个已声明真实器件运行可确认、trace 无丢失或显式 overflow 失败，结果与仿真及 reference 一致；无法全 trace 的结论范围明确降为已观察窗口/签名；不能以一块板证据覆盖其他两块。
 - Fail: 只综合便称板测、JTAG 下载成功当程序通过、带宽不足无声抽样却声称完整差分。
 - Covers: SRC-03 §FPGA 原型与验证路线；GW5A/Zynq/Virtex UltraScale+ 用户平台要求。
 - Sources: VR-003, VR-008；具体器件与工具主源见 platform-plan.md。
@@ -932,11 +938,11 @@ build/<profile>/eaf-sim --elf <path> --platform <json> --ref <so> --seed <u64> -
 - Sources: SRC-03:1-2528, VR-001–VR-015。
 
 ### V-079 — 验证观测逻辑可移除与平台可移植
-- Depends: V-008, V-042, V-077
-- Inputs: 含/不含探针 RTL、不同 RAM wrapper/复位/端口模式的实现里程碑。
-- Action: 对探针开关进行顺序等价或相同输入 trace 比较；对 RAM read-during-write、端序/byte-enable、reset 值做合同测试；ASIC memory wrapper 同样复用此接口但独立进行时序签核。
-- Outputs: instrumentation noninterference 与跨 wrapper 行为报告。
-- Pass: 观测不反馈功能路径，wrapper 实现满足同一逻辑合同；厂商特定能力显式封装，不进入 core 语义。
+- Depends: V-008, V-042
+- Inputs: 含/不含探针 RTL、此次声明目标的 RAM wrapper/复位/端口模式实现里程碑；声明 FPGA 目标另附对应 V-077 真实板证据，ASIC 目标附独立物理证据。
+- Action: 对探针开关进行顺序等价或相同输入 trace 比较；针对声明的目标对 RAM read-during-write、端序/byte-enable、reset 值做合同测试；ASIC memory wrapper 同样复用此接口但独立进行时序签核。
+- Outputs: instrumentation noninterference 与逐目标 wrapper 行为报告。
+- Pass: 观测不反馈功能路径，已声明 wrapper 实现满足同一逻辑合同；FPGA 广告必须对应目标 V-077 板证据，ASIC 广告必须独立签核；厂商特定能力显式封装，不进入 core 语义。
 - Fail: 仿真 DPI RAM 隐藏 FPGA collision 行为、删探针改变 arbitration、将 Verilator 测试当 ASIC equivalence/timing proof。
 - Covers: SRC-03 §same architectural machine/dynamic physical substrate；可移植性与 ASIC 后续转换。
 - Sources: VR-003, VR-008, VR-011。
@@ -982,78 +988,112 @@ build/<profile>/eaf-sim --elf <path> --platform <json> --ref <so> --seed <u64> -
 - Sources: AR-019, AR-020, AR-021。
 
 ### V-084 — 证明 shared-domain 保护与综合冗余存活
-- Depends: V-067, V-079, V-083
-- Inputs: shared RAM/cache/LLB/clock/bus/debug保护图、综合netlist和平台约束。
-- Action: 对共享memory/总线注入可检测错误；核对ECC/parity/CRC/address binding和monitor路径；检查综合后shadow、delay、checker、barrier仍存在，运行post-synthesis/implemented对比测试。
-- Outputs: common-mode fault ledger、netlist survivability evidence、physical protection report。
-- Pass: 每个shared architectural path有保护或残余风险记录；冗余未被优化移除；所有保护路径能被fault campaign触发。
-- Fail: 综合掉duplicate logic、共享memory corruption无检测、仅RTL仿真证明物理冗余存活。
+- Depends: V-083
+- Inputs: DCLS 已验收的 shared p0 RAM/bus/clock/debug 保护图；对所声明 FPGA/ASIC 目标附 V-079 观测/物理 wrapper 证据、综合 netlist/平台约束；若声明 shared multi-hart/coherence/LLB 再附 V-067 等对应内存证据。
+- Action: 从共享 RAM/总线注入可检测错误，核对 ECC/parity/CRC/address binding 和 monitor 路径；仅在物理目标声明时检查综合后 shadow、delay、checker、barrier 仍存在并运行 post-synthesis/implemented 对比测试；增加 cache/LLB/coherence 时扩大共享保护域。
+- Outputs: p0 common-mode fault ledger；物理 claim 分别附 netlist survivability evidence、physical protection report。
+- Pass: 每个声明范围内的 shared architectural path 有保护或残余风险记录且 fault campaign 能触发；物理 DCLS claim 另证明冗余未被综合优化移除，不能借 p0 RTL 证据宣称物理冗余存活。
+- Fail: 共享 RAM corruption 无检测、遗漏已声明 cache/LLB 保护；物理 claim 综合掉 duplicate logic，或仅 RTL 仿真证明物理冗余存活。
 - Covers: common-cause faults, synthesis survival, shared-domain protection。
 - Sources: AR-019, AR-020, HR-009。
 
-### V-085 — 闭合 RVA23 mandatory capability 与 reference 覆盖
+### V-085 — 闭合 RVA23U64/RVA23S64 全部 mandatory 条款与 reference 覆盖
 - Depends: V-002, V-020, V-043, V-080
-- Inputs: RVA23 compliance matrix、每个mandatory extension的实现里程碑、ACT/Sail/Spike/NEMU能力表。
-- Action: 逐项生成RVA23U64/S64测试义务，覆盖mandatory scalar/FP/vector/privilege/cache/PMA/PMU/hypervisor行为；为reference不支持的项建立第二oracle或形式/定向证据。
-- Outputs: RVA23 verification manifest、capability intersection、missing coverage ledger。
-- Pass: 每项mandatory capability有至少一个真实执行证据和对应spec条款；没有未登记排除。
-- Fail: ISA字符串/build flag通过但指令/CSR/PMA无执行证据。
-- Covers: RVA23 Core verification, binary compatibility。
-- Sources: AR-022, AR-023, VR-005, VR-007, VR-009。
+- Inputs: ratified RVA23 profile 的 U64/S64 mandatory 条款与批准的 ISA 扩展版本/hash、逐扩展实现里程碑、V-044–V-059/V-045–V-049 等已有证据、ACT/Sail/Spike/NEMU 逐项能力表；可选项独立账本。
+- Action: 按下列分组将**每个**命名 mandatory 扩展展开为独立 requirement×规范条款×正例/负例×oracle×DUT 事件×结果行；分组只是小模型派工，不可用分组 PASS 替代成员 PASS。U64 基础：little-endian RV64I/ECALL→V-025/V-041/V-043/V-047；M、A、F、D、C、B、Zicsr→V-043–V-051/V-044/V-045/V-046 的逐指令/CSR 定向与 ACT；Zicntr、Zihpm→计数器权限/增量/实现值、只读零行为（V-017/V-047）；Ziccif、Ziccrse、Ziccamoa、Zicclsm、Za64rs、Zic64b、Zicbom、Zicbop、Zicboz→V-086 的各自 PMA/atomic/fetch/cache 行；Zihintpause、Zihintntl、Zimop、Zcmop→逐合法编码/长度、定义的 hint/MOP 效果或无效果、非法编码负例（V-016/V-044）；Zfhmin、Zfa→FP 数值/舍入/flags/NaN-boxing 与不合法编码（V-050/V-051）；Zkt→适用标量指令的 mandatory 数据独立执行延迟（DIEL）单列，固定控制量改变数据值、记录可重复测量窗口与边界，**不**依赖可选密码套件；V（每 hart VLEN≥128，完整 V 而非子集）→V-052–V-058 的完整逐指令、宽状态、mask/tail/vstart/内存；Zvfhmin、Zvbb→向量半精度最小集/位操作逐指令值及配置；Zvkt→适用向量指令 mandatory DIEL，固定 `vl/vtype/mask` 等控制量分别改变 active/inactive data operand，独立于 V-089；Zicond、Zcb、Zawrs→逐指令条件值/压缩解码/预约等待与故障边界；Supm→V-087 的 U-mode PMLEN=0/7 与环境选择。
 
-### V-086 — 验证 RVA23 cache/PMA/atomic/misaligned 合同
-- Depends: V-018, V-045, V-065, V-085
-- Inputs: CMO/Zic64b、misaligned/atomic PMA、coherence agents、cache hierarchy。
-- Action: 测试CBO.INVAL/CLEAN/FLUSH/ZERO/PREFETCH、misaligned load/store/AMO、64-byte block、跨cache/非coherent agent和错误权限；记录PPO/load-value规则与trap。
-- Outputs: CMO/PMA evidence、memory execution traces、negative controls。
-- Pass: 每个CMO按PMA/权限/ordering执行；misaligned/atomic能力与profile广告一致；错误权限和非幂等路径被拒绝。
-- Fail: CMO当noop忽略权限、misaligned只测标量不测vector/atomic、把cache hit当一致性证明。
-- Covers: RVA23 memory contract, CMO, PMA。
-- Sources: AR-022, AR-024, VR-014。
+S64 先继承上述**全部** U64 obligations，再将 Zifencei→改代码后取指可见性；Ss1p13→CSR/权限/trap 条款；Svbare、Sv39、Svade、Ssccptr、Svpbmt、Svnapot→Bare/页表/权限/PBMT/NAPOT/页表 PMA 与 A/D fault（V-047–V-049）；Svinval→按地址/ASID 失效及旧 PTW 回应（V-049）；Sstvecd、Sstvala、Sscounterenw、Sstc、Sscofpmf、Ssu64xl→Direct 任意有效 4B 对齐 BASE、各类 fault 的 `stval`、非零 `hpmcounter` enable 可写、timer/overflow/过滤/UXL=64 的 CSR 与 interrupt 正负例；Ssnpm→`senvcfg.PME`/`henvcfg.PME` PMLEN=0/7（V-087）；Sha **逐成员** H、Ssstateen、Shcounterenw、Shvstvala、Shtvala、Shvstvecd、Shvsatpa、Shgatpa→HS/VS/VU 两阶段翻译及虚拟异常/注入/陷阱、`sstateen0–3`/`hstateen0–3`、非零 HPM 的 `hcounteren` 可写、`vstval`/`htval` 定值、Direct `vstvec` 任意有效 4B 对齐 BASE、`vsatp` 支持所有 `satp` 模式、`hgatp` 支持对应 SvNNx4 及 Bare；参照 V-047–V-049 的模式与异常 trace，但补专用 H/guest directed oracle，不把一条 S-mode 页表测试当 H 测试。每个无 reference 支持的 mandatory 行必须有独立第二 oracle 或规范驱动定向/形式证据；ACT exclusion、skip、只读实现值均逐项登记，缺少证据为 UNSUPPORTED 而非 PASS。
 
-### V-087 — 验证 pointer masking 全访问覆盖
+Mandatory `Zkt` 只约束规范表内**已实现**的标量指令（含适用 I/M/C/B 等；不因此要求实现标量密码）；loads/stores/conditional branches 不在其范围，OoO 的融合、拆分、路由优化不得依赖操作数**数据**。`Zvkt` 约束适用向量指令的所有 data operands，包括 inactive 数据；`vl/vtype/mask` 用作控制时不属于 DIEL 数据约束。对各自指令清单逐项冻结可观察计时边界及重复输入对照，不将 DIEL 宣称为整个处理器恒时或完整侧信道安全。
+
+- Outputs: U64/S64 逐条 clause ledger、独立 H/guest 与 Zkt/Zvkt DIEL evidence、逐工具 capability intersection、missing coverage/exclusion ledger、每行输入 hash/trace/正负控制及 pass/fail/unsupported。
+- Pass: U64 和 S64 **各自**全体 mandatory 行均有符合其条款的真实执行/状态/时序证据及有效 oracle；mandatory 负控制能检出错误；不从 ISA 字符串、ACT 通过率或分组名推断覆盖。
+- Fail: 任一 mandatory 成员缺证、完整 V 被少量指令代替、Sha 被当可选 H、Zkt/Zvkt DIEL 推迟到可选密码、参考模型不支持便跳过，或把可选项当 Core 门禁。
+- Covers: ratified RVA23U64/RVA23S64 mandatory conformance、binary compatibility；profile 不等于 OS/server 平台。
+- Sources: AR-022, AR-023, VR-005, VR-007, VR-009；[ratified RVA23U64/S64 profile §Mandatory](https://raw.githubusercontent.com/riscv/riscv-profiles/rva23-rvb23-ratified/src/rva23-profile.adoc)、[Zkt §31.1.5](https://docs.riscv.org/reference/isa/v20260120/unpriv/scalar-crypto.html#crypto_scalar_zkt)、[Zvkt](https://docs.riscv.org/reference/isa/v20260120/unpriv/vector-crypto.html#zvkt)。
+
+### V-086 — 验证 RVA23 fetch/cache/PMA/atomic/misaligned 合同
+- Depends: V-018, V-045, V-046, V-085
+- Inputs: Ziccif/Ziccrse/Ziccamoa/Zicclsm/Za64rs/Zic64b/Zicbom/Zicbop/Zicboz 与 Ssccptr 的区域 PMA、fetch/cache/预约实现、CPU 与**独立可控 coherent agent**；非一致性设备/区域另标；声明 multi-hart 时附 V-065/V-067。
+- Action: 在同时具有 cacheability+coherence PMA 的 main-memory 区域分别测：Ziccif 的自然对齐 power-of-two 取指（16-bit 与**完整 32-bit**）不可撕裂；通过规范允许的写入与指令同步在两个完整编码版本间切换，观察结果只能为完整旧/新编码（含跨 fetch line 的 32-bit、页边界对照；不是“取指单周期”）。Ziccrse 在公平环境、符合规范的受限 LR/SC 循环检验 RsrvEventual，SC 自发失败不要求与 oracle 同周期一致；Za64rs 测预约集连续、自然对齐、最大 64B；Ziccamoa 测 A 全体 W/D atomics 的 PMA 支持、原值/原子性/aq/rl（V-045/046），**不**把可选 Zacas/Zabha 算入 A；Zicclsm 测 main memory 的 misaligned scalar 与适用 FP/vector load/store 成功及字节/异常边界，**不要求 misaligned AMO 或原子 misaligned load/store**；Ssccptr 测页表硬件读取 PMA。每项分别构造负例：撕裂取指、无限允许失败、超界预约、拒绝合法 A 原子、错误的 misaligned 数据/意外陷阱、拒绝合法 PTW，预期被 checker 检出。
+
+对每个有效 64B 自然对齐 block 测 `cbo.inval/clean/flush/zero`（Zicbom/Zicboz）及 Zicbop prefetch 的规范允许可见性、PMA/权限/fault/ordering；跨块边界和错误权限对照，prefetch 不强制产生数据/缓存命中。CPU 与独立 coherent agent 在广告 coherent 区域交错读/写及 CBO，核对代理读值、旧行失效、dirty 数据不丢；noncoherent 设备只按明确软件维护协议判断，不能偷用 coherent 期望。分别记录不适用区域的 PMA 拒绝，不能把所有非幂等访问一律定义为相同 trap。multi-hart claim 才追加 V-065/V-067 memory/coherence traces；单 hart Core 不需要 SMP、密码或 FPGA。
+
+Zawrs 单列 `WRS.NTO`/`WRS.STO`，在 LR 建立 reservation 后比较无 store、reservation 被 store 失效、pending interrupt、`WRS.STO` 实现定义短超时，以及 S/VS `TW/VTW` 的受限异常；允许规范规定的自发提前结束，不能把每次唤醒硬绑定为 store，也不能强求 NTO 固定时间退出。
+
+- Outputs: 32-bit fetch atomicity、RsrvEventual、64B reservation/block、A atomics、misaligned load/store、PTW、CBO/agent 各自正/负 case 的事件与 PMA/区域属性/最终 bytes/错误原因；multi-hart 独立证据。
+- Pass: 所有 mandatory PMA 区域义务及权限/可见性/进展有可观测合法结果且负控制拒绝违规，未声明的 misaligned AMO/Zama16b 不计入 Core；multi-hart 仅按声明追加。
+- Fail: 撕裂 fetch、受限循环永不进展、预约集越界、合法 A/非原子 misaligned load/store 被拒、CMO 静默 noop 掩盖应见副作用或权限错误、cache hit 被当 agent 证据、强制 Core 实现可选 misaligned AMO。
+- Covers: RVA23 mandatory memory-region PMA, cache/CMO, fetch atomicity, RsrvEventual。
+- Sources: AR-022, AR-024, VR-014；[ratified RVA23U64/S64 profile §Mandatory](https://raw.githubusercontent.com/riscv/riscv-profiles/rva23-rvb23-ratified/src/rva23-profile.adoc)、[Zawrs §13.1](https://docs.riscv.org/reference/isa/v20260120/unpriv/zawrs.html)。
+
+### V-087 — 验证 mandatory Supm/Ssnpm pointer masking 全访问覆盖
 - Depends: V-049, V-056, V-085
-- Inputs: pointer masking implementation、PMLEN配置、全部显式访问类型。
-- Action: 覆盖scalar/FP/vector/AMO/CMO/CFI/SS、debug trigger、stval、MPRV/MXR、Bare/Sv39/Sv48、guest/physical边界；验证implicit fetch/PTW/DMA不被mask。
-- Outputs: pointer masking case matrix、address transform evidence。
-- Pass: 每个适用指令的transformed address、fault、tval和debug匹配符合规范；错误mask路径被检测。
-- Fail: 只测普通load/store，或对implicit/设备访问应用mask。
-- Covers: pointer masking, tagged addressing, security。
-- Sources: AR-024。
+- Inputs: U64 Supm 用户执行环境的 PMLEN 选择、S64 Ssnpm 的 `senvcfg.PME`/`henvcfg.PME`、PMLEN=0/7 至少两档、U/VS/VU（及实际支持的更高权限）有效权限/地址转换模式、CPU 显式访问与设备/DMA 起源表（含 MMIO PMA）；可选 Sspm 单列 V-090。
+- Action: 对 mandatory U/VS/VU 配置 0/7 各运行启用/禁用成对 tagged/untagged CPU 显式 scalar/FP/compressed/vector/AMO/CMO/HLV/HSV（适用时）访问及指向 MMIO 的 CPU 访问，按是否虚拟地址符号扩展、Bare/guest-physical 高位清零计算预期地址，再核对读写值、权限/副作用、fault、硬件写 `stval`/`vstval` 与 debug trigger；CFI shadow-stack 访问**仅声明 Zicfiss 时**纳入。MPRV/SPVP 按有效权限选择对应配置；MXR 生效则不 masking，即使 Bare。对设备/IOMMU/DMA、CPU implicit fetch/PTW 使用同 tag 确认不 mask；CSR 软件写不转换，适用的硬件异常写与地址 trigger 转换；用错 tag/禁止区域/非法模式提供可检测负例。Supm/Sspm 是执行环境提供的选择承诺，不能从 Supm 推出 M-mode masking 或把可选 Sspm 强加到 S64。
+- Outputs: 起源×访问×有效模式×PMLEN=0/7 的有限正/负矩阵、原/转换地址、读写副作用/异常及 CSR trace，optional Sspm 另册。
+- Pass: Supm 与 Ssnpm 的 mandatory 0/7 选择可达并有实测对照；CPU MMIO 仍按有效权限转换且副作用恰一次，DMA/fetch/PTW 不转换；CSR/trigger/MXR/MPRV/SPVP 遵循冻结规范。
+- Fail: 只测 RAM load/store、把 CPU MMIO 归为设备起源、误 mask DMA/fetch/PTW、PMLEN=0 吞高位、未测 VS/VU/Ssnpm 或擅自要求 Sspm。
+- Covers: mandatory Supm/Ssnpm pointer masking 与 H guest access；Sspm 仅可选。
+- Sources: AR-024（[Pointer Masking §17.1.2.2/§17.1.2.6–8](https://docs.riscv.org/reference/isa/v20260120/priv/zpm.html)）；[ratified RVA23U64/S64 profile](https://raw.githubusercontent.com/riscv/riscv-profiles/rva23-rvb23-ratified/src/rva23-profile.adoc)。
 
 ### V-088 — 验证 CFI landing pad 与 shadow stack
 - Depends: V-016, V-044, V-047, V-087
-- Inputs: Zicfilp/Zicfiss实现、合法/非法indirect control flow、SS PTE/PMA/PMP、trap/debug状态。
-- Action: 覆盖LPAD/label/ELP、trap save/restore、SSPUSH/SSPOPCHK/SSRDP/SSAMOSWAP、错误页面/非幂等memory/跨权限、direct call/return与speculation路径。
-- Outputs: CFI directed suite、fault/trap evidence、speculation boundary report。
-- Pass: 合法路径通过；非法landing/shadow-store/return mismatch在正确异常优先级失败；speculative错误路径不改变architectural state。
-- Fail: LPAD被全局当hint、SS page被普通store写入、trap丢失ELP/ssp。
-- Covers: CFI, landing pad, shadow stack。
-- Sources: AR-025。
+- Inputs: **仅声明** RVA23U64 扩展选项 Zicfilp/Zicfiss 时的实现与合法/非法 indirect control flow、SS PTE/PMA/PMP、trap/debug 状态；两选项独立声明与记账。
+- Action: Zicfilp 测 LPAD/label/ELP、trap save/restore、间接跳转正负例；Zicfiss 测 SSPUSH/SSPOPCHK/SSRDP/SSAMOSWAP、错误页面/非幂等 memory/跨权限、direct call/return 与 speculation；另按 V-087 测已声明 shadow-stack 显式访问的 pointer masking。
+- Outputs: 每个已声明选项的 directed suite、fault/trap evidence、speculation boundary report；未声明选项为 deferred。
+- Pass: 已声明的合法路径通过；非法 landing/shadow-store/return mismatch 按正确异常优先级失败；speculative 错误路径不改变 architectural state。
+- Fail: LPAD 被全局当 hint、SS page 被普通 store 写入、trap 丢失 ELP/ssp、以其中一个选项通过冒充另一个通过。
+- Covers: RVA23U64 **expansion options** Zicfilp/Zicfiss；非 mandatory。
+- Sources: AR-025；[ratified RVA23U64 §Expansion Options](https://raw.githubusercontent.com/riscv/riscv-profiles/rva23-rvb23-ratified/src/rva23-profile.adoc)。
 
-### V-089 — 验证 vector crypto 结果与 DIEL
-- Depends: V-052, V-059, V-076, V-085
-- Inputs: vector crypto units、官方known-answer/KAT来源、DIEL instrumentation。
-- Action: 逐指令跑AES/SM4/SHA/SM3/GHASH/CLMUL和Zvbb/Zvkt覆盖，检查EGW/EEW/EGS、LMUL/vstart/mask/tail/overlap；对数据值扫描执行时间，验证DIEL不在数据上变化。
-- Outputs: crypto correctness matrix、DIEL evidence、side-channel limitation statement。
-- Pass: 声明suite全部通过，reserved constraints正确拒绝，数据值不改变声明范围内时序。
-- Fail: 用少数AES KAT宣称完整Zvkng/Zvksg；masked inactive数据影响timing；DIEL被宣传为完整侧信道免疫。
-- Covers: vector crypto, side-channel timing, RVA23 Secure。
-- Sources: AR-026。
+### V-089 — 验证**可选** vector crypto 结果与其 DIEL
+- Depends: V-052, V-059, V-085
+- Inputs: **实际声明**的 RVA23U64 localized options Zvkng/Zvksg 或独立 development option Zvbc、官方 known-answer/KAT 与规范逐指令 oracle、DIEL instrumentation；mandatory Zvbb/Zvkt 和 Zkt 的独立 V-085 结果不得在这里首次生成。
+- Action: 按声明拆套件：Zvkng 的 Zvkn + Zvkg（GHASH `vghsh`/`vgmul`），Zvksg 的 Zvks + Zvkg；另行声明 development option Zvbc 才加 `vclmul[h]`/CLMUL（若另外宣称 Zvknc/Zvksc，则单列各自超出 profile 选项的 claim）。仅对已声明密码扩展逐指令覆盖 AES/SM4/SHA/SM3、EGW/EEW/EGS、LMUL/vstart/mask/tail/overlap；区分规范强制 illegal-instruction 的 `LMUL×VLEN<EGW`（即使 `vl=0`）与仅 reserved 的 SEW、vl/vstart 编码：reserved 记录实现选择，不凭空强制 trap。固定 `vl/vtype/mask` 等控制量，扫描活动/不活动 data operand 测**可选密码扩展适用范围** DIEL；不是替代 mandatory Zkt/Zvkt 的 DIEL 或完整侧信道免疫结论。
+- Outputs: 每个声明→逐指令 crypto correctness matrix、GHASH/另行声明 CLMUL 账本、illegal/reserved 判定、可选密码 DIEL evidence 与侧信道范围声明。
+- Pass: 各已声明扩展全部适用指令/KAT 正确；强制 illegal 情形 trap，reserved 不错误规定必须 trap；可选密码 DIEL 范围内的数据值不改变测量延迟。
+- Fail: 少数 AES KAT 冒充 Zvkng/Zvksg、将独立 Zvbc/CLMUL 写成 Zvkng/Zvksg 成员、将 mandatory Zkt/Zvkt 推给 optional crypto、reserved 一概判 illegal、inactive 数据改变应受 DIEL 约束的时间、DIEL 被宣传为全侧信道免疫。
+- Covers: RVA23U64 localized options Zvkng/Zvksg 与单独 development option Zvbc；mandatory DIEL 仍由 V-085 验收。
+- Sources: AR-026（[Vector Cryptography §32.1.1.5/§32.1.2](https://docs.riscv.org/reference/isa/v20260120/unpriv/vector-crypto.html)）；[ratified RVA23U64 §Options](https://raw.githubusercontent.com/riscv/riscv-profiles/rva23-rvb23-ratified/src/rva23-profile.adoc)。
 
-### V-090 — 验证 RVA23 Secure platform 边界
-- Depends: V-073, V-085, V-088, V-089
-- Inputs: Sv48/Svadu/Zkr/Sdtrig/Ssstrict/Ssaia实现、平台RoT/TPM/secure boot/IOPMP owner。
-- Action: 对core内扩展逐项验证；对平台项核对owner、接口和证据；禁止把缺失平台组件写成core能力；运行server-style boot/VM/vector/crypto/CFI综合程序。
-- Outputs: RVA23 Secure verification bundle、platform responsibility matrix、综合程序证据。
-- Pass: core与平台责任分离，所有宣称功能有真实证据；没有RoT/IOPMP时不宣称平台安全合规。
-- Fail: 用RVA23 profile通过代替server platform安全、把未实现扩展写成已支持。
-- Covers: commercial security acceptance, server boundary。
-- Sources: AR-027, HR-014。
+### V-090 — 验证逐项 RVA23 optional claim / 项目自选 Secure / Server Platform 边界
+- Depends: V-085
+- Inputs: V-085 mandatory 已闭合的目标 RVA23U64/S64、**每个**选项的 yes/no claim 与前置实现里程碑；只有另行声明 Linux/server 平台才输入 V-073 与平台 RoT/TPM/secure boot/IOPMP owner 和平台规范版本。`RVA23 Secure` 仅是项目自选 bundle 名称，**不是** ratified RVA23 profile。
+- Action: 为 ratified profile 的**每个**选项各开独立可发现行，保留分类与未声明 `deferred`：U64 localized **Zvkng、Zvksg**（各走 V-089）；U64 development **Zabha、Zacas、Ziccamoc、Zvbc、Zama16b**（byte/half AMO、CAS、主存 AMOCASQ PMA、vector CLMUL、16B 原子性 granule 各测独立正负例）；U64 expansion **Zfh、Zbc、Zicfilp、Zicfiss、Zvfh、Zfbfmin、Zvfbfmin、Zvfbfwma**（各自 scalar/vector 半精度、carryless multiply、CFI V-088、BF16 convert/FMA 数值与非法边界）；S64 **没有** privileged localized/development；S64 expansion **Sv48、Sv57、Zkr、Svadu、Sdtrig、Ssstrict、Svvptc、Sspm**（每种分页翻译模式/故障、entropy CSR 行为、硬件 A/D 更新与 mandatory Svade 的切换关系、trigger、标准/保留空间非法指令和 CSR contained trap 但不强加到 custom 空间、invalid→valid PTE 有界可见性、S-mode PMLEN=0/7 分别做正负例）。每项记录 `claim, category, normative clause, dependency, oracle, positive, negative, observed state, evidence/UNSUPPORTED`；扩展依赖不自动等于另一个选项已被声明；额外实现如 Ssaia 另列平台/非 profile claim，不混入上述 ratified inventory。
+
+仅若项目**选择** `RVA23 Secure` bundle，冻结该项目 bundle 的逐项成员/版本并对每个所选选项闭合上表证据；仅若单独声明 Linux/server 平台，才联结 V-073 与该平台自己的规范、设备/固件、RoT/TPM/secure boot/IOPMP owner 和可运行的 server-style 综合程序（仅覆盖所声明功能）。平台安全设备不是 ISA 扩展，也不因 ratified profile 而自动存在；选项、安全 bundle、平台是三个不同 claim，不得互相代理。
+
+- Outputs: ratified option 分类完整 inventory（每项 selected/未选 deferred/UNSUPPORTED/FAIL/PASS）、项目自选 bundle manifest（若声明）、独立平台 owner/evidence matrix 与适用程序执行证据（若声明）；未声明的平台/选项不得冒充 Core PASS。
+- Pass: U64/S64 mandatory 不依赖任何可选行；所有**声明**选项有独立规范闭合与正负执行证据，所选 bundle 成员全通过才签项目自选 bundle，平台有自身完整证据才签平台；未声明选项留 deferred 而不阻断 mandatory Core。
+- Fail: 将任一选项当 mandatory、将 `RVA23 Secure` 称 ratified profile、遗漏可选行、Zama16b 错算 Core misaligned AMO、以 ISA Core 代替 Server Platform/安全设备验收、将未实现选项写成支持。
+- Covers: RVA23U64/S64 ratified localized/development/expansion options 的逐项可发现性；项目自选 Secure 与 Server Platform 分离。
+- Sources: AR-022, AR-027, HR-014；[ratified RVA23U64/S64 §Optional Extensions](https://raw.githubusercontent.com/riscv/riscv-profiles/rva23-rvb23-ratified/src/rva23-profile.adoc)。源边界：Ziccamoc、Zama16b、Ssstrict 与 Sha 均由 ratified profile 定义，其文本说明相关定义将收入 ISA 手册；在该文本与批准 ISA 手册版本正式对齐前，以批准的 ratified profile 版本逐条冻结，不猜测尚未收入手册的替代条款。
+
+#### RVA23 验证交接微案例（内部非任务 ID；按 V-085–V-090 各行派独立小模型 owner）
+
+先冻结目标 U64 或 S64、规范条款/hash、区域 PMA/特权模式、程序/外部事件/hash、预算和 oracle；每一行仅处理一个有限案例族，下面「反例」是 checker/真实实现注入的**应检出错误**，不是要求规范合法 DUT 抛异常。执行者按第 4 节小模型协议保存正例结果、反例激活及首次差异/非零状态；reference 不支持时先换独立 oracle，仍无判据记 UNSUPPORTED 并阻断对应 mandatory/selected claim，绝不自行 skip。矩阵为未来工作设计，**没有**已运行 PASS：
+
+| 微案例族（每个族内逐成员开行） | 固定正例及明确 PASS | 应检出反例 / FAIL | 证据或 UNSUPPORTED 条件 |
+|---|---|---|---|
+| U 基础/整数/压缩 `RV64I,M,B,C,Zicsr,Zicond,Zcb,Zimop,Zcmop` | 对每种规范指令/CSR 编码、RV64 little-endian 读写及合法 MOP 执行一项既定签名；每项值、PC 长度/权限合法才 PASS | 改写算术结果、压缩 PC、合法 hint/MOP 取指或非法编码处理；错误逃过检查即 FAIL | ELF/encoding、pre/post GPR/PC/CSR、ACT coverpoint；未覆盖 opcode→UNSUPPORTED |
+| U FP/vector `F,D,Zfhmin,Zfa,V,Zvfhmin,Zvbb` | 对每扩展逐指令数值/flags，V 每 hart VLEN≥128、32 寄存器全宽和合法 mask/tail/vstart/element fault 全覆盖才 PASS | 高段截断、错误舍入、mask 后误写；未检出即 FAIL | 各指令 oracle/完整 VRF 与 trap trace；只有向量子集→UNSUPPORTED |
+| U 计数器与 hints `Zicntr,Zihpm,Zihintpause,Zihintntl` | 每项权限/增量/可见实现值及合法 hint 的保留状态满足规范才 PASS | 注入误增量/异常/错序；未检出即 FAIL | CSR/opcode trace 与合法结果集合；仅 cycle 等于墙钟不构成证据 |
+| U mandatory DIEL `Zkt,Zvkt` | Zkt 的**已实现且列于规范表**的标量指令和 Zvkt 的适用向量指令分别固定控制条件后改变数据（Zvkt 包括 inactive 数据），规定范围内延迟数据独立才 PASS | 数据相关执行路线/延迟差异未报警即 FAIL | 指令集合/独立计时窗口/对照；Zkt 不覆盖 load/store/conditional branch；控制用 `vl/vtype/mask` 排除；无 instrumentation→UNSUPPORTED，V-089 不可代偿 |
+| Fetch/atomic `Ziccif,Ziccrse,Ziccamoa,Za64rs,A,Zawrs` | 自然对齐 16/32-bit fetch 不撕裂、受限 LR/SC 在公平环境进展、A 全体原子值/排序、≤64B 连续自然对齐预约集、`WRS.STO` 有界等待且 `WRS.NTO` 支持 reservation/interrupt 事件，各自满足才 PASS | 撕裂指令、SC 永远失败、RMW 半步暴露、预约超界、STO 无界等待或 TW/VTW 陷阱错误未检出即 FAIL | fetch/内存/预约/等待事件和公平刺激 hash；WRS 可自发醒，NTO 不要求固定 timeout；无独立 agent/oracle→UNSUPPORTED |
+| PMA/misaligned/CMO `Zicclsm,Zic64b,Zicbom,Zicbop,Zicboz,Ssccptr` | coherent+cacheable 主存 misaligned scalar/FP/vector load/store 的 bytes，64B block 的 CBO/PREFETCH 允许结果与页表硬件读，各自满足才 PASS | 拒绝合法 misaligned load/store、非法权限仍 zero、dirty 数据丢失、PTW PMA 错误未检出即 FAIL | CPU+独立 coherent agent 和 PMA trace；不要求 misaligned AMO 或 cache hit |
+| S 模式/翻译 `Zifencei,Ss1p13,Svbare,Sv39,Svade,Svpbmt,Svinval,Svnapot` | code modify/fence 后取指、Bare/Sv39/页表 fault、PBMT/NAPOT 翻译和 invalidate 对照各项合法才 PASS | stale 指令、A/D=0 时未 fault、无效 PTE 被接受、该失效未失效未检出即 FAIL | fetch/PTW/fault/TLB trace；省略任何命名成员→UNSUPPORTED |
+| S trap/counters/timer `Sstvecd,Sstvala,Sscounterenw,Sstc,Sscofpmf,Ssu64xl` | Direct BASE 任意有效 4B 对齐值、逐 fault `stval`、非零 HPM enable、timer/overflow/filter、UXL=64 各测合法值才 PASS | 硬编码 BASE、错误 fault 地址/计数/溢出或 UXL 非 64 未检出即 FAIL | CSR/trap/IRQ 事件与实现 HPM 清单；缺实测成员→UNSUPPORTED |
+| H/guest `Sha:H,Ssstateen,Shcounterenw,Shvstvala,Shtvala,Shvstvecd,Shvsatpa,Shgatpa` | HS/VS/VU guest 两阶段读写/fault/trap 与每个具名 CSR/模式承诺独立通过才 PASS | 缺 VS mode、缺 `hgatp` Sv39x4/Bare、`htval` 错地址或 stateen 越权未检出即 FAIL | 两阶段 VA→GPA→PA 与权限/CSR/trap trace；仅 S-mode 测试→UNSUPPORTED |
+| PM `Supm,Ssnpm` | U/VS/VU 的 PMLEN=0、7 分别在虚拟与 Bare/guest-physical，CPU MMIO/CMO 与 DMA/fetch/PTW 对照及 MXR/MPRV/SPVP 合法才 PASS | tagged DMA 被 mask、CPU MMIO 绕过 mask、PMLEN=0 误抹高位未检出即 FAIL | 起源/转换地址/权限/副作用日志；Sspm 未声明不参与 |
+| Ratified options `localized/development/expansion` | V-090 **每一具名选项**独立选中后按其条款运行对应功能正例，结果合法才给该选项 PASS；未选 `deferred` | 选中 option 的数值/PMA/异常/CFI/模式或 DIEL 错误逃过检测即 FAIL | 每项 claim/spec/trace/负控制；已声明但缺 oracle→UNSUPPORTED，不从别的选项继承 |
+| 自选 Secure / 独立 Server Platform | 仅分别声明时，bundle 所选成员全部通过；平台按自身规范实跑所声明 boot/设备/安全接口才分别 PASS | 将缺 RoT/设备写成平台合规或用 Core ISA 冒充平台验证即 FAIL | 独立 manifest 与 owner/运行签名；不声明则 deferred，绝不拖累 U64/S64 |
 
 ## 6. 阶段 gate 与非确定性的具体裁决
 
-基线 gate 使用 V-001–V-043 中适用于 p0 的全部义务、V-074/V-075/V-078/V-080；C/A/S/U/Sv39/F/D 各自增加 V-044–V-051 对应任务。V 阶段必须增加 V-052–V-060；多 hart memory 加 V-064–V-067；LLB/MEF 加 V-061–V-063；cohort 加 V-068–V-071；pod 加 V-072；Linux 加 V-073；硬件加 V-077/V-079；可选 lockstep profile 加 V-081–V-084；RVA23 Core/Secure 加 V-085–V-090。任务 Depends 是依赖图，不是“未列在 Depends 就不用做”的验收范围替代品。所有扩展再次运行受影响的 baseline、negative-control、ACT、fuzz 与 replay 套件。
+基线 p0 gate 使用 V-001–V-043 中适用的全部义务及 V-074/V-075/V-078/V-080；V-038/039 可用 V-021 的 seeded RTL ALU/CSR 注入完成无自然 defect 时的真实 mismatch/replay，不需要意外故障。p0 的 V-018 只需 I-035 保守 ordered LSU、forwarding 与 store visibility；启用可选 I-036 speculative load replay 后重跑 V-018 的 late alias/kill 并与 V-029 核对。C/A/S/U/Sv39/F/D 各增加 V-044–V-051 对应任务；V 增加 V-052–V-060；多 hart memory 加 V-064–V-067；LLB/MEF 加 V-061–V-063；cohort 加 V-068–V-071；pod 加 V-072。Linux 单 hart p1 必须 V-073 全部单 hart boot/userspace/MMU/timer/context 义务，不能只靠 I-048 启动烟测；SMP Linux 另需 V-064/V-065/V-067 与 V-073 多 hart 分支。每个所声明 FPGA 目标各需对应 V-077 板证据和 V-079 wrapper 证据；ASIC 目标需 V-079 及独立 ASIC 证据，不因 V-079 执行而要求任何 FPGA 板卡。可选 p0 DCLS 先需 V-081–V-083，可选目标物理 DCLS 再需 V-084 和目标 FPGA/ASIC 证据（V-084 的 V-079 仅物理目标触发）。
+
+RVA23U64/S64 mandatory conformance 增加 V-085–V-087，S64 必须包含 U64 全部义务及 Sha 八成员；V-086 单 hart 用独立 coherent agent 验证区域 PMA，**仅**广告多 hart/shared memory 才追加 V-065/V-067。所有 ratified profile 选项走 V-090 的逐项 deferred/selected 分类，仅声明 Zicfilp/Zicfiss 才执行 V-088、声明 Zvkng/Zvksg/Zvbc 才执行 V-089；项目自选 `RVA23 Secure` 不是 ratified profile，Linux/Server Platform 另有独立规范/设备/软件 gate。不得将这些可选项目、SMP、密码或 FPGA 板卡强加给 mandatory Core。任务 Depends 仅表达无条件构建前提，不代替 claim 验收范围；所有扩展再次运行受影响的 baseline、negative-control、ACT、fuzz 与 replay 套件。
 
 | 场景 | 不能采用的方法 | 裁决与证据 |
 |---|---|---|
@@ -1149,5 +1189,5 @@ build/<profile>/eaf-sim --elf <path> --platform <json> --ref <so> --seed <u64> -
 
 - 原报告 SRC-03 全文连续 2528 行已阅读，45 个标题逐项处置；保留所有架构思想的接受/修正/实验/后置/拒绝关系。
 - 主源确证了 XiangShan V2→Difftest/ready-to-run→NEMU 的来源链，发现固定 128-bit vector 参考布局、vector skip 限制、主线 Spike SC 范围、Sail/ACT4 版本组合及 ACT4 默认排除风险。
-- 80 个未来任务覆盖 scalar→A/C/privilege→F/D/V→LLB/MEF→多 hart/cohort→pod→程序/Linux→实际平台回放；每项含依赖、输入、动作、输出与 pass/fail。它们不是已完成的实现或测试。
+- 90 个未来验证任务覆盖 scalar→A/C/privilege→F/D/V→LLB/MEF→多 hart/cohort→pod→程序/Linux→完整 RVA23U64/S64 mandatory /逐项 ratified options /项目自选 Secure→独立平台回放；每项含依赖、输入、动作、输出与 pass/fail。它们不是已完成的实现或测试。
 - 可运行性、参考 ABI 兼容性、工具/镜像 digest、准确 profile 参数、宽 VLEN adapter、SMP memory checker、板卡 trace 及 ASIC 工具全部是后续任务的明确验收产物；本轮没有用安装/构建/模拟结果冒充文献核实。

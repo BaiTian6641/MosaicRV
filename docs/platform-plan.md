@@ -88,12 +88,12 @@ Gowin 搜索索引提到 `gw_sh`/`run all`，但本次 SUG918/Tcl PDF 获取返�
 
 ### H-004 — 验证 RAM wrapper 的可观察一致性
 - Depends: H-002, H-003
-- Inputs: I-006、target RAM guides、generic/vendor simulation models。
-- Action: 对每个 wrapper 执行全地址 walking pattern、byte mask、同址 read/write、双 port collision、enable/output latency；未定义 collision 由上层仲裁禁止并断言。
-- Outputs: RAM semantics matrix、CASE=ram.collision_matrix 的三平台结果。
-- Pass: 允许交易的输出值/延迟一致，所有禁止情形可被 assertion 捕获；综合实际推断期望 RAM。
-- Fail: 以 vendor simulation 的 X 被 Verilator 变零掩盖问题，或仅比较写后最后值。
-- Covers: BRAM/BSRAM/VRF/cache portability。
+- Inputs: I-006 p0 RAM合同、目标RAM手册、generic/vendor仿真模型；仅广告vector/cache等容量profile时加入其额外RAM合同。
+- Action: 先对p0 wrapper执行全地址walking pattern、byte mask、同址read/write、双port collision、enable/output latency；未定义collision由上层仲裁禁止并断言；可选profile另验证其RAM，不让缺失cache阻断p0。
+- Outputs: 按board/profile索引的RAM semantics matrix、CASE=ram.collision_matrix结果。
+- Pass: p0允许交易的输出值/延迟一致，禁止情形可由assertion捕获且综合实际推断预期RAM；广告其他profile时该profile也需满足。
+- Fail: vendor仿真X被Verilator变零掩盖，或仅比较写后最后值；隔离受影响board/profile。
+- Covers: BRAM/BSRAM portability；可选VRF/cache portability按profile验收。
 - Sources: HR-003, HR-004, HR-011, implementation-plan.md。
 
 ### H-005 — 验证 clock/reset 与 CDC/RDC
@@ -170,10 +170,10 @@ Gowin 搜索索引提到 `gw_sh`/`run all`，但本次 SUG918/Tcl PDF 获取返�
 
 ### H-012 — 验证 GW5A RAM/PLL 推断
 - Depends: H-011, H-004, H-005
-- Inputs: exact-part BSRAM/SSRAM/PLL 文档、wrapper unit results。
-- Action: 单独综合 PRF/cache/boot-RAM/PLL 小实例，检查资源类型、读延迟、mask 粒度和 reset inference；必要的 native IP 只留 wrapper 内。
-- Outputs: GW5A memory/clock mapping report、IP config hashes。
-- Pass: 没有意外全阵列 FF reset 或容量爆炸；所用模式都有可取得手册/模型证据。
+- Inputs: exact-part BSRAM/SSRAM/PLL 文档、p0 PRF/boot-RAM wrapper 单元结果；cache 仅在声明相应配置时加入。
+- Action: 先单独综合 p0 PRF/boot-RAM/PLL 小实例，检查资源类型、读延迟、mask 粒度和 reset inference；若某容量 profile 使用 cache，再单独综合其 cache RAM。必要的 native IP 只留 wrapper 内。
+- Outputs: 按 profile 的 GW5A memory/clock mapping report、IP config hashes。
+- Pass: p0 没有意外全阵列 FF reset 或容量爆炸；已广告配置的所用模式都有可取得手册/模型证据，未实现 cache 不阻断 p0。
 - Fail: 推断成 FF 后仍沿用 BRAM 预算，或从 GW1N RAM 推断 GW5A collision 语义。
 - Covers: GW5A portability primitives。
 - Sources: HR-001, HR-011。
@@ -324,7 +324,7 @@ Gowin 搜索索引提到 `gw_sh`/`run all`，但本次 SUG918/Tcl PDF 获取返�
 
 ### H-027 — 验证 Virtex BRAM/URAM adapter
 - Depends: H-026, H-004
-- Inputs: selected-part memory resources、p0 PRF/cache latency contract。
+- Inputs: selected-part memory resources、p0 PRF/ordered-memory RAM读写与延迟合同；URAM或cache合同仅在相应容量profile另行使用。
 - Action: 先BRAM实现共同profile；URAM作为独立容量优化，显式处理其端口/byte write/reset/读延迟限制，不以同一wrapper名字隐藏额外cycle。
 - Outputs: memory mapping/inference report、adapter equivalence cases。
 - Pass: 每种允许memory实现均满足core contract；不支持模式通过外置逻辑实现或拒绝配置。
@@ -405,12 +405,12 @@ Gowin 搜索索引提到 `gw_sh`/`run all`，但本次 SUG918/Tcl PDF 获取返�
 - Sources: architecture-review.md, SRC-02:1033-1070。
 
 ### H-035 — 冻结 FPGA release evidence
-- Depends: H-032, H-033, H-017, H-025, H-031
-- Inputs: common与已支持advanced profiles、全部锁定输入/报告/physical logs。
-- Action: 独立重建与重放每family，列supported/blocked/failed profile；文档写明program/run/recover步骤，不发布许可证/受限IP源。
-- Outputs: FPGA release manifest、board operation guide、完整已知限制。
-- Pass: 每claim可定位同part/tool/image/ELF/signature，未知板/未fit profile不算成功。
-- Fail: 仅一份bitstream无源配置，或使用未经授权的第三方IP归档。
+- Depends: H-032
+- Inputs: p0 cacheless ordered-memory two-cluster RV64IM的三家族common证据；按板列出的可选p1/p2/p3或测量性能声明、锁定的part/tool/license/source/constraints/image/ELF与physical logs。
+- Action: 按GW5A、Zynq、Virtex UltraScale+各自独立重建并在真实板重放p0 corpus；为每个board/profile记录supported/blocked/failed及program/run/recover命令。仅声称对应advanced board/profile时，另验H-017（GW5A）、H-025（Zynq）或H-031（Virtex）；仅广告板上性能/功耗测量时另验H-033，不把I-077/cache/MLP研究传递给p0。
+- Outputs: 每board/profile可追溯manifest（part/tool版本、source/constraints/bitstream/ELF hash、时序/资源报告、设备ID、signature和运行日志）、板卡操作指南、已知限制与阻断责任人。
+- Pass: 三家族p0各有同源可重建实板证据；每个另行宣传的advanced claim有对应H-017/H-025/H-031证据；性能/功耗实测声明有H-033证据；未知板或未fit profile记blocked而非成功。
+- Fail: 任一声称的板/profile缺实板、时序、同源签名或授权IP，或仅一份bitstream无源配置；隔离该claim并交还对应平台负责人，不把可选失败传播到已闭合p0。
 - Covers: reproducible real prototype deliverable。
 - Sources: references.md, validation-plan.md。
 
@@ -527,9 +527,9 @@ Gowin 搜索索引提到 `gw_sh`/`run all`，但本次 SUG918/Tcl PDF 获取返�
 - Sources: H-036, validation-plan.md。
 
 ### H-047 — 审核 ASIC-ready 与 tapeout 声明
-- Depends: H-046, H-035
-- Inputs: RTL/profile/source locks、三板证据、全部ASIC signoff与license记录。
-- Action: 逐claim检查对应artifact/责任人/approval；区分portable RTL、ASIC synthesized、routed、signoff complete、taped out、silicon validated六种状态。
+- Depends: H-046
+- Inputs: 选定 ASIC RTL/profile/source locks、同一候选的全部 ASIC signoff 与 license 记录；仅当联合广告三板/FPGA 时追加 H-035 的独立板证据。
+- Action: 按 ASIC 候选和实际声明逐 claim 查对应 artifact/责任人/approval，区分 portable RTL、ASIC synthesized、routed、signoff complete、taped out、silicon validated 六级；ASIC 审核不等待 FPGA 三板。
 - Outputs: release readiness report、已完成/外部阻断清单。
 - Pass: 每声明不超证据范围；未获PDK/许可/硅样品的阶段明确阻断而非伪完成。
 - Fail: 把某工具返回0作为跨阶段总完成标准。
@@ -538,41 +538,41 @@ Gowin 搜索索引提到 `gw_sh`/`run all`，但本次 SUG918/Tcl PDF 获取返�
 
 ### H-048 — 验证三家族 lockstep 物理分离与故障注入
 - Depends: H-010, I-089
-- Inputs: 每个family的lockstep-capable build、fault-injection控制、physical placement/clock/reset约束、故障动作。
-- Action: 对GW5A、Zynq、Virtex UltraScale+分别约束main/shadow物理分区与共同资源边界；执行正常corpus和真实fault注入，记录检测延迟、阻断副作用、资源/时序差异。
-- Outputs: 每family lockstep evidence bundle、placement/timing/fault reports。
-- Pass: 三家族都证明redundant logic实际存在、输入同步、fault被检测且未发布副作用；资源不足或无时序则该family profile blocked。
-- Fail: 仅Verilator fault injection充当实板证据、shadow被优化移除、比较器无法阻断设备写。
+- Inputs: 每个声称的family/mode的lockstep-capable build、I-089模式/延迟与故障模型、注入控制、placement/clock/reset约束、无故障签名。
+- Action: 对GW5A、Zynq、Virtex UltraScale+逐一核对main/shadow分区、综合存活和共同资源；在真实板重放同一mode的正常corpus及定点注入，观察检测延迟、阻断store/MMIO等副作用、reset/recovery和资源/时序差异。
+- Outputs: 按board/mode索引的source/part/tool/constraints/bitstream/ELF hash、netlist/placement/STA、device ID、fault seed/site/time、trace/signature和恢复日志；向I-091交付证据或具体阻断。
+- Pass: 仅广告的board/mode各自证明物理冗余、同步、实际故障检测与未发布副作用；声称“三家族DCLS”须三家族均通过。
+- Fail: Verilator注入冒充实板、shadow被优化移除、无法阻止设备写或某板未fit；该board/mode保持blocked，回退normal模式，不阻断p0。
 - Covers: optional FPGA lockstep, physical common-mode protection。
 - Sources: AR-019, AR-020, platform-plan.md。
 
 ### H-049 — 审核 ASIC lockstep 的物理与制造测试边界
-- Depends: H-038, H-041, I-090
-- Inputs: main/shadow floorplan、共享SRAM/clock/power、scan/MBIST/ATPG、fault model、目标安全认证边界。
-- Action: 对replica放置/时钟树/电源/共享宏做common-mode审查；扫描链覆盖replica和checker，MBIST/ECC覆盖shared memories；把lockstep状态纳入function/test/power mode等价与签核。
-- Outputs: ASIC lockstep physical/signoff report、fault coverage scope、residual safety analysis。
-- Pass: 每个声称的安全机制有设计、仿真、形式/物理或制造测试证据；没有正式评估时不发布ASIL/SIL合规结论。
-- Fail: 将DCLS当作TMR纠错、FPGA fault campaign替代ASIC signoff、共享SRAM/clock未纳入风险。
+- Depends: H-038, H-041, H-043, H-044, H-045, I-090
+- Inputs: 同一DCLS ASIC candidate的floorplan/routed netlist与寄生参数、共享SRAM/clock/power保护图、scan/MBIST/ATPG故障模型、H-043多corner STA、H-044 power/IR/EM/thermal、H-045 DRC/LVS/ERC及post-route等价和waiver、目标安全边界。
+- Action: 核对replica/checker的物理分离及综合存活、共享资源common-mode风险和制造测试覆盖；在该candidate的functional/test/power各mode审查多corner timing、power与post-route检查及fault阻断证据，逐一说明残余风险和waiver。
+- Outputs: 候选hash与mode/corner索引的ASIC DCLS physical/signoff bundle、fault coverage分母/排除项、残余安全分析；向I-091及ASIC claim gate交付通过或阻断原因。
+- Pass: 宣传ASIC DCLS前，H-043..H-045均针对同一DCLS候选闭合，replica/checker和shared domains有可审计的DFT/物理/故障证据；未正式认证不宣传ASIL/SIL。
+- Fail: 仅H-038/H-041、FPGA故障活动或其他候选的route报告替代DCLS签核，或遗漏共享SRAM/clock；ASIC DCLS blocked，不影响p0或未声称DCLS的ASIC release。
 - Covers: ASIC lockstep, DFT, physical safety boundary。
 - Sources: AR-019, AR-020, AR-021, HR-009。
 
 ### H-050 — 验证 RVA23 软件包在三家族的物理执行
 - Depends: H-032, I-098
-- Inputs: RVA23 Core/Secure acceptance bundle、Linux/RVV/crypto/CFI/PM软件包、三家族实际资源和memory map。
-- Action: 在每块真实板执行RVA23-directed corpus、Linux应用、RVV workloads、pointer masking、CFI、vector crypto和故障负例；记录binary hash、device tree、capability discovery和性能。
-- Outputs: three-family RVA23 evidence bundles、capability/runtime logs。
-- Pass: 每家族支持声明与实际执行一致；软件发现机制读到真实能力；无RVA23能力时不能运行profile binary并称成功。
-- Fail: 只在host模拟器运行RVA23，或用不支持VLEN/crypto/CFI的板宣称完整commercial profile。
+- Inputs: I-098 同版预硬件 RVA23U64/S64 **全部 mandatory** 及 Sha 子项证据包（非实板证明）、每板所选 optional 软件包、板实际资源/≥128-bit VLEN、cache/PMA、guest H、memory map、device tree、trace/装载协议；固定 DIEL 负载与测量条件。
+- Action: 在每块实际广告 RVA23 的板上运行 U/S mandatory corpus、guest two-stage VM、Zic64b/CMO/独立外部 agent、pointer masking 和 vector 正反例；对已实现 Zkt/Zvkt 清单以固定 opcode/control/竞争负载仅变 data（含非活动 vector data）重放 DIEL case，通过经校准的板上 probe/trace 对比指令执行起止而非 host wall-clock，另测热态/背压/remote 路径；只对板宣称的选项运行 crypto/CFI 等。逐板核 binary/config/device ID、发现值和 signature，缺功能/可观测手段记 BLOCKED，不把 unsupported 当 PASS。
+- Outputs: 按 board/profile/mandatory clause/option 索引的 source/part/tool/image/ELF hash、DIEL 条件/观测、device ID、architectural 签名/负例与运行日志、能力发现及 blocked 列表。
+- Pass: I-098 只解锁上板准备；每个被广告的 RVA23 目标都在真实板上完成全部 mandatory、对应外部 agent/guest 路径和本机 DIEL 适用证据；声称三家族则三家族各自通过，未宣称的选项不影响 Core。
+- Fail: host 模拟器、p0 bitstream 或某板结果代替当前板；VLEN<128、Sha/PMAs/Zkt/Zvkt 缺路径却广告 Core，或未实现 crypto/CFI 却广告该选项；仅阻断缺证的 board/profile，退回诚实的 p0 声明。
 - Covers: RVA23 hardware portability, real-board commercial evidence。
 - Sources: AR-022, AR-023, AR-024, AR-025, AR-026。
 
 ### H-051 — 验证 ASIC security features 的物理与制造边界
-- Depends: H-049, I-097, I-098
-- Inputs: RVA23 Secure候选、RoT/IOPMP/AIA接口、SRAM/ECC、DFT/scan、物理安全约束。
-- Action: 把pointer masking、CFI、vector crypto、entropy、debug trigger、AIA和lockstep纳入ASIC physical/DFT/security审查；明确RoT/TPM/secure boot/IOPMP的外部owner；执行综合后故障和side-channel观测。
-- Outputs: ASIC security signoff bundle、platform dependency ledger、residual risk report。
-- Pass: core内功能有硅级证据路径，平台责任明确；无正式side-channel/security evaluation时不宣称合规。
-- Fail: 用FPGA软件通过代替ASIC安全验证，或把vector crypto DIEL说成完整物理侧信道免疫。
+- Depends: I-085, H-045, I-097, V-090, I-098
+- Inputs: 已通过 I-085/H-045 的同一 ASIC Secure candidate 及所声明功能清单、V-090 的所选功能与外部平台责任证据、RoT/TPM/secure boot/IOPMP/AIA 接口 owner、SRAM/ECC、DFT/scan 与物理安全约束；若同时宣传 ASIC DCLS，另取 H-049 证据。
+- Action: 按Secure功能映射pointer masking、CFI、vector crypto、entropy、debug trigger、AIA至同候选post-route/DFT/故障及side-channel评估边界，区分CPU功能与外部平台职责；仅在广告DCLS时审查H-049并将lockstep纳入该声明。
+- Outputs: 候选hash/功能/mode索引的ASIC Secure signoff bundle、外部owner与证据/缺口ledger、残余风险；向I-086交付该claim的门禁结论。
+- Pass: 宣传ASIC Secure前每项广告功能有同候选硅实现证据路径和外部责任闭合；同时宣传ASIC DCLS时H-049必须通过；无正式安全/侧信道评估不宣传合规。
+- Fail: FPGA软件结果替代ASIC安全证据、未经证实的vector crypto侧信道免疫或把缺失DCLS证据冒充Secure签核；仅相应ASIC claim blocked，不阻断p0。
 - Covers: ASIC commercial security, physical signoff boundary。
 - Sources: AR-024, AR-025, AR-026, AR-027, HR-014。
 
@@ -594,7 +594,7 @@ Gowin 搜索索引提到 `gw_sh`/`run all`，但本次 SUG918/Tcl PDF 获取返�
 | HR-010 | [Vivado Tcl Command Reference UG835 v2018.3](https://docs.amd.com/api/khub/documents/wNJReNjblikQ29AHV1THwg/content)、[Vivado Quick Reference](https://docs.amd.com/api/khub/documents/aNBqzHrLSGHsSXaindgD5Q/content) | 已读命令目录与batch invocation；这是已取得版本，不冒称最新2026.1全文已读。H-022对所选release检查help/flags。 |
 | HR-011 | [Gowin Quick Start SUG918](https://cdn.gowinsemi.com.cn/SUG918E.pdf)、[Arora V BSRAM/SSRAM UG300](https://cdn.gowinsemi.com.cn/UG300E.pdf) | 本轮获取返回HTTP403；仅为待取得的primary pointers。没有凭搜索摘要发布可执行GW5A Tcl或具体collision保证；阻断只在未来相应实现gate。 |
 | HR-012 | [OpenROAD project flow](https://openroad.readthedocs.io/en/latest/main/README.html)、[SkyWater PDK status](https://skywater-pdk.readthedocs.io/en/main/status.html) | OpenROAD可用于physical-flow研究；SkyWater状态页明确experimental preview而非保证production使用。本项目不预选该PDK，也不把开放工具当foundry认可。 |
-| HR-015 | [RVA23 ratified profile](https://docs.riscv.org/reference/rva23/v1.0/index.html)、[ratified source](https://raw.githubusercontent.com/riscv/riscv-profiles/rva23-rvb23-ratified/src/rva23-profile.adoc) | 支持商业RVA23基线、V mandatory、pointer masking、Sha、crypto/CFI选项边界；不把可选安全扩展当强制。 |
+| HR-015 | [RVA23 ratified profile v1.0](https://docs.riscv.org/reference/rva23/v1.0/index.html)、[ratified source](https://raw.githubusercontent.com/riscv/riscv-profiles/rva23-rvb23-ratified/src/rva23-profile.adoc) | RVA23S64 继承 U64 mandatory，含 V、Zkt/Zvkt、coherent PMA、Supm/Ssnpm 与 Sha 八子项；Zvkng/Zvksg 和其余 development/expansion 属 optional。RVA23 是 ISA/执行环境 profile，Server Platform 与项目自选 Secure 组合另行声明，不能互替。 |
 | HR-016 | [RISC-V Server Platform v1.0](https://docs.riscv.org/reference/server-platform/v1.0/server_platform_requirements.html) | 支持server/平台责任的RoT、TPM、Secure Boot、AIA、debug trigger、SEE一致性边界；不是core-only合规证明。 |
 | HR-013 | [VeeR EL2 DCLS documentation](https://chipsalliance.github.io/Cores-VeeR-EL2/html/main/docs_rendered/html/dual-core-lock-step.html)、[Antmicro DCLS article](https://antmicro.com/blog/2026/04/dual-core-lockstep-in-veer-el2) | 支持synthesis barrier、delayed shadow、error injection和物理集成风险。VeeR是小规模RISC-V参考，不替代MosaicRV的宽OoO/fabric证明。 |
 | HR-014 | [TI SDAA393, June 2026](https://www.ti.com/lit/pdf/sdaa393) | 支持DCLS检测-only/common-mode限制与安全等级需系统论证；不把DCLS当作fault-tolerant TMR或自动认证。 |
