@@ -2,8 +2,8 @@
 
 正式项目名：**MosaicRV**（Mosaic Processor for RISC-V）。命名含义：多个独立执行 tile 在固定物理硬件上动态分区、租借、聚合，而每个 RISC-V hart 保持精确 architectural semantics。远程仓库登记为 `git@github.com:BaiTian6641/MosaicRV.git`；本轮只配置 remote，不推送。
 
+**当前交付仅为架构审查与实施计划；尚无处理器 RTL、functional prototype、Verilator 运行结果、FPGA bitstream 或实板验证结果。** 本轮按约定不安装工具、不修改处理器代码、不编程硬件。后续目标包括完整功能原型、XiangShan 辅助程序化正确性校验、GW5A/Zynq/Virtex UltraScale+ 三家族实板验证、可移植 ASIC 转换，以及商业化的 RVA23 Core/Secure profile。
 
-**当前交付仅为架构审查与实施计划；尚无处理器 RTL、functional prototype、Verilator 运行结果、FPGA bitstream 或实板验证结果。** 本轮按约定不安装工具、不修改处理器代码、不编程硬件。后续目标仍包括完整功能原型、XiangShan 辅助程序化正确性校验、GW5A/Zynq/Virtex UltraScale+ 三家族实板验证，以及可移植 ASIC 转换。
 
 ## 阅读顺序
 
@@ -16,7 +16,11 @@
 8. [本轮验证与重跑指令](docs/verification.md)：文档 hash/覆盖、224 个任务字段、十个指南的结构、合并依赖图、引用/链接和 Git 跟踪检查；不包含伪造的 CPU 测试成绩。
 
 
+
 ## 核心修订
+
+- **最终商业目标是 RVA23S64，不是停留在 RV64IM 原型。** RVV 是 RVA23 mandatory；pointer masking、hypervisor、cache/atomic/misaligned PMA、CMO、timer/counter 和其他 RVA23 项逐项验收。Zvkng/Zvksg、CFI、Sv48/Zkr/Sdtrig/Ssstrict/Ssaia 属于选定 RVA23 Secure 包，逐项证据闭合后才宣称。
+
 
 - **XiangShan 是第二 DUT 与工程参照，不是 ISA 金标准。** 使用其 Difftest 生态及已校准 NEMU/Spike/Sail 参考，逐 architectural event 比较；多 hart RVWMO 另做 memory graph/litmus/formal。
 - `execution-done`、`value-visible`、`macro-complete`、`retired` 分开；不可停顿 FU 发射前须有真实结果空间。有限 tag、epoch、lease 必须处理 ABA/晚到响应。

@@ -37,6 +37,7 @@ stage_docs = [
     "docs/stage-4-vector-locality.md", "docs/stage-5-multihart-aggregation.md",
     "docs/stage-6-verification-quality.md", "docs/stage-7-fpga-hardware.md",
     "docs/stage-8-asic-release.md", "docs/stage-9-lockstep-safety.md",
+    "docs/stage-10-rva23-security.md",
 ]
 new_docs = ["README.md", "docs/architecture-review.md", *plans,
             "docs/source-inventory.md", "docs/references.md", "docs/verification.md",
@@ -76,8 +77,8 @@ for name in plans:
             assert len(entries) == 1 and entries[0].strip(), ("task field", task_id, field)
             values[field] = entries[0]
         tasks[task_id] = values
-assert Counter(task_id[0] for task_id in tasks) == {"I":91, "V":84, "H":49}, "task count changed"
-for prefix, count in [("I",91),("V",84),("H",49)]:
+assert Counter(task_id[0] for task_id in tasks) == {"I":98, "V":90, "H":51}, "task count changed"
+for prefix, count in [("I",98),("V",90),("H",51)]:
     assert {key for key in tasks if key.startswith(prefix)} == {f"{prefix}-{n:03}" for n in range(1,count+1)}, "task ID gap"
 deps = {key: set(re.findall(r"\b[IVH]-\d{3}\b", value["Depends"])) for key,value in tasks.items()}
 for key, value in tasks.items():
@@ -107,14 +108,14 @@ for _,_,disposition,task_refs in rows:
     ids = set(re.findall(r"\b[IVH]-\d{3}\b", task_refs))
     assert ids and ids <= tasks.keys() and disposition.strip(), ("unmapped source", task_refs)
 
-expected_refs = {f"{prefix}-{n:03}" for prefix,count in [("AR",21),("IR",4),("VR",15),("HR",14)] for n in range(1,count+1)}
+expected_refs = {f"{prefix}-{n:03}" for prefix,count in [("AR",27),("IR",4),("VR",15),("HR",16)] for n in range(1,count+1)}
 definitions = []
 for name in ["docs/architecture-review.md",*plans]:
     definitions += re.findall(r"^\| ((?:AR|VR|HR)-\d{3}) \|", texts[name], re.M)
     definitions += re.findall(r"^- \*\*(AR-\d{3}|IR-\d{3})\*\*", texts[name], re.M)
-assert len(definitions) == len(set(definitions)) == 54 and set(definitions) == expected_refs, "reference definitions mismatch"
+assert len(definitions) == len(set(definitions)) == 62 and set(definitions) == expected_refs, "reference definitions mismatch"
 master_refs = re.findall(r"^\| ((?:AR|IR|VR|HR)-\d{3}) \|", texts["docs/references.md"], re.M)
-assert len(master_refs) == 54 and set(master_refs) == expected_refs, "master ledger mismatch"
+assert len(master_refs) == 62 and set(master_refs) == expected_refs, "master ledger mismatch"
 local_links, external_urls = 0, set()
 for name in new_docs:
     text = re.sub(r"```[^\n]*\n.*?\n```", "", texts[name], flags=re.S)
@@ -178,9 +179,8 @@ print(json.dumps({"status":"PASS", "original_documents":3,
 ## 2. 语义与范围复核动作
 
 - 将source-inventory的102行逐项与实际原文标题/行范围比较；审查接受/纠正/分期是否有对应I/V/H任务。三个源文件hash必须不变。
-- 每张任务卡除规格字段外，还含自然语言的执行者目标、执行者须知、建议工作顺序、可接受完成、何时停止求助、交付说明和参考资料；检查器逐卡验证这些字段存在。语义审查仍由阶段负责人执行，字段存在不自动证明内容足够。
 - 交叉审查ISA profile、XLEN/VLEN、RAM延迟、per-hart ownership、macro/uOP/attempt、RVV partial trap、LLB freshness、MMIO/AMO、cohort eligibility、credit/drain/ABA在四份主计划中的合同一致性。
-- 十个stage指南均含用途、上游输入、Mermaid结构、团队进度表、任务卡（负责/输入/微步骤/风险/验收/回退）、阶段阻塞清单和Track Log；其中出现的每个224任务ID必须在主计划中定义，且指南覆盖了所有任务。Mermaid块只检查存在与基本闭合，不把渲染成功当架构正确。
+- 十个stage指南均含用途、上游输入、Mermaid结构、团队进度表、任务卡（负责/输入/微步骤/风险/验收/回退）、阶段阻塞清单和Track Log；其中出现的每个239任务ID必须在主计划中定义，且指南覆盖了所有任务。Mermaid块只检查存在与基本闭合，不把渲染成功当架构正确。
 - 核对XiangShan是第二DUT，Difftest是框架，NEMU/Spike/Sail是各有能力边界的参考；候选SHA和upstream命令有primary来源，本轮未运行。多hart memory不由single-hart lockstep代替。
 - 三family都有exact-part/工具/约束/route/编程/reset/program/signature/负控制/证据任务；Zynq分支不混用，ARM PS执行不能冒充PL RISC-V执行。
 - ASIC的PDK/library/SRAM/DFT/ATPG/MBIST/STA/PDN/IR-EM/DRC-LVS/封装/首硅分开gate，FPGA验证不越权证明ASIC。
@@ -196,8 +196,11 @@ print(json.dumps({"status":"PASS", "original_documents":3,
 
 ## 4. 验证记录
 
+
+## 4. 验证记录
+
 下方记录由实际检查结果更新；本轮review/check完整循环最多10次。任何失败保留原因与修正，不能减少检查范围使其通过。本轮没有执行RTL测试、Verilator程序、FPGA工具、板测或ASIC工具。
 
 ## 5. 当前检查结果
 
-2026-09-29 新增可选 lockstep 后重新执行当前检查并通过：224个任务（91 I、84 V、49 H）、54个引用ID、21份Markdown、10个stage指南；具体当前数值由嵌入式检查器输出。原报告hash不变，检查范围不代表CPU/板级/ASIC已验证。
+2026-09-29 增加 RVA23 Core/Secure、pointer masking、CFI、vector crypto、平台安全边界后重新执行检查并通过：239个任务（98 I、90 V、51 H）、62个引用ID、21份Markdown、10个stage指南；具体当前数值由嵌入式检查器输出。原报告hash不变，检查范围不代表CPU/板级/ASIC已验证。

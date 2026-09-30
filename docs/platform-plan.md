@@ -556,6 +556,26 @@ Gowin 搜索索引提到 `gw_sh`/`run all`，但本次 SUG918/Tcl PDF 获取返�
 - Covers: ASIC lockstep, DFT, physical safety boundary。
 - Sources: AR-019, AR-020, AR-021, HR-009。
 
+### H-050 — 验证 RVA23 软件包在三家族的物理执行
+- Depends: H-032, I-098
+- Inputs: RVA23 Core/Secure acceptance bundle、Linux/RVV/crypto/CFI/PM软件包、三家族实际资源和memory map。
+- Action: 在每块真实板执行RVA23-directed corpus、Linux应用、RVV workloads、pointer masking、CFI、vector crypto和故障负例；记录binary hash、device tree、capability discovery和性能。
+- Outputs: three-family RVA23 evidence bundles、capability/runtime logs。
+- Pass: 每家族支持声明与实际执行一致；软件发现机制读到真实能力；无RVA23能力时不能运行profile binary并称成功。
+- Fail: 只在host模拟器运行RVA23，或用不支持VLEN/crypto/CFI的板宣称完整commercial profile。
+- Covers: RVA23 hardware portability, real-board commercial evidence。
+- Sources: AR-022, AR-023, AR-024, AR-025, AR-026。
+
+### H-051 — 验证 ASIC security features 的物理与制造边界
+- Depends: H-049, I-097, I-098
+- Inputs: RVA23 Secure候选、RoT/IOPMP/AIA接口、SRAM/ECC、DFT/scan、物理安全约束。
+- Action: 把pointer masking、CFI、vector crypto、entropy、debug trigger、AIA和lockstep纳入ASIC physical/DFT/security审查；明确RoT/TPM/secure boot/IOPMP的外部owner；执行综合后故障和side-channel观测。
+- Outputs: ASIC security signoff bundle、platform dependency ledger、residual risk report。
+- Pass: core内功能有硅级证据路径，平台责任明确；无正式side-channel/security evaluation时不宣称合规。
+- Fail: 用FPGA软件通过代替ASIC安全验证，或把vector crypto DIEL说成完整物理侧信道免疫。
+- Covers: ASIC commercial security, physical signoff boundary。
+- Sources: AR-024, AR-025, AR-026, AR-027, HR-014。
+
 ## 10. 已读取来源、版本与访问限制
 
 所有访问日期为 2026-09-29；只记录一手来源，不把搜索生成总结当规范。外部文档未复制进仓库，以URL/版本/取得状态记录，避免未经许可再分发。
@@ -574,6 +594,8 @@ Gowin 搜索索引提到 `gw_sh`/`run all`，但本次 SUG918/Tcl PDF 获取返�
 | HR-010 | [Vivado Tcl Command Reference UG835 v2018.3](https://docs.amd.com/api/khub/documents/wNJReNjblikQ29AHV1THwg/content)、[Vivado Quick Reference](https://docs.amd.com/api/khub/documents/aNBqzHrLSGHsSXaindgD5Q/content) | 已读命令目录与batch invocation；这是已取得版本，不冒称最新2026.1全文已读。H-022对所选release检查help/flags。 |
 | HR-011 | [Gowin Quick Start SUG918](https://cdn.gowinsemi.com.cn/SUG918E.pdf)、[Arora V BSRAM/SSRAM UG300](https://cdn.gowinsemi.com.cn/UG300E.pdf) | 本轮获取返回HTTP403；仅为待取得的primary pointers。没有凭搜索摘要发布可执行GW5A Tcl或具体collision保证；阻断只在未来相应实现gate。 |
 | HR-012 | [OpenROAD project flow](https://openroad.readthedocs.io/en/latest/main/README.html)、[SkyWater PDK status](https://skywater-pdk.readthedocs.io/en/main/status.html) | OpenROAD可用于physical-flow研究；SkyWater状态页明确experimental preview而非保证production使用。本项目不预选该PDK，也不把开放工具当foundry认可。 |
+| HR-015 | [RVA23 ratified profile](https://docs.riscv.org/reference/rva23/v1.0/index.html)、[ratified source](https://raw.githubusercontent.com/riscv/riscv-profiles/rva23-rvb23-ratified/src/rva23-profile.adoc) | 支持商业RVA23基线、V mandatory、pointer masking、Sha、crypto/CFI选项边界；不把可选安全扩展当强制。 |
+| HR-016 | [RISC-V Server Platform v1.0](https://docs.riscv.org/reference/server-platform/v1.0/server_platform_requirements.html) | 支持server/平台责任的RoT、TPM、Secure Boot、AIA、debug trigger、SEE一致性边界；不是core-only合规证明。 |
 | HR-013 | [VeeR EL2 DCLS documentation](https://chipsalliance.github.io/Cores-VeeR-EL2/html/main/docs_rendered/html/dual-core-lock-step.html)、[Antmicro DCLS article](https://antmicro.com/blog/2026/04/dual-core-lockstep-in-veer-el2) | 支持synthesis barrier、delayed shadow、error injection和物理集成风险。VeeR是小规模RISC-V参考，不替代MosaicRV的宽OoO/fabric证明。 |
 | HR-014 | [TI SDAA393, June 2026](https://www.ti.com/lit/pdf/sdaa393) | 支持DCLS检测-only/common-mode限制与安全等级需系统论证；不把DCLS当作fault-tolerant TMR或自动认证。 |
 

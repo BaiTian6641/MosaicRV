@@ -991,9 +991,69 @@ build/<profile>/eaf-sim --elf <path> --platform <json> --ref <so> --seed <u64> -
 - Covers: common-cause faults, synthesis survival, shared-domain protection。
 - Sources: AR-019, AR-020, HR-009。
 
+### V-085 — 闭合 RVA23 mandatory capability 与 reference 覆盖
+- Depends: V-002, V-020, V-043, V-080
+- Inputs: RVA23 compliance matrix、每个mandatory extension的实现里程碑、ACT/Sail/Spike/NEMU能力表。
+- Action: 逐项生成RVA23U64/S64测试义务，覆盖mandatory scalar/FP/vector/privilege/cache/PMA/PMU/hypervisor行为；为reference不支持的项建立第二oracle或形式/定向证据。
+- Outputs: RVA23 verification manifest、capability intersection、missing coverage ledger。
+- Pass: 每项mandatory capability有至少一个真实执行证据和对应spec条款；没有未登记排除。
+- Fail: ISA字符串/build flag通过但指令/CSR/PMA无执行证据。
+- Covers: RVA23 Core verification, binary compatibility。
+- Sources: AR-022, AR-023, VR-005, VR-007, VR-009。
+
+### V-086 — 验证 RVA23 cache/PMA/atomic/misaligned 合同
+- Depends: V-018, V-045, V-065, V-085
+- Inputs: CMO/Zic64b、misaligned/atomic PMA、coherence agents、cache hierarchy。
+- Action: 测试CBO.INVAL/CLEAN/FLUSH/ZERO/PREFETCH、misaligned load/store/AMO、64-byte block、跨cache/非coherent agent和错误权限；记录PPO/load-value规则与trap。
+- Outputs: CMO/PMA evidence、memory execution traces、negative controls。
+- Pass: 每个CMO按PMA/权限/ordering执行；misaligned/atomic能力与profile广告一致；错误权限和非幂等路径被拒绝。
+- Fail: CMO当noop忽略权限、misaligned只测标量不测vector/atomic、把cache hit当一致性证明。
+- Covers: RVA23 memory contract, CMO, PMA。
+- Sources: AR-022, AR-024, VR-014。
+
+### V-087 — 验证 pointer masking 全访问覆盖
+- Depends: V-049, V-056, V-085
+- Inputs: pointer masking implementation、PMLEN配置、全部显式访问类型。
+- Action: 覆盖scalar/FP/vector/AMO/CMO/CFI/SS、debug trigger、stval、MPRV/MXR、Bare/Sv39/Sv48、guest/physical边界；验证implicit fetch/PTW/DMA不被mask。
+- Outputs: pointer masking case matrix、address transform evidence。
+- Pass: 每个适用指令的transformed address、fault、tval和debug匹配符合规范；错误mask路径被检测。
+- Fail: 只测普通load/store，或对implicit/设备访问应用mask。
+- Covers: pointer masking, tagged addressing, security。
+- Sources: AR-024。
+
+### V-088 — 验证 CFI landing pad 与 shadow stack
+- Depends: V-016, V-044, V-047, V-087
+- Inputs: Zicfilp/Zicfiss实现、合法/非法indirect control flow、SS PTE/PMA/PMP、trap/debug状态。
+- Action: 覆盖LPAD/label/ELP、trap save/restore、SSPUSH/SSPOPCHK/SSRDP/SSAMOSWAP、错误页面/非幂等memory/跨权限、direct call/return与speculation路径。
+- Outputs: CFI directed suite、fault/trap evidence、speculation boundary report。
+- Pass: 合法路径通过；非法landing/shadow-store/return mismatch在正确异常优先级失败；speculative错误路径不改变architectural state。
+- Fail: LPAD被全局当hint、SS page被普通store写入、trap丢失ELP/ssp。
+- Covers: CFI, landing pad, shadow stack。
+- Sources: AR-025。
+
+### V-089 — 验证 vector crypto 结果与 DIEL
+- Depends: V-052, V-059, V-076, V-085
+- Inputs: vector crypto units、官方known-answer/KAT来源、DIEL instrumentation。
+- Action: 逐指令跑AES/SM4/SHA/SM3/GHASH/CLMUL和Zvbb/Zvkt覆盖，检查EGW/EEW/EGS、LMUL/vstart/mask/tail/overlap；对数据值扫描执行时间，验证DIEL不在数据上变化。
+- Outputs: crypto correctness matrix、DIEL evidence、side-channel limitation statement。
+- Pass: 声明suite全部通过，reserved constraints正确拒绝，数据值不改变声明范围内时序。
+- Fail: 用少数AES KAT宣称完整Zvkng/Zvksg；masked inactive数据影响timing；DIEL被宣传为完整侧信道免疫。
+- Covers: vector crypto, side-channel timing, RVA23 Secure。
+- Sources: AR-026。
+
+### V-090 — 验证 RVA23 Secure platform 边界
+- Depends: V-073, V-085, V-088, V-089
+- Inputs: Sv48/Svadu/Zkr/Sdtrig/Ssstrict/Ssaia实现、平台RoT/TPM/secure boot/IOPMP owner。
+- Action: 对core内扩展逐项验证；对平台项核对owner、接口和证据；禁止把缺失平台组件写成core能力；运行server-style boot/VM/vector/crypto/CFI综合程序。
+- Outputs: RVA23 Secure verification bundle、platform responsibility matrix、综合程序证据。
+- Pass: core与平台责任分离，所有宣称功能有真实证据；没有RoT/IOPMP时不宣称平台安全合规。
+- Fail: 用RVA23 profile通过代替server platform安全、把未实现扩展写成已支持。
+- Covers: commercial security acceptance, server boundary。
+- Sources: AR-027, HR-014。
+
 ## 6. 阶段 gate 与非确定性的具体裁决
 
-基线 gate 使用 V-001–V-043 中适用于 p0 的全部义务、V-074/V-075/V-078/V-080；C/A/S/U/Sv39/F/D 各自增加 V-044–V-051 对应任务。V 阶段必须增加 V-052–V-060；多 hart memory 加 V-064–V-067；LLB/MEF 加 V-061–V-063；cohort 加 V-068–V-071；pod 加 V-072；Linux 加 V-073；硬件加 V-077/V-079；可选 lockstep profile 加 V-081–V-084。任务 Depends 是依赖图，不是“未列在 Depends 就不用做”的验收范围替代品。所有扩展再次运行受影响的 baseline、negative-control、ACT、fuzz 与 replay 套件。
+基线 gate 使用 V-001–V-043 中适用于 p0 的全部义务、V-074/V-075/V-078/V-080；C/A/S/U/Sv39/F/D 各自增加 V-044–V-051 对应任务。V 阶段必须增加 V-052–V-060；多 hart memory 加 V-064–V-067；LLB/MEF 加 V-061–V-063；cohort 加 V-068–V-071；pod 加 V-072；Linux 加 V-073；硬件加 V-077/V-079；可选 lockstep profile 加 V-081–V-084；RVA23 Core/Secure 加 V-085–V-090。任务 Depends 是依赖图，不是“未列在 Depends 就不用做”的验收范围替代品。所有扩展再次运行受影响的 baseline、negative-control、ACT、fuzz 与 replay 套件。
 
 | 场景 | 不能采用的方法 | 裁决与证据 |
 |---|---|---|

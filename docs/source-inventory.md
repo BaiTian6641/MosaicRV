@@ -110,7 +110,7 @@
 
 | Source range | 原始标题 | 处置 | Tasks |
 |---|---|---|---|
-| SRC-03:1-2 | 面向 RISC-V / RVV 的动态聚合处理器架构研究：从高 IPC CPU 到 GPU-like SIMT 的弹性执行 Fabric | 保留MosaicRV（原EAF-V）完整目标而非神奇GPU加速；新增optional lockstep不改变原ISA目标 | I-001, I-084, I-087 |
+| SRC-03:1-2 | 面向 RISC-V / RVV 的动态聚合处理器架构研究：从高 IPC CPU 到 GPU-like SIMT 的弹性执行 Fabric | 保留MosaicRV（原EAF-V）完整目标而非神奇GPU加速；新增optional lockstep不改变原ISA目标；RVA23商业基线作为后续明确需求加入 | I-001, I-084, I-087, I-092 |
 | SRC-03:3-54 | 研究结论与架构定位 | 论文数字与本设计结果分开，primary追溯 | I-077, I-078 |
 | SRC-03:55-56 | 从 XiangShan 与现有 RISC-V 设计推导新的 Pipeline | 顺序control plane+弹性backend | I-002, I-017 |
 | SRC-03:57-129 | 不要把 Frontend 也完全 Fabric 化 | latency-sensitive frontend保留常规结构 | I-009, I-021 |
@@ -163,3 +163,7 @@ XiangShan queue/PRF/FU/ROB具体数值与版本绑定不足；PULP-C910/BOOM/RSD
 ## 6. 后续新增需求：optional lockstep
 
 用户在初次三份报告之外明确提出 lockstep。该需求不改变原始文档范围：在 [architecture-review.md](architecture-review.md) §11.1 中定义为可选安全 profile，由 I-087–I-091 实现、V-081–V-084 验证、H-048/H-049 完成三FPGA/ASIC物理边界。它不是原报告的隐藏假设，也不是默认处理器模式；DCLS检测与TMR纠错分开，lockstep pair不是第二个 architectural hart。
+
+## 7. 后续新增需求：RVA23 与商业安全包
+
+用户随后明确要求 RV64、RVA23 profile、RVV 与社区广泛接受的安全功能。该需求不改变原始报告内容：最终商业目标是 RVA23S64 Core，RVV 为 mandatory；pointer masking、CFI、vector crypto、Sv48/Zkr/Sdtrig/Ssstrict/Ssaia 等进入可选/分层的 RVA23 Secure 包；RoT/TPM/secure boot/IOPMP 属平台责任而非 core ISA。实施任务 I-092–I-098、验证任务 V-085–V-090、硬件任务 H-050/H-051 逐项覆盖。

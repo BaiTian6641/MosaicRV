@@ -30,11 +30,25 @@
 | 并行语义 | 标量 OoO／ILP | SMT／多 hart、RVV、透明 cohort／micro-SIMT、显式 GPU-style SIMT 的独立分支 |
 | 平台 | Verilator 程序执行证据优先 | GW5A、Xilinx Zynq、Virtex UltraScale+ 实板各有证据，随后 ASIC 转换；小器件配置不冒充最终宽配置 |
 
+
+### 1.2 商业基线：RVA23 与安全包
+**[ISA]** MosaicRV 的最终应用处理器目标是 **RVA23S64**，不再停在 RV64IM 教学基线。首阶段 bring-up 仍从受控子集开始，但那是中间实现步骤，不是商业 profile。RVA23U64 强制 RV64I、little-endian、M/A/F/D/C/B/Zicsr/Zicntr/Zihpm、cacheability/atomic/misaligned PMA、64-byte cache block、CMO、half-precision FP、Zkt，以及新增 V、Zvfhmin、Zvbb、Zvkt、Zihintntl、Zicond、Zimop/Zcmop、Zcb、Zfa、Zawrs、Supm；RVA23S64 另强制 Zifencei、Ss1p13、Sv39/Svade/Ssccptr/Sstvecd/Sstvala/Sscounterenw/Svpbmt/Svinval/Svnapot/Sstc/Sscofpmf/Ssnpm/Ssu64xl/Sha。最终 gate 必须逐项核对，不允许把 p0/p1/p2 当 RVA23 完成（AR-022、AR-023）。
+
+**[提案]** 商业发布分为三层：
+
+1. **RVA23 Core**：完整 RVA23S64 hart 能力、VLEN≥128、标准 Linux/虚拟化支持。
+2. **RVA23 Secure**：RVA23 Core + Zvkng（localized）、Zicfilp/Zicfiss（expansion）、Sv48/Svadu/Zkr/Sdtrig/Ssstrict/Ssaia 中选定项；每一项通过能力广告和测试后才宣称。
+3. **MosaicRV Safety**：RVA23 Secure 子集或独立配置 + 可选 lockstep、ECC/parity、隔离 SoC、fault controller。它不与 RVA23 profile 名称混淆，也不由 lockstep 自动得到 ASIL/SIL。
+
+**[纠正]** RVA23 不把 vector crypto、CFI、Sv48、Sv57、Zkr 全部变成无条件强制。Zvkng/Zvksg 是 localized options，Zicfilp/Zicfiss 是 expansion options；pointer masking 是 profile 强制能力，但其硬件控制在更高 privilege 的 Smnpm/Ss npm/Smmpm 族，Supm/Ssnpm/Sspm 是执行环境层面的能力名称。Zicfiss 依赖 Zicsr/Zimop/Zaamo，U-mode 使用还要求 S-mode，M-mode当前不支持；Shadow Stack page 的 PTE 编码、CBO 禁止、idempotency、PMP/read-write规则都要进入 memory plan（AR-024、AR-025）。Vector crypto 指令要求 data-independent timing；VLEN≥128 是 application-processor 下限，SHA-512/SM3 在 VLEN=128 时依赖 LMUL 组合（AR-026）。
+
+非传统 backend 不改变这些软件可见合同：动态 route、cohort、LLB、coalescer、lockstep 都不能绕过 pointer masking、CFI、RVV、atomic、cache/TLB、PMA/PMP、Sv39/Sv48 或 virtualization。一个 SEE 中迁移的 harts 必须保持同一 XLEN/VLEN/cache block/endianness/extension 和实现相关选择，除非迁移不受影响的证据已证明；这点直接约束 MosaicRV 的 cohort/pod 迁移（AR-027）。
+
 共同初始参数是**设计假设而非容量承诺**：1 hart、2 clusters、2-wide rename/dispatch、64 个 architectural ROB slots、96 个整数物理寄存器、4 个 PRF banks、每 cluster 8 项 IQ、1 个 MUL/DIV、1 个 LSU、每 cluster 2 项 local result buffer。ROB／PRF／队列允许更小的硬件 profile，但要满足寄存器初始映射、最大原子分配组和前向进展的最低要求。物理 read/write ports、RAM latency、互连 pipeline cuts 必须由后续综合与板卡资源实测确定；不能从“4 banks”推出“4 reads + 4 writes/cycle”，不能从“2 项结果队列”推出任意数量不可停顿 FU 都安全。
 
 将阶段性功能子集称为“内部 bring-up”，不能将未完成 M 扩展的乘法子集称为 RV64IM，不能将向量整数子集称为完整 V，不能将仅 M-mode 的核称为 Linux-capable。基础执行环境采用 little-endian；自然对齐普通访问在声明范围内保证原子性，未对齐数据访问起步采用规范允许的同步 trap 策略，后续如实现拆分访问必须重新定义故障、原子性和 MMIO 边界。
 
-### 1.2 核心假设如何被证伪
+### 1.3 核心假设如何被证伪
 
 **[假设]** 资源解耦减少闲置和昂贵端口，收益可能被路由延迟、bank conflict、调度器关键路径、状态量与 drain 开销抵消。必须有相同 ISA、内存系统、FU 数、PRF 容量和 workload 的固定路由对照；单独加 FU、加 cache、降低时钟后的 IPC 增长不能归因于 fabric。若关键程序 wall time、面积／吞吐或公平性没有改善，应记录负面结果并停止该策略进入默认配置，不删除相应研究议题，更不能伪造“自然可扩展”的结论。
 
@@ -457,5 +471,12 @@ SRC-01 的 XiangShan 寄存器／ROB／FU／operand／队列数量、示例 pipe
 | AR-016 | [XiangShan Rename](https://docs.xiangshan.cc/projects/design/zh-cn/kunminghu-v3/backend/CtrlBlock/Rename/)，页面标V2R2/2025-01-20/commit xxx | robIdx/PRF分配、RAT恢复、uOP边界、snapshot组织 | URL版本与正文不一致，数值不作本项目budget；未绑定准确源revision |
 | AR-017 | [Sankaralingam et al., Distributed Microarchitectural Protocols in the TRIPS Prototype Processor](https://www.cs.utexas.edu/~skeckler/pubs/micro06_trips.pdf)，MICRO 2006，作者托管稿，重点§1/§2 | 多tile／多网络控制、fetch/execute/flush/commit协议先例；EDGE block-atomic与编译器语义 | 不是RISC-V；未移用其物理规模／性能数字为本机依据 |
 | AR-018 | [İpek et al., Core Fusion: Accommodating Software Diversity in Chip Multiprocessors](https://people.ece.cornell.edu/martinez/doc/isca07.pdf)，ISCA 2007正式作者公开稿，重点§2.2/§3/§4.1 | distributed ROB／LSQ、pre-commit、FUSE/SPLIT/OS eligibility、drain与重构成本 | 历史模拟与技术假设不等于现代RISC-V/FPGA实现；不用其数值作预算 |
+
+| AR-022 | [RVA23 Profiles ratified branch source](https://raw.githubusercontent.com/riscv/riscv-profiles/rva23-rvb23-ratified/src/rva23-profile.adoc)，branch `rva23-rvb23-ratified`，访问 2026-09-29 | RVA23U64/S64 mandatory/optional/extension categories、V mandatory、Zvkng/Zvksg localized、Zicfilp/Zicfiss expansion、Supm/Ssnpm/Sspm、Sha | 分支源码不是最终构建版本固定 hash；本文不声称所有可选安全功能都是 RVA23 强制 |
+| AR-023 | [RVA23 Profile v1.0](https://docs.riscv.org/reference/rva23/v1.0/index.html)，2024-10-17 ratified | 官方 ratified profile 入口与状态 | 静态页面主要证明状态；逐项内容由 ratified source 和后续规范章节固定 |
+| AR-024 | [Pointer Masking Extensions v1.0.0](https://docs.riscv.org/reference/isa/v20260120/priv/zpm.html)，v20260120 | Supm/Sspm/Ssnpm/Smnpm/Smmpm、PMLEN、ignore transform、显式访问/CMO/vector/CFI覆盖范围 | 不证明当前软件栈已使用 tags；硬件 tag check 属于后续扩展 |
+| AR-025 | [Control-flow Integrity](https://docs.riscv.org/reference/isa/v20260120/unpriv/unpriv-cfi.html) 与 [Privileged CFI](https://docs.riscv.org/reference/isa/v20260120/priv/priv-cfi.html)，v20260120 | Zicfilp/Zicfiss、LPAD/ELP、shadow-stack CSR/memory/PTE/trap规则 | 不自动支持 M-mode shadow stack；不能把 CFI 扩展称为 RVA23 强制 |
+| AR-026 | [Vector Cryptography Extensions v1.0](https://docs.riscv.org/reference/isa/v20260120/unpriv/vector-crypto.html)，v20260120 | Zvkned/Zvknh/Zvkg/Zvksed/Zvksh/Zvkt/Zvkng/Zvksg、VLEN≥128 application guidance、DIEL | 不证明实际算法侧信道免疫；Sail覆盖需单独核实 |
+| AR-027 | [RISC-V Server Platform v1.0](https://docs.riscv.org/reference/server-platform/v1.0/server_platform_requirements.html)，2026-09-29读取 | RVA23S64 server hart、Sv48/Sdtrig/Sdext/Zkr/Ssccfg/Ssstrict/Ssaia、SEE一致性、RoT/secure boot边界 | Server Platform 不是 RVA23 profile本身；RoT/TPM/UEFI是平台责任，不是core内部指令 |
 
 架构交接的最终判定：本文件给出可实施的保守起点、不可破坏的语义边界和每个激进目标的重启门槛；它没有把尚未实现的宽 fabric、distributed ROB、完整 RVV 或 core fusion 伪装为完成品，也没有将这些最终目标从项目中删去。

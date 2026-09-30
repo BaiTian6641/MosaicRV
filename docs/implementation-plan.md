@@ -167,6 +167,22 @@ flowchart TD
 | H-049 | I-090, H-038, H-041 | ASIC lockstep物理/DFT边界 |
 | I-091 | I-080, I-083, I-090, V-081, V-082, V-083, V-084 | 可选lockstep profile验收 |
 
+| I-092 | I-001 | RVA23 compliance matrix |
+| V-085 | I-092, V-002, V-020, V-043, V-080 | RVA23 mandatory verification manifest |
+| I-093 | I-092, I-041, I-048 | RVA23 mandatory implementation |
+| I-094 | I-093, I-045, I-046, I-056 | pointer masking implementation |
+| V-086 | I-093, V-018, V-045, V-065, V-085 | RVA23 cache/PMA/atomic evidence |
+| V-087 | I-094, V-049, V-056, V-085 | pointer masking coverage |
+| I-095 | I-093, I-045, I-047 | CFI implementation |
+| V-088 | I-095, V-016, V-044, V-047, V-087 | CFI evidence |
+| I-096 | I-082, I-093 | vector crypto implementation |
+| V-089 | I-096, V-052, V-059, V-076, V-085 | vector crypto/DIEL evidence |
+| I-097 | I-093, I-095, I-096 | commercial security/platform package |
+| V-090 | I-097, V-073, V-085, V-088, V-089 | RVA23 Secure verification |
+| I-098 | I-082, I-091, I-096, I-097, V-085, V-086, V-087, V-088, V-089, V-090 | RVA23 Core/Secure release gate |
+| H-050 | I-098, H-032 | 三家族 RVA23 物理执行证据 |
+| H-051 | I-097, I-098, H-049 | ASIC security/physical boundary |
+
 ## 4. 工作包：合同、工具、可执行基线
 
 ### I-001 — 冻结 ISA 与平台配置 manifest
@@ -1032,7 +1048,7 @@ flowchart TD
 - Sources: platform-plan.md。
 
 ### I-086 — 交付可复现 processor release
-- Depends: I-085, I-091
+- Depends: I-085, I-091, I-098
 - Inputs: 所有已声明 profile 的 RTL/software/tool/reference/license/hardware manifests。
 - Action: 从零重建各支持配置、重放有限验收集，归档 Git commit、submodule closure、日志、失败排除理由与用户操作手册；未达 gate 的功能不标 supported。
 - Outputs: 发布清单、可操作 rebuild/validate/program/run 指令、能力与限制矩阵。
@@ -1077,9 +1093,79 @@ flowchart TD
 - Action: 对共享数据加ECC/parity/CRC/地址绑定或独立monitor；在replica边界加入可综合keep/dont_touch/size_only等工程约束或等效技术，并核对netlist；禁止lockstep与debug/DFT状态互相静默关闭。
 - Outputs: shared-domain protection map、survivability netlist evidence、CDC/reset/test matrix。
 - Pass: 所有shared architectural-data路径有明确保护或残留风险记录；综合后shadow与checker仍存在且可观测。
-- Fail: synthesis合并duplicate logic、shared RAM corruption污染两副本却无任何检测、debug/scan状态关闭检查仍宣称启用。
 - Covers: common-mode faults, synthesis survivability, physical separation。
 - Sources: AR-020, HR-008, HR-009。
+- Fail: synthesis合并duplicate logic、shared RAM corruption污染两副本却无任何检测、debug/scan状态关闭检查仍宣称启用。
+
+### I-092 — 构建完整 RVA23 合规矩阵
+- Depends: I-001
+- Inputs: ratified RVA23 profile source、当前 profile 表、ISA/manual references。
+- Action: 逐项建立 RVA23U64/S64 mandatory/localized/development/expansion/extension matrix，标出每项的实现任务、验证任务、capability bit、软件发现方式和当前状态。
+- Outputs: RVA23 compliance matrix、capability contract、不得提前广告清单。
+- Pass: 每个mandatory extension有唯一实现和验证责任；RVA23不通过时没有任何binary发布宣称兼容。
+- Fail: 把p0/p1/p2误称RVA23，或把optional feature误列为mandatory。
+- Covers: RVA23 Core, commercial ISA baseline。
+- Sources: AR-022, AR-023。
+
+### I-093 — 实现 RVA23 mandatory scalar/privilege/cache 扩展
+- Depends: I-092, I-041, I-048
+- Inputs: B/Zicond/Zimop/Zcmop/Zcb/Zfa/Zfhmin/Zkt、CMO/Zic64b、misaligned/atomic PMA、Zicntr/Zihpm、Sv39/Svnapot/Svinval/Svpbmt/Sstc/Sscofpmf/Ssu64xl、Sha。
+- Action: 将RVA23强制但尚未覆盖的指令/CSR/PMA/计时/计数/缓存和虚拟化行为拆成实现项，接入现有frontend、memory、CSR、MMU和SoC合同。
+- Outputs: RVA23 mandatory implementation set、CSR/trap/PMA/PMU更新、Sha hypervisor候选。
+- Pass: 每项都有真实RTL和对应directed/reference检查；不是仅ISA字符串更新。
+- Fail: 只对齐编译器misa/ISA字符串，不实现指令；或忽略PMA/CSR/特权副作用。
+- Covers: RVA23 mandatory extensions, hypervisor, cache management。
+- Sources: AR-022, AR-024, AR-027。
+
+### I-094 — 实现 pointer masking 与地址传播边界
+- Depends: I-093, I-045, I-046, I-056
+- Inputs: Supm/Ssnpm/Sspm执行环境合同、Smnpm/Smmpm控制、PMLEN=0/7/16策略、Sv39/Sv48、scalar/FP/vector/AMO/CMO/CFI显式访问列表。
+- Action: 在AGU和memory packetizer统一执行ignore transform；排除implicit fetch/PTW/DMA；把mask后的地址用于TLB/PMP/PMA/debug trigger/stval/vector/CMO/SS访问；保留权限、地址空间和错误报告语义。
+- Outputs: pointer-mask transform unit、per-access coverage matrix、integration into LSU/MMU/debug。
+- Pass: 所有显式访问按当前 privilege/mode/PMM 转换；implicit access不被错误mask；跨misaligned/vector/CMO/shadow-stack的语义逐项通过。
+- Fail: 只在标量load/store加mask，或错误mask取指、PTW、DMA和trap handler地址。
+- Covers: pointer integrity, tagged addressing, memory safety。
+- Sources: AR-024。
+
+### I-095 — 实现 CFI：landing pad 与 shadow stack
+- Depends: I-093, I-045, I-047
+- Inputs: Zicfilp/Zicfiss规范、Zimop/Zcmop/Zaamo依赖、ELP/ssp状态、PTE/PMA/PMP规则、trap priority。
+- Action: 实现LPAD/ELP、shadow-stack instructions、ssp CSR、SS page permission、CBO禁止、idempotency检查、trap save/restore、software-check cause/tval。
+- Outputs: CFI implementation、SS memory contract、trap/permission evidence。
+- Pass: direct/indirect/return/trap/debug边界符合规范；SS memory只能由合法指令写，非幂等或错误PTE/PMP被拒绝。
+- Fail: 把LPAD当普通hint而不启用ELP、允许任意store写SS page、忽略trap优先级或M/U限制。
+- Covers: control-flow integrity, software security。
+- Sources: AR-025。
+
+### I-096 — 实现 vector crypto 与 data-independent latency
+- Depends: I-082, I-093
+- Inputs: Zvbb/Zvkt、Zvkng/Zvksg localized options、VLEN≥128、EGW/EEW/EGS/LMUL/vstart约束。
+- Action: 在RVV datapath上实现选定的NIST/ShangMi suites、GCM/GHASH、carryless multiply、SHA-2/SM3、AES/SM4及Zvkt DIEL规则；VLEN=128时用LMUL组合256-bit group。
+- Outputs: vector crypto units、operation matrix、constant-latency evidence hooks。
+- Pass: 每个声明suite的element grouping、overlap、illegal/reserved、vstart、mask/tail和结果正确；DIEL模式对数据值不表现可测时序差异。
+- Fail: 只实现AES/SHA子集却宣称Zvkng/Zvksg；VLEN<128仍宣称application vector crypto；允许masked inactive元素改变timing。
+- Covers: vector cryptography, side-channel-aware datapath。
+- Sources: AR-026。
+
+### I-097 — 实现 commercial security/platform package
+- Depends: I-093, I-095, I-096
+- Inputs: RVA23 Secure选定项、Sv48/Svadu/Zkr/Sdtrig/Ssstrict/Ssaia、平台RoT/TPM/secure boot/IOPMP边界。
+- Action: 将core内扩展与SoC责任分离：实现/验证Sv48、Svadu、entropy CSR、debug triggers、AIA/APLIC/IMSIC接口；定义RoT/TPM/secure boot/IOPMP为平台任务，不把core能力冒充平台合规。
+- Outputs: commercial security integration package、platform responsibility matrix、selected capability manifest。
+- Pass: 每项core功能有实现/测试；平台功能有明确owner和接口；不声称无RoT/IOPMP实现的平台安全。
+- Fail: 用RVA23 Core宣称server-platform合规，或把未实现的CoVE/WorldGuard/IOPMP写成当前支持。
+- Covers: security package, platform security, server requirements。
+- Sources: AR-027, HR-014。
+
+### I-098 — 完成 RVA23 Core/Secure 发布 gate
+- Depends: I-082, I-091, I-096, I-097
+- Inputs: 全部RVA23/RVV/crypto/CFI/pointer masking证据、reference coverage、platform manifests。
+- Action: 逐项闭合RVA23 mandatory与选定optional能力，运行应用/VM/RVV/crypto/CFI软件集合；生成合规性声明模板和已知限制。
+- Outputs: RVA23 Core/Secure acceptance bundle、binary compatibility evidence、capability map。
+- Pass: 所有宣称能力有实现、reference/formal/ACT/程序证据；binary compatibility从同profile软件运行结果证明。
+- Fail: 用build flag、ISA字符串或单个Linux boot代替profile闭合；未实现mandatory项仍发布RVA23。
+- Covers: commercial RVA23 release, security acceptance。
+- Sources: AR-022, AR-023, AR-024, AR-025, AR-026, AR-027。
 
 ### I-091 — 完成 lockstep 安全 profile 验收 gate
 - Depends: I-080, I-083, I-090
