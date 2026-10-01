@@ -45,9 +45,11 @@
 //   * An access that straddles a region boundary faults, so an 8-byte access at
 //     the last word of a small MMIO region cannot silently bleed into a
 //     neighbour.
-//   * TOHOST reads as 0 for the whole run.  tests/programs/src/crt0.S documents
-//     exactly that ("reads 0 while the program runs") and crt0 samples TOHOST at
-//     boot, so the value it reads is defined.
+//   * TOHOST is an ordinary RAM word with a watch on it.  It reads as 0 until
+//     the program writes it, which is what tests/programs/src/crt0.S documents
+//     ("reads 0 while the program runs") and what makes its boot-time sample
+//     well defined.  A non-zero write ends the run and is reported to the
+//     harness; a zero write is an ordinary store.
 //   * CLINT is a plain readable/writable region here.  config/csr/mode_m.json
 //     declares the `time` CSR fixed at reset 0 and p0 has no timer interrupt
 //     logic, so there is no mtime behaviour to model; inventing one would create
@@ -87,6 +89,7 @@ module mosaic_bringup_tb (
     output logic        h_rb_fault,
     output logic        h_rb_valid,
     input  wire  [11:0] h_dbg_csr_addr,
+    input  wire         h_clear_mem,     // one-cycle pulse: zero every array
 
     // -------------------------------------------- observation (DUT + devices)
     output wire         c_evt_valid,
@@ -126,11 +129,11 @@ module mosaic_bringup_tb (
   localparam logic [63:0] RAM_BASE     = 64'h0000_0000_8000_0000;
   localparam logic [63:0] RAM_SIZE     = 64'h0000_0000_0020_0000;
 
-  // config/profiles/p0.json -> test_protocol.
-  // TOHOST occupies the low word of the test_harness region and FROMHOST the
-  // high one.  Only TOHOST has behaviour: it is latched rather than stored, which
-  // is what makes a read of it return 0 for the whole run.
-  localparam logic [63:0] TOHOST_BASE  = HARN_BASE;
+  // config/profiles/p0.json -> test_protocol.  TOHOST and FROMHOST are ordinary
+  // RAM words; the only thing that is special about TOHOST is that a non-zero
+  // write to it ends the run.  It is latched as well as stored, so the value the
+  // program wrote is what the harness reports.
+  localparam logic [63:0] TOHOST_BASE  = 64'h0000_0000_8000_1000;
   localparam logic [63:0] RESET_VECTOR = 64'h0000_0000_8000_0000;
 
   localparam int unsigned ROM_WORDS    = 512;      //  4 KiB / 8
@@ -401,6 +404,7 @@ import mosaic_pkg::*;
 
   logic [2:0]  img_rid;
   logic [17:0] img_idx;
+  int unsigned zi;
 
   always_comb begin
     rb_data_c    = mem_load(h_rb_addr, SZ_DBL, 1'b0, rb_fault_c);
@@ -412,15 +416,56 @@ import mosaic_pkg::*;
     store_mask_v    = store_mask_of(c_dmem_size);
     store_value     = c_dmem_wdata & store_mask_v;
     store_allowed   = access_ok(c_dmem_addr, c_dmem_size, 1'b1, 1'b0);
-    store_is_tohost = (store_rid == R_HARNESS) &&
-                      ((c_dmem_addr & ~64'd7) == TOHOST_BASE);
+    store_is_tohost = ((c_dmem_addr & ~64'd7) == TOHOST_BASE);
 
     img_rid = pma_region(h_img_addr);
     img_idx = word_index(img_rid, h_img_addr);
   end
 
   always_ff @(posedge h_clk) begin
-    if (h_rst) begin
+    // ---- harness image loader ----------------------------------------------
+    // Deliberately outside the reset branch: the harness pushes the image in
+    // while reset is still asserted, and a loader that only worked once reset
+    // released would force it to release first.  Word-granular by contract:
+    // `h_img_addr` is 8-byte aligned and `h_img_data` is the whole word, so a
+    // plain assignment is correct.
+    if (h_img_we) begin
+      case (img_rid)
+        R_ROM:     m_rom[img_idx[8:0]]   <= h_img_data;
+        R_UART:    m_uart[img_idx[4:0]]  <= h_img_data;
+        R_HARNESS: m_harn[img_idx[0:0]]  <= h_img_data;
+        R_CLINT:   m_clint[img_idx[8:0]] <= h_img_data;
+        R_RAM:     m_ram[img_idx]        <= h_img_data;
+        // A segment outside the frozen map is a load error the harness reports
+        // by name; the model drops it so the run continues and fails its own
+        // checks rather than dying here.
+        default: ;
+      endcase
+    end
+
+    if (h_clear_mem) begin
+      // Every array starts as a defined zero rather than as whatever the
+      // simulator happened to leave behind.  Without this, a program that reads
+      // an address nobody wrote would produce a different retire stream on every
+      // run and the differential comparison would be worthless.
+      for (zi = 0; zi < ROM_WORDS; zi = zi + 1)   m_rom[zi]   <= 64'd0;
+      for (zi = 0; zi < UART_WORDS; zi = zi + 1)  m_uart[zi]  <= 64'd0;
+      for (zi = 0; zi < HARN_WORDS; zi = zi + 1)  m_harn[zi]  <= 64'd0;
+      for (zi = 0; zi < CLINT_WORDS; zi = zi + 1) m_clint[zi] <= 64'd0;
+      for (zi = 0; zi < RAM_WORDS; zi = zi + 1)   m_ram[zi]   <= 64'd0;
+      m_if_pending     <= 1'b0;
+      m_if_data        <= 32'h00000000;
+      m_if_fault       <= 1'b0;
+      m_d_pending      <= 1'b0;
+      m_d_data         <= 64'd0;
+      m_d_fault        <= 1'b0;
+      m_tohost_written <= 1'b0;
+      m_tohost_value   <= 64'd0;
+      m_uart_count     <= 64'd0;
+      h_rb_data        <= 64'd0;
+      h_rb_fault       <= 1'b0;
+      h_rb_valid       <= 1'b0;
+    end else if (h_rst) begin
       m_if_pending     <= 1'b0;
       m_if_data        <= 32'h00000000;
       m_if_fault       <= 1'b0;
@@ -458,11 +503,6 @@ import mosaic_pkg::*;
             // Unmapped, straddling a region, or a read-only region such as
             // boot_rom.  The write is not performed.
             m_d_fault <= 1'b1;
-          end else if (store_is_tohost) begin
-            // The protocol register: latched, never stored, so a later read of
-            // TOHOST returns 0 exactly as crt0.S documents.
-            m_tohost_value   <= store_value;
-            m_tohost_written <= (store_value != 64'd0);
           end else begin
             case (store_rid)
               R_ROM: m_rom[store_idx[8:0]] <= word_keep(store_rid, c_dmem_addr, store_mask_v) | store_value;
@@ -477,6 +517,12 @@ import mosaic_pkg::*;
               R_CLINT:   m_clint[store_idx[8:0]] <= word_keep(store_rid, c_dmem_addr, store_mask_v) | store_value;
               default:   m_ram[store_idx]   <= word_keep(store_rid, c_dmem_addr, store_mask_v) | store_value;
             endcase
+            // The protocol register is ordinary memory that also ends the run:
+            // a non-zero write to TOHOST is the frozen end-of-program signal.
+            if (store_is_tohost) begin
+              m_tohost_value   <= store_value;
+              m_tohost_written <= (store_value != 64'd0);
+            end
             m_d_fault <= 1'b0;
           end
         end else begin
@@ -485,25 +531,6 @@ import mosaic_pkg::*;
         end
       end else if (m_d_pending) begin
         m_d_pending <= 1'b0;
-      end
-
-      // ---- harness image loader -------------------------------------------
-      // Word-granular by contract: `h_img_addr` is 8-byte aligned and
-      // `h_img_data` is the whole word, so a plain assignment is correct.  The
-      // harness builds each word from its own shadow after zero-filling, which is
-      // why no byte merge is needed here.
-      if (h_img_we) begin
-        case (img_rid)
-          R_ROM:     m_rom[img_idx[8:0]]    <= h_img_data;
-          R_UART:    m_uart[img_idx[4:0]]   <= h_img_data;
-          R_HARNESS: m_harn[img_idx[0:0]]   <= h_img_data;
-          R_CLINT:   m_clint[img_idx[8:0]]  <= h_img_data;
-          R_RAM:     m_ram[img_idx]    <= h_img_data;
-          // A segment outside the frozen map is a load error the harness reports
-          // by name; the model drops it so the run continues and fails its own
-          // checks rather than dying here.
-          default: ;
-        endcase
       end
     end
   end

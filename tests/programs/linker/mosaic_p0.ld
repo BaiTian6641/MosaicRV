@@ -56,7 +56,9 @@ __signature_base  = 0x80000400;
 __signature_words = 4;
 
 /* ---- firmware-owned areas ---- */
-__traplog_base    = 0x80001000;
+__tohost_base     = 0x80001000;   /* frozen test_protocol.tohost    */
+__fromhost_base   = 0x80001008;   /* frozen test_protocol.fromhost  */
+__traplog_base    = 0x80002000;   /* NOT adjacent: see below        */
 __traplog_size    = 128;           /* 8 records x 2 words */
 __scratch_base    = 0x80001080;
 __scratch_size    = 128;
@@ -129,15 +131,6 @@ SECTIONS
     }
 
     /* ============ firmware-owned RAM areas ============ */
-    . = __traplog_base;
-    .traplog (NOLOAD) : ALIGN(8)
-    {
-        __traplog_start = .;
-        KEEP(*(.traplog))
-        . = . + __traplog_size;
-        __traplog_end = .;
-    }
-
     . = __scratch_base;
     .scratch (NOLOAD) : ALIGN(8)
     {
@@ -163,6 +156,19 @@ SECTIONS
     .progtext : ALIGN(4)
     {
         *(.text .text.*)
+    }
+
+    /* The trap log sits above the program code, NOT at 0x80001000.  TOHOST
+     * and FROMHOST occupy that address pair; a trap log written there makes
+     * every trapping program latch its own mcause as the result word and
+     * self-report FAIL.  The ASSERTs below make the collision impossible. */
+    . = __traplog_base;
+    .traplog (NOLOAD) : ALIGN(8)
+    {
+        __traplog_start = .;
+        KEEP(*(.traplog))
+        . = . + __traplog_size;
+        __traplog_end = .;
     }
 
     .stack (NOLOAD) : ALIGN(16)
@@ -203,12 +209,17 @@ ASSERT(__signature_base == 0x80000400,
        "signature area must be 0x80000400 (config/profiles/p0.json test_protocol)")
 ASSERT(__boot_end <= __signature_base,
        "boot region (.text.init/.rodata/.data) runs past 0x80000400")
-ASSERT(__signature_end <= __traplog_base,
-       "signature area must not overrun the trap log")
-ASSERT(__traplog_end <= __scratch_base,
-       "trap log must not overrun the scratch buffer")
+ASSERT(__signature_end <= __tohost_base,
+       "signature area must not overrun the tohost/fromhost window")
 ASSERT(__scratch_end <= __bss_base,
        "scratch buffer must not overrun .bss")
+/* The two that matter: nothing firmware-owned may sit in the result word. */
+ASSERT(__traplog_base > __tohost_base + 16 || __traplog_end <= __tohost_base,
+       "trap log overlaps tohost/fromhost at 0x80001000")
+ASSERT(__bss_base > __tohost_base + 16 || __bss_end <= __tohost_base,
+       ".bss overlaps tohost/fromhost at 0x80001000")
+ASSERT(__scratch_base > __tohost_base + 16 || __scratch_end <= __tohost_base,
+       "scratch buffer overlaps tohost/fromhost at 0x80001000")
 ASSERT(__bss_end <= __progtext_base,
        ".bss must not overrun the program code region")
 ASSERT(__trapstack_section_end <= __ram_end,

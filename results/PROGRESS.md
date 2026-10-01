@@ -29,3 +29,35 @@ wrong the day an instruction collides with the pattern, and the failure would
 land only on instructions nobody was looking at. The honest description is that
 **my port list was under-specified, not that the agent implemented it wrongly**,
 and that is what the report says.
+---
+
+## 2026-09-30 — I-007 closed — the p08 root cause was self-inflicted
+
+The `.traplog` section was placed at `0x80001000` — the address **I** moved
+TOHOST to earlier in the same session. Every trapping program wrote its first
+`mcause` straight into the result word, so the harness latched `mcause=4` as the
+outcome and each run self-reported FAIL. The "endless re-entry" and "control
+falling back into crt0" symptoms were both consequences of that collision.
+
+Found by `BringupCore`, working on a different package, and reported rather than
+worked around locally. Fixed by moving `.traplog` to `0x80002000`, and — more
+valuably — by adding three linker `ASSERT`s that make any overlap between
+`.traplog`, `.bss` or `.scratch` and the `0x80001000` TOHOST/FROMHOST window a
+link error. The bug cannot recur silently, which matters more than the fix.
+
+This is also on the record as **my** error: the collision existed only because I
+moved the test protocol into RAM to make Spike able to poll TOHOST at all. The
+decision was right and the consequence was not checked.
+
+The store-to-`boot_rom` case was split out as `p13_romstore` so the reference
+that is actually available can adjudicate it. Corpus is now 13 programs × 3
+inputs = 39 ELFs, 8649 instructions, all within `rv64im_zicsr_zifencei`.
+
+**Not yet recorded as agreeing:** on a clean rebuild the Spike cross-check
+reports **four** disagreements, not three, and `p13_romstore` disagrees on all
+three inputs by exactly one in the low byte (`...107` against `...106`). The
+package report claims all three of its inputs agree. That claim is contradicted
+by the tool's own output and is being resolved before anything is recorded
+either way. A report that says "36 of 39" when the tool says 37 is worse than no
+number, so the discrepancy is being carried as an open item rather than smoothed
+away.

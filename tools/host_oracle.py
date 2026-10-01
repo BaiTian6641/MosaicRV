@@ -451,7 +451,7 @@ def p07_byteops(a: int, b: int, c: int) -> tuple:
 
 def p08_misaligned(a: int, b: int, c: int) -> tuple:
     sig0 = a & 0xFF                        # lbu [scratch+16]
-    sig1 = u64(a >> 32)                    # lw  [scratch+20]
+    sig1 = sext(u64(a >> 32), 32)          # lw  [scratch+20], sign-extends
     sig2 = sext((a >> 48) & 0xFFFF, 16)    # lh  [scratch+22]
     _check(sig2 == sext_masked((a >> 48) & 0xFFFF, 16), "p08 sig2")
 

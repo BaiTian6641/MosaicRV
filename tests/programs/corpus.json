@@ -13,7 +13,7 @@
     "signature": 2147484672,
     "signature_words": 4,
     "pass_code": 1,
-    "traplog": 2147487744,
+    "traplog": 2147491840,
     "traplog_records": 8,
     "traplog_record_words": 2,
     "input": 2147487872,
@@ -459,7 +459,7 @@
           "c": "0x0",
           "expect_sig": [
             "0x0000000000000000",
-            "0x0000000080000000",
+            "0xffffffff80000000",
             "0xffffffffffff8000",
             "0x000000101018181f"
           ],
@@ -492,7 +492,7 @@
           "c": "0xffffffffffffffff",
           "expect_sig": [
             "0x00000000000000ff",
-            "0x00000000ffffffff",
+            "0xffffffffffffffff",
             "0xffffffffffffffff",
             "0x000000101018181f"
           ],

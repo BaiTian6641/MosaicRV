@@ -29,12 +29,12 @@ Reset vector `0x80000000` (`config/profiles/p0.json` → `reset.reset_vector`).
             .rodata       compiled-in program inputs (A)
             .data
 0x80000400  .signature    FROZEN test_protocol.signature, 4 x 8 bytes (NOLOAD)
-0x80001000  .traplog      8 records x {mcause, mtval} (NOLOAD)
-0x80001008  fromhost      FROZEN test_protocol.fromhost
-0x80001010  tohost        FROZEN test_protocol.tohost
+0x80001000  tohost        FROZEN test_protocol.tohost (RESERVED, nothing else here)
+0x80001008  fromhost      FROZEN test_protocol.fromhost (RESERVED)
 0x80001080  .scratch      128-byte program buffer (NOLOAD)
 0x80001100  .bss          firmware scalar state (NOLOAD)
 0x80001200  .progtext     the corpus program's main() (AX)
+0x80002000  .traplog      8 records x {mcause, mtval} (NOLOAD)
 ...         .stack 16 KiB, .trapstack 1 KiB (NOLOAD)
 ```
 
@@ -53,10 +53,12 @@ silent surprise:
 ASSERT(__ram_base == 0x80000000, ...)
 ASSERT(__signature_base == 0x80000400, ...)
 ASSERT(__boot_end <= __signature_base, ...)          /* boot region fits below the signature */
-ASSERT(__signature_end <= __traplog_base, ...)
-ASSERT(__traplog_end <= __scratch_base, ...)
+
 ASSERT(__scratch_end <= __bss_base, ...)
 ASSERT(__bss_end <= __progtext_base, ...)
+ASSERT(__traplog_base > __tohost_base + 16 || __traplog_end <= __tohost_base, ...)
+ASSERT(__bss_base      > __tohost_base + 16 || __bss_end      <= __tohost_base, ...)
+ASSERT(__scratch_base  > __tohost_base + 16 || __scratch_end  <= __tohost_base, ...)
 ASSERT(__trapstack_section_end <= __ram_end, ...)
 ASSERT(__image_end > __boot_rom_end, ...)            /* never in boot_rom */
 ```
@@ -559,9 +561,45 @@ sig2 = sext16(a >> 48)
 expected trap trace: [7]
 ```
 
+### Root cause of the p08 failure — found by I-008, fixed here
+
+`tests/programs/linker/mosaic_p0.ld` originally placed `.traplog` at
+`0x80001000`, which is where `test_protocol.tohost` moved to. Every trapping
+program therefore wrote its first `mcause` straight into the result word, and
+the harness latched it as the outcome:
+
+```
+p08_misaligned.i0  outcome=tohost tohost=0000000000000004
+p08_misaligned.i1  outcome=tohost tohost=0000000000000004
+p08_misaligned.i2  outcome=tohost tohost=0000000000000004
+```
+
+That is the whole of the earlier "illegal instruction, endless `ret` into
+`_start`" mystery: the trace was self-inflicted. The trap log has been moved
+to `0x80002000`, above the program code, and three `ASSERT`s now make an
+overlap with the `tohost`/`fromhost` window a link error. `p08` now runs to
+completion on Spike and `sig0`, `sig1` and `sig2` all agree with the oracle.
+
+What remains is exactly one word. `p08`'s `sig3` folds the recorded
+`mcause` values, and Spike records a different set because it does not trap on
+misaligned accesses:
+
+```
+p08_misaligned.i1: spike [.., .., .., 0x101018181c000002]
+                   oracle [.., .., .., 0x000000101018181f]
+```
+
+`sig0`/`sig1`/`sig2` (the aligned-neighbour accesses, which do not depend on
+the misalignment policy) agree exactly. Only the trap fold differs, which is
+the `NOT_CLAIMED` item below and nothing else. The earlier narrowed question
+about control flow falling back into `crt0` was a **consequence** of the
+collision, not an independent defect; it is resolved.
+
+### Open question — resolved
+
 ### Open question, narrowed — not a cause
 
-The hot loop at `0x80000130`–`0x8000013c` is `zero_region`'s byte-at-a-time
+**Resolved.** The hot loop at `0x80000130`–`0x8000013c` was `zero_region`'s byte-at-a-time
 tail loop in `crt0.S`:
 
 ```

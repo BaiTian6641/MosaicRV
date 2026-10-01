@@ -653,3 +653,634 @@ stops before any stimulus is counted.
   constants — and they are now confined to the comparator, which is the only unit that
   needs to know them.
 * `rtl/core/mosaic_pkg.sv` was not modified.
+
+---
+
+# Part III — I-010, RV64I/M decode
+
+Work package **I-010**, run as `CASE=decode.rv64im_reserved` from
+`tests/unit/registry.json`. The card is `### I-010 — 实现 RV64I/M decode 与非法指令`
+in `docs/stage-1-scalar-control.md`.
+
+This part covers the decoder and its case only. The ALU, the branch comparator and
+the jump-target unit are Parts I and II above.
+
+---
+
+## What was built
+
+| File | Contents |
+| --- | --- |
+| `rtl/core/mosaic_decoder.sv` | `mosaic_decoder`, RV64I + M, purely combinational, 652 lines |
+| `sim/tb/mosaic_decoder_tb.sv` | Simulation wrapper: the struct broken out into 37 named ports plus the raw 133-bit vector, 129 lines |
+| `sim/unit/tb_decoder.cpp` | Independent reference decoder, encoders, directed set, reserved enumeration, structural sweeps, random campaign, 1318 lines |
+
+### Interface
+
+```systemverilog
+module mosaic_decoder (
+    input  wire  [31:0]             insn,
+    output mosaic_pkg::decode_ctl_t ctl
+);
+```
+
+No clock, no reset, no state. Every field of `ctl` is a function of `insn` alone,
+so the decoder can sit anywhere in the front end and its output can be sampled
+whenever the instruction word is stable. `rtl/core/mosaic_pkg.sv` is the only other
+file needed; the port is written `mosaic_pkg::decode_ctl_t` so its origin is
+unambiguous to a reader who has not opened the package.
+
+### Field contract
+
+These are the decisions a consumer of `decode_ctl_t` needs and cannot infer from
+the field names. Each one is enforced by a named check in the case.
+
+| Field | Contract |
+| --- | --- |
+| `valid`, `illegal` | `illegal` implies `!valid`, always. No partial decode: an instruction is fully legal or `ctl` is exactly `CTL_ILLEGAL` with nothing stale left over |
+| `reg_write` | already qualified by `rd != 0`. A write to x0 is not a register write, so nothing downstream special-cases x0 again (I-013 relies on this) |
+| `rd`, `rs1`, `rs2` | the raw instruction fields **wherever those bits are register fields**; `x0` where the bits are an immediate fragment — `rs1`/`rs2` for U-type (`lui`/`auipc`), `rd` for S-type and B-type |
+| `imm` | sign-extended to 64 bits, and the *only* immediate the instruction has. `uses_imm` means "imm participates": the address add for loads and stores, the shift amount for the six shift-immediates (zero-extended, never sign-extended), the control-transfer offset |
+| `alu_op`, `uses_alu` | driven only when `uses_alu` is 1. Control transfers leave them at the `CTL_ILLEGAL` values `ALU_PASSB` / 0 and are driven by `branch_funct` / `writes_link` instead: the link value is `PC + 4`, produced by the branch unit |
+| `is_auipc` | ALU operand A is the instruction's PC |
+| `uses_rs1 == 0` | ALU operand A is hard-wired zero (`lui`) |
+| `md_signed` | 1 for `mul`, `mulh`, `mulhsu`, `div`, `rem`; 0 for `mulhu`, `divu`, `remu`. `mulhsu`'s mixed signedness is carried by `MD_MULHSU` itself, not by this bit |
+| `csr_reads`, `csr_writes` | the architectural intent *after* the x0 rules: `csrrw` with `rd == x0` does not read, `csrrs`/`csrrc` with `rs1 == x0` do not write |
+| `uses_rs1` (CSR) | 1 for every CSR form — in the immediate forms `insn[19:15]` is a zero-extended 5-bit zimm, not a register index, and `csr_imm_form` says which |
+| `mem_kind`, `mem_size`, `mem_signed` | valid whenever `mem_kind != MEM_NONE` |
+| JALR target | **not** computed here. `is_jalr` + `uses_imm` + `imm` is what the core needs: `target = pc + rs1 + imm`, after which **the core clears target bit 0**. Clearing bit 0 is a target-computation rule owned by I-011, not an encoding rule, so it is deliberately not folded into `imm` |
+
+The last row is worth stating plainly because it is a boundary decision: the
+decoder is responsible for the *encoding* of the offset and the target unit
+(I-011, Part II) is responsible for the *arithmetic* of the target, including the
+alignment clear. The case asserts the boundary from both sides: `tb_decoder.cpp`
+checks that a `jalr` with immediate 3 delivers `imm == 3`, unmodified, and
+`tb_alu.cpp` checks that the target unit clears bit 0 of the sum.
+
+## Instruction table implemented
+
+Twelve opcodes decode. `funct3` values not in the table are reserved and set
+`illegal`; so is any `funct7` outside those listed.
+
+| Opcode | `funct3` | Instructions | Other constraints |
+| --- | --- | --- | --- |
+| `0000011` LOAD | 000 001 010 011 100 101 | `lb lh lw ld lbu lhu` | 110, 111 reserved |
+| `0001111` MISC-MEM | 000 / 001 | `fence` / `fence.i` | 010–111 reserved |
+| `0010011` OP-IMM | 000 010 011 100 110 111 | `addi slti sltiu xori ori andi` | — |
+| | 001 | `slli` | `insn[31:26] == 000000` |
+| | 101 | `srli` / `srai` | `insn[31:26] == 000000` / `010000` |
+| `0010111` AUIPC | any | `auipc` | `funct3` is not part of the encoding |
+| `0100011` STORE | 000 001 010 011 | `sb sh sw sd` | 100–111 reserved |
+| `0011011` OP-IMM-32 | 000 / 001 / 101 | `addiw` / `slliw` / `srliw`,`sraiw` | `slliw` needs `funct7 == 0`; the shifts need `funct7` 0 or `0100000` |
+| `0110011` OP+M | `funct7 == 0000001` | `mul mulh mulhsu mulhu div divu rem remu` | `funct3` is the operation |
+| | `funct7 == 0000000` / `0100000` | `add sub sll slt sltu xor srl sra or and` | `sub` and `sra` need `0100000` |
+| `1100011` BRANCH | 000 001 100 101 110 111 | `beq bne blt bge bltu bgeu` | 010, 011 reserved |
+| `1100111` JALR | 000 | `jalr` | every other `funct3` reserved |
+| `1101111` JAL | any | `jal` | `funct3` is not part of the encoding |
+| `1110011` SYSTEM | 000 | `ecall` (imm12 `000`), `ebreak` (`001`), `mret` (`302`) | `rd == rs1 == x0` required; every other imm12 reserved |
+| | 001 010 011 | `csrrw csrrs csrrc` | — |
+| | 101 110 111 | `csrrwi csrrsi csrrci` | `funct3` 100 reserved |
+
+Two entries in that table are worth calling out because getting them wrong is
+invisible until something breaks:
+
+**`lbu` and `lhu` are decoded.** They are RV64I, not reserved. A decoder that
+treats `funct3` 100/101 on LOAD as reserved is silently dropping two legal
+instructions; the case asserts both by name.
+
+**The shift-immediate selector is six bits, not seven.** On RV64 the 64-bit
+shift-immediates carry a **6-bit** `shamt` in `insn[25:20]`, so they are selected
+by `insn[31:26]`, not by the 7-bit `funct7` field. The `*W` shift-immediates
+carry a 5-bit `shamt` in `insn[24:20]` and really are selected by `insn[31:25]`.
+Reading `funct7` for the 64-bit forms rejects every `shamt` whose `insn[31:26]` is
+not zero — that is, `shamt` 32 through 63, all of which are legal. The case
+sweeps all 64 values of `insn[31:26]` against all 8 `funct3`, and has a named
+check for `slli` by 63.
+
+### Immediate formats
+
+Taken from the volume I instruction-format diagrams, then cross-checked against
+the assembler (see *Third check: the assembler*):
+
+| Format | Immediate | Sign-extended to |
+| --- | --- | --- |
+| I-type | `imm[11:0] = insn[31:20]` — **one field**; `insn[11:7]` is `rd` | 12 → 64 |
+| S-type | `imm[11:5] = insn[31:25]`, `imm[4:0] = insn[11:7]` | 12 → 64 |
+| B-type | `imm[12] = insn[31]`, `imm[11] = insn[7]`, `imm[10:5] = insn[30:25]`, `imm[4:1] = insn[11:8]`, `imm[0] = 0` | 13 → 64 |
+| U-type | `imm[31:12] = insn[31:12]`, `imm[11:0] = 0` | 32 → 64 |
+| J-type | `imm[20] = insn[31]`, `imm[10:1] = insn[30:21]`, `imm[11] = insn[20]`, `imm[19:12] = insn[19:12]`, `imm[0] = 0` | 21 → 64 |
+
+The I-type line is the one that is easy to get wrong, because the manual's
+instruction-format *diagram* draws the immediate as `inst[31:25] inst[11:7]` for
+both I and S — the same two bit ranges under two names. In an I-type instruction
+`insn[11:7]` is `rd`. Using the S layout for a load or a `jalr` corrupts every
+address and every jalr offset whose low five bits are non-zero. The reference
+decoder and the RTL each assembled it their own way, and the case compares them
+field by field, so this could not have survived.
+
+## Reserved encodings, and why each is reserved
+
+The named enumeration the card asks for. Every row below is asserted by name in
+`Reserved()`, and each assertion checks *both* that `illegal` is set and that
+every other field is at the defined illegal state — a reserved encoding that
+half-decodes is as much a bug as one that decodes wrongly.
+
+| Reserved encoding | Count swept | Why it is reserved |
+| --- | --- | --- |
+| LOAD `funct3` 110, 111 | 2 | RV64I defines no load wider than `ld`; 32-bit load/store assume RV32 |
+| MISC-MEM `funct3` 010–111 | 6 | only `fence` (000) and `fence.i` (001) exist in the base |
+| OP-IMM `slli` with `insn[31:26] != 0` | 63 | RV64 reserves the whole `insn[31:26]` field: a nonzero value is not a shift amount, it is an unallocated extension slot |
+| OP-IMM `funct3` 101, selector not `000000`/`010000` | 62 | the selector chooses `srli` vs `srai`; any other value names no shift |
+| STORE `funct3` 100–111 | 4 | RV64I defines no store width beyond `sd` |
+| OP `funct7` outside `{0000000, 0100000, 0000001}` × all 8 `funct3` | 750 | `funct7` selects the operation; `0000000` and `0100000` are fully allocated across the eight `funct3`, and `0000001` is the M extension |
+| OP-IMM-32 `funct3` outside `{000, 001, 101}` | 5 | only `addiw`, `slliw` and `srliw`/`sraiw` exist |
+| OP-IMM-32 shift `funct7` outside `{0000000, 0100000}` | 250 | same argument as the OP `funct7` |
+| BRANCH `funct3` 010, 011 | 2 | the branch `funct3` space is `000 001 100 101 110 111`; 010/011 are the ALU's `slt`/`sltu` encodings, which name no condition. **`funct3` 100 is `blt`, not a reserved value** — the ALU mapping is not the branch mapping |
+| JALR `funct3` 001–111 | 7 | `jalr` has exactly one `funct3` |
+| RV32-only `addw subw sllw srlw sraw` (opcode `0111011`) | 5 named, plus all 1024 encodings of that opcode | these are RV32-only; on RV64 they are reserved and must raise an illegal instruction |
+| SYSTEM `funct3` 100 | 1 | there is no fourth CSR form and no form with neither a register nor an immediate |
+| SYSTEM `funct3` 000, imm12 ∉ {`000`,`001`,`302`} | 11 sampled | the other nine system instructions in that slot (`uret`, `sret`, `wfi`, `sfence.vma`, `hfence`, `sb`, …) are not part of this profile's M-mode set |
+| SYSTEM `funct3` 000 with `rd != x0` or `rs1 != x0` | 6 | `rd` and `rs1` are not part of the `ecall`/`ebreak`/`mret` encoding; a nonzero value there is a reserved encoding, not "ecall with a don't-care destination" |
+| Every opcode outside the twelve above | 116 × 8 | the custom-0/custom-1 spaces, the A extension, `OP-32`, the F/D/Q opcodes, the float `OP-32` space, the other privileged instructions, and everything unassigned. A 16-bit compressed instruction arrives with `insn[1:0] != 11` and lands on one of these, which is why I-041 decompresses *before* here rather than after |
+
+**Total named reserved checks in the case: 1428.**
+
+### The two RV32-only rules, stated separately
+
+The card calls out the RV32 word forms explicitly, so, to be unambiguous: on
+RV64, `addw`, `subw`, `sllw`, `srlw` and `sraw` — opcode `0111011` — are
+**illegal**. All 1024 encodings of that opcode are swept, not just the five named
+ones, and `reserved_opcodes_` is asserted to be exactly 116, which fails if a
+future edit adds a thirteenth legal opcode without updating the enumeration.
+
+## The testbench
+
+`CASE=decode.rv64im_reserved` → `python3 tools/run_unit.py --case decode.rv64im_reserved`.
+
+The DUT is combinational, so the wrapper has no clock and no reset and the driver
+settles each vector with a single `eval()`. `--max-cycles` therefore bounds
+instruction words presented, not clock cycles.
+
+### Why the wrapper has no clock, and why it exposes 38 ports
+
+The decoder has no state, so a clock would have nothing to advance; adding one
+would only create unused-signal warnings and suggest a false sequentiality.
+Instead the struct is broken out into **one named port per field**, so the driver
+compares field by field and can name the field that mismatched.
+
+That break-out is 37 assignments, and a typo in any of them would either hide a
+decoder bug or invent one. So the wrapper also exports the struct unchanged as
+`o_ctl_bits`, and the driver re-packs the 37 observed fields in the declaration
+order of `decode_ctl_t` and compares the two. That check is not decoration: it
+caught two real bugs during development — a bit-order error in the driver's
+own packing (MSB-first vs LSB-first), and a five-word-vs-three-word
+misunderstanding of how Verilator widens a 133-bit port. Both would have been
+attributed to the decoder.
+
+### The reference decoder, and why it is independent
+
+`DecodeRef()` is written from the ISA manual's instruction-format diagrams, with
+its own immediate assemblers (`ImmI`/`ImmS`/`ImmB`/`ImmU`/`ImmJ`), its own
+encoders for building test vectors (`EncI`/`EncS`/`EncB`/`EncU`/`EncJ`/`EncR`/
+`EncShiftX`/`EncShiftW`/`EncCsr`), and its own legality predicates. It shares no
+expression and no control structure with the RTL. Where they disagree, the case
+stops at the first difference and reports the instruction word, the field name
+and both values.
+
+Two design points in the reference are worth naming because they were the source
+of its own bugs:
+
+* `DecodeFields()` returns a `Decoded{Ref ctl; bool legal;}` pair, and `DecodeRef()`
+  turns that into `valid`/`illegal`. Splitting it this way means **no arm inside
+  the switch can forget to set `valid`** — which is exactly the mistake the first
+  version made, and it made every instruction in the case look illegal.
+* `Illegal()` restates `CTL_ILLEGAL` from the package rather than borrowing the
+  RTL's constant, including `alu_op = ALU_PASSB` — the package's defined "no ALU
+  operation" encoding, which is *not* zero.
+
+### Third check: the assembler
+
+Neither the RTL nor the reference was trusted on the immediate formats alone. A
+third implementation — a Python script that decodes `objdump -M no-aliases`
+output and re-renders the instruction text — was compared against
+`riscv64-elf-gcc`/`objdump` over 92 assembled instructions covering every
+immediate format, every shift boundary, every memory width and every CSR form:
+
+```
+$ cd build/p0/scratch
+$ riscv64-elf-gcc -march=rv64im_zicsr_zifencei -mabi=lp64 -c isa_check.s -o isa_check.o
+$ riscv64-elf-objdump -d -M no-aliases isa_check.o > isa_check.dis
+$ python3 isa_crosscheck.py
+cross-checked 92 instructions against objdump, 0 mismatches
+```
+
+Representative lines from that disassembly, the ones that pin the formats down:
+
+```
+  3c:	8000bf83          	ld	t6,-2048(ra)
+  40:	fff1c103          	lbu	sp,-1(gp)
+  44:	7ff2d203          	lhu	tp,2047(t0)
+  48:	80038367          	jalr	t1,-2048(t2) # ffffffff7ffff800
+  54:	00069613          	slli	a2,a3,0x0
+  58:	03f79713          	slli	a4,a5,0x3f          <- shamt 63, insn[31:26] == 0
+  68:	43fbdb13          	srai	s6,s7,0x3f
+  6c:	000c9c1b          	slliw	s8,s9,0x0
+  74:	01fede1b          	srliw	t3,t4,0x1f
+  78:	405fdf1b          	sraiw	t5,t6,0x5
+  9c:	7e208f63          	beq	ra,sp,89a
+  a0:	804180e3          	beq	gp,tp,fffffffffffff8a0
+  e4:	80000d6f          	jal	s10,fffffffffff000e4
+  f8:	029423b3          	mulhsu	t2,s0,s1
+ 160:	34002573          	csrrs	a0,mscratch,zero
+ 164:	0ff0000f          	fence	iorw,iorw
+```
+
+The Python cross-checker earned its place three times before the RTL existed. It
+found: the I-type immediate assembled with the S-type layout (`insn[31:20]` vs
+`insn[31:25]||insn[11:7]`); the 64-bit shift-immediate selector read as a 7-bit
+`funct7` instead of a 6-bit `insn[31:26]`; and `blt` transcribed as `funct3` 010
+instead of 100. **All three were then found independently in the RTL by the case
+itself**, which is the point of having three sources.
+
+### Stimulus
+
+| Phase | Instructions | What it is |
+| --- | --- | --- |
+| directed | ~180 | the card's named cases, each with its own assertions |
+| reserved | 1428 named + 936 + 1024 | the enumeration above, each with a name |
+| sweep (a) | 8192 | all 128 opcodes × all 8 `funct3` × 8 `funct7` patterns |
+| sweep (b) | 3072 | all 128 `funct7` values × all 8 `funct3` on `0110011`, `0111011`, `0011011` |
+| sweep (c) | 512 | all 64 `insn[31:26]` values × all 8 `funct3` on OP-IMM |
+| sweep (d) | 11264 | every `rd` × `rs1` pair for 8 formats, every `rs1` × `rs2` pair for 6 |
+| sweep (e) | ~37 000 | every immediate bit, field by field, exhaustively |
+| random | 100 000 | `--seed`ed: half uniform 32-bit words, half biased onto the twelve legal opcodes |
+| **total applied** | **166 701** | 84 469 legal, 82 232 illegal, seed 1 |
+
+**Sweep (e) is the complete argument for immediates**, and it is worth spelling
+out because it is cheaper than a 2^32 campaign by five orders of magnitude. Each
+immediate is scrambled across the word, so sweeping *each field* across its full
+range while the others are held at a few patterns reaches every value of every
+bit of the immediate:
+
+* I-type: all 4096 values of `imm[11:0]`, twice — once through `addi`, once
+  through `ld`, so a decoder that only got it right for ALU forms is caught.
+* S-type: all 128 values of `imm[11:5]` × 8 patterns, then all 32 values of
+  `imm[4:0]` × 8 patterns. Split in two because that is exactly where the I/S
+  confusion lives.
+* B-type: **all 8192** immediate patterns, for `funct3` 000 and 110.
+* J-type: all 1024 values of `imm[10:1]`, all 256 of `imm[19:12]`, and `imm[20]`
+  separately — the three scrambled fields plus the sign, each swept on its own.
+* U-type: all 4096 values of `imm[31:12]`, then all 256 values of `imm[31:24]`
+  to reach the sign bit independently.
+
+### Invariants asserted
+
+Named checks against the RTL, written without reference to the model, so a shared
+mistake in `DecodeRef` cannot make model and DUT agree for the wrong reason. The
+card's required cases are marked ★.
+
+**Immediate formats**
+
+```
+★ S-type offset -16                     S-type has no rd: insn[11:7] is immediate, not rd
+sd offset -2048                          sw offset +2047 (needs imm[11:5] all ones)
+★ beq offset -4096 (max back)           bgeu offset +4094 (max forward)
+blt offset -2: branch funct3 100         ★ jal offset -1048576 (most negative legal)
+jal offset +1048574 (max forward)        jal offset -2: imm[20] and the sign bit set together
+lui imm, low 12 bits zero and imm[31] sign-extended
+auipc sign-extends imm[31]               auipc with imm[31:12] all ones
+lui passes the U-type immediate through the ALU
+lui/auipc insn[19:15] and insn[24:20] are immediate, not registers
+```
+
+**Shifts**
+
+```
+★ slli by 0                              ★ slli by 63: insn[31:26] zero, 6-bit shamt
+★ slli by 64 is reserved on RV64         ★ srai by 63: funct3 101 with insn[31:26] = 010000
+srli by 31: funct3 101, top6 zero        srai by 0 is not the same as srli by 0 in op
+slliw by 31: 5-bit shamt in insn[24:20]  sraiw by 31
+srliw with funct7 0000001 is reserved
+```
+
+**ALU selection — every legal operation asserted by number**
+
+```
+add sub sll slt sltu xor srl sra or and addi slti sltiu xori ori andi addiw
+```
+
+so a renumbering of `mosaic_pkg::alu_op_e` fails the case instead of silently
+agreeing with a renumbered decoder. The `alu_op_e` values are transcribed by hand
+into `tb_decoder.cpp` (C++ cannot import a SystemVerilog package), and this is the
+decoder-side check of that transcription; `tb_alu.cpp` holds the other copy. The
+two must agree, and the RV32 `ALU_SUBW`/`ALU_SLLW`/`ALU_SRLW`/`ALU_SRAW`
+encodings are checked from the ALU side only, because no RV64 instruction reaches
+them through the decoder — which is the point.
+
+**Memory**
+
+```
+lb lh lw ld lbu lhu sb sh sw sd: width, signedness, and rs1 + imm in the ALU
+```
+
+**M extension**
+
+```
+mul mulh mulhsu mulhu div divu rem remu: md_op, md_signed, and rd write
+```
+
+**CSR x0 rules — the two rules a decoder most often gets wrong, because both look
+like they belong to the CSR unit**
+
+```
+csrrw always writes the CSR                csrrw with rd == x0 does not read the CSR
+csrrw with rd != x0 reads and writes       csrrs with rs1 == x0 does not write the CSR
+csrrs always reads the CSR                 csrrs with rs1 != x0 writes the CSR
+csrrc with rs1 == x0 does not write        csrrwi with rd == x0 does not read the CSR
+csrrwi always writes the CSR, whatever the zimm
+csrrsi with zimm != 0 writes and reads     csr_op and csr_addr for all six forms
+```
+
+**Control transfer and x0 discipline**
+
+```
+★ jalr immediate 3 survives: the core clears the target
+jalr links, uses rs1 + imm, does not use the ALU datapath
+branch writes no register, does not use the ALU datapath
+jal with rd == x0 performs no register write; with rd == x31 it writes the link
+9 instructions with rd == x0 all report reg_write == 0
+decode_ctl_t is 133 bits wide and every one is accounted for
+the 37 named ports carry exactly the bits of the struct
+```
+
+**Coverage assertions**, so a stimulus edit that stops reaching something fails
+the case instead of quietly passing over a shorter path:
+
+* every one of the 128 opcodes was presented;
+* every one of the 1024 (opcode, `funct3`) pairs was presented;
+* the legal side was exercised at least 10 000 times and the illegal side at
+  least 10 000 times;
+* the 116 non-RV64IM opcodes were all enumerated and all decoded as illegal;
+* 1428 named reserved checks ran;
+* every presented instruction was legal or illegal, never both;
+* the run stayed within `--max-cycles`.
+
+## Negative controls
+
+Seven deliberate defects, each behind a `-D` that is **off in the shipping build**,
+each confined to an `` `ifdef `` block in `rtl/core/mosaic_decoder.sv`. The
+wrapper and the C++ driver are identical in all eight builds; only the `-D`
+changes. All seven are detected, each with exit 1.
+
+| Mutant | Injected defect | First mismatch reported | Exit |
+| --- | --- | --- | --- |
+| `MOSAIC_DECODER_MUTANT_SRAI_FUNCT3` | `srai` accepted with `funct3` 000 | `0x40730293.imm`: expected `0x0000000000000407`, got `0x0000000000000007` | 1 |
+| `MOSAIC_DECODER_MUTANT_S_IMM_AS_I` | S-type immediate built with the I-type layout | `0xfe530823.imm`: expected `0xfffffffffffffff0`, got `0xffffffffffffffe5` | 1 |
+| `MOSAIC_DECODER_MUTANT_RV32_WORD_LEGAL` | RV32-only `addw`/`subw`/… decode as legal | `0x003100bb.valid`: expected `0x0000000000000000`, got `0x0000000000000001` | 1 |
+| `MOSAIC_DECODER_MUTANT_RESERVED_F3_LEGAL` | reserved LOAD `funct3` 111 accepted as a load | `0x00017083.valid`: expected `0x0000000000000000`, got `0x0000000000000001` | 1 |
+| `MOSAIC_DECODER_MUTANT_SHIFT_UPPER_IGNORED` | `slli` ignores `insn[31:26]`, so shift-by-64 is legal | `0x04031293.valid`: expected `0x0000000000000000`, got `0x0000000000000001` | 1 |
+| `MOSAIC_DECODER_MUTANT_B_IMM_SWAPPED` | B immediate's `[10:5]` and `[4:1]` halves exchanged | `0x007302e3.imm`: expected `0x0000000000000804`, got `0x0000000000000900` | 1 |
+| `MOSAIC_DECODER_MUTANT_CSR_INTENT` | CSR read/write intent ignores the x0 rules | `0x30001073.csr_reads`: expected `0x0000000000000000`, got `0x0000000000000001` | 1 |
+
+The first two rows are the card's suggested mutants and the last four were added
+because the first two are caught in the *first* instruction of the campaign, which
+means they prove the comparison works but not that the later phases do. With all
+seven, the earliest a defect is detected ranges from instruction 1 to instruction
+9798, so the reserved enumeration, the `funct7` sweep, the register sweep and the
+B-immediate sweep are each independently shown to have teeth.
+
+`MOSAIC_DECODER_MUTANT_SRAI_FUNCT3` is worth a note: the first implementation of it
+put the defect *inside* the `funct3 == 101` arm, where it was unreachable — the
+condition it weakened (`funct3 == F3_SRL_SRA`) was already true. The `-D`
+compiled, the run was bit-identical to the shipping build, and **the case passed**.
+That is the same failure mode as `MOSAIC_ALU_MUTANT_4` in Part I, and it is why the
+defect was moved out to the `funct3 == 000` arm where it changes the decode of a
+real instruction. A negative control that is never exercised proves nothing.
+
+## Evidence
+
+### Lint
+
+The project linter, which elaborates each source on its own with the packages it
+imports:
+
+```
+$ python3 tools/lint_rtl.py | tail -3
+ok   rtl/core/mosaic_bringup_core.sv: clean as mosaic_bringup_core
+ok   rtl/core/mosaic_decoder.sv: clean as mosaic_decoder
+lint: 9 source file(s) clean
+```
+
+and the decoder plus its wrapper under the plain `-Wall` the Makefile uses, with
+no warning suppressions at all — in **both** file orders, since the package is
+named in the command line:
+
+```
+$ verilator --lint-only -Wall -Wno-DECLFILENAME --top-module mosaic_decoder_tb \
+    -Irtl/core rtl/core/mosaic_pkg.sv rtl/core/mosaic_decoder.sv \
+    sim/tb/mosaic_decoder_tb.sv; echo $?
+- V e r i l a t i o n   R e p o r t: Verilator 5.052 2026-09-05 rev vUNKNOWN-built20260905
+- Verilator: Built from 0.113 MB sources in 4 modules, into 0.070 MB in 3 C++ files needing 0.000 MB
+0
+```
+
+Zero warnings and zero errors from the three files this package owns.
+
+**A scoping error that was not an error, and the import form that survives.** An
+earlier iteration of this file put `import mosaic_pkg::*;` at `$unit` (file)
+scope, above the module. `tools/lint_rtl.py` at that time appended the package
+*after* the module on the Verilator command line, and Verilator — which processes
+files in order — reported
+
+```
+%Error: rtl/core/mosaic_decoder.sv:220:14: Reference to 'decode_ctl_t' before
+declaration (IEEE 1800-2023 6.18)
+```
+
+which reads exactly like a real scoping mistake in the module. It was a
+file-ordering bug in the linter. The two import forms were then measured directly
+against Verilator 5.052, with the package listed first, and the result is:
+
+```
+in-body import, qualified port            -> 0 warnings, 0 errors
+file-scope (IMPORTSTAR)                   -> %Warning-IMPORTSTAR: 'import::*' in $unit scope
+```
+
+The file-scope form is therefore wrong on its own terms regardless of the linter
+bug: `-Wall` promotes `IMPORTSTAR` to an error, and it is not even needed here,
+because the port is written `mosaic_pkg::decode_ctl_t`. The shipped file uses an
+in-body `import` and fully qualifies the two package *type* references
+(`mosaic_pkg::decode_ctl_t` on the port and on `CTL_ILLEGAL`,
+`mosaic_pkg::md_op_e` on the enum cast), which resolves regardless of file order.
+
+The general lesson is worth recording next to the evidence: **a diagnostic that
+names a specific standard-mandated construct and points at a plausible line is very
+persuasive and can be completely fictional.** "Reference before declaration" is
+exactly the shape an ordering bug imitates. It is the same class of defect as the
+`mosaic_bringup_core.sv` and `mosaic_alu.sv` import questions, and it is the reason
+no import form in this package was changed on the strength of a message about
+scoping — all of them were re-measured against the tool instead.
+
+### The case, seed 1
+
+```
+$ python3 tools/run_unit.py --case decode.rv64im_reserved; echo $?
+PASS decode.rv64im_reserved       task=I-010
+0
+
+$ cat results/unit/decode.rv64im_reserved/run.log
+$ /Users/flare/MosaicRV/build/p0/unit/decode.rv64im_reserved/decode.rv64im_reserved \
+    --case decode.rv64im_reserved --out /Users/flare/MosaicRV/results/unit/decode.rv64im_reserved \
+    --seed 1 --max-cycles 200000
+RESULT PASS decode.rv64im_reserved 166701 instructions (84469 legal, 82232 illegal), 0 mismatches, 1428 named reserved checks
+
+$ python3 -c "import json;d=json.load(open('results/unit/decode.rv64im_reserved/result.json'));print('checks',d['checks'],'failures',d['failures'],'seed',d['seed'])"
+169428 0 1
+```
+
+169 428 checks: 37 field comparisons plus one break-out comparison per presented
+instruction, the named directed and reserved checks, and 128 + 1024 + 7 coverage
+assertions.
+
+### Seed independence
+
+```
+$ for s in 2 7 4294967296; do build/p0/unit/decode.rv64im_reserved/decode.rv64im_reserved \
+    --case decode.rv64im_reserved --out /tmp/ds_$s --seed $s --max-cycles 200000; echo "exit=$?"; done
+RESULT PASS decode.rv64im_reserved 166701 instructions (84355 legal, 82346 illegal), 0 mismatches, 1428 named reserved checks
+exit=0
+RESULT PASS decode.rv64im_reserved 166701 instructions (84426 legal, 82275 illegal), 0 mismatches, 1428 named reserved checks
+exit=0
+RESULT PASS decode.rv64im_reserved 166701 instructions (84473 legal, 82228 illegal), 0 mismatches, 1428 named reserved checks
+exit=0
+```
+
+### C++ lint
+
+```
+$ incs="-Ibuild/p0/sim -Isim/common -I$(verilator -getenv VERILATOR_ROOT)/include"
+$ for d in build/p0/unit/*/obj_dir; do [ -d "$d" ] && incs="$incs -I$d"; done
+$ c++ -std=c++17 -fsyntax-only -Wall -Wextra -Wshadow $incs sim/unit/tb_decoder.cpp 2>&1 \
+    | grep -E 'tb_decoder\.cpp:[0-9]+:[0-9]+: (error|warning)'
+(no output)
+```
+
+Zero from `sim/unit/tb_decoder.cpp`. The 64 warnings still in the full output all
+come from Verilator's own runtime headers (55 in `verilated_funcs.h`, 9 in
+`verilated_types.h`), which the Makefile already documents as not being held to
+that standard.
+
+### Mutation runs
+
+Each mutant was built with the runner's own flags plus its `-D`, into its own
+build directory. `tools/run_unit.py` does not expose a `-D` flag, so the Verilator
+command below is the runner's, reproduced verbatim with the define and the paths
+made absolute (Verilator's generated `make` runs in `-Mdir`, so relative
+`-CFLAGS -I` paths do not resolve):
+
+```sh
+R=$(pwd)
+verilator --cc --exe --build -j 0 -O2 -CFLAGS "-O2 -std=c++17 -Wall" \
+  --x-assign unique --x-initial unique --top-module mosaic_decoder_tb \
+  -Mdir $R/build/p0/unit/mutants/$M/obj_dir \
+  -I$R/build/p0/sim -I$R/rtl/core -I$R/rtl/common \
+  -CFLAGS -I$R/sim/common -CFLAGS -I$R/build/p0/sim \
+  -D$M -o $R/build/p0/unit/mutants/$M/decode.rv64im_reserved \
+  $R/sim/tb/mosaic_decoder_tb.sv $R/rtl/core/mosaic_decoder.sv \
+  $R/sim/unit/tb_decoder.cpp $R/sim/common/sim_common.cpp
+```
+
+Output, all seven, with the exit status of each run:
+
+```
+=== -DMOSAIC_DECODER_MUTANT_SRAI_FUNCT3 (exit 1) ===
+MISMATCH insn=0x40730293.imm: expected 0x0000000000000407, got 0x0000000000000007
+CHECK FAILED: decoder disagrees with the reference at insn=0x40730293
+RESULT FAIL decode.rv64im_reserved 4681 instructions compared, 2 failure(s)
+=== -DMOSAIC_DECODER_MUTANT_S_IMM_AS_I (exit 1) ===
+MISMATCH insn=0xfe530823.imm: expected 0xfffffffffffffff0, got 0xffffffffffffffe5
+CHECK FAILED: decoder disagrees with the reference at insn=0xfe530823
+RESULT FAIL decode.rv64im_reserved 1 instructions compared, 2 failure(s)
+=== -DMOSAIC_DECODER_MUTANT_RV32_WORD_LEGAL (exit 1) ===
+MISMATCH insn=0x003100bb.valid: expected 0x0000000000000000, got 0x0000000000000001
+RESULT FAIL decode.rv64im_reserved 1487 instructions compared, 2 failure(s)
+=== -DMOSAIC_DECODER_MUTANT_RESERVED_F3_LEGAL (exit 1) ===
+MISMATCH insn=0x00017083.valid: expected 0x0000000000000000, got 0x0000000000000001
+RESULT FAIL decode.rv64im_reserved 85 instructions compared, 2 failure(s)
+=== -DMOSAIC_DECODER_MUTANT_SHIFT_UPPER_IGNORED (exit 1) ===
+MISMATCH insn=0x04031293.valid: expected 0x0000000000000000, got 0x0000000000000001
+RESULT FAIL decode.rv64im_reserved 14 instructions compared, 2 failure(s)
+=== -DMOSAIC_DECODER_MUTANT_B_IMM_SWAPPED (exit 1) ===
+MISMATCH insn=0x007302e3.imm: expected 0x0000000000000804, got 0x0000000000000900
+RESULT FAIL decode.rv64im_reserved 9798 instructions compared, 2 failure(s)
+=== -DMOSAIC_DECODER_MUTANT_CSR_INTENT (exit 1) ===
+MISMATCH insn=0x30001073.csr_reads: expected 0x0000000000000000, got 0x0000000000000001
+RESULT FAIL decode.rv64im_reserved 62 instructions compared, 2 failure(s)
+```
+
+## Things that went wrong on the way, kept on the record
+
+**The reference decoder never set `valid`.** The first version returned a `Ref`
+whose `valid`/`illegal` pair was whatever `Illegal()` had left in it, so every
+instruction decoded "illegal" and the very first comparison failed. The run did
+its job — it stopped at instruction 1 and named the field — but the cause was in
+the *checker*, not the DUT, which is worth naming because it is the failure mode a
+model-based test is supposed to protect against and here it protected the DUT from
+the model instead. Fixed by splitting `DecodeFields()` (which cannot forget
+`valid`, because it returns a separate `legal` flag) from `DecodeRef()` (which
+sets the pair).
+
+**Three transcription errors survived the hand-decoding and were caught by the
+case**, all on the first full run and all in the same family — reading a format's
+field as another format's field with the same bit positions:
+
+* `blt` transcribed as `funct3` 010 (the ALU's `slt`) instead of 100, so the
+  branch arm rejected `blt` and accepted a value that names no condition. The
+  Python cross-checker had already found this one independently.
+* the M-extension signedness predicate written as "unsigned means all three
+  `funct3` bits set", which is 111 only and classifies `mulhu` (011) and `divu`
+  (101) as signed. Written out as an explicit exclusion of `011`/`101`/`111` now.
+* `fence` and `fence.i` decoded but with `legal` never set, so both reported
+  illegal. Caught by the very next directed instruction.
+
+**Three of my own named checks were wrong**, all caught immediately: a `lui`
+expectation written as `0xABCDE000` where the sign-extended answer is
+`0xFFFFFFFFABCDE000`; `csrrwi with zimm == 0` expected *not* to write, where
+`csrrwi` always writes; and a "jal with rd == x0 performs no register write"
+assertion attached to an instruction built with `rd = x31`. All three were
+expectation errors, not decoder errors, and all three were found because the check
+was written from the ISA manual rather than from the model's output.
+
+**A `tb_decoder.cpp` self-check caught two bugs in `tb_decoder.cpp`.** The
+break-out comparison first packed the 37 fields LSB-first, then assumed Verilator
+widened the 133-bit port into three 64-bit words rather than five 32-bit ones. Both
+produced a "MISMATCH … (testbench break-out vs decode_ctl_t)" that looked like a
+decoder defect and was not. This is the argument for keeping the self-check: an
+unchecked 37-line break-out is a place where a testbench bug masquerades as a DUT
+bug.
+
+**One mutant was inert on the first run**, as described under Negative controls.
+
+---
+
+# Scope, and what this section does not claim
+
+* **CSR *execution* is not here.** The decoder classifies `csr_op`, `csr_addr`,
+  `csr_writes`, `csr_reads` and `csr_imm_form`; I-019 implements the registers.
+  Writing a read-only CSR is an illegal instruction, but that is an address-decode
+  property and needs the project's CSR table, so it is left to the module that owns
+  the table rather than hardcoded here.
+* **`mret` is classified, not executed.** `is_mret` is driven; the trap unit (I-019)
+  acts on it.
+* **The M datapath is not here.** `is_muldiv`, `md_op` and `md_signed` are driven;
+  I-012 owns the multiplier and divider. The case tests the classification without
+  that unit, which is what makes it testable now.
+* **Compressed instructions are not here.** I-041 owns them; a 16-bit instruction
+  arrives with `insn[1:0] != 11` and lands on one of the 116 reserved opcodes.
+* **Alignment and trap generation are not here.** `fence` and `fence.i` are
+  classified; the memory system and the trap unit act on them.
+* **`lbu`/`lhu` are decoded** even though the card's instruction list omits them.
+  They are RV64I, not reserved, and a decoder that rejects them silently drops two
+  legal instructions. Flagging the omission rather than following it.
+* **`rtl/core/mosaic_pkg.sv` was not modified.**
+* `tests/unit/registry.json` was not modified by this package.

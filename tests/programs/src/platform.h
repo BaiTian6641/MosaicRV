@@ -57,7 +57,7 @@
 /* all NOLOAD output sections so they are provably present in the ELF  */
 /* program headers while consuming no file bytes.                     */
 /* ------------------------------------------------------------------ */
-#define MOSAIC_TRAPLOG_BASE       0x80001000UL
+#define MOSAIC_TRAPLOG_BASE       0x80002000UL
 #define MOSAIC_TRAPLOG_RECORDS    8
 #define MOSAIC_TRAPLOG_REC_WORDS  2              /* { mcause, mtval }        */
 #define MOSAIC_TRAPLOG_REC_BYTES  (MOSAIC_TRAPLOG_REC_WORDS * 8)

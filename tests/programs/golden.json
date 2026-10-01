@@ -322,7 +322,7 @@
       "program": "p08_misaligned",
       "sig": [
         "0x0000000000000000",
-        "0x0000000080000000",
+        "0xffffffff80000000",
         "0xffffffffffff8000",
         "0x000000101018181f"
       ],
@@ -342,7 +342,7 @@
       "program": "p08_misaligned",
       "sig": [
         "0x00000000000000ff",
-        "0x00000000ffffffff",
+        "0xffffffffffffffff",
         "0xffffffffffffffff",
         "0x000000101018181f"
       ],
