@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "case": "harness.reset_load_exit",
+  "verdict": "PASS",
+  "detail": "6 events, 14 cycles",
+  "seed": 1,
+  "max_cycles": 2000,
+  "checks": 12,
+  "failures": 0,
+  "image": "",
+  "expect": "",
+  "tool": "mosaic harness I-004",
+  "timestamp": "2026-10-01T00:05:27Z",
+  "first_mismatch": ""
+}

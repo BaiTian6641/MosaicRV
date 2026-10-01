@@ -1,0 +1,5 @@
+{
+  "schema_version": 1,
+  "comment": "Simulation suites. A suite is a named set of registered unit cases with a shared intent; docs/implementation-plan.md I-080 requires scalar-directed-v1, scalar-random-v1, metamorphic-v1 and fabric-transition-v1 at the p0 gate. Until those suites exist, tools/verify.py --all deliberately fails rather than reporting success for an empty set.",
+  "suites": {}
+}

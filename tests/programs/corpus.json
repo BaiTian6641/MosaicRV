@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "profile": "p0",
+  "isa": "rv64im_zicsr_zifencei",
+  "sources": {
+    "memory_map": "config/memory/p0.json",
+    "profile": "config/profiles/p0.json"
+  },
+  "protocol": {
+    "tohost": 1056768,
+    "fromhost": 1056776,
+    "signature": 2147484672,
+    "signature_words": 4,
+    "pass_code": 1,
+    "traplog": 2147484736,
+    "traplog_records": 8,
+    "traplog_record_words": 2,
+    "input": 2147484864,
+    "input_words": 4,
+    "scratch": 2147484928,
+    "scratch_bytes": 128
+  },
+  "input_names": ["a", "b", "c"],
+  "programs": [
+    {
+      "name": "p01_addsub",
+      "title": "add / sub / shift / logic, sign-extension and overflow edges",
+      "oracle": "p01_addsub",
+      "covers": ["ADDI", "ADD", "SUB", "ANDI", "SRA", "SLTU", "SLLI", "SRLI", "XORI"],
+      "inputs": [
+        {"a": "0x0123456789abcdef", "b": "0xfedcba9876543210", "c": 13,
+         "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
+         "expect_traps": []},
+        {"a": "0x7fffffffffffffff", "b": "0x0000000000000001", "c": 1,
+         "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
+         "expect_traps": []},
+        {"a": "0x8000000000000000", "b": "0xffffffffffffffff", "c": 63,
+         "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
+         "expect_traps": []}
+      ]
+    }
+  ]
+}

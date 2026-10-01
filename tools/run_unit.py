@@ -29,6 +29,11 @@ REPO_ROOT = config_check.REPO_ROOT
 REGISTRY = os.path.join(REPO_ROOT, "tests", "unit", "registry.json")
 SIM_COMMON = os.path.join(REPO_ROOT, "sim", "common")
 
+# Support code every testbench needs. It is added by the runner rather than
+# listed per case, so a new case cannot forget it and end up with a link error,
+# and cannot list it twice and end up with duplicate symbols.
+SHARED_CPP = ["sim/common/sim_common.cpp"]
+
 VERILATOR_FLAGS = [
     "--cc",
     "--exe",
@@ -36,8 +41,12 @@ VERILATOR_FLAGS = [
     "-j",
     "0",
     "-O2",
+    # Only -Wall reaches the simulator build: Verilator's own runtime headers are
+    # compiled with the same flags and are not warning-clean under -Wextra. Our
+    # sources are held to the stricter standard by the `lint-cpp` make target,
+    # which compiles them on their own without the generated runtime.
     "-CFLAGS",
-    "-O2 -std=c++17 -Wall -Wextra",
+    "-O2 -std=c++17 -Wall",
     "--x-assign",
     "unique",
     "--x-initial",
@@ -60,14 +69,18 @@ def build_case(profile: str, case_id: str, entry: dict) -> str:
     binary = os.path.join(build_dir, case_id)
     os.makedirs(build_dir, exist_ok=True)
 
-    sources = [os.path.join(REPO_ROOT, p) for p in entry["sv"] + entry["rtl"] + entry["cpp"]]
+    sources = [os.path.join(REPO_ROOT, p)
+               for p in (entry.get("sv", []) + entry.get("rtl", [])
+                         + entry.get("cpp", []) + SHARED_CPP)]
     missing = [p for p in sources if not os.path.exists(p)]
     if missing:
         raise RuntimeError("case %s lists missing sources: %s" % (case_id, ", ".join(missing)))
 
     cmd = ["verilator"] + VERILATOR_FLAGS
     cmd += ["--top-module", entry["top"], "-Mdir", os.path.join(build_dir, "obj_dir")]
+    cmd += ["-I%s" % os.path.join(REPO_ROOT, "build", profile, "sim")]
     cmd += ["-CFLAGS", "-I%s" % SIM_COMMON]
+    cmd += ["-CFLAGS", "-I%s" % os.path.join(REPO_ROOT, "build", profile, "sim")]
     cmd += ["-o", binary]
     cmd += sources
 

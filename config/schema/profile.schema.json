@@ -16,7 +16,8 @@
     "csr_files",
     "memory_map_file",
     "geometry_file",
-    "reset"
+    "reset",
+    "test_protocol"
   ],
   "properties": {
     "schema_version": { "type": "integer", "const": 1 },
@@ -66,6 +67,19 @@
     },
     "memory_map_file": { "type": "string", "pattern": "^memory/.+\\.json$" },
     "geometry_file": { "type": "string", "pattern": "^geometry/.+\\.json$" },
+    "test_protocol": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tohost", "fromhost", "signature", "pass_code", "signature_words"],
+      "description": "The platform test protocol shared by firmware, DUT and harness. Frozen here so the three cannot drift apart.",
+      "properties": {
+        "tohost": { "type": "integer", "minimum": 0, "maximum": 281474976710655 },
+        "fromhost": { "type": "integer", "minimum": 0, "maximum": 281474976710655 },
+        "signature": { "type": "integer", "minimum": 0, "maximum": 281474976710655 },
+        "pass_code": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+        "signature_words": { "type": "integer", "minimum": 1, "maximum": 1024 }
+      }
+    },
     "reset": {
       "type": "object",
       "additionalProperties": false,

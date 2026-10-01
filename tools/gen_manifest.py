@@ -249,6 +249,49 @@ def render_sv_id_package(bundle: config_check.Bundle) -> str:
     return "\n".join(lines)
 
 
+def render_platform_header(bundle: config_check.Bundle) -> str:
+    """Emit the C-visible platform contract for the simulation harness.
+
+    The memory map and the test protocol reach the harness as generated constants
+    rather than as a JSON file parsed at run time, so the harness, the firmware
+    and the RTL cannot disagree about where TOHOST lives.
+    """
+    protocol = bundle.profile["test_protocol"]
+    lines = []
+    add = lines.append
+    add("// GENERATED FILE - do not edit.")
+    add("// Produced by tools/gen_manifest.py --profile %s." % bundle.name)
+    add("// The memory map and test protocol come from the frozen profile configuration.")
+    add("#ifndef MOSAIC_PLATFORM_H_")
+    add("#define MOSAIC_PLATFORM_H_")
+    add("")
+    add("#include <stdint.h>")
+    add("")
+    add("#define MOSAIC_PROFILE_NAME \"%s\"" % bundle.name)
+    add("#define MOSAIC_RESET_VECTOR UINT64_C(0x%x)" % bundle.profile["reset"]["reset_vector"])
+    add("")
+    add("// ---- physical memory map ----")
+    for region in sorted(bundle.memory["regions"], key=lambda r: r["base"]):
+        upper = "MOSAIC_%s_BASE" % region["name"].upper()
+        add("#define %-34s UINT64_C(0x%016x)" % (upper, region["base"]))
+        add("#define MOSAIC_%-30s UINT64_C(0x%016x)" % (region["name"].upper() + "_SIZE", region["size"]))
+        add("#define MOSAIC_%-30s %d" % (region["name"].upper() + "_CACHEABLE",
+                                        1 if region["cacheable"] else 0))
+        add("#define MOSAIC_%-30s %d" % (region["name"].upper() + "_ATOMIC_GRANULE",
+                                        region["atomic_granule"]))
+    add("")
+    add("// ---- test protocol (must match tests/programs and rtl/soc) ----")
+    add("#define MOSAIC_TOHOST          UINT64_C(0x%x)" % protocol["tohost"])
+    add("#define MOSAIC_FROMHOST        UINT64_C(0x%x)" % protocol["fromhost"])
+    add("#define MOSAIC_SIGNATURE_ADDR  UINT64_C(0x%x)" % protocol["signature"])
+    add("#define MOSAIC_SIGNATURE_WORDS %d" % protocol["signature_words"])
+    add("#define MOSAIC_TEST_PASS_CODE  UINT32_C(%d)" % protocol["pass_code"])
+    add("")
+    add("#endif  // MOSAIC_PLATFORM_H_")
+    add("")
+    return "\n".join(lines)
+
+
 def _collect_filelist() -> list:
     sources = []
     for rel, _label in FILELIST_GROUPS:
@@ -329,6 +372,11 @@ def main() -> int:
     id_path = os.path.join(rtl_out, "mosaic_id_pkg.svh")
     with open(id_path, "w") as handle:
         handle.write(render_sv_id_package(bundle))
+
+    sim_out = os.path.join(out_dir, "sim")
+    os.makedirs(sim_out, exist_ok=True)
+    with open(os.path.join(sim_out, "mosaic_platform.h"), "w") as handle:
+        handle.write(render_platform_header(bundle))
 
     sources = _collect_filelist()
     list_path = os.path.join(rtl_out, "filelist.f")

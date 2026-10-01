@@ -1,0 +1,137 @@
+{
+  "advertised_capabilities": [],
+  "claimed_capabilities": [
+    "I",
+    "M",
+    "Zicsr",
+    "Zifencei",
+    "Zicntr",
+    "Zihpm"
+  ],
+  "csr_count": 21,
+  "geometry": {
+    "fabric": {
+      "alu_per_cluster": 1,
+      "clusters": 2,
+      "iq_entries_per_cluster": 8,
+      "mul_div_units": 1,
+      "remote_link_latency": 4,
+      "result_fifo_per_cluster": 2
+    },
+    "frontend": {
+      "bpu_entries": 512,
+      "btb_entries": 64,
+      "fetch_outstanding": 4,
+      "ras_entries": 16,
+      "target_quantum": 32
+    },
+    "int_prf": {
+      "banks": 4,
+      "entries": 96,
+      "ports_per_bank": 1
+    },
+    "lsu": {
+      "lq_entries": 8,
+      "sq_entries": 8,
+      "units": 1
+    },
+    "profile": "p0",
+    "rename": {
+      "dispatch_width": 2,
+      "rename_width": 2
+    },
+    "rob": {
+      "entries": 64,
+      "max_uops_per_macro": 8
+    },
+    "schema_version": 1,
+    "source": "docs/implementation-plan.md#1.2 initial geometry: 2-wide rename/dispatch, 64 ROB entries, 96 integer physical registers, 4 PRF banks, 2x8 local IQ entries, one integer ALU per cluster, one shared iterative MUL/DIV, one LSU, LQ=8/SQ=8, two-entry result FIFO per cluster, 2-wide maximum retire"
+  },
+  "harts": 1,
+  "input_hashes": {
+    "config/capability_ladder.json": "45ef1cd37ee0e7eb1ac5b6f3763afa3e97a10dc084cf5a0eeef28c2e3ef4dc15",
+    "config/csr/mode_m.json": "8931dc42e34c6ef1f14eba5dbbf3e8b5340fc44cba92b463731a65c92b5685d8",
+    "config/geometry/p0.json": "8e93b6ad75ab8334d08d3782c5d22b7e53edca71a61de0b961414e138be9449d",
+    "config/memory/p0.json": "6b6acac5e4851f0078d732ee1509d9427f39a245f5a485b72fc8213e62d5b57a",
+    "config/profiles/p0.json": "7fb1b471a3bd719d882833cb1ca647afcd5910bf02de1cfc05c8a555f9c266cf",
+    "config/schema/csr.schema.json": "c885af9d3efdd9c316baf90b3e4a72d585d22346928d1719afc464d20f59a6fd",
+    "config/schema/geometry.schema.json": "b0b88031d0ef0c9cd2b2f8c87d75bde83f6666df363495e14dee5532d2f29da7",
+    "config/schema/memory_map.schema.json": "3bfbd35ac65e3a2fa7a62c649ca25f635fca0fcb94c04dfacee5af953c569800",
+    "config/schema/profile.schema.json": "e52b49f64ed34abdd7c759f3c9fa6909c54b7f398beecb8da2486d037d0f2cfb",
+    "config/status/implementation_status.json": "0786c7884e026511fd86e4a6fbff4fc2d7b9263c62b5c0a54ae0cfad82ae29f1"
+  },
+  "isa_string": "rv64",
+  "isa_string_claimed": "rv64im_zicntr_zicsr_zifencei_zihpm",
+  "memory_map": [
+    {
+      "atomic_granule": 4,
+      "base": 0,
+      "cacheable": false,
+      "kind": "rom",
+      "name": "boot_rom",
+      "size": 4096
+    },
+    {
+      "atomic_granule": 4,
+      "base": 1048576,
+      "cacheable": false,
+      "kind": "mmio",
+      "name": "uart",
+      "size": 256
+    },
+    {
+      "atomic_granule": 4,
+      "base": 1056768,
+      "cacheable": false,
+      "kind": "mmio",
+      "name": "test_harness",
+      "size": 16
+    },
+    {
+      "atomic_granule": 4,
+      "base": 33554432,
+      "cacheable": false,
+      "kind": "mmio",
+      "name": "clint",
+      "size": 4096
+    },
+    {
+      "atomic_granule": 8,
+      "base": 2147483648,
+      "cacheable": false,
+      "kind": "ram",
+      "name": "ram",
+      "size": 2097152
+    }
+  ],
+  "misa_reset": 9223372036854775808,
+  "misalignment": {
+    "atomic": "trap",
+    "instruction_fetch": "trap",
+    "load": "trap",
+    "store": "trap"
+  },
+  "not_yet_implemented": [
+    "I",
+    "M",
+    "Zicsr",
+    "Zifencei",
+    "Zicntr",
+    "Zihpm"
+  ],
+  "privilege_modes": [
+    "M"
+  ],
+  "profile": "p0",
+  "reset_vector": 2147483648,
+  "schema_version": 1,
+  "tool_versions": {
+    "make": "GNU Make 3.81",
+    "python": "3.9.6",
+    "riscv_gcc": "riscv64-elf-gcc (GCC) 16.2.0",
+    "slang_tidy": "slang-tidy version 11.0.0+0",
+    "verilator": "Verilator 5.052 2026-09-05 rev vUNKNOWN-built20260905",
+    "yosys": "Yosys 0.69+post (git sha1 143eb14f9cc55d6f8927e68523b0c9d2166ed02c, Release, AppleClang clang++ 21.0.0.21000101)"
+  },
+  "xlen": 64
+}

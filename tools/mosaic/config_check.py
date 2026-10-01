@@ -641,6 +641,37 @@ def _check_cross_references(bundle: Bundle) -> None:
             "reset vector 0x%x is not inside any readable+executable region" % reset_vector,
         )
 
+    protocol = bundle.profile.get("test_protocol")
+    if protocol:
+        def region_of(address):
+            for r in regions:
+                if r["base"] <= address < r["base"] + r["size"]:
+                    return r
+            return None
+
+        for key in ("tohost", "fromhost"):
+            region = region_of(protocol[key])
+            if region is None:
+                bundle.fail("test protocol", "%s address 0x%x is not inside any mapped region"
+                            % (key, protocol[key]))
+            elif region.get("device") != "test_harness":
+                bundle.fail("test protocol", "%s address 0x%x lands in region %r, not in the "
+                            "test_harness device region the firmware writes to"
+                            % (key, protocol[key], region["name"]))
+        signature = protocol["signature"]
+        region = region_of(signature)
+        if region is None:
+            bundle.fail("test protocol", "signature address 0x%x is not inside any mapped region"
+                        % signature)
+        elif not region["writable"]:
+            bundle.fail("test protocol", "signature address 0x%x is in region %r which is not "
+                        "writable; the program could never record its result"
+                        % (signature, region["name"]))
+        span = protocol["signature_words"] * 8
+        if region is not None and signature + span > region["base"] + region["size"]:
+            bundle.fail("test protocol", "signature area of %d words at 0x%x runs past the end "
+                        "of region %r" % (protocol["signature_words"], signature, region["name"]))
+
     roms = [r for r in regions if r["kind"] == "rom"]
     if not roms:
         bundle.fail("profile reset", "memory map declares no rom region to hold the boot vector")

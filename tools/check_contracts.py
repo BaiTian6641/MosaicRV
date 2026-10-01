@@ -46,7 +46,6 @@ GENERATION_REQUIREMENTS = {
     "prf_tag": "prf_gen",
     "req_id": "epoch",
     "tx_id": "tx_gen",
-    "route_id": "route_gen",
 }
 
 
@@ -79,7 +78,7 @@ class ExpressionEvaluator(object):
         ast.Expression, ast.BinOp, ast.UnaryOp, ast.Name, ast.Load, ast.Call,
         ast.Add, ast.Sub, ast.Mult, ast.FloorDiv, ast.Div, ast.Mod, ast.Pow,
         ast.USub, ast.UAdd, ast.Mod, ast.Compare, ast.Lt, ast.LtE, ast.Gt,
-        ast.GtE, ast.Eq, ast.NotEq, ast.IfExp,
+        ast.GtE, ast.Eq, ast.NotEq, ast.IfExp, ast.Constant,
     )
 
     def __init__(self, namespace: Dict[str, int], allowed_names: List[str]) -> None:
@@ -97,6 +96,10 @@ class ExpressionEvaluator(object):
                     "expression %r uses disallowed syntax %s"
                     % (expression, type(node).__name__)
                 )
+            if isinstance(node, ast.Constant) and not isinstance(node.value, int):
+                raise ValueError(
+                    "expression %r uses a non-integer literal" % expression
+                )
             if isinstance(node, ast.Name) and node.id not in self.allowed_names:
                 raise ValueError(
                     "expression %r uses unknown name %r" % (expression, node.id)
@@ -109,7 +112,9 @@ class ExpressionEvaluator(object):
                     )
                 if node.keywords:
                     raise ValueError("expression %r passes a keyword argument" % expression)
-        value = eval(compile(tree, "<contract>", "eval"), {"__builtins__": {}}, dict(self.namespace))
+        scope = dict(self.namespace)
+        scope["clog2"] = clog2
+        value = eval(compile(tree, "<contract>", "eval"), {"__builtins__": {}}, scope)
         if isinstance(value, bool) or not isinstance(value, int):
             raise ValueError("expression %r did not evaluate to an integer" % expression)
         return value
@@ -147,8 +152,18 @@ def build_namespace(bundle: config_check.Bundle) -> Dict[str, int]:
         "lsu_units": lsu.get("units", 1),
         "mul_div_units": fabric.get("mul_div_units", 1),
         "fetch_bandwidth": 2,
+        "vlen": (geometry.get("vector") or {}).get("vlen", isa.get("vlen") or 128),
+        "elen": (geometry.get("vector") or {}).get("elen", isa.get("elen") or 64),
         "elems_per_reg": elems_per_reg,
     }
+
+
+def load_contract(name: str, contract_root: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    path = os.path.join(contract_root or CONTRACT_ROOT, name)
+    if not os.path.exists(path):
+        return None
+    with open(path) as handle:
+        return json.load(handle)
 
 
 def check_profile(profile: str, config_root: Optional[str] = None) -> List[Problem]:
@@ -191,12 +206,32 @@ def check_profile(profile: str, config_root: Optional[str] = None) -> List[Probl
                 Problem(where, "modulus %d does not exceed the %d values that can be live"
                         % (modulus, max_live))
             )
-        if modulus <= 2 * max_distance:
+        # An *identity* counter (a tag generation) is only ever compared for
+        # equality, so it must merely outlast the number of concurrent owners. An
+        # *ordered* counter (an age or sequence number) is compared with "which is
+        # older?", and a wrapped value must never be able to answer that wrongly,
+        # so its modulus must strictly exceed twice the largest distance two live
+        # values can be separated by. Applying the age rule to a generation would
+        # force a generation bit wider than it can ever need.
+        kind = counter.get("comparison")
+        if kind == "order":
+            if modulus <= 2 * max_distance:
+                problems.append(
+                    Problem(where,
+                            "ordered counter modulus %d does not strictly exceed twice the "
+                            "maximum compare distance %d; a wrapped counter would alias with "
+                            "a live one" % (modulus, max_distance))
+                )
+        elif kind == "identity":
+            if modulus <= max_distance:
+                problems.append(
+                    Problem(where,
+                            "identity counter modulus %d does not exceed its maximum "
+                            "concurrent owners %d" % (modulus, max_distance))
+                )
+        else:
             problems.append(
-                Problem(where,
-                        "modulus %d does not strictly exceed twice the maximum compare "
-                        "distance %d; a wrapped counter would alias with a live one"
-                        % (modulus, max_distance))
+                Problem(where, "comparison must be declared as `order` or `identity`")
             )
         if not counter.get("purpose"):
             problems.append(Problem(where, "no purpose recorded"))
@@ -352,13 +387,26 @@ class NegativeControls(object):
         self.case("field with no justification",
                   lambda s: edit_contract(
                       s, lambda d: d["interfaces"][0]["identity_fields"][0].update({"why": ""})))
-        self.case("counter modulus equal to twice the compare distance",
+        def ordered_index(doc):
+            for i, c in enumerate(doc["counters"]):
+                if c.get("comparison") == "order":
+                    return i
+            raise AssertionError("no ordered counter to target")
+
+        # An *ordered* counter must exceed twice the compare distance; halving it
+        # to exactly twice is the boundary case the rule exists to forbid.
+        self.case("ordered counter modulus equal to twice the compare distance",
                   lambda s: edit_counters(
-                      s, lambda d: d["counters"][0].update(
-                          {"expression": "2*%s" % d["counters"][0]["max_compare_distance_expr"]})))
-        self.case("counter modulus below the live count",
+                      s, lambda d: d["counters"][ordered_index(d)].update(
+                          {"expression": "2*%s"
+                           % d["counters"][ordered_index(d)]["max_compare_distance_expr"]})))
+        self.case("identity counter modulus below its live count",
                   lambda s: edit_counters(
-                      s, lambda d: d["counters"][0].update({"expression": "rob_entries-1"})))
+                      s, lambda d: d["counters"][ordered_index(d) - 1].update(
+                          {"expression": "rob_entries-1"})))
+        self.case("counter with no declared comparison kind",
+                  lambda s: edit_counters(
+                      s, lambda d: d["counters"][0].pop("comparison")))
         self.case("field narrower than its justification claims",
                   lambda s: edit_contract(
                       s, lambda d: d["interfaces"][0]["identity_fields"][0].update(

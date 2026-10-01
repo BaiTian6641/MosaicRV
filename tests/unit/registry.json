@@ -5,19 +5,100 @@
     "fifo.backpressure": {
       "task": "I-005",
       "top": "mosaic_fifo_tb",
-      "rtl": ["rtl/common/mosaic_fifo.sv"],
-      "sv": ["sim/tb/mosaic_fifo_tb.sv"],
-      "cpp": ["sim/unit/tb_fifo.cpp"],
+      "rtl": [
+        "rtl/common/mosaic_fifo.sv",
+        "rtl/common/mosaic_skid_buffer.sv"
+      ],
+      "sv": [
+        "sim/tb/mosaic_fifo_tb.sv"
+      ],
+      "cpp": [
+        "sim/unit/tb_fifo.cpp"
+      ],
       "max_cycles": 20000,
       "seed": 1
     },
     "ram.collision_matrix": {
       "task": "I-006",
       "top": "mosaic_ram_tb",
-      "rtl": ["rtl/common/mosaic_ram.sv"],
-      "sv": ["sim/tb/mosaic_ram_tb.sv"],
-      "cpp": ["sim/unit/tb_ram.cpp"],
+      "rtl": [
+        "rtl/common/mosaic_ram.sv"
+      ],
+      "sv": [
+        "sim/tb/mosaic_ram_tb.sv"
+      ],
+      "cpp": [
+        "sim/unit/tb_ram.cpp"
+      ],
       "max_cycles": 20000,
+      "seed": 1
+    },
+    "harness.reset_load_exit": {
+      "task": "I-004",
+      "top": "harness_tb",
+      "rtl": [],
+      "sv": [
+        "sim/tb/harness_tb.sv",
+        "sim/tb/harness_probe.sv"
+      ],
+      "cpp": [
+        "sim/harness/tb_harness.cpp",
+        "sim/common/elf_loader.cpp",
+        "sim/common/memory_model.cpp",
+        "sim/common/event_tap.cpp"
+      ],
+      "max_cycles": 2000,
+      "seed": 1
+    },
+    "harness.bad_image": {
+      "task": "I-004",
+      "top": "harness_tb",
+      "rtl": [],
+      "sv": [
+        "sim/tb/harness_tb.sv",
+        "sim/tb/harness_probe.sv"
+      ],
+      "cpp": [
+        "sim/harness/tb_harness.cpp",
+        "sim/common/elf_loader.cpp",
+        "sim/common/memory_model.cpp",
+        "sim/common/event_tap.cpp"
+      ],
+      "max_cycles": 2000,
+      "seed": 1
+    },
+    "harness.timeout": {
+      "task": "I-004",
+      "top": "harness_tb",
+      "rtl": [],
+      "sv": [
+        "sim/tb/harness_tb.sv",
+        "sim/tb/harness_probe.sv"
+      ],
+      "cpp": [
+        "sim/harness/tb_harness.cpp",
+        "sim/common/elf_loader.cpp",
+        "sim/common/memory_model.cpp",
+        "sim/common/event_tap.cpp"
+      ],
+      "max_cycles": 2000,
+      "seed": 1
+    },
+    "harness.injected_mismatch": {
+      "task": "I-004",
+      "top": "harness_tb",
+      "rtl": [],
+      "sv": [
+        "sim/tb/harness_tb.sv",
+        "sim/tb/harness_probe.sv"
+      ],
+      "cpp": [
+        "sim/harness/tb_harness.cpp",
+        "sim/common/elf_loader.cpp",
+        "sim/common/memory_model.cpp",
+        "sim/common/event_tap.cpp"
+      ],
+      "max_cycles": 2000,
       "seed": 1
     }
   }

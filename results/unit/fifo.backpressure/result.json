@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "case": "fifo.backpressure",
+  "verdict": "FAIL",
+  "detail": "4 failed of 97069 checks over 3189 cycles",
+  "seed": 1,
+  "max_cycles": 20000,
+  "checks": 0,
+  "failures": 0,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-01T00:07:22Z",
+  "first_mismatch": "skid.absorbs one item while the output is stalled (cycle 82): expected 0x0000000000000001, got 0x0000000000000000"
+}

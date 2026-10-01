@@ -51,6 +51,13 @@
   ],
   "memory_map_file": "memory/p2.json",
   "geometry_file": "geometry/p2.json",
+  "test_protocol": {
+    "tohost": 1056768,
+    "fromhost": 1056776,
+    "signature": 2147484672,
+    "pass_code": 1,
+    "signature_words": 4
+  },
   "reset": {
     "reset_vector": 2147483648,
     "boot_rom_bytes": 4096

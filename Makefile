@@ -28,6 +28,10 @@ GEN_ID := $(BUILD_DIR)/rtl/mosaic_id_pkg.svh
 GEN_DEPS := $(GEN_CFG) $(GEN_ID)
 
 VERILATOR ?= verilator
+CXX ?= c++
+# Verilator's own headers must be on the include path when linting the
+# testbenches, because they include the generated model headers.
+VERILATOR_ROOT := $(shell verilator -getenv VERILATOR_ROOT 2>/dev/null)
 YOSYS ?= yosys
 SLANG_TIDY ?= slang-tidy
 
@@ -35,7 +39,7 @@ SLANG_TIDY ?= slang-tidy
 # toolchain will turn into a silently different netlist.
 VERILATOR_LINT_FLAGS := --lint-only -Wall -Wno-DECLFILENAME
 
-.PHONY: all help check check-config check-contracts manifest lint lint-slang \
+.PHONY: all help check check-config check-contracts manifest lint lint-slang lint-cpp \
         unit sim synth-generic test clean distclean verify-tools
 
 all: check manifest lint unit
@@ -113,6 +117,23 @@ lint-slang: check-valid-profile manifest
 	fi
 	$(SLANG_TIDY) --std 1800-2017 -I $(BUILD_DIR)/rtl $(RTL_SRCS)
 
+# Our own C++ is held to a stricter standard than the simulator's runtime, which
+# is compiled with the same CFLAGS and is not -Wextra clean.
+CPP_SRCS := $(filter %.cpp,$(shell find sim -name '*.cpp' 2>/dev/null | sort))
+
+lint-cpp: manifest
+	@if [ -z "$(CPP_SRCS)" ]; then \
+	  echo "lint-cpp: no C++ sources yet" >&2; exit 1; \
+	fi
+	@incs="-I$(BUILD_DIR)/sim -Isim/common -I$(VERILATOR_ROOT)/include"; \
+	for d in build/$(PROFILE)/unit/*/obj_dir; do \
+	  [ -d "$$d" ] && incs="$$incs -I$$d"; \
+	done; \
+	for f in $(CPP_SRCS); do \
+	  $(CXX) -std=c++17 -fsyntax-only -Wall -Wextra -Wshadow $$incs "$$f" || exit 1; \
+	done
+	@echo "lint-cpp: $(words $(CPP_SRCS)) file(s) clean"
+
 # --------------------------------------------------------------------- tests
 
 unit: check-valid-profile manifest
@@ -129,7 +150,7 @@ sim: check-valid-profile manifest
 synth-generic: check-valid-profile manifest
 	$(PYTHON) tools/synth_check.py --profile $(PROFILE)
 
-test: check check-contracts lint unit sim synth-generic
+test: check check-contracts lint lint-slang lint-cpp unit sim synth-generic
 	@echo "profile $(PROFILE): all configured checks passed"
 
 check: check-config check-contracts

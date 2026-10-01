@@ -1,41 +1,46 @@
 {
   "schema_version": 1,
-  "comment": "Every tag, generation and age counter in the fabric, with the bound that makes it safe. A counter is legal only if its modulus strictly exceeds twice the largest distance any two live values can be separated by, and strictly exceeds the number of values that can be live at once. Both inequalities are checked by tools/check_contracts.py against the real profile geometry, so shrinking a queue or a ROB automatically invalidates a counter that is no longer wide enough.",
+  "comment": "Every tag, generation and age counter in the fabric, with the bound that makes it safe. A counter is legal only if its modulus must exceed the number of values that can be live at once. A counter additionally declared `comparison: \"order\"` (an age or sequence number compared with \"which is older?\") must also strictly exceed twice the largest distance two live values can be separated by. A counter declared `comparison: \"identity\"` (a tag generation, only ever compared for equality) needs only the first inequality; forcing the age rule onto a generation would make it wider than it can ever need. Both inequalities are checked by tools/check_contracts.py against the real profile geometry, so shrinking a queue or a ROB automatically invalidates a counter that is no longer wide enough.",
   "counters": [
     {
       "name": "rob_generation",
       "expression": "2*rob_entries",
       "max_live_expr": "rob_entries",
       "max_compare_distance_expr": "rob_entries",
-      "purpose": "distinguishes a recycled ROB slot from the macro that still owns it. A ROB entry cannot be reallocated until the previous occupant has died, and there are only rob_entries of them, so rob_entries reallocations of the same index can be outstanding at once."
+      "purpose": "distinguishes a recycled ROB slot from the macro that still owns it. A ROB entry cannot be reallocated until the previous occupant has died, and there are only rob_entries of them, so rob_entries reallocations of the same index can be outstanding at once.",
+      "comparison": "identity"
     },
     {
       "name": "uop_sequence",
       "expression": "2*rob_entries*max_uops_per_macro+1",
       "max_live_expr": "rob_entries*max_uops_per_macro",
       "max_compare_distance_expr": "rob_entries*max_uops_per_macro",
-      "purpose": "age for oldest-first selection. The largest distance two live uops can be separated by is every uop of every live ROB entry, so the modulus must exceed twice that; this is the rule docs/implementation-plan.md section 1.3 states about scheduling age."
+      "purpose": "age for oldest-first selection. The largest distance two live uops can be separated by is every uop of every live ROB entry, so the modulus must exceed twice that; this is the rule docs/implementation-plan.md section 1.3 states about scheduling age.",
+      "comparison": "order"
     },
     {
       "name": "prf_generation",
       "expression": "2*int_prf_entries",
       "max_live_expr": "int_prf_entries",
       "max_compare_distance_expr": "int_prf_entries",
-      "purpose": "distinguishes a recycled physical register tag. Tags are allocated from a free list, so the live count is bounded by the file depth rather than by a wrapping pointer."
+      "purpose": "distinguishes a recycled physical register tag. Tags are allocated from a free list, so the live count is bounded by the file depth rather than by a wrapping pointer.",
+      "comparison": "identity"
     },
     {
       "name": "memory_transaction_generation",
       "expression": "2*(fetch_outstanding+lq_entries+sq_entries+mshrs)+1",
       "max_live_expr": "fetch_outstanding+lq_entries+sq_entries+mshrs",
       "max_compare_distance_expr": "fetch_outstanding+lq_entries+sq_entries+mshrs",
-      "purpose": "distinguishes a reused memory transaction id from the request that still owns it, covering fetch, LQ, SQ and MSHR transactions sharing one id space."
+      "purpose": "distinguishes a reused memory transaction id from the request that still owns it, covering fetch, LQ, SQ and MSHR transactions sharing one id space.",
+      "comparison": "identity"
     },
     {
       "name": "retire_sequence",
       "expression": "2*rob_entries+1",
       "max_live_expr": "rob_entries",
       "max_compare_distance_expr": "rob_entries",
-      "purpose": "monotonic per-hart retire counter published in the event stream; a wrapped counter must never be mistaken for a live one."
+      "purpose": "monotonic per-hart retire counter published in the event stream; a wrapped counter must never be mistaken for a live one.",
+      "comparison": "order"
     }
   ]
 }
