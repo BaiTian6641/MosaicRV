@@ -185,21 +185,31 @@
 // Widths are declared at file scope because a module's port list cannot see
 // declarations inside its own body. Every one is derived from a generated
 // package and nothing else.
-localparam int unsigned PRF_ENTRIES = mosaic_cfg_pkg::MOSAIC_INT_PRF_ENTRIES;  // 96
-localparam int unsigned PRF_TAG_W   = mosaic_cfg_pkg::MOSAIC_INT_PRF_TAG_W;    // 7
-localparam int unsigned PRF_BANKS   = mosaic_cfg_pkg::MOSAIC_PRF_BANKS;        // 4
-localparam int unsigned PRF_GEN_W   = mosaic_id_pkg::MOSAIC_ID_W_PRF_GEN;      // 8
-localparam int unsigned PRF_XLEN    = mosaic_cfg_pkg::MOSAIC_XLEN;             // 64
+//
+// The `MPRF_` prefix is deliberate rather than decorative. These are
+// compilation-unit-scope names shared with every file elaborated alongside this
+// one, and a `PRF_`-prefixed name here collides with package-scope geometry that
+// other files declare for the same register file (`mosaic_uop_pkg.sv` has its
+// own `PRF_ENTRIES`): Verilator then reports the package's declaration as
+// hiding this one, and VARHIDDEN is an error under the project's -Wall lint
+// gate -- from a file that did nothing wrong. The prefix keeps the two scopes
+// from meeting, so renaming it back to `PRF_...` is a lint failure waiting for
+// the next module that mentions both.
+localparam int unsigned MPRF_ENTRIES = mosaic_cfg_pkg::MOSAIC_INT_PRF_ENTRIES;  // 96
+localparam int unsigned MPRF_TAG_W   = mosaic_cfg_pkg::MOSAIC_INT_PRF_TAG_W;    // 7
+localparam int unsigned MPRF_BANKS   = mosaic_cfg_pkg::MOSAIC_PRF_BANKS;        // 4
+localparam int unsigned MPRF_GEN_W   = mosaic_id_pkg::MOSAIC_ID_W_PRF_GEN;      // 8
+localparam int unsigned MPRF_XLEN    = mosaic_cfg_pkg::MOSAIC_XLEN;             // 64
 // Rows per bank. ceil(), not a floor: a profile whose entry count does not
 // divide evenly leaves the surplus rows of the last bank unreachable rather than
 // dropping real entries or aliasing them.
-localparam int unsigned PRF_ROWS    = (PRF_ENTRIES + PRF_BANKS - 1) / PRF_BANKS;
+localparam int unsigned MPRF_ROWS    = (MPRF_ENTRIES + MPRF_BANKS - 1) / MPRF_BANKS;
 // A degenerate geometry (one bank, or one row per bank) has a zero-bit decode
 // field, and a zero-width vector is not a legal declaration. The width is
 // clamped to one bit and the decode is still exact, because a one-bank decode
 // compares against zero and a one-row row is always row zero.
-localparam int unsigned PRF_BANK_W  = (PRF_BANKS > 1) ? $clog2(PRF_BANKS) : 1;
-localparam int unsigned PRF_ROW_W   = (PRF_ROWS > 1) ? $clog2(PRF_ROWS) : 1;
+localparam int unsigned MPRF_BANK_W  = (MPRF_BANKS > 1) ? $clog2(MPRF_BANKS) : 1;
+localparam int unsigned MPRF_ROW_W   = (MPRF_ROWS > 1) ? $clog2(MPRF_ROWS) : 1;
 
 module mosaic_prf (
     input  logic                                             clk_i,
@@ -210,26 +220,26 @@ module mosaic_prf (
     // and presents it here. `wr_gen_valid_i[b]` is the producer's statement that
     // the identity on this port carries a live generation; a write without it is
     // refused (see the header).
-    input  logic [PRF_BANKS-1:0]                             wr_en_i,
-    input  logic [PRF_BANKS-1:0]                             wr_gen_valid_i,
-    input  logic [PRF_BANKS*PRF_TAG_W-1:0]                   wr_tag_i,
-    input  logic [PRF_BANKS*PRF_GEN_W-1:0]                   wr_gen_i,
-    input  logic [PRF_BANKS*PRF_XLEN-1:0]                    wr_data_i,
+    input  logic [MPRF_BANKS-1:0]                             wr_en_i,
+    input  logic [MPRF_BANKS-1:0]                             wr_gen_valid_i,
+    input  logic [MPRF_BANKS*MPRF_TAG_W-1:0]                   wr_tag_i,
+    input  logic [MPRF_BANKS*MPRF_GEN_W-1:0]                   wr_gen_i,
+    input  logic [MPRF_BANKS*MPRF_XLEN-1:0]                    wr_data_i,
 
     // ------------------------------------------------- one read demand per bank
-    // Up to PRF_BANKS demands per cycle. `rd_ready_o[b]` is the grant for slot b
+    // Up to MPRF_BANKS demands per cycle. `rd_ready_o[b]` is the grant for slot b
     // in this cycle, and `rsp_valid_o[b]` the response; a refused demand is
     // re-offered by the consumer.
-    input  logic [PRF_BANKS-1:0]                             rd_valid_i,
-    output logic [PRF_BANKS-1:0]                             rd_ready_o,
-    input  logic [PRF_BANKS*PRF_TAG_W-1:0]                   rd_tag_i,
-    input  logic [PRF_BANKS*PRF_GEN_W-1:0]                   rd_gen_i,
-    output logic [PRF_BANKS-1:0]                             rsp_valid_o,
-    output logic [PRF_BANKS*PRF_TAG_W-1:0]                   rsp_tag_o,
-    output logic [PRF_BANKS*PRF_GEN_W-1:0]                   rsp_gen_o,
-    output logic [PRF_BANKS*PRF_XLEN-1:0]                    rsp_data_o,
-    output logic [PRF_BANKS-1:0]                             rsp_gen_mismatch_o,
-    output logic [PRF_BANKS-1:0]                             rsp_never_written_o,
+    input  logic [MPRF_BANKS-1:0]                             rd_valid_i,
+    output logic [MPRF_BANKS-1:0]                             rd_ready_o,
+    input  logic [MPRF_BANKS*MPRF_TAG_W-1:0]                   rd_tag_i,
+    input  logic [MPRF_BANKS*MPRF_GEN_W-1:0]                   rd_gen_i,
+    output logic [MPRF_BANKS-1:0]                             rsp_valid_o,
+    output logic [MPRF_BANKS*MPRF_TAG_W-1:0]                   rsp_tag_o,
+    output logic [MPRF_BANKS*MPRF_GEN_W-1:0]                   rsp_gen_o,
+    output logic [MPRF_BANKS*MPRF_XLEN-1:0]                    rsp_data_o,
+    output logic [MPRF_BANKS-1:0]                             rsp_gen_mismatch_o,
+    output logic [MPRF_BANKS-1:0]                             rsp_never_written_o,
 
     // ------------------------------------------------ testbench-visible status
     output logic [31:0]                                      o_wr_ctr,
@@ -242,25 +252,25 @@ module mosaic_prf (
 
   // -------------------------------------------------------------- the storage
   // Data and generation are not reset; validity is, and lives outside them.
-  logic [PRF_ROWS-1:0]  valid_q [PRF_BANKS];
-  logic [PRF_GEN_W-1:0] gen_q   [PRF_BANKS][PRF_ROWS];
-  logic [PRF_XLEN-1:0]  data_q  [PRF_BANKS][PRF_ROWS];
+  logic [MPRF_ROWS-1:0]  valid_q [MPRF_BANKS];
+  logic [MPRF_GEN_W-1:0] gen_q   [MPRF_BANKS][MPRF_ROWS];
+  logic [MPRF_XLEN-1:0]  data_q  [MPRF_BANKS][MPRF_ROWS];
 
   // ------------------------------------------------------------- write decode
-  logic [PRF_BANK_W-1:0] wr_home_bank [PRF_BANKS];
-  logic [PRF_ROW_W-1:0]  wr_row_addr  [PRF_BANKS];
-  logic                  wr_applied   [PRF_BANKS];
+  logic [MPRF_BANK_W-1:0] wr_home_bank [MPRF_BANKS];
+  logic [MPRF_ROW_W-1:0]  wr_row_addr  [MPRF_BANKS];
+  logic                  wr_applied   [MPRF_BANKS];
 
   // -------------------------------------------------------------- read decode
-  logic [PRF_BANK_W-1:0] rd_bank  [PRF_BANKS];
-  logic [PRF_ROW_W-1:0]  rd_row   [PRF_BANKS];
-  logic                  rd_range [PRF_BANKS];
+  logic [MPRF_BANK_W-1:0] rd_bank  [MPRF_BANKS];
+  logic [MPRF_ROW_W-1:0]  rd_row   [MPRF_BANKS];
+  logic                  rd_range [MPRF_BANKS];
 
   // Combinational temporaries, declared here rather than inside the always_comb
   // so that both Verilator and Yosys see only declarations they already handle
   // elsewhere in this tree.
-  logic [PRF_BANK_W-1:0] arb_bank;
-  logic [PRF_ROW_W-1:0]  arb_row;
+  logic [MPRF_BANK_W-1:0] arb_bank;
+  logic [MPRF_ROW_W-1:0]  arb_row;
   logic                  arb_conflict;
   logic                  arb_bypass;
 
@@ -283,15 +293,15 @@ module mosaic_prf (
   // Pure functions of the geometry: the home bank is a modulo and the row is the
   // quotient, exactly as the header states. Both are constant-divisor operations
   // on a constant divisor, so both synthesise to wiring and a small adder.
-  function automatic logic [PRF_BANK_W-1:0] bank_of(input logic [PRF_TAG_W-1:0] tag);
+  function automatic logic [MPRF_BANK_W-1:0] bank_of(input logic [MPRF_TAG_W-1:0] tag);
     int unsigned t;
     begin
       t       = int'(tag);
-      bank_of = PRF_BANK_W'(t % PRF_BANKS);
+      bank_of = MPRF_BANK_W'(t % MPRF_BANKS);
     end
   endfunction
 
-  function automatic logic [PRF_ROW_W-1:0] row_of(input logic [PRF_TAG_W-1:0] tag);
+  function automatic logic [MPRF_ROW_W-1:0] row_of(input logic [MPRF_TAG_W-1:0] tag);
     int unsigned t;
     begin
       t = int'(tag);
@@ -303,26 +313,26 @@ module mosaic_prf (
       // entry -- rather than an out-of-bounds array read, which would be
       // undefined behaviour in the simulator and would prove nothing about the
       // decode.
-      row_of = PRF_ROW_W'((t & ((1 << PRF_ROW_W) - 1)) % PRF_ROWS);
+      row_of = MPRF_ROW_W'((t & ((1 << MPRF_ROW_W) - 1)) % MPRF_ROWS);
 `else
-      row_of = PRF_ROW_W'(t / PRF_BANKS);
+      row_of = MPRF_ROW_W'(t / MPRF_BANKS);
 `endif
     end
   endfunction
 
-  function automatic logic in_range(input logic [PRF_TAG_W-1:0] tag);
-    in_range = (int'(tag) < PRF_ENTRIES);
+  function automatic logic in_range(input logic [MPRF_TAG_W-1:0] tag);
+    in_range = (int'(tag) < MPRF_ENTRIES);
   endfunction
 
   // ---------------------------------------------------------- write admission
   always_comb begin
-    for (int b = 0; b < PRF_BANKS; b++) begin
-      wr_home_bank[b] = bank_of(wr_tag_i[b*PRF_TAG_W +: PRF_TAG_W]);
-      wr_row_addr[b]  = row_of(wr_tag_i[b*PRF_TAG_W +: PRF_TAG_W]);
+    for (int b = 0; b < MPRF_BANKS; b++) begin
+      wr_home_bank[b] = bank_of(wr_tag_i[b*MPRF_TAG_W +: MPRF_TAG_W]);
+      wr_row_addr[b]  = row_of(wr_tag_i[b*MPRF_TAG_W +: MPRF_TAG_W]);
       wr_applied[b]   = wr_en_i[b]
                      && wr_gen_valid_i[b]
                      && (int'(wr_home_bank[b]) == b)
-                     && in_range(wr_tag_i[b*PRF_TAG_W +: PRF_TAG_W]);
+                     && in_range(wr_tag_i[b*MPRF_TAG_W +: MPRF_TAG_W]);
 `ifdef MOSAIC_PRF_MUTANT_DROP_BANK0_WRITE
       // MUTANT: bank 0's write port is silently dead.
       if (b == 0) wr_applied[b] = 1'b0;
@@ -332,10 +342,10 @@ module mosaic_prf (
 
   // ----------------------------------------------------------- read decoding
   always_comb begin
-    for (int s = 0; s < PRF_BANKS; s++) begin
-      rd_bank[s]  = bank_of(rd_tag_i[s*PRF_TAG_W +: PRF_TAG_W]);
-      rd_row[s]   = row_of(rd_tag_i[s*PRF_TAG_W +: PRF_TAG_W]);
-      rd_range[s] = in_range(rd_tag_i[s*PRF_TAG_W +: PRF_TAG_W]);
+    for (int s = 0; s < MPRF_BANKS; s++) begin
+      rd_bank[s]  = bank_of(rd_tag_i[s*MPRF_TAG_W +: MPRF_TAG_W]);
+      rd_row[s]   = row_of(rd_tag_i[s*MPRF_TAG_W +: MPRF_TAG_W]);
+      rd_range[s] = in_range(rd_tag_i[s*MPRF_TAG_W +: MPRF_TAG_W]);
     end
   end
 
@@ -350,17 +360,17 @@ module mosaic_prf (
     arb_conflict = 1'b0;
     arb_bypass   = 1'b0;
 
-    for (int s = 0; s < PRF_BANKS; s++) begin
+    for (int s = 0; s < MPRF_BANKS; s++) begin
       rd_ready_o[s]                       = 1'b0;
       rsp_valid_o[s]                      = 1'b0;
-      rsp_tag_o[s*PRF_TAG_W +: PRF_TAG_W] = rd_tag_i[s*PRF_TAG_W +: PRF_TAG_W];
-      rsp_gen_o[s*PRF_GEN_W +: PRF_GEN_W] = '0;
-      rsp_data_o[s*PRF_XLEN +: PRF_XLEN]  = '0;
+      rsp_tag_o[s*MPRF_TAG_W +: MPRF_TAG_W] = rd_tag_i[s*MPRF_TAG_W +: MPRF_TAG_W];
+      rsp_gen_o[s*MPRF_GEN_W +: MPRF_GEN_W] = '0;
+      rsp_data_o[s*MPRF_XLEN +: MPRF_XLEN]  = '0;
       rsp_gen_mismatch_o[s]               = 1'b0;
       rsp_never_written_o[s]              = 1'b0;
     end
 
-    for (int s = 0; s < PRF_BANKS; s++) begin
+    for (int s = 0; s < MPRF_BANKS; s++) begin
       if (rd_valid_i[s]) begin
         arb_bank     = rd_bank[s];
         arb_row      = rd_row[s];
@@ -389,33 +399,33 @@ module mosaic_prf (
 
           if (rd_range[s] && (arb_bypass || valid_q[arb_bank][arb_row])) begin
             if (arb_bypass) begin
-              rsp_gen_o[s*PRF_GEN_W +: PRF_GEN_W] =
-                  wr_gen_i[arb_bank*PRF_GEN_W +: PRF_GEN_W];
-              rsp_data_o[s*PRF_XLEN +: PRF_XLEN] =
-                  wr_data_i[arb_bank*PRF_XLEN +: PRF_XLEN];
+              rsp_gen_o[s*MPRF_GEN_W +: MPRF_GEN_W] =
+                  wr_gen_i[arb_bank*MPRF_GEN_W +: MPRF_GEN_W];
+              rsp_data_o[s*MPRF_XLEN +: MPRF_XLEN] =
+                  wr_data_i[arb_bank*MPRF_XLEN +: MPRF_XLEN];
 `ifdef MOSAIC_PRF_MUTANT_IGNORE_STORED_GEN
               rsp_gen_mismatch_o[s] = 1'b0;
 `else
               rsp_gen_mismatch_o[s] =
-                  (wr_gen_i[arb_bank*PRF_GEN_W +: PRF_GEN_W] !=
-                   rd_gen_i[s*PRF_GEN_W +: PRF_GEN_W]);
+                  (wr_gen_i[arb_bank*MPRF_GEN_W +: MPRF_GEN_W] !=
+                   rd_gen_i[s*MPRF_GEN_W +: MPRF_GEN_W]);
 `endif
             end else begin
-              rsp_data_o[s*PRF_XLEN +: PRF_XLEN] =
+              rsp_data_o[s*MPRF_XLEN +: MPRF_XLEN] =
                   data_q[arb_bank][arb_row];
 `ifdef MOSAIC_PRF_MUTANT_IGNORE_STORED_GEN
               // MUTANT: the response echoes the requested generation and never
               // reports a mismatch, so a stale read looks like a live one. The
               // data is still the stored data, so the defect is exactly "the
               // generation is not checked", not "the value is lost".
-              rsp_gen_o[s*PRF_GEN_W +: PRF_GEN_W] =
-                  rd_gen_i[s*PRF_GEN_W +: PRF_GEN_W];
+              rsp_gen_o[s*MPRF_GEN_W +: MPRF_GEN_W] =
+                  rd_gen_i[s*MPRF_GEN_W +: MPRF_GEN_W];
               rsp_gen_mismatch_o[s] = 1'b0;
 `else
-              rsp_gen_o[s*PRF_GEN_W +: PRF_GEN_W] =
+              rsp_gen_o[s*MPRF_GEN_W +: MPRF_GEN_W] =
                   gen_q[arb_bank][arb_row];
               rsp_gen_mismatch_o[s] =
-                  (gen_q[arb_bank][arb_row] != rd_gen_i[s*PRF_GEN_W +: PRF_GEN_W]);
+                  (gen_q[arb_bank][arb_row] != rd_gen_i[s*MPRF_GEN_W +: MPRF_GEN_W]);
 `endif
             end
           end else begin
@@ -435,15 +445,15 @@ module mosaic_prf (
   // ------------------------------------------------------------ the storage
   always_ff @(posedge clk_i) begin
     if (rst_i) begin
-      for (int b = 0; b < PRF_BANKS; b++) begin
+      for (int b = 0; b < MPRF_BANKS; b++) begin
         valid_q[b] <= '0;
       end
     end else begin
-      for (int b = 0; b < PRF_BANKS; b++) begin
+      for (int b = 0; b < MPRF_BANKS; b++) begin
         if (wr_applied[b]) begin
           valid_q[b][wr_row_addr[b]] <= 1'b1;
-          gen_q[b][wr_row_addr[b]]   <= wr_gen_i[b*PRF_GEN_W +: PRF_GEN_W];
-          data_q[b][wr_row_addr[b]]  <= wr_data_i[b*PRF_XLEN +: PRF_XLEN];
+          gen_q[b][wr_row_addr[b]]   <= wr_gen_i[b*MPRF_GEN_W +: MPRF_GEN_W];
+          data_q[b][wr_row_addr[b]]  <= wr_data_i[b*MPRF_XLEN +: MPRF_XLEN];
         end
       end
     end
@@ -456,7 +466,7 @@ module mosaic_prf (
     rd_refusals   = 32'd0;
     mismatch_hits = 32'd0;
     invalid_hits  = 32'd0;
-    for (int b = 0; b < PRF_BANKS; b++) begin
+    for (int b = 0; b < MPRF_BANKS; b++) begin
       wr_hits       = wr_hits + (wr_applied[b] ? 32'd1 : 32'd0);
       rd_grants     = rd_grants + (rd_ready_o[b] ? 32'd1 : 32'd0);
       rd_refusals   = rd_refusals + ((rd_valid_i[b] && !rd_ready_o[b]) ? 32'd1 : 32'd0);

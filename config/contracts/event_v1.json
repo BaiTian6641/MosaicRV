@@ -39,7 +39,7 @@
     {
       "id": "retire_unit",
       "file": "rtl/core/mosaic_retire.sv",
-      "declaration_selector": {"kind": "sv_output_port_prefix", "prefix": "ev_"},
+      "declaration_selector": {"kind": "sv_lane_port_prefix", "prefix": "ev_"},
       "lanes_expr": "rename_width",
       "presentation": "combinational from the buffer's head view and the execution payload; the record for each acknowledged lane is presented in the same cycle the pop is acknowledged, gated on ev_valid",
       "presentation_latency_cycles": 0,
@@ -97,6 +97,7 @@
   "fields": [
     {
       "name": "retire_seq",
+      "group": "identity",
       "width_bits": 8,
       "width_expr": "clog2(2*rob_entries+1)",
       "encoding_offset_bytes": 4,
@@ -114,6 +115,7 @@
     },
     {
       "name": "hart_id",
+      "group": "identity",
       "width_bits": 1,
       "width_expr": "harts",
       "encoding_offset_bytes": 5,
@@ -125,11 +127,13 @@
       "sampled_at": "producer_constant",
       "meaning": "the single hart the effect belongs to. It is architectural, and it is the first half of the locating identity: an effect with no hart is an effect no per-hart reference model can be compared against.",
       "sources": [
+        {"kind": "tap", "file": "sim/common/event_tap.h", "decl": "hart", "relation": "container", "declared_bits": 32, "why": "host uint32_t is a container for the hart index; with one hart it is always zero"},
         {"kind": "harness_binding", "decl": "driven hart index", "why": "a single-hart DUT has no hart port to read; the harness that instantiates it is the only authority, and it binds the constant it is driving"}
       ]
     },
     {
       "name": "cycle",
+      "group": "timing",
       "width_bits": 64,
       "width_expr": "xlen",
       "encoding_offset_bytes": 6,
@@ -137,7 +141,7 @@
       "class": "observed",
       "identity_role": "occurrence",
       "valid_kinds": ["RETIRE", "TRAP", "MEM_VISIBLE"],
-      "valid_when": "always present; supplied by the harness that owns the clock, counted in the production `settled_pre_edge` presentation cycle",
+      "valid_when": "always present; supplied by the harness that owns the clock, counted in the record's `settled_pre_edge` presentation cycle",
       "sampled_at": "producer_constant",
       "meaning": "the producer's core-clock cycle for the presentation of this record, recorded so the first difference in a differential run can be located in time. OBSERVED, not architectural: two microarchitectures' cycle numbers are not comparable values and this field must never enter an architectural-equality comparison (docs/validation-plan.md#3 rule 4). It is a different field from retire_seq with a different meaning, and the checker rejects a schema in which the two claim the same identity role.",
       "sources": [
@@ -146,6 +150,7 @@
     },
     {
       "name": "kind",
+      "group": "kind",
       "width_bits": 2,
       "width_expr": "2",
       "encoding_offset_bytes": 14,
@@ -164,6 +169,7 @@
     },
     {
       "name": "pc_before",
+      "group": "instruction",
       "width_bits": 64,
       "width_expr": "xlen",
       "encoding_offset_bytes": 15,
@@ -182,6 +188,7 @@
     },
     {
       "name": "pc_after",
+      "group": "instruction",
       "width_bits": 64,
       "width_expr": "xlen",
       "encoding_offset_bytes": 23,
@@ -200,6 +207,7 @@
     },
     {
       "name": "insn_bits",
+      "group": "instruction",
       "width_bits": 32,
       "width_expr": "32",
       "encoding_offset_bytes": 31,
@@ -218,6 +226,7 @@
     },
     {
       "name": "rob_id",
+      "group": "microarch_identity",
       "width_bits": 14,
       "width_expr": "2*clog2(int_prf_entries)",
       "encoding_offset_bytes": 35,
@@ -234,6 +243,7 @@
     },
     {
       "name": "gpr_write_valid",
+      "group": "gpr",
       "width_bits": 1,
       "width_expr": "1",
       "encoding_offset_bytes": 37,
@@ -252,6 +262,7 @@
     },
     {
       "name": "rd",
+      "group": "gpr",
       "width_bits": 5,
       "width_expr": "5",
       "encoding_offset_bytes": 38,
@@ -270,6 +281,7 @@
     },
     {
       "name": "rd_value",
+      "group": "gpr",
       "width_bits": 64,
       "width_expr": "xlen",
       "encoding_offset_bytes": 39,
@@ -288,6 +300,7 @@
     },
     {
       "name": "csr_write_valid",
+      "group": "csr",
       "width_bits": 1,
       "width_expr": "1",
       "encoding_offset_bytes": 47,
@@ -304,6 +317,7 @@
     },
     {
       "name": "csr_addr",
+      "group": "csr",
       "width_bits": 12,
       "width_expr": "12",
       "encoding_offset_bytes": 48,
@@ -320,6 +334,7 @@
     },
     {
       "name": "csr_value",
+      "group": "csr",
       "width_bits": 64,
       "width_expr": "xlen",
       "encoding_offset_bytes": 50,
@@ -336,6 +351,7 @@
     },
     {
       "name": "mem_is_store",
+      "group": "memory",
       "width_bits": 1,
       "width_expr": "1",
       "encoding_offset_bytes": 58,
@@ -354,6 +370,7 @@
     },
     {
       "name": "mem_addr",
+      "group": "memory",
       "width_bits": 64,
       "width_expr": "xlen",
       "encoding_offset_bytes": 59,
@@ -372,6 +389,7 @@
     },
     {
       "name": "mem_data",
+      "group": "memory",
       "width_bits": 64,
       "width_expr": "xlen",
       "encoding_offset_bytes": 67,
@@ -390,6 +408,7 @@
     },
     {
       "name": "mem_size",
+      "group": "memory",
       "width_bits": 3,
       "width_expr": "3",
       "encoding_offset_bytes": 75,
@@ -408,6 +427,7 @@
     },
     {
       "name": "trap_cause",
+      "group": "trap",
       "width_bits": 64,
       "width_expr": "xlen",
       "encoding_offset_bytes": 76,
@@ -426,6 +446,7 @@
     },
     {
       "name": "trap_tval",
+      "group": "trap",
       "width_bits": 64,
       "width_expr": "xlen",
       "encoding_offset_bytes": 84,
@@ -444,6 +465,7 @@
     },
     {
       "name": "trap_epc",
+      "group": "trap",
       "width_bits": 64,
       "width_expr": "xlen",
       "encoding_offset_bytes": 92,
@@ -467,6 +489,11 @@
       "id": "retire_status_is_explicit",
       "text": "An interface that exposes execution results but not retire status is forbidden: every record carries `kind`, every payload field names the kinds it is valid in, and a TRAP record never carries a register, CSR or store payload even when the payload bus was driving one.",
       "enforced_by": "INV-KINDS"
+    },
+    {
+      "id": "every_field_declares_itself",
+      "text": "A field is not considered defined until it states its width, its meaning, the kinds it is valid in, a validity rule in words and the phase of the cycle it is sampled in; a field missing any of them is rejected rather than assumed.",
+      "enforced_by": "INV-COMPLETE"
     },
     {
       "id": "no_shared_snapshot",
@@ -509,8 +536,28 @@
       "enforced_by": "INV-VERSION"
     },
     {
+      "id": "layout_is_the_record",
+      "text": "The recorded byte layout is the layout the encoder produces: the header, the field order, each field's octet width and the record size are checked against the field list, so a schema whose offsets describe a different record than the one the codec writes is rejected.",
+      "enforced_by": "INV-ENCODING"
+    },
+    {
+      "id": "one_serialiser",
+      "text": "There is one serialiser: the C++ field list, its widths and their order must equal the schema's, so a harness cannot encode a different record from the one the schema defines.",
+      "enforced_by": "INV-CPPFIELDS"
+    },
+    {
+      "id": "every_field_has_a_producer",
+      "text": "Every field names at least one producer, every producer declaration exists in the file it names, and every event declaration of a producer file is mapped to a field -- so a field with no source and a declaration nobody consumes are both rejected.",
+      "enforced_by": "INV-SOURCE"
+    },
+    {
+      "id": "no_truncated_field",
+      "text": "A producer may not carry fewer bits than the field it supplies: a per-lane RTL port must be exactly the frozen width, and a host or wrapper declaration narrower than the field is a truncation rather than a representation choice.",
+      "enforced_by": "INV-RTLWIDTH"
+    },
+    {
       "id": "containers_are_declared",
-      "text": "A producer declaration wider than the canonical field is a host container and must be recorded with its exact declared width and a reason; a declaration narrower than the field, or one that is not recorded at all, is a truncation or a drift and is rejected.",
+      "text": "A producer declaration wider than the canonical field is a host container and must be recorded with its exact declared width and a reason; a declaration that is not recorded at all, or recorded with a width it does not have, is drift and is rejected.",
       "enforced_by": "INV-TAPDECL"
     },
     {
@@ -557,7 +604,7 @@
     },
     {
       "id": "F-4",
-      "field": "kind == MEM_VISIBLE",
+      "field": "kind",
       "source": "rtl/core/mosaic_lsu_endpoint.sv",
       "finding": "the memory endpoint exports counters and last-fault values but no event tap, so nothing in the implemented p0 path can emit the visibility of a committed store. The plan keeps the commit-store and the drain apart, so without this record a store's side effect can only be checked against final memory, not attributed to an instruction.",
       "decided_by": "docs/validation-plan.md#3 Memory operation: 'commit-store 与 store-buffer drain/MEM_VISIBLE 是不同事件'.",
@@ -565,7 +612,7 @@
     },
     {
       "id": "F-5",
-      "field": "rob_id, cycle, csr_*",
+      "field": "rob_id, cycle, csr_write_valid, csr_addr, csr_value",
       "source": "sim/common/event_tap.h RetireEvent",
       "finding": "the de-facto host record has no microarchitectural identity, no cycle and no CSR effect, and no message for a memory visibility, so a differential runner built on it alone cannot attribute an effect to a reorder-buffer slot, cannot locate a failure in time, and cannot compare Zicsr.",
       "decided_by": "docs/validation-plan.md#3 CSR group (the CSR list is part of the canonical event) and the V-008 card's requirement that every architectural effect locate to one hart and one instruction.",

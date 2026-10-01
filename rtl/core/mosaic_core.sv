@@ -184,7 +184,21 @@ module mosaic_core (
     output logic                        o_rename_boundary,
     output logic [31:0]                 o_redir_act_ctr,
     output logic [31:0]                 o_redir_wait_ctr,
-    output logic [31:0]                 o_redir_dead_ctr
+    output logic [31:0]                 o_redir_dead_ctr,
+    // ------------------------------------------------------- debug observability
+    // The instructions and the ROB head, so a failing case can say what the
+    // machine was doing instead of only that a count was wrong.
+    output logic                        o_dbg_deliver_valid,
+    output logic [CORE_XLEN-1:0]        o_dbg_deliver_pc,
+    output logic [31:0]                 o_dbg_deliver_bits,
+    output logic                        o_dbg_head_valid,
+    output logic                        o_dbg_head_complete,
+    output logic [CORE_IDX_W-1:0]       o_dbg_head_index,
+    output logic [CORE_XLEN-1:0]        o_dbg_head_pc,
+    output logic [4:0]                  o_dbg_desc_rd0,
+    output logic [4:0]                  o_dbg_desc_rd1,
+    output logic [31:0]                 o_dbg_alloc_ctr,
+    output logic [31:0]                 o_dbg_ins_ctr
 );
 
   // ==========================================================================
@@ -287,6 +301,7 @@ module mosaic_core (
   logic                      rob_retire_req_next, rob_retire_ack_next;
   logic                      rob_retire_ack;
   logic                      rob_head_valid, rob_head_ready;
+  logic                      rob_head_complete;
   logic                      rob_head_exc;
   logic [CORE_IDX_W-1:0]     rob_head_index;
   logic [CORE_RGEN_W-1:0]    rob_head_gen;
@@ -383,6 +398,7 @@ module mosaic_core (
   // evidence
   logic [31:0] commit_ctr, redirect_ctr, recovering_ctr, stop_ctr, cycle_ctr;
   logic [31:0] squash_under_ctr, journal_ovf_ctr;
+  logic [31:0] disp_alloc_ctr, disp_ins_ctr;
   logic [31:0] squash_nc_ctr;
   logic        core_stop_prev;
 
@@ -722,7 +738,7 @@ module mosaic_core (
       .head_valid      (rob_head_valid),
       .head_ready      (rob_head_ready),
       .head_replay     (),
-      .head_complete   (),
+      .head_complete   (rob_head_complete),
       .head_exc        (rob_head_exc),
       .head_closed     (),
       .head_index      (rob_head_index),
@@ -1156,8 +1172,8 @@ module mosaic_core (
       .barrier          (br_inflight),
       .stop             (disp_unsupported),
       .o_take           (disp_take),
-      .o_alloc_ctr      (),
-      .o_ins_ctr        (),
+      .o_alloc_ctr      (disp_alloc_ctr),
+      .o_ins_ctr        (disp_ins_ctr),
       .o_unsupported_ctr(o_unsupported_ctr),
       .o_illegal_ctr    (o_illegal_ctr),
       .o_exhausted_ctr  (),
@@ -1408,6 +1424,18 @@ module mosaic_core (
       core_stop_prev   <= core_stop;
     end
   end
+
+  assign o_dbg_deliver_valid = fetch_out_valid;
+  assign o_dbg_deliver_pc    = fetch_out_pc;
+  assign o_dbg_deliver_bits  = fetch_out_bits;
+  assign o_dbg_head_valid    = rob_head_valid;
+  assign o_dbg_head_complete = rob_head_complete;
+  assign o_dbg_head_index    = rob_head_index;
+  assign o_dbg_head_pc       = rob_head_pc;
+  assign o_dbg_desc_rd0      = desc_rd0;
+  assign o_dbg_desc_rd1      = desc_rd1;
+  assign o_dbg_alloc_ctr     = disp_alloc_ctr;
+  assign o_dbg_ins_ctr       = disp_ins_ctr;
 
   assign o_commit_ctr    = commit_ctr;
   assign o_redirect_ctr  = redirect_ctr;

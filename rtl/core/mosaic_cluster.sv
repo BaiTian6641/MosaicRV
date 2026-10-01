@@ -234,6 +234,12 @@ module mosaic_cluster (
   );
 
   // ------------------------------------------------------- branch resolution
+  /* verilator lint_off UNUSEDSIGNAL */
+  // br_sum[0] is deliberately not read: a JALR's bit 0 is cleared, which is the
+  // whole of the alignment rule the unit also implements for its own arm.
+  logic [CL_XLEN-1:0] br_sum;
+  /* verilator lint_on UNUSEDSIGNAL */
+  logic [CL_XLEN-1:0] br_target_eff;
   logic               br_taken;
   logic [CL_XLEN-1:0] br_link;
   logic [CL_XLEN-1:0] br_target;
@@ -246,6 +252,13 @@ module mosaic_cluster (
       .taken        (br_taken)
   );
 
+  // A JALR's target base is a *register* (rs1), not the PC, and
+  // mosaic_branch_target has a single `pc` input that it adds the immediate to
+  // and from which it also derives `link = pc + 4`. One input cannot be both,
+  // so the unit is fed the instruction's own PC (keeping `link` and the
+  // PC-relative arms exactly as documented) and the JALR arm is computed here,
+  // where the rs1 operand is; `is_taken` still comes from the unit, because the
+  // predicate does not depend on the base.
   mosaic_branch_target #(.XLEN(CL_XLEN)) u_btgt (
       .pc           (iq_grant_meta.pc),
       .imm          (iq_grant_imm),
@@ -258,6 +271,12 @@ module mosaic_cluster (
       .target       (br_target),
       .is_taken     (br_is_taken)
   );
+
+  always_comb begin
+    br_sum        = iq_grant_a + iq_grant_imm;
+    br_target_eff = iq_grant_meta.is_jalr ? {br_sum[CL_XLEN-1:1], 1'b0}
+                                          : br_target;
+  end
 
   // --------------------------------------------------------- result register
   mosaic_uop_pkg::wb_event_t wb_ev_q;
@@ -398,7 +417,7 @@ module mosaic_cluster (
         rr_v_q <= 1'b0;
       end
       if (grant_fire && is_branch) begin
-        rr_pc_q    <= br_target;
+        rr_pc_q    <= br_target_eff;
         rr_idx_q   <= iq_grant_uop[CL_UOP_ID_W-1 -: CL_IDX_W];
         rr_gen_q   <= iq_grant_uop[CL_IGEN_W + CL_UOP_W - 1 -: CL_RGEN_W];
         rr_taken_q <= br_is_taken;

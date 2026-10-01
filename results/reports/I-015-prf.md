@@ -90,6 +90,32 @@ write above tag 3 (§8). The entry count (96) is not a power of two, so the
 tag 95 lands in bank 3 row 23, and the shadow's independent `tag / banks`
 arithmetic agrees with the hardware on every tag in the random campaign.
 
+### File-scope width names, and the one lint collision integration produced
+
+`mosaic_prf.sv` declares its eight width constants **at file scope** (a module's
+ANSI port list cannot see declarations inside its own body), which puts them in
+the compilation-unit scope shared by every file elaborated with it. They are
+therefore named `MPRF_*`, not `PRF_*`: `mosaic_uop_pkg.sv` declares its own
+`PRF_ENTRIES` for the same register file in package scope, and when the first
+module that both instantiates `mosaic_prf` and mentions that package was
+elaborated (`rtl/core/mosaic_core.sv`, I-023), Verilator reported the package's
+declaration as hiding the file-scope one:
+
+```
+%Warning-VARHIDDEN: rtl/core/mosaic_uop_pkg.sv:105:27: Declaration of signal hides
+declaration in upper scope: 'PRF_ENTRIES'
+  rtl/core/mosaic_prf.sv:188:25: ... Location of original declaration
+```
+
+`VARHIDDEN` is an error under the project's `-Wall` lint gate, and the warning is
+emitted while the *package* is processed, so a `lint_off` in either file does not
+reach it. The prefix is the fix: the two scopes no longer meet. Verified after the
+rename — `rtl/core/mosaic_core.sv: clean as mosaic_core` in the project lint, and
+a scoped `verilator --lint-only -Wall --top-module mosaic_core` of that file exits
+0 with zero warnings. Behaviour is unchanged: the base case, its comparison
+counts and all six mutant failure points are identical before and after the
+rename (§8).
+
 ## 3. The rules the card is about
 
 ### Write-through (§ "Same-cycle write and read to the same bank")
@@ -245,14 +271,18 @@ phase"), 0 failures, exit 0.
 ```
 $ python3 tools/lint_rtl.py --profile p0
 ok   rtl/core/mosaic_prf.sv: clean as mosaic_prf
-lint: 25 source file(s) clean                       # exit 0
+lint: 31 source file(s) clean                       # exit 0
 
-$ slang-tidy --std 1800-2017 --single-unit -I build/p0/rtl $(find rtl -name '*.sv' | sort)
-# exit 0. mosaic_prf.sv contributes 4 x STYLE-13 (unnamed always_comb) and
-# 6 x STYLE-2 (ports named "o_wr_ctr"... which the frozen interface fixes, so
-# there is no "_o"-suffix convention to follow for these status outputs). The
-# whole tree at this run reports 100 STYLE-13, 701 STYLE-2, 10 STYLE-16,
-# 1 STYLE-6 and 1 STYLE-7 -- the same classes, from other modules, none an error.
+$ slang-tidy --std 1800-2017 --single-unit -I build/p0/rtl rtl/core/mosaic_prf.sv
+# exit 0, 0 errors. mosaic_prf.sv contributes 4 x STYLE-13 (unnamed always_comb)
+# and 6 x STYLE-2 (ports named "o_wr_ctr"... which the frozen interface fixes, so
+# there is no "_o"-suffix convention to follow for these status outputs).
+# Scoped to this module because the whole-tree invocation does not complete
+# today: it stops on a sibling's in-flight file, rtl/core/mosaic_dispatch.sv
+# ("identifier 'head_fire' used before its declaration", six such errors). An
+# earlier whole-tree run, with that file absent, exited 0 and reported the style
+# counts 100 STYLE-13 / 701 STYLE-2 / 10 STYLE-16 / 1 STYLE-6 / 1 STYLE-7 across
+# the tree -- the same classes, from other modules, none an error.
 ```
 
 ```
@@ -267,6 +297,18 @@ $ g++ -std=c++17 -fsyntax-only -Wall -Wextra -Wshadow -Ibuild/p0/sim -Isim/commo
 
 The wrapper `sim/tb/mosaic_prf_tb.sv` is not linted by either RTL gate (they walk
 `rtl/`); it is compiled by the case build above.
+
+Integration check for the scope collision of §2 (the first module that both
+instantiates this file and mentions `mosaic_uop_pkg`):
+
+```
+$ grep -E "mosaic_core" /tmp/lint_after_rename.log
+ok   rtl/core/mosaic_core.sv: clean as mosaic_core
+
+$ verilator --lint-only -Wall -Wno-DECLFILENAME --top-module mosaic_core \
+      -Ibuild/p0/rtl -Irtl/common -Irtl/core rtl/core/mosaic_core.sv
+# exit 0, 0 warnings
+```
 
 ### 7.3 Not seed-1-fragile
 
@@ -304,12 +346,12 @@ no mutant silently compiles the shipping build.
 
 | Mutant | Line | Defect injected | Verdict | First mismatch | Comparisons before failure (base: 5263, 0 failures) |
 |---|---|---|---|---|---|
-| `NO_BANK_CONFLICT` | 370 | a bank conflict is ignored: two slots are granted to one bank in one cycle | FAIL exit 1 | `bank-collision: cycle 37: slot 1: rd_ready expected 0, got 1 [rd=s0:(t0,g0) s1:(t4,g0) s2:(t1,g0) s3:(t2,g0)]` | 25 |
-| `DROP_BANK0_WRITE` | 325 | bank 0's write port never applies | FAIL exit 1 | `write-through: cycle 46: o_wr_ctr expected 1, got 0` | 30 |
-| `IGNORE_STORED_GEN` | 395, 405 | a read echoes the requested generation and never reports a mismatch (data still stored data) | FAIL exit 1 | `generation: cycle 58: slot 0: rsp_gen_mismatch expected 1, got 0 [rd=s0:(t1,g6)]` | 38 |
-| `NEVER_WRITTEN_VALID` | 421 | an entry with no value since reset is reported as an ordinary valid read of zero | FAIL exit 1 | `reset-state: cycle 9: slot 0: rsp_never_written expected 1, got 0` | 1 |
-| `NO_WRITE_THROUGH` | 383 | a same-cycle write to the read entry is not visible to the read | FAIL exit 1 | `write-through: cycle 48: slot 1: rsp_gen_mismatch expected 0, got 1 [wr=b0:(t0,g4,v)=0xfedcba9876543210 rd=s1:(t0,g4)]` | 32 |
-| `SLICE_ROW` | 298 | the row is `tag`'s low bits instead of `tag/BANKS` (masked into range so it stays a wrong-entry defect, not an out-of-bounds read) | FAIL exit 1 | `write-through: cycle 50: the validity bit of bank 0 row 1 expected 1, got 0` | 34 |
+| `NO_BANK_CONFLICT` | 381 | a bank conflict is ignored: two slots are granted to one bank in one cycle | FAIL exit 1 | `bank-collision: cycle 37: slot 1: rd_ready expected 0, got 1 [rd=s0:(t0,g0) s1:(t4,g0) s2:(t1,g0) s3:(t2,g0)]` | 25 |
+| `DROP_BANK0_WRITE` | 336 | bank 0's write port never applies | FAIL exit 1 | `write-through: cycle 46: o_wr_ctr expected 1, got 0` | 30 |
+| `IGNORE_STORED_GEN` | 406, 416 | a read echoes the requested generation and never reports a mismatch (data still stored data) | FAIL exit 1 | `generation: cycle 58: slot 0: rsp_gen_mismatch expected 1, got 0 [rd=s0:(t1,g6)]` | 38 |
+| `NEVER_WRITTEN_VALID` | 432 | an entry with no value since reset is reported as an ordinary valid read of zero | FAIL exit 1 | `reset-state: cycle 9: slot 0: rsp_never_written expected 1, got 0` | 1 |
+| `NO_WRITE_THROUGH` | 394 | a same-cycle write to the read entry is not visible to the read | FAIL exit 1 | `write-through: cycle 48: slot 1: rsp_gen_mismatch expected 0, got 1 [wr=b0:(t0,g4,v)=0xfedcba9876543210 rd=s1:(t0,g4)]` | 32 |
+| `SLICE_ROW` | 308 | the row is `tag`'s low bits instead of `tag/BANKS` (masked into range so it stays a wrong-entry defect, not an out-of-bounds read) | FAIL exit 1 | `write-through: cycle 50: the validity bit of bank 0 row 1 expected 1, got 0` | 34 |
 
 Delta statement: the unmodified base completes all 5263 comparisons with 0
 failures and exit 0; each mutant above exits 1 with exactly 1 failure and dies at
@@ -354,6 +396,10 @@ path — which is the reason the wrapper exposes the storage at all.
    `fatal error: 'Vmosaic_muldiv_tb.h' file not found` — a sibling's case whose
    generated header is not built yet, not this package's file. My file's compile
    is verified scoped in §7.2.
+5. **The whole-tree `slang-tidy` invocation does not complete today.** It stops
+   on a sibling's in-flight file, `rtl/core/mosaic_dispatch.sv`, with six
+   "identifier used before its declaration" errors. Not this module's file; the
+   scoped run in §7.2 is exit 0.
 
 ## 10. What is NOT verified
 

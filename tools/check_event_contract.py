@@ -107,14 +107,18 @@ INVARIANTS = (
 
 
 class Problem(object):
-    __slots__ = ("where", "message")
+    __slots__ = ("where", "message", "invariant")
 
-    def __init__(self, where: str, message: str) -> None:
+    def __init__(self, where: str, message: str, invariant: str = "INV-SOURCE") -> None:
         self.where = where
         self.message = message
+        self.invariant = invariant
 
     def __str__(self) -> str:
-        return "%s: %s" % (self.where, self.message)
+        # The invariant is printed, not implied: a rejected interface says which
+        # check rejected it, so the negative controls below are evidence about a
+        # named check rather than about "the tool exited non-zero".
+        return "[%s] %s: %s" % (self.invariant, self.where, self.message)
 
 
 # ---------------------------------------------------------------------------
@@ -334,7 +338,7 @@ def evaluate(text: str, namespace: Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 RETIRE_LOCALPARAM_RE = re.compile(
-    r"^\s*localparam\s+int\s+unsigned\s+([A-Za-z_]\w*)\s*=\s*([^;]*);"
+    r"^\s*localparam\s+int\s+unsigned\s+([A-Za-z_]\w*)\s*=\s*([^;]*);", re.M
 )
 RETIRE_PORT_RE = re.compile(
     r"^\s*output\s+logic\s*\[\s*(.+?)\s*-\s*1\s*:\s*0\s*\]\s*(ev_\w+)\s*,?\s*$"
@@ -474,7 +478,7 @@ def check(root: str, profile: str) -> List[Problem]:
     problems: List[Problem] = []
 
     def fail(where: str, message: str) -> None:
-        problems.append(Problem(where, message))
+        problems.append(Problem(where, message, invariant))
 
     try:
         schema = load_schema(root)
@@ -496,6 +500,7 @@ def check(root: str, profile: str) -> List[Problem]:
     fields = schema.get("fields", [])
 
     # ------------------------------------------------------------ INV-COMPLETE
+    invariant = "INV-COMPLETE"
     seen = set()
     for field in fields:
         name = field.get("name", "<unnamed>")
@@ -544,6 +549,7 @@ def check(root: str, profile: str) -> List[Problem]:
             )
 
     # ------------------------------------------------------------ INV-ENCODING
+    invariant = "INV-ENCODING"
     encoding = schema.get("encoding", {})
     offset = int(encoding.get("header", {}).get("bits", 0)) // 8
     if offset <= 0:
@@ -565,6 +571,7 @@ def check(root: str, profile: str) -> List[Problem]:
              % (encoding.get("total_octets"), offset))
 
     # ------------------------------------------------------------- INV-VERSION
+    invariant = "INV-VERSION"
     codec_text = read_text(os.path.join(root, CODEC_REL))
     try:
         codec_version, codec_fields, codec_kinds = parse_codec(codec_text)
@@ -582,6 +589,7 @@ def check(root: str, profile: str) -> List[Problem]:
              % (CODEC_REL, codec_kinds, kinds))
 
     # ----------------------------------------------------------- INV-CPPFIELDS
+    invariant = "INV-CPPFIELDS"
     schema_names = [f.get("name") for f in fields]
     cpp_names = [name for name, _ in codec_fields]
     if cpp_names != schema_names:
@@ -604,6 +612,7 @@ def check(root: str, profile: str) -> List[Problem]:
                      % (CODEC_REL, bits, field["width_bits"]))
 
     # ------------------------------------------------------------- INV-SOURCE
+    invariant = "INV-SOURCE"
     schema_fields = {f["name"]: f for f in fields if "name" in f}
     declared_per_file: Dict[str, Dict[str, int]] = {}
     pending: List[str] = []
@@ -645,6 +654,7 @@ def check(root: str, profile: str) -> List[Problem]:
                      "names field %r which is not in the field list" % name)
 
     # ------------------------------------------------------------- INV-TAPDECL
+    invariant = "INV-TAPDECL"
     producer_decls: Dict[str, Dict[str, int]] = {}
     for producer in schema.get("producers", []):
         relative = producer["file"]
@@ -654,6 +664,13 @@ def check(root: str, profile: str) -> List[Problem]:
             if selector_kind == "sv_output_port_prefix":
                 actual = parse_sv_ports(read_text(os.path.join(root, relative)),
                                         selector["prefix"])
+            elif selector_kind == "sv_lane_port_prefix":
+                # A per-lane port is declared as one flat vector of
+                # retire_width * field_width bits whose width is an expression
+                # over the file's own localparams, so it is evaluated rather
+                # than read as a literal.
+                actual = parse_retire_ports(read_text(os.path.join(root, relative)),
+                                            namespace)
             elif selector_kind == "cpp_struct_members":
                 actual = parse_cpp_struct(read_text(os.path.join(root, relative)),
                                           selector["struct"])
@@ -676,6 +693,7 @@ def check(root: str, profile: str) -> List[Problem]:
                  % (relative, decl))
 
     # ------------------------------------------------------------ INV-RTLWIDTH
+    invariant = "INV-RTLWIDTH"
     for field in fields:
         name = field.get("name", "?")
         for source in field.get("sources", []):
@@ -707,6 +725,7 @@ def check(root: str, profile: str) -> List[Problem]:
                          "is recorded" % (relative, decl))
 
     # ----------------------------------------------------------- INV-IDENTITY
+    invariant = "INV-IDENTITY"
     roles: Dict[str, List[str]] = {}
     for field in fields:
         roles.setdefault(field.get("identity_role", "none"), []).append(field["name"])
@@ -714,20 +733,25 @@ def check(root: str, profile: str) -> List[Problem]:
         if role != "none" and len(names) > 1:
             fail("identity", "%s claim the %r identity; a field may not claim an "
                              "identity another field already carries" % (names, role))
-    locating = schema.get("locating", {})
-    hart_field = schema_fields.get(locating.get("hart_field", ""))
-    order_field = schema_fields.get(locating.get("order_field", ""))
-    if hart_field is None or hart_field.get("identity_role") != "hart":
-        fail("locating.hart_field", "does not name a field with the hart identity")
-    if order_field is None or order_field.get("identity_role") != "retire_order":
-        fail("locating.order_field",
-             "does not name a field with the retirement-order identity")
 
     # ------------------------------------------------------------- INV-LOCATE
-    for key in ("hart_field", "order_field"):
+    # The clause the card makes non-negotiable: every architectural effect
+    # locates to exactly one hart and one instruction. The two locating fields
+    # carry the identities, are architectural, and are valid on every kind -- so
+    # a store's visibility and a trap are attributable through the same two
+    # fields as a retirement is, with no debug-only side channel.
+    invariant = "INV-LOCATE"
+    locating = schema.get("locating", {})
+    for key, role in (("hart_field", "hart"), ("order_field", "retire_order")):
         field = schema_fields.get(locating.get(key, ""))
         if field is None:
+            fail("locating.%s" % key, "names %r, which is not a field in the list"
+                 % locating.get(key))
             continue
+        if field.get("identity_role") != role:
+            fail("field %s" % field["name"],
+                 "is named by locating.%s but claims the %r identity, not %r"
+                 % (key, field.get("identity_role"), role))
         if field.get("class") != "architectural":
             fail("field %s" % field["name"],
                  "is a locating field and must be architectural, not %s"
@@ -738,6 +762,7 @@ def check(root: str, profile: str) -> List[Problem]:
                  % field.get("valid_kinds"))
 
     # -------------------------------------------------------------- INV-KINDS
+    invariant = "INV-KINDS"
     kind_field = None
     for field in fields:
         if field.get("group") == "kind":
@@ -759,6 +784,7 @@ def check(root: str, profile: str) -> List[Problem]:
             fail("fields", "no field of group %s is listed" % group)
 
     # ------------------------------------------------------------- INV-VECTOR
+    invariant = "INV-VECTOR"
     for field in fields:
         name = field["name"]
         if re.match(r"^(vec|vbody|vreg)", name):
@@ -777,6 +803,7 @@ def check(root: str, profile: str) -> List[Problem]:
             fail("deferred %s" % entry.get("id"), "is also an active field")
 
     # -------------------------------------------------------------- INV-RULES
+    invariant = "INV-RULES"
     rules = schema.get("rules", [])
     if not rules:
         fail("rules", "the schema records no rule, so the failure modes it was "
@@ -820,7 +847,14 @@ class NegativeControls(object):
                 target = os.path.join(workdir, relative)
                 os.makedirs(os.path.dirname(target), exist_ok=True)
                 shutil.copyfile(os.path.join(REPO_ROOT, relative), target)
-            mutator(workdir)
+            try:
+                mutator(workdir)
+            except AssertionError as exc:
+                # A mutation whose target has vanished is a broken control, not a
+                # passing one: it would otherwise silently stop testing anything.
+                self.failures.append("%s (mutation does not apply: %s)" % (name, exc))
+                print("  BROKEN CONTROL: %s (%s)" % (name, exc), file=sys.stderr)
+                return
             problems = check(workdir, self.profile)
             if not problems:
                 self.failures.append(name)
@@ -863,56 +897,92 @@ class NegativeControls(object):
                   % len(baseline), file=sys.stderr)
             return 1
 
-        # The RTL producers.
+        def swap_codec_fields(workdir: str) -> None:
+            # Swap the first two field entries' names, keeping the macro's line
+            # layout, so the *order* is what changed and nothing else.
+            path = os.path.join(workdir, CODEC_REL)
+            text = read_text(path)
+            pattern = re.compile(r"(?P<a>X\(retire_seq,\s*8\))(?P<mid>.*?)"
+                                 r"(?P<b>X\(hart_id,\s*1\))", re.S)
+            replaced, count = pattern.subn(
+                lambda m: m.group("b") + m.group("mid") + m.group("a"), text, count=1)
+            if count != 1:
+                raise AssertionError("could not swap the codec's first two fields")
+            with open(path, "w") as handle:
+                handle.write(replaced)
+
+        def rename_field_everywhere(workdir: str, old: str, new: str) -> None:
+            self._edit(workdir, CODEC_REL, "X(%s," % old, "X(%s," % new)
+            self._edit_schema(
+                workdir, lambda d: self._field(d, old).update({"name": new}))
+
+        # -- the RTL producers -------------------------------------------------
         self.case("retire ev_store_size narrowed to 2 bits",
                   lambda w: self._edit(w, RETIRE_REL, "RET_SIZE_W = 3;", "RET_SIZE_W = 2;"))
         self.case("retire ev_store_data renamed",
                   lambda w: self._edit(w, RETIRE_REL, "ev_store_data,", "ev_stdata,"))
         self.case("retire ev_seq widened past the schema",
-                  lambda w: self._edit(w, RETIRE_REL, "RET_SEQ_W = $clog2(2 * RET_ROB + 1);",
-                                       "RET_SEQ_W = $clog2(2 * RET_ROB + 1) + 4;"))
-        # The bring-up tap.
+                  lambda w: self._edit(w, RETIRE_REL, "$clog2(2 * RET_ROB + 1);",
+                                       "$clog2(2 * RET_ROB + 1) + 4;"))
+        # -- the bring-up tap --------------------------------------------------
         self.case("bringup c_evt_pc narrowed to 32 bits",
                   lambda w: self._edit(w, TAP_SV_REL, "output wire  [63:0] c_evt_pc,",
                                        "output wire  [31:0] c_evt_pc,"))
         self.case("bringup c_evt_next_pc renamed",
                   lambda w: self._edit(w, TAP_SV_REL, "output wire  [63:0] c_evt_next_pc,",
                                        "output wire  [63:0] c_evt_npc,"))
-        # The host record.
+        # -- the host record ---------------------------------------------------
         self.case("host record store_size removed",
                   lambda w: self._edit(w, TAP_H_REL, "  unsigned store_size = 0;", ""))
         self.case("host record rd widened to 16 bits",
                   lambda w: self._edit(w, TAP_H_REL, "  uint8_t rd = 0;",
                                        "  uint16_t rd = 0;"))
-        # The codec.
+        # -- the serialiser ----------------------------------------------------
         self.case("codec pc_before encoded 32 bits wide",
                   lambda w: self._edit(w, CODEC_REL, "X(pc_before, 64)", "X(pc_before, 32)"))
         self.case("codec trap_epc dropped from the field list",
-                  lambda w: self._edit(w, CODEC_REL, "  X(trap_epc, 64)\n", ""))
-        self.case("codec field order changed",
-                  lambda w: self._edit(w, CODEC_REL,
-                                       "  X(hart_id, 1)                \\\n  X(cycle, 64)",
-                                       "  X(cycle, 64)                 \\\n  X(hart_id, 1)"))
+                  lambda w: self._edit(w, CODEC_REL, "  X(trap_epc, 64)", ""))
+        self.case("codec field order changed", swap_codec_fields)
+        self.case("codec field renamed without the schema",
+                  lambda w: self._edit(w, CODEC_REL, "X(rd_value,", "X(rdval,"))
         self.case("codec schema version bumped alone",
                   lambda w: self._edit(w, CODEC_REL,
                                        "MOSAIC_EVENT_SCHEMA_VERSION 1",
                                        "MOSAIC_EVENT_SCHEMA_VERSION 2"))
         self.case("codec MEM_VISIBLE value changed",
                   lambda w: self._edit(w, CODEC_REL, "K(MEM_VISIBLE, 3)", "K(MEM_VISIBLE, 9)"))
-        # The schema's own completeness.
+        # -- the schema's own completeness -------------------------------------
         self.case("field without a validity rule",
                   lambda w: self._edit_schema(
                       w, lambda d: self._field(d, "rd_value").pop("valid_when")))
         self.case("field without a sampling instant",
                   lambda w: self._edit_schema(
                       w, lambda d: self._field(d, "pc_after").pop("sampled_at")))
+        self.case("field with no group at all",
+                  lambda w: self._edit_schema(
+                      w, lambda d: self._field(d, "insn_bits").pop("group")))
+        self.case("width expression that does not resolve to the width",
+                  lambda w: self._edit_schema(
+                      w, lambda d: self._field(d, "csr_addr").update({"width_expr": "1"})))
+        # -- sources -----------------------------------------------------------
         self.case("field without any source",
                   lambda w: self._edit_schema(
                       w, lambda d: self._field(d, "csr_value").update({"sources": []})))
+        self.case("pending source with no reason recorded",
+                  lambda w: self._edit_schema(
+                      w, lambda d: self._field(d, "insn_bits")["sources"][-1].pop("why")))
+        # -- identity and the locating clause ----------------------------------
         self.case("second field claiming the retirement order",
                   lambda w: self._edit_schema(
                       w, lambda d: self._field(d, "cycle").update(
                           {"identity_role": "retire_order"})))
+        self.case("locating order field is a debug-only identity",
+                  lambda w: self._edit_schema(
+                      w, lambda d: d["locating"].update({"order_field": "rob_id"})))
+        self.case("locating hart field named but absent",
+                  lambda w: self._edit_schema(
+                      w, lambda d: d["locating"].update({"hart_field": "hart_number"})))
+        # -- kinds -------------------------------------------------------------
         self.case("trap payload marked valid on a retirement",
                   lambda w: self._edit_schema(
                       w, lambda d: self._field(d, "trap_cause").update(
@@ -924,16 +994,18 @@ class NegativeControls(object):
         self.case("architectural next PC marked observed",
                   lambda w: self._edit_schema(
                       w, lambda d: self._field(d, "pc_after").update({"class": "observed"})))
-        self.case("vector body in a fixed 128-bit window",
-                  lambda w: self._edit_schema(w, lambda d: d["fields"].append(
-                      dict(self._field(d, "insn_bits"),
-                           name="vbody", width_expr="128", width_bits=128,
-                           encoding_octets=16, encoding_offset_bytes=100))))
-        self.case("rule with no implemented check",
+        self.case("event kind field too narrow for the kinds it must carry",
+                  lambda w: [self._edit(w, CODEC_REL, "X(kind, 2)", "X(kind, 1)"),
+                             self._edit_schema(
+                                 w, lambda d: self._field(d, "kind").update(
+                                     {"width_bits": 1, "width_expr": "1"}))])
+        # -- the vector rule ---------------------------------------------------
+        self.case("active field named as a vector body in a fixed window",
+                  lambda w: rename_field_everywhere(w, "rd", "vbody"))
+        self.case("deferred vector entry names an active field",
                   lambda w: self._edit_schema(
-                      w, lambda d: d["rules"][0].update({"enforced_by": "INV-VIBES"})))
-        self.case("rule deleted from the schema",
-                  lambda w: self._edit_schema(w, lambda d: d["rules"].pop()))
+                      w, lambda d: d["deferred"][0].update({"id": "insn_bits"})))
+        # -- the encoding ------------------------------------------------------
         self.case("encoding offset drifted by one byte",
                   lambda w: self._edit_schema(
                       w, lambda d: self._field(d, "mem_data").update(
@@ -941,6 +1013,15 @@ class NegativeControls(object):
         self.case("record size disagrees with the field layout",
                   lambda w: self._edit_schema(
                       w, lambda d: d["encoding"].update({"total_octets": 104})))
+        # -- rules -------------------------------------------------------------
+        self.case("rule with no implemented check",
+                  lambda w: self._edit_schema(
+                      w, lambda d: d["rules"][0].update({"enforced_by": "INV-VIBES"})))
+        self.case("rule deleted from the schema",
+                  lambda w: self._edit_schema(w, lambda d: d["rules"].pop()))
+        self.case("reconciliation naming a field that does not exist",
+                  lambda w: self._edit_schema(
+                      w, lambda d: d["reconciliation"][0].update({"field": "pc_future"})))
 
         if self.failures:
             print("negative controls: %d of %d were wrongly accepted: %s"

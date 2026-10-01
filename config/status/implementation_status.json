@@ -21,7 +21,10 @@
     "I-028",
     "I-024",
     "I-033",
-    "I-018"
+    "I-018",
+    "I-008",
+    "I-011",
+    "I-021"
   ],
   "evidence": {
     "I-001": {
@@ -251,6 +254,39 @@
       "verdict": "PASS",
       "notes": "Both cases PASS from clean builds (build/p0/unit/<case> removed first), 419470 per-cycle comparisons over 6810 cycles in the base run. Nine mutants each exit 1 with a distinct named first failure and a delta; two of the previously delivered mutants did not elaborate at all and had never been run (they were re-expressed so they build and still inject the described defect) and three more were added so that each RTL defect fixed has a mutant failing on the check written for it. Root causes the package found: an allocation at the undo bound was accepted while the journal index wrapped (out-of-bounds write, found with AddressSanitizer -- this was the cause of the changing first divergence the integration lane kept seeing, not a shifting model); a restore undid only the restored checkpoint's own branch tag, leaking one tag per killed younger checkpoint; alloc_seen/last_alloc_gen were not reset so the first ROB_ENTRIES allocations after reset reported a regression on a compliant producer; and the credit kill was by epoch-only, which kills older work the squash does not own -- plan section 1.3 and the card forbid it, so the module's documented rule was wrong and its header was corrected rather than only its code. NOT verified: the module still owns its own copy of the speculative maps, free list, generation table and journal; the rename/recovery cutover (one owner for that state, recovery driving rename's ckpt/squash) is recorded in PROGRESS as the next integration task and is not claimed here.",
       "report": "results/reports/I-018-recovery.md"
+    },
+    "I-008": {
+      "cases": [
+        "core.bringup_vs_reference"
+      ],
+      "commands": [
+        "python3 tools/run_unit.py --profile p0 --case core.bringup_vs_reference"
+      ],
+      "verdict": "PASS",
+      "notes": "Case PASS; 39 corpus ELFs, 2774346 architectural events, every retire stream byte-identical to the independent reference (the event comparison is per instruction, not an end-state check; the run is registered at --max-cycles 4000000). Five mutants re-run independently: four exit 1 with the documented first mismatches, and MOSAIC_BRINGUP_MUTANT_4 exits 0 -- its own report section 8.4 declares it unobservable by construction in this profile (every writable CSR is idempotent under a write of its own value), so acceptance criterion 3 is recorded as NOT MET for that one control rather than counted as evidence. That is a coverage gap in the package, not a hardware defect, and it is carried in the report and in results/PROGRESS.md.",
+      "report": "results/reports/I-008-bringup.md"
+    },
+    "I-011": {
+      "cases": [
+        "alu.boundaries"
+      ],
+      "commands": [
+        "python3 tools/run_unit.py --profile p0 --case alu.boundaries"
+      ],
+      "verdict": "PASS",
+      "notes": "Case PASS: 108560 ALU and 49536 branch vectors, 316022 checks, zero failures; boundary coverage includes 0, all-ones, signed MIN/MAX, W sign-extension, JALR bit-0 clearing and target alignment. Nine mutants re-run independently: all nine exit 1 with the first mismatches their report claims. The case also asserts the invariant that a caller driving branch_taken with no branch named gets is_taken = 0 (the port list defect that produced this package's original wrong fix is now a check, not a comment).",
+      "report": "results/reports/I-010-011-decode-alu.md"
+    },
+    "I-021": {
+      "cases": [
+        "predictor.btb_aliasing"
+      ],
+      "commands": [
+        "python3 tools/run_unit.py --profile p0 --case predictor.btb_aliasing"
+      ],
+      "verdict": "PASS",
+      "notes": "Case PASS. Five mutants re-run independently: all five exit 1. The discriminating coverage the card names is present and asserted: BTB aliasing is distinguished (two PCs colliding on one index resolve to different targets, and a retrained pair must HIT, so a predictor that always missed cannot pass), training is observable in both directions (a static predictor fails), and reset determinism is byte-identical across two runs. Sizes come from the generated config package (512/64/16), and the module takes no mispredict input by design -- it is corrected by being rewritten from resolved values, with the redirect and miss invariants checked every cycle.",
+      "report": "results/reports/I-021-predictor.md"
     }
   }
 }

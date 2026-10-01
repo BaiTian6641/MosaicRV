@@ -165,11 +165,6 @@ class RenameModel {
   // A writeback the arbiter offered *and* this model accepted has happened.
   void Commit(uint32_t tag, uint32_t gen) { state_[tag].written.insert(gen); }
 
-  bool Written(uint32_t tag, uint32_t gen) const {
-    auto it = state_.find(tag);
-    return it != state_.end() && it->second.written.count(gen) != 0;
-  }
-
  private:
   struct State {
     bool assigned = false;
@@ -238,34 +233,6 @@ class RobModel {
   std::map<Key, bool> live_;  // key -> already completed
 };
 
-// ---------------------------------------------------------- durable contents
-// What the register file is expected to hold, per physical tag: the (generation,
-// value) of the last accepted write. Used to compare against the register file
-// actually read back, not to replace the read-back.
-class PrfExpect {
- public:
-  void Write(uint32_t tag, uint32_t gen, uint64_t value) {
-    Entry& e = entries_[tag];
-    e.written = true;
-    e.gen = gen;
-    e.value = value;
-  }
-  bool Written(uint32_t tag) const {
-    auto it = entries_.find(tag);
-    return it != entries_.end() && it->second.written;
-  }
-  uint32_t Gen(uint32_t tag) const { return entries_.at(tag).gen; }
-  uint64_t Value(uint32_t tag) const { return entries_.at(tag).value; }
-
- private:
-  struct Entry {
-    bool written = false;
-    uint32_t gen = 0;
-    uint64_t value = 0;
-  };
-  std::map<uint32_t, Entry> entries_;
-};
-
 // ---------------------------------------------------------------- the tally
 struct Tally {
   uint64_t offered = 0;
@@ -308,7 +275,6 @@ class Harness {
     for (int i = 0; i < cycles; i++) Cycle(/*rst=*/true);
     rename_ = RenameModel();
     rob_ = RobModel();
-    prf_expect_ = PrfExpect();
     for (Held& h : held_) h = Held{};
     inflight_.clear();
     exp_ = Tally();
@@ -318,8 +284,6 @@ class Harness {
   RenameModel& Rename() { return rename_; }
   RobModel& Rob() { return rob_; }
   const Tally& Totals() const { return totals_; }
-  const Tally& Expected() const { return exp_; }
-  const PrfExpect& Prf() const { return prf_expect_; }
   uint64_t comparisons() const { return comparisons_; }
   uint64_t cycles() const { return cycles_; }
 
@@ -747,7 +711,6 @@ class Harness {
             totals_.written++;
             totals_.wakeups++;
             rename_.Commit(ev->tag, Mask(ev->gen, igen_w_));
-            prf_expect_.Write(ev->tag, ev->gen, ev->value);
           } else if (!ans.ren.accepted) {
             exp_.drops++;
             totals_.drops++;
@@ -819,7 +782,6 @@ class Harness {
 
   RenameModel rename_;
   RobModel rob_;
-  PrfExpect prf_expect_;
 
   Tally exp_;      // expected DUT counter values at the start of this cycle
   Tally totals_;   // accumulated over the whole run
@@ -851,12 +813,16 @@ void PhaseResetState(Harness* h) {
   h->Phase("reset-state");
   h->Fresh();
 
-  // One quiet cycle checks the cold presentation directly.
+  // One quiet cycle checks the cold presentation directly: no producer refused,
+  // no publication, no wakeup, no register-file write, all counters zero (the
+  // standing comparison in Check() compares every one of those).
   h->Cycle(/*rst=*/false);
 
-  Require(h->Expected().written == 0 && h->Expected().stale == 0 &&
-              h->Expected().duplicate == 0,
-          "reset-state", "the tallies are not zero at reset");
+  // The ready table holds nothing at reset, for any identity.
+  const uint32_t written = h->QProbe(0, 0, true, 95, 0, true);
+  Require(written == 0, "reset-state",
+          "the ready table reports a written entry before any write: " +
+              std::to_string(written));
 }
 
 // ------------------------------------------ 1. same-bank serialisation
@@ -919,7 +885,8 @@ void PhaseSameBank(Harness* h) {
               std::to_string(collisions));
 
   // Both values must be durable: read them back out of the register file with
-  // their own (tag, generation).
+  // their own (tag, generation), and out of the value stash the retire path
+  // reads, keyed by the ROB index the completion carried.
   for (const Event& e : {ea, eb}) {
     const Harness::PrfRead r = h->PrfProbe(e.tag, e.gen);
     Require(r.valid && !r.never_written, "same-bank",
@@ -930,6 +897,12 @@ void PhaseSameBank(Harness* h) {
             "mismatch");
     Require(r.data == e.value, "same-bank",
             "tag " + std::to_string(e.tag) + ": PRF holds " + mosaic::Hex(r.data) +
+                ", expected " + mosaic::Hex(e.value));
+
+    const Harness::StashRead s = h->StashProbe(e.rob_index);
+    Require(s.valid && s.value == e.value, "same-bank",
+            "the value stash at ROB index " + std::to_string(e.rob_index) +
+                " does not hold the completion's value: got " + mosaic::Hex(s.value) +
                 ", expected " + mosaic::Hex(e.value));
   }
 }

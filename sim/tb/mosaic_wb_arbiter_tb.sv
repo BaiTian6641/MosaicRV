@@ -239,8 +239,7 @@ module mosaic_wb_arbiter_tb (
     output logic [31:0] o_rob_entries_o,
     output logic [31:0] o_rob_index_w_o,
     output logic [31:0] o_rob_gen_w_o,
-    output logic [31:0] o_uop_w_o,
-    output logic [31:0] o_cmp_uop_w_o
+    output logic [31:0] o_uop_w_o
 );
 
   // The contract widths, each named from the package that owns it. A tag port is
@@ -507,7 +506,6 @@ module mosaic_wb_arbiter_tb (
   assign o_rob_index_w_o = 32'(mosaic_id_pkg::MOSAIC_ID_W_ROB_INDEX);
   assign o_rob_gen_w_o   = 32'(mosaic_id_pkg::MOSAIC_ID_W_ROB_GEN);
   assign o_uop_w_o       = 32'(mosaic_id_pkg::MOSAIC_ID_W_UOP_INDEX);
-  assign o_cmp_uop_w_o   = 32'(mosaic_id_pkg::MOSAIC_ID_W_UOP_INDEX);
 
 endmodule : mosaic_wb_arbiter_tb
 

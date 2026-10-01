@@ -102,7 +102,10 @@ package mosaic_uop_pkg;
   localparam int unsigned TAG_W       = mosaic_id_pkg::MOSAIC_ID_W_PRF_TAG;
   localparam int unsigned GEN_W       = mosaic_id_pkg::MOSAIC_ID_W_PRF_GEN;
   localparam int unsigned HART_W      = mosaic_id_pkg::MOSAIC_ID_W_HART;
-  localparam int unsigned PRF_ENTRIES = mosaic_cfg_pkg::MOSAIC_INT_PRF_ENTRIES;
+  // Deliberately no `PRF_ENTRIES` here: it was unused, and a file-scope name in
+  // another module that happened to match it made Verilator report VARHIDDEN --
+  // an error under this project's `-Wall` gate. A package that declares a name
+  // nobody uses is a collision waiting for the first module that includes both.
 
   // -------------------------------------------------------------- identity
   // One in-flight instruction, as I-002 froze it. Aliased rather than
