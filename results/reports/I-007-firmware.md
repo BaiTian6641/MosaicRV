@@ -504,16 +504,18 @@ unmapped so a store there faults as the memory map requires.
 
 ```
 $ python3 tests/programs/audit/spike_crosscheck.py --timeout 15
-spike cross-check: 36/42 case(s) agree between Spike's architectural memory
-writes and the host program
+spike cross-check: 33/39 case(s) agree between Spike's architectural memory
+writes and the host oracle
   p08_misaligned.i0: spike exit 255 (tohost was not 1)
   p08_misaligned.i0: spike ['0x0','0x0','0x0','0x0'], oracle ['0x00000000000000ef','0x0000000001234567','0x0000000000000123','0x000000101018181f']
   p08_misaligned.i1: spike exit 255 (tohost was not 1)
   p08_misaligned.i2: spike exit 255 (tohost was not 1)
 ```
 
-42 = 39 cases counted once per reported defect line. **36 of the 39 cases
-agree**; the three that do not are all `p08_misaligned`.
+**33 of the 39 cases agree.** Six do not: `p08_misaligned` i0/i1/i2 and
+`p13_romstore` i0/i1/i2. In every failing case `sig0`, `sig1` and `sig2` agree
+exactly and only a single word differs, and in every failing case that word is
+the one that folds the recorded `mcause`.
 
 ### `p08_misaligned` — misalignment claim is `NOT_CLAIMED`
 
@@ -558,8 +560,24 @@ the store, or let it succeed produces a different `sig3`:
 sig0 = lbu[0]                    sig3 = ((record_count << 8) | first_mcause)
 sig1 = sext32(a >> 32)                          ^ (1 if the store was not trapped)
 sig2 = sext16(a >> 48)
-expected trap trace: [7]
+expected trap trace: [7]   (specification; NOT_CLAIMED against this reference)
 ```
+
+The low byte of `sig3` **is** the cause: `sig3 = (record_count << 8) |
+first_mcause`, so `0x107` is count 1, cause 7. Spike produces `0x106` — count
+1, cause **6**, store/AMO address misaligned — for a `sw` to address `0`, which
+is a perfectly 4-byte-aligned address (verified: the store is
+`addiw t3, zero, 0` then `sw a0, 0(t3)`). Cause 7 is what the Privileged
+specification requires for a store to a non-writable region and what our
+frozen map demands, so **the oracle is right and the reference differs**.
+
+Part of that is my harness's fault and is stated as such: I run Spike with
+`boot_rom` **unmapped entirely**, because Spike has no read-only memory
+region type. So Spike is answering "what happens on a store to a hole" rather
+than "what happens on a store to a read-only region". That is an approximation
+of the frozen map, not a faithful model of it. Either way this reference cannot
+adjudicate the read-only-region case, so the assertion is `NOT_CLAIMED` rather
+than counted as agreeing.
 
 ### Root cause of the p08 failure — found by I-008, fixed here
 

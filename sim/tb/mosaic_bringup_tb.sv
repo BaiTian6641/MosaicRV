@@ -74,6 +74,14 @@
 // is a defined zero.
 // ============================================================================
 
+// The shared package is *included* here rather than only listed as a source
+// file.  The elaborator reads sources in command-line order, and
+// tools/run_unit.py puts the testbench sources before the RTL sources, so a
+// package that is merely listed would be read after the module that uses it and
+// every package type would look like an undeclared identifier.  The package has
+// an include guard, so listing it separately as well costs nothing.
+`include "mosaic_pkg.sv"
+
 `default_nettype none
 
 module mosaic_bringup_tb (

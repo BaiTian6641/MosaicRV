@@ -53,9 +53,12 @@
 
 #include <verilated.h>
 
+#include <algorithm>
+#include <cctype>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <limits.h>
 #include <cstring>
 #include <fstream>
 #include <map>
@@ -1084,7 +1087,7 @@ class Dut {
   uint64_t uart_writes() const { return dut_.h_uart_count; }
 
  private:
-  mosaic::RetireEvent CurrentEvent() const {
+  mosaic::RetireEvent CurrentEvent() {
     mosaic::RetireEvent event;
     event.hart = 0;
     event.seq = seq_++;
@@ -1132,15 +1135,16 @@ class Dut {
 // results/reports/I-008-bringup.md.  The harness writes the probe selector to
 // kPselBase before each run, so one image covers every probe.
 const char* kProbeImageBase64 =
-    "twIIAJuC8gCTksIAA7MCABMTMwCXAwAAk4NDATMDcwADPgMAZwAOAGgAAIAAAAAAhAAAgAAAAADIAACAAAAAA"
-    "PAPgAAIAAAAAASAEAgAAAAACEAQCAAAAAALABAIAAAAAAtAEAgAAAAAATAFAAswIAABsDEAATE/MBEwMDQCMwUw"
-    "BvAAAYlwIAAJOCghVzkFIwN9XSAhsFNS0TFcUAEwXV0hMVxQATBTUtExXVABMFpaVzJQB9mwIQAJOS8gGTgg"
-    "JAI7CiAG8AwBOXAgAAk4JCEXOQUjC3xa0Lm4XlDRMG8P/zFRYwmwIQAJOS8gGTggJAI7CyAG8AwBCXAgAAk4"
-    "JCDnOQUjC3oqr6m4JSVZOSwgCTgrJak5LCAJOCUqqTksIAk4JSVXOQAjRzIwA0cy4ANJsDEACTk/MBk4MDQCOw"
-    "wwEjtGMAbwDAC5cCAACTgkIJc5BSMDcOCAAbDh4AEx7OALcyIhGbgkI0IyBeAAMVHgCbAhAAk5LyAZOCAkAjsKI"
-    "AbwAACJcCAACTgoIFc5BSMLfFrQubheUNQwAAApsCEACTkvIBk4ICQCOwsgBvAEAFbwAAAJcCAACTgoICc5B"
-    "SMFUAUjIKAAmwIQAJOS8gGTggJAI7CiAG8AgALzIhA0cyMgNBsOEAATHv4BEw4OQCM8bgCTgkIAc5ASNHMAIDA"
-    "TBQAAkwUQALcjEAAjsKMAbwAAABMAAAA=";
+    "twIIAJuC8gCTksIAA7MCABMTMwCXAwAAk4NDATMDcwADPgMAZwAOAGgAAIAAAAAAhAAAgAAAAA"
+    "DIAACAAAAAAPgAAIAAAAAASAEAgAAAAACEAQCAAAAAALABAIAAAAAAtAEAgAAAAAATAFAAswIA"
+    "ABsDEAATE/MBEwMDQCMwUwBvAAAYlwIAAJOCghVzkFIwN9XSAhsFNS0TFcUAEwXV0hMVxQATBT"
+    "UtExXVABMFpaVzJQB9mwIQAJOS8gGTggJAI7CiAG8AwBOXAgAAk4JCEXOQUjC3xa0Lm4XlDRMG"
+    "8P/zFRYwmwIQAJOS8gGTggJAI7CyAG8AwBCXAgAAk4JCDnOQUjC3oqr6m4JSVZOSwgCTgrJak5"
+    "LCAJOCUqqTksIAk4JSVXOQAjRzIwA0cy4ANJsDEACTk/MBk4MDQCOwwwEjtGMAbwDAC5cCAACT"
+    "gkIJc5BSMDcOCAAbDh4AEx7OALcyIhGbgkI0IyBeAAMVHgCbAhAAk5LyAZOCAkAjsKIAbwAACJ"
+    "cCAACTgoIFc5BSMLfFrQubheUNQwAAApsCEACTkvIBk4ICQCOwsgBvAEAFbwAAAJcCAACTgoIC"
+    "c5BSMBMFUAUjIKAAmwIQAJOS8gGTggJAI7CiAG8AgALzIhA0cyMgNBsOEAATHv4BEw4OQCM8bg"
+    "CTgkIAc5ASNHMAIDATBQAAkwUQALcjEAAjsKMAbwAAABMAAAA=";
 
 struct ProbeResult {
   Outcome outcome = Outcome::kCycleLimit;
@@ -1340,8 +1344,9 @@ int main(int argc, char** argv) {
       if (!tap.Save(event_path, &detail)) Fail(stem + ": " + detail);
 
       std::string mismatch, compare_detail;
-      const bool differs =
-          tap.Compare(reference_detail, &mismatch, &compare_detail);
+      int mismatch_count = 0;
+      const bool differs = tap.Compare(reference_detail, &mismatch,
+                                       &mismatch_count, &compare_detail);
       if (differs) {
         reporter.Mismatch(stem + " retire stream", reference_detail, mismatch);
         Fail(stem + ": the DUT and the independent reference disagree -- " +
