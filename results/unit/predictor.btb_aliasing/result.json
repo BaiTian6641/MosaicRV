@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "case": "predictor.btb_aliasing",
+  "verdict": "PASS",
+  "detail": "predictor contract holds: 9266 shadow comparisons over 4673 cycles, seed 1",
+  "seed": 1,
+  "max_cycles": 200000,
+  "checks": 9,
+  "failures": 0,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-01T06:25:14Z",
+  "first_mismatch": ""
+}

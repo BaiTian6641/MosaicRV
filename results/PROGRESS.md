@@ -594,3 +594,27 @@ Mutants are required, and the card warns about the specific way they lie: a `-D`
 whose `` `ifdef `` block does not exist compiles to the shipping build and "passes"
 vacuously. That has happened twice here, so the acceptance is that the mutant is
 shown to *change behaviour*, not merely that it was defined.
+
+---
+
+## 2026-10-01 — a defect found by the agent, not by me
+
+The I-021 agent reported that `tools/run_unit.py` did not pass
+`-Ibuild/<profile>/rtl`, so `` `include "mosaic_cfg_pkg.svh" `` could not resolve:
+Verilator does not search the including file's own directory. The linter and
+`lint-slang` already passed that directory — only the runner did not.
+
+The consequence matters more than the one-line fix. Without it, the only way to
+build was to parameterise with defaults and have the testbench pass the sizes, which
+would have put **512/64/16 in two places**: RTL defaults and C++ expectations. That
+is how geometry and hardware drift apart, and it is the same defect this project has
+already been hit by twice with constants that were correct when written.
+
+The agent diagnosed it, showed the search-path error verbatim, proposed the fix, and
+correctly rejected the fallback. That is the behaviour the plan's blocking rules ask
+for, and it is why the sizes come from one generated source.
+
+Worth noting for the record: this is the second defect in this session that a
+subagent found in tooling I own. The linter's package ordering and the harness
+sampling race were found by running things; this one was found by an agent reading a
+build error I had not looked at closely enough.
