@@ -479,3 +479,36 @@ the correct call and is exactly the kind of thing that is easy to skip quietly.
 - **V-043** — no MosaicRV ACT4 DUT profile or runner.
 
 An upstream environment being ready is the precondition for all four, not any of them.
+
+---
+
+## 2026-10-01 — CoreMark positive control reproduced here, not inherited
+
+I ran the XiangShan/NEMU differential control myself rather than citing the
+record. Getting there took three wrong invocations first: I passed the image
+positionally, then used a `--diff-so` flag that does not exist, and only got a
+clean run after reading `emu --help`, which shows `--diff=<ref.so>` and
+`--image=<workload>`.
+
+Run inside the pinned AMD64 `xs-env` image under Rosetta:
+
+```
+Core  0's Commit SHA is: e7bab53e66, dirty: 0
+The first instruction of core 0 has commited. Difftest enabled.
+Core 0: HIT GOOD TRAP at pc = 0x80001ca0
+Core-0 instrCnt = 663692, cycleCnt = 463152, IPC = 1.432990
+CoreMark Iterations/Sec 495
+```
+
+Every figure matches the recorded values exactly — instruction count, cycle count
+and IPC agree to the digit. This is **upstream XiangShan against upstream NEMU**,
+which proves the toolchain, the image, the reference library and the workload all
+work together. It says nothing whatsoever about MosaicRV: our core is not in that
+loop, and a `HIT GOOD TRAP` here is not a DUT pass.
+
+One incidental fact worth keeping, because it cost real time to find: the emulator
+binary lives at `build/verilator-compile/emu`, while `build/emu` is a **dangling
+symlink** pointing at `/work/build/verilator-compile/emu`, a path from the original
+container that does not exist in the guest. Anything scripted against `build/emu`
+fails with a bare "No such file or directory" that looks like a missing build rather
+than a stale link.
