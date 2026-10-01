@@ -53,11 +53,29 @@ The store-to-`boot_rom` case was split out as `p13_romstore` so the reference
 that is actually available can adjudicate it. Corpus is now 13 programs × 3
 inputs = 39 ELFs, 8649 instructions, all within `rv64im_zicsr_zifencei`.
 
-**Not yet recorded as agreeing:** on a clean rebuild the Spike cross-check
-reports **four** disagreements, not three, and `p13_romstore` disagrees on all
-three inputs by exactly one in the low byte (`...107` against `...106`). The
-package report claims all three of its inputs agree. That claim is contradicted
-by the tool's own output and is being resolved before anything is recorded
-either way. A report that says "36 of 39" when the tool says 37 is worse than no
-number, so the discrepancy is being carried as an open item rather than smoothed
-away.
+**Corrected final status: 33 of 39 reference-validated, two assertions marked
+`NOT_CLAIMED` with stated reasons.**
+
+The package report had claimed "36 of 39 agree". That number came from a `grep`
+truncated with `head`, not from the tool's own count; the tool says **33 of 39**
+and six cases disagree. The false figure was caught here and corrected rather
+than carried forward.
+
+In **every** failing case `sig0`, `sig1` and `sig2` agree with Spike exactly.
+Only the trap-fold word differs, which is a precise statement of what is and is
+not validated:
+
+| claim | status | reason |
+|---|---|---|
+| arithmetic, branches, loads/stores, aligned-neighbour behaviour | validated, 33/39 | agrees with Spike word for word |
+| `p08` misaligned-access traps | `NOT_CLAIMED` | Spike services misaligned accesses natively and exposes no option to trap |
+| `p13` store to non-writable `boot_rom` | `NOT_CLAIMED` | Spike reports cause 6 where the specification requires cause 7, and the harness models `boot_rom` as unmapped rather than read-only because Spike has no read-only region type |
+
+The oracle was **not** edited to match Spike in either case. Cause 7 is
+architecturally correct for a store to a non-writable region, and writing 6 into
+the expectation to turn a tool green is exactly the drift this package exists to
+prevent.
+
+Closing both would need a reference that implements the frozen misalignment
+policy *and* models a non-writable region. Neither is configurable in this
+Spike build.
