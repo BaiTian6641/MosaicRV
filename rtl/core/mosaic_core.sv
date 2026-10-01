@@ -26,21 +26,22 @@
 //   * The redirect arbiter only lets a branch act in the cycle it is the ROB
 //     head and is being retired. Everything still in the ROB is therefore
 //     younger than it, so the all-or-nothing ROB flush discards exactly the
-//     wrong-path instructions and the branch itself retires normally (its link
+//     wrong-path instructions, and the branch itself retires normally (its link
 //     write and its PC change both land). The flush is asserted one cycle after
 //     the retirement, because the retire module refuses to retire in a flush
 //     cycle.
 //   * The rename squash restores the speculative map from the committed map,
 //     which is correct exactly because everything unretired is younger than the
-//     branch that just committed. Its free-list roll-back is not used: the
+//     branch that has just committed. Its free-list roll-back is not used: the
 //     checkpoint is taken every cycle (`ckpt_valid` tied high), so the journal
 //     is empty and the squash restores the map only. The destinations of the
 //     discarded instructions are released explicitly by walking the descriptor
-//     store, which is the only structure that knows those tags -- rename's own
-//     journal cannot be used for this because it would also free a tagged entry
-//     that has since committed.
+//     store, which is the only structure that knows those tags. rename's own
+//     journal cannot be used for that: it would also free an entry that has
+//     since committed, and the committed map would then point at a tag the
+//     allocator believes is free.
 //
-// Recovery holds dispatch and fetch until both the clusters have purged their
+// Recovery holds dispatch and fetch until both clusters have purged their
 // queues and the walk has released every discarded destination. Retirement is
 // never held: a pending redirect waits for older work to retire, and a macro
 // waiting for issue-queue space only delays itself and everything younger.
@@ -49,13 +50,15 @@
 //
 // Loads, stores, fences, CSRs, traps, interrupts and the memory path are not
 // part of this package; dispatch refuses those macros and stops the machine
-// (see mosaic_dispatch.sv). The data port is brought out and tied to a
+// (see mosaic_dispatch.sv). The data port is brought out and driven to a
 // never-requesting value so the SoC interface exists, but it is not exercised.
+//
 // The instruction-side port carries the fetch unit's request id and epoch
-// unchanged; the fetch unit already refuses a response from a retired epoch
+// unchanged and the fetch unit already refuses a response from a retired epoch
 // (`rsp_live` in mosaic_fetch.sv requires the slot to own the response, the
 // slot not to be cancelled, no redirect in the cycle, and the epoch to match),
-// so a stale response cannot reach the decoder.
+// so a stale response cannot reach the decoder -- confirmed in the source, not
+// assumed.
 // ============================================================================
 
 `default_nettype none
@@ -82,13 +85,15 @@ localparam int unsigned CORE_BANKS   = mosaic_cfg_pkg::MOSAIC_PRF_BANKS;
 localparam int unsigned CORE_ROB_N   = mosaic_cfg_pkg::MOSAIC_ROB_ENTRIES;
 localparam int unsigned CORE_FETCH_N = mosaic_cfg_pkg::MOSAIC_FETCH_OUTSTANDING;
 localparam int unsigned CORE_REQ_ID_W = (CORE_FETCH_N <= 1) ? 1 : $clog2(CORE_FETCH_N);
-localparam int unsigned CORE_EPOCH_W = ((CORE_ROB_N <= 1) ? 2 : $clog2(CORE_ROB_N) + 1);
+localparam int unsigned CORE_EPOCH_W = (CORE_ROB_N <= 1) ? 2 : $clog2(CORE_ROB_N) + 1;
 localparam int unsigned CORE_RET_N   = mosaic_cfg_pkg::MOSAIC_RETIRE_WIDTH;
 localparam int unsigned CORE_RET_ID_W = 2 * CORE_TAG_W;
 localparam int unsigned CORE_SEQ_W   = $clog2(2 * CORE_ROB_N + 1);
 localparam int unsigned CORE_RD_W    = 5;
 localparam int unsigned CORE_CSR_W   = 12;
 localparam int unsigned CORE_SIZE_W  = 3;
+localparam int unsigned CORE_OCC_W   = $clog2(CORE_ROB_N + 1);
+localparam int unsigned CORE_JLEN_W  = $clog2(CORE_ROB_N + 1);
 
 module mosaic_core (
     input  logic                        clk,
@@ -118,26 +123,26 @@ module mosaic_core (
     // ------------------------------------------------------ retire event stream
     output logic [CORE_RET_N-1:0]       ev_valid,
     output logic [CORE_RET_N-1:0]       ev_trap,
-    output logic [CORE_RET_N*CORE_SEQ_W-1:0] ev_seq,
-    output logic [CORE_RET_N*CORE_XLEN-1:0]  ev_pc,
+    output logic [CORE_RET_N*CORE_SEQ_W-1:0]  ev_seq,
+    output logic [CORE_RET_N*CORE_XLEN-1:0]   ev_pc,
     output logic [CORE_RET_N*CORE_RET_ID_W-1:0] ev_id,
     output logic [CORE_RET_N-1:0]       ev_reg_we,
-    output logic [CORE_RET_N*CORE_RD_W-1:0]  ev_rd,
-    output logic [CORE_RET_N*CORE_XLEN-1:0]  ev_value,
+    output logic [CORE_RET_N*CORE_RD_W-1:0]   ev_rd,
+    output logic [CORE_RET_N*CORE_XLEN-1:0]   ev_value,
     output logic [CORE_RET_N-1:0]       ev_store,
-    output logic [CORE_RET_N*CORE_XLEN-1:0]  ev_store_addr,
-    output logic [CORE_RET_N*CORE_XLEN-1:0]  ev_store_data,
+    output logic [CORE_RET_N*CORE_XLEN-1:0]   ev_store_addr,
+    output logic [CORE_RET_N*CORE_XLEN-1:0]   ev_store_data,
     output logic [CORE_RET_N*CORE_SIZE_W-1:0] ev_store_size,
 
     // -------------------------------------------------------------- evidence
     output logic [31:0]                 o_commit_ctr,
     output logic [31:0]                 o_unsupported_ctr,
+    output logic [31:0]                 o_illegal_ctr,
     output logic [31:0]                 o_redirect_ctr,
     output logic [31:0]                 o_recovering_ctr,
     output logic [31:0]                 o_stop_ctr,
     output logic                        o_stopped,
     output logic [31:0]                 o_cycle_ctr,
-    // per-cluster live evidence
     output logic [31:0]                 o_c0_count,
     output logic [31:0]                 o_c1_count,
     output logic                        o_c0_grant_valid,
@@ -149,7 +154,6 @@ module mosaic_core (
     output logic [31:0]                 o_c0_branch_ctr,
     output logic [31:0]                 o_c1_branch_ctr,
     output logic [31:0]                 o_muldiv_ctr,
-    // writeback evidence
     output logic                        o_wb_pub_valid,
     output logic [CORE_IDX_W-1:0]       o_wb_pub_index,
     output logic [CORE_RGEN_W-1:0]      o_wb_pub_gen,
@@ -159,55 +163,259 @@ module mosaic_core (
     output logic [31:0]                 o_wb_stale_ctr,
     output logic [31:0]                 o_wb_dup_ctr,
     output logic [31:0]                 o_wb_collision_ctr,
-    // rename / ROB occupancy
+    output logic [31:0]                 o_wb_drop_ctr,
     output logic [CORE_TAG_W:0]         o_free_count,
+    output logic [31:0]                 o_free_stale_ctr,
+    output logic [31:0]                 o_free_double_ctr,
+    output logic [31:0]                 o_squash_underflow_ctr,
+    output logic [31:0]                 o_journal_overflow_ctr,
     output logic [31:0]                 o_rob_occupied,
     output logic [31:0]                 o_rob_free,
     output logic [31:0]                 o_desc_live,
-    // redirect arbiter counters
     output logic [31:0]                 o_redir_act_ctr,
     output logic [31:0]                 o_redir_wait_ctr,
     output logic [31:0]                 o_redir_dead_ctr
 );
 
   // ==========================================================================
-  // 1. Fetch
+  // Interconnect declarations (hoisted: a port connection must see its net)
   // ==========================================================================
+  // fetch
   logic                      fetch_req_ready;
   logic [CORE_XLEN-1:0]      fetch_pc_q;
   logic                      fetch_req_fire;
-
-  logic                      fetch_out_valid;
-  logic                      fetch_out_ready;
+  logic                      fetch_out_valid, fetch_out_ready;
   logic [CORE_XLEN-1:0]      fetch_out_pc;
   logic [31:0]               fetch_out_bits;
   logic [2:0]                fetch_out_len;
-  logic                      fetch_out_illegal;
-  logic                      fetch_out_fault;
+  logic                      fetch_out_illegal, fetch_out_fault;
   logic [63:0]               fetch_out_cause;
   logic                      fetch_pred_next_valid;
   logic [CORE_XLEN-1:0]      fetch_pred_next_pc;
 
+  // control
   logic                      redirect_valid;
   logic [CORE_XLEN-1:0]      redirect_pc;
-
-  logic                      core_stop;      // unsupported macro seen
+  logic                      rob_flush_pulse;
+  logic                      squash_pulse;
+  logic                      cluster_flush_pulse;
+  logic                      desc_walk_start;
+  logic                      core_stop;
   logic                      recovering;
 
-  // The request side: a request is issued whenever the frontend is allowed to
-  // run. `pred_valid` is tied low, so the predictor offers no next PC and the
-  // generator's fall-through arm is the one taken -- the documented
+  // decode buffer
+  mosaic_pkg::decode_ctl_t   dec_ctl_comb;
+  mosaic_pkg::decode_ctl_t   dbuf_ctl_new;
+  logic                      dbuf_valid [0:1];
+  logic [CORE_XLEN-1:0]      dbuf_pc    [0:1];
+  mosaic_pkg::decode_ctl_t   dbuf_ctl   [0:1];
+  logic [1:0]                dbuf_cnt;
+  logic                      dbuf_take, dbuf_push, dbuf_room;
+
+  // dispatch
+  logic [4:0]                alloc_rd_w;
+  logic                      disp_take, disp_unsupported;
+  logic [1:0]                disp_rq_valid, disp_rq_written;
+  logic [1:0][CORE_TAG_W-1:0]  disp_rq_tag;
+  logic [1:0][CORE_IGEN_W-1:0] disp_rq_gen;
+  logic [1:0]                disp_rq_written_hi;
+
+  // rename
+  logic                      ren_alloc_req, ren_alloc_accepted, ren_alloc_exhausted;
+  logic                      ren_alloc_squashed, ren_alloc_is_x0, ren_alloc_new_valid;
+  logic [CORE_TAG_W-1:0]     ren_new_tag;
+  logic [CORE_IGEN_W-1:0]    ren_new_gen;
+  logic                      ren_old_valid;
+  logic [CORE_TAG_W-1:0]     ren_old_tag;
+  logic [CORE_IGEN_W-1:0]    ren_old_gen;
+  logic [4:0]                ren_rs1_addr, ren_rs2_addr;
+  logic                      ren_rs1_is_x0, ren_rs2_is_x0;
+  logic                      ren_rs1_ready, ren_rs2_ready;
+  logic [CORE_TAG_W-1:0]     ren_rs1_tag, ren_rs2_tag;
+  logic [CORE_IGEN_W-1:0]    ren_rs1_gen, ren_rs2_gen;
+  logic                      ren_wb_valid;
+  logic [CORE_TAG_W-1:0]     ren_wb_tag;
+  logic [CORE_IGEN_W-1:0]    ren_wb_gen;
+  logic                      ren_wb_accepted, ren_wb_stale, ren_wb_duplicate;
+  logic                      ren_free_valid;
+  logic [CORE_TAG_W-1:0]     ren_free_tag;
+  logic [CORE_IGEN_W-1:0]    ren_free_gen;
+  logic                      ren_free_accepted, ren_free_stale, ren_free_double;
+  logic                      ren_commit_valid;
+  logic [4:0]                ren_commit_rd;
+  logic [CORE_TAG_W-1:0]     ren_commit_tag;
+  logic [CORE_IGEN_W-1:0]    ren_commit_gen;
+  logic                      ren_commit_accepted, ren_commit_x0_dropped;
+  logic                      ren_commit2_valid;
+  logic [4:0]                ren_commit2_rd;
+  logic [CORE_TAG_W-1:0]     ren_commit2_tag;
+  logic [CORE_IGEN_W-1:0]    ren_commit2_gen;
+  logic                      ren_commit2_accepted, ren_commit2_x0_dropped;
+  logic                      ren_squash_accepted, ren_squash_underflow, ren_journal_overflow;
+  logic [CORE_TAG_W:0]       ren_free_count;
+
+  // descriptor store
+  logic                      desc_wr_valid;
+  logic [CORE_IDX_W-1:0]     desc_wr_index;
+  logic [CORE_TAG_W-1:0]     desc_wr_tag;
+  logic [CORE_PGEN_W-1:0]    desc_wr_gen;
+  logic [4:0]                desc_wr_rd;
+  logic                      desc_wr_reg_we;
+  logic                      desc_walk_busy;
+  logic                      desc_free_valid;
+  logic [CORE_TAG_W-1:0]     desc_free_tag;
+  logic [CORE_PGEN_W-1:0]    desc_free_gen;
+  logic [31:0]               desc_free_ctr, desc_live_ctr;
+  logic                      desc_rd_valid0, desc_rd_valid1;
+  logic [4:0]                desc_rd0, desc_rd1;
+  logic                      desc_reg_we0, desc_reg_we1;
+  logic [1:0]                retire_clr_valid;
+  logic [1:0][CORE_IDX_W-1:0] retire_clr_index;
+
+  // ROB
+  logic                      rob_alloc_valid;
+  logic [CORE_TAG_W-1:0]     rob_alloc_tag;
+  logic [CORE_XLEN-1:0]      rob_alloc_pc;
+  logic [3:0]                rob_alloc_num_uops;
+  logic                      rob_alloc_exc, rob_alloc_open;
+  logic                      rob_alloc_ok, rob_alloc_refused, rob_alloc_full;
+  logic                      rob_alloc_bad_uops;
+  logic [CORE_IDX_W-1:0]     rob_alloc_index;
+  logic [CORE_RGEN_W-1:0]    rob_alloc_gen;
+  logic                      rob_cmp_valid;
+  logic [CORE_IDX_W-1:0]     rob_cmp_index;
+  logic [CORE_RGEN_W-1:0]    rob_cmp_gen;
+  logic [CORE_UOP_W-1:0]     rob_cmp_uop;
+  logic                      rob_cmp_exc;
+  logic                      rob_cmp_accepted, rob_cmp_duplicate, rob_cmp_stale;
+  logic                      rob_cmp_bad_uop;
+  logic                      rob_retire_req_next, rob_retire_ack_next;
+  logic [CORE_RET_N-1:0]     rob_retire_ack;
+  logic                      rob_head_valid, rob_head_ready, rob_head_complete;
+  logic                      rob_head_exc, rob_head_closed, rob_head_replay;
+  logic [CORE_IDX_W-1:0]     rob_head_index;
+  logic [CORE_RGEN_W-1:0]    rob_head_gen;
+  logic [CORE_TAG_W-1:0]     rob_head_tag;
+  logic [CORE_XLEN-1:0]      rob_head_pc;
+  logic [3:0]                rob_head_num_uops;
+  logic [7:0]                rob_head_done_mask;
+  logic [3:0]                rob_head_done_cnt;
+  logic                      rob_head1_valid, rob_head1_ready, rob_head1_complete;
+  logic                      rob_head1_exc, rob_head1_closed, rob_head1_replay;
+  logic [CORE_IDX_W-1:0]     rob_head1_index;
+  logic [CORE_RGEN_W-1:0]    rob_head1_gen;
+  logic [CORE_TAG_W-1:0]     rob_head1_tag;
+  logic [CORE_XLEN-1:0]      rob_head1_pc;
+  logic [31:0]               rob_alloc_total, rob_retired_total, rob_squashed_total;
+  logic [CORE_OCC_W-1:0]     rob_occupied, rob_free_rob;
+
+  // clusters
+  logic                      c0_ins_valid, c0_ins_ready;
+  logic [CORE_UOP_ID_W-1:0]  c0_ins_uop;
+  mosaic_uop_pkg::uop_meta_t c0_ins_meta;
+  logic [CORE_XLEN-1:0]      c0_ins_imm;
+  logic [CORE_TAG_W-1:0]     c0_s1_tag, c0_s2_tag, c0_dst_tag;
+  logic [CORE_IGEN_W-1:0]    c0_s1_gen, c0_s2_gen, c0_dst_gen;
+  logic                      c0_s1_rdy, c0_s2_rdy;
+  logic [CORE_XLEN-1:0]      c0_s1_val, c0_s2_val;
+  logic                      c1_ins_valid, c1_ins_ready;
+  logic [CORE_UOP_ID_W-1:0]  c1_ins_uop;
+  mosaic_uop_pkg::uop_meta_t c1_ins_meta;
+  logic [CORE_XLEN-1:0]      c1_ins_imm;
+  logic [CORE_TAG_W-1:0]     c1_s1_tag, c1_s2_tag, c1_dst_tag;
+  logic [CORE_IGEN_W-1:0]    c1_s1_gen, c1_s2_gen, c1_dst_gen;
+  logic                      c1_s1_rdy, c1_s2_rdy;
+  logic [CORE_XLEN-1:0]      c1_s1_val, c1_s2_val;
+  mosaic_uop_pkg::wb_event_t c0_wb_ev, c1_wb_ev, md_wb_ev;
+  logic                      c0_wb_valid, c0_wb_ready;
+  logic                      c1_wb_valid, c1_wb_ready;
+  logic                      md_wb_valid, md_wb_ready;
+  logic                      c0_redir_valid, c1_redir_valid;
+  logic [CORE_XLEN-1:0]      c0_redir_pc, c1_redir_pc;
+  logic [CORE_IDX_W-1:0]     c0_redir_idx, c1_redir_idx;
+  logic [CORE_RGEN_W-1:0]    c0_redir_gen, c1_redir_gen;
+  logic                      c0_redir_taken, c1_redir_taken;
+  logic [CORE_RET_N-1:0]     redir_ack_vec;
+  logic                      c0_flush_busy, c1_flush_busy;
+  logic [31:0]               c0_count, c1_count;
+  logic                      c0_grant_valid, c1_grant_valid;
+  logic [CORE_UOP_ID_W-1:0]  c0_grant_uop, c1_grant_uop;
+  logic [31:0]               c0_alu_ctr, c1_alu_ctr, c0_br_ctr, c1_br_ctr, md_ctr;
+
+  // wakeup / PRF / arbiter
+  logic                      wu_valid;
+  logic [CORE_TAG_W-1:0]     wu_tag;
+  logic [CORE_IGEN_W-1:0]    wu_gen;
+  logic [CORE_XLEN-1:0]      wu_val;
+  logic [CORE_BANKS-1:0]          prf_wr_en, prf_wr_gen_valid;
+  logic [CORE_BANKS*CORE_TAG_W-1:0]  prf_wr_tag;
+  logic [CORE_BANKS*CORE_PGEN_W-1:0] prf_wr_gen;
+  logic [CORE_BANKS*CORE_XLEN-1:0]   prf_wr_data;
+  logic [CORE_BANKS-1:0]          prf_rd_valid, prf_rd_ready;
+  logic [CORE_BANKS*CORE_TAG_W-1:0]  prf_rd_tag;
+  logic [CORE_BANKS*CORE_PGEN_W-1:0] prf_rd_gen;
+  logic [CORE_BANKS-1:0]          prf_rsp_valid, prf_rsp_bad, prf_rsp_never;
+  logic [CORE_BANKS*CORE_XLEN-1:0] prf_rsp_data;
+  logic                      stash_valid0, stash_valid1;
+  logic [CORE_XLEN-1:0]      stash_value0, stash_value1;
+  logic [31:0]               wb_wr_ctr, wb_wake_ctr, wb_stale_ctr, wb_dup_ctr;
+  logic [31:0]               wb_collision_ctr, wb_drop_ctr;
+
+  // MUL/DIV
+  logic                      md_req_valid, md_req_ready_raw, md_req_ready_gated;
+  mosaic_pkg::md_op_e        md_req_op;
+  logic                      md_req_w;
+  logic [CORE_XLEN-1:0]      md_req_a, md_req_b;
+  logic [CORE_IDX_W-1:0]     md_req_rob_index;
+  logic [CORE_RGEN_W-1:0]    md_req_rob_gen;
+  logic [CORE_UOP_W-1:0]     md_req_uop_index;
+  logic [CORE_TAG_W-1:0]     md_req_dst_tag;
+  logic [CORE_IGEN_W-1:0]    md_req_dst_gen;
+  logic                      md_req_fire;
+  logic                      md_res_valid, md_res_ready;
+  logic [CORE_XLEN-1:0]      md_res_data;
+  logic [CORE_IDX_W-1:0]     md_res_rob_index;
+  logic [CORE_RGEN_W-1:0]    md_res_rob_gen;
+  logic [CORE_UOP_W-1:0]     md_res_uop_index;
+  logic                      md_dst_valid;
+  logic [CORE_TAG_W-1:0]     md_dst_tag_q;
+  logic [CORE_IGEN_W-1:0]    md_dst_gen_q;
+
+  // retire
+  logic [CORE_RET_N-1:0]     ret_req;
+  logic [CORE_RET_N*CORE_XLEN-1:0] retire_pay_value;
+  logic                      head_pending_taken;
+
+  // evidence
+  logic [31:0] commit_ctr, redirect_ctr, recovering_ctr, stop_ctr, cycle_ctr;
+  logic [31:0] free_stale_ctr, free_double_ctr, squash_under_ctr, journal_ovf_ctr;
+  logic        core_stop_prev;
+
+  // Leaf modules bring out observation and status outputs that this package
+  // does not consume -- the fetch unit's delivery counters, the retire module's
+  // event classification flags, the rename module's debug views, the second
+  // allocation lane of rename. Leaving those pins empty is stated here, once,
+  // rather than by declaring dozens of nets nobody reads; nothing functional is
+  // routed through them, and the units' own cases read them where they matter.
+  /* verilator lint_off PINCONNECTEMPTY */
+
+  // ==========================================================================
+  // 1. Fetch
+  // ==========================================================================
+  // The request side: a request is issued whenever the frontend may run.
+  // `pred_valid` is tied low, so the predictor offers no next PC and the
+  // generator takes its fall-through arm -- the documented
   // `pred_next_valid ? pred_next_pc : last_pc + 4`, with the prediction side
-  // disabled because this package cannot classify an instruction until it has
+  // disabled because this package cannot classify an instruction before it has
   // been fetched and decoded. Every taken branch therefore redirects; that is a
   // deliberate correctness-first choice, and recovery is what the case exercises.
-  assign imem_req_valid      = !core_stop && !recovering;
-  assign imem_req.we         = 1'b0;
-  assign imem_req.addr       = fetch_pc_q;
-  assign imem_req.size       = mosaic_pkg::SZ_WORD;
-  assign imem_req.wstrb      = {(CORE_XLEN/8){1'b0}};
-  assign imem_req.wdata      = {CORE_XLEN{1'b0}};
-  assign fetch_req_fire      = imem_req_valid && fetch_req_ready;
+  assign imem_req_valid = !core_stop && !recovering;
+  assign imem_req.we    = 1'b0;
+  assign imem_req.addr  = fetch_pc_q;
+  assign imem_req.size  = mosaic_pkg::SZ_WORD;
+  assign imem_req.wstrb = {(CORE_XLEN/8){1'b0}};
+  assign imem_req.wdata = {CORE_XLEN{1'b0}};
+  assign fetch_req_fire = imem_req_valid && fetch_req_ready;
 
   always_ff @(posedge clk) begin
     if (rst) begin
@@ -223,13 +431,11 @@ module mosaic_core (
   mosaic_fetch u_fetch (
       .clk                (clk),
       .rst                (rst),
-
       .req_valid          (imem_req_valid),
       .req_pc             (fetch_pc_q),
       .req_ready          (fetch_req_ready),
       .req_id             (imem_req_id),
       .req_epoch          (imem_req_epoch),
-
       .rsp_valid          (imem_rsp_valid),
       .rsp_ready          (imem_rsp_ready),
       .rsp_squashed       (),
@@ -238,16 +444,13 @@ module mosaic_core (
       .rsp_data           (imem_rsp.rdata[31:0]),
       .rsp_len            (imem_rsp_len),
       .rsp_fault          (imem_rsp.fault),
-
       .redirect_valid     (redirect_valid),
       .redirect_pc        (redirect_pc),
-
       .pred_valid         (1'b0),
       .pred_pc            ({CORE_XLEN{1'b0}}),
       .pred_is_branch     (1'b0),
       .pred_is_jump       (1'b0),
       .pred_is_return     (1'b0),
-
       .upd_valid          (1'b0),
       .upd_pc             ({CORE_XLEN{1'b0}}),
       .upd_is_branch      (1'b0),
@@ -258,7 +461,6 @@ module mosaic_core (
       .upd_target         ({CORE_XLEN{1'b0}}),
       .ckpt_valid         (1'b0),
       .flush              (redirect_valid),
-
       .pred_next_valid    (fetch_pred_next_valid),
       .pred_next_pc       (fetch_pred_next_pc),
       .pred_squashed      (),
@@ -269,7 +471,6 @@ module mosaic_core (
       .pred_ras_underflow (),
       .ras_overflow       (),
       .ras_underflow      (),
-
       .out_valid          (fetch_out_valid),
       .out_ready          (fetch_out_ready),
       .out_pc             (fetch_out_pc),
@@ -278,7 +479,6 @@ module mosaic_core (
       .out_illegal        (fetch_out_illegal),
       .out_fault          (fetch_out_fault),
       .out_cause          (fetch_out_cause),
-
       .outstanding_count  (),
       .cancel_pending     (),
       .epoch_now          (),
@@ -299,22 +499,15 @@ module mosaic_core (
   // ==========================================================================
   // 2. Decode buffer (2 entries, program order, lane 0 oldest)
   // ==========================================================================
-  logic                    dbuf_valid [0:1];
-  logic [CORE_XLEN-1:0]    dbuf_pc    [0:1];
-  mosaic_pkg::decode_ctl_t dbuf_ctl   [0:1];
-  logic [1:0]              dbuf_cnt;
-
   mosaic_decoder u_dec (
       .insn (fetch_out_bits),
       .ctl  (dec_ctl_comb)
   );
-  mosaic_pkg::decode_ctl_t dec_ctl_comb;
 
   // A delivered instruction that fetch reported illegal or faulted does not
   // decode; it is carried as an invalid control word, which dispatch refuses
-  // and counts (its `unsupported`/`illegal` path) and the machine stops cleanly
-  // at it. Taking the trap is I-019's business, not this package's.
-  mosaic_pkg::decode_ctl_t dbuf_ctl_new;
+  // and counts, and the machine stops cleanly at it. Taking the trap is
+  // I-019's business, not this package's.
   always_comb begin
     dbuf_ctl_new = dec_ctl_comb;
     if (fetch_out_illegal || fetch_out_fault) begin
@@ -323,18 +516,14 @@ module mosaic_core (
     end
   end
 
-  logic dbuf_take;
-  logic dbuf_push;
-  logic dbuf_room;
-
-  assign dbuf_take = dispatch_take;
+  assign dbuf_take = disp_take;
   assign dbuf_room = (dbuf_cnt < 2'd2) || dbuf_take;
-  assign dbuf_push = fetch_out_valid && dbuf_room;
-  assign fetch_out_ready = dbuf_room;
+  assign dbuf_push = fetch_out_valid && dbuf_room && !core_stop;
+  assign fetch_out_ready = dbuf_room && !core_stop;
 
   always_ff @(posedge clk) begin
     if (rst) begin
-      dbuf_cnt   <= 2'd0;
+      dbuf_cnt      <= 2'd0;
       dbuf_valid[0] <= 1'b0;
       dbuf_valid[1] <= 1'b0;
     end else begin
@@ -344,12 +533,10 @@ module mosaic_core (
         dbuf_ctl[0]   <= dbuf_ctl[1];
       end
       if (dbuf_push) begin
-        // A push this cycle lands behind whatever survived the pop.
-        dbuf_pc[dbuf_take ? 1 : 0]  <= fetch_out_pc;
-        dbuf_ctl[dbuf_take ? 1 : 0] <= dbuf_ctl_new;
+        dbuf_pc[dbuf_take ? 1 : 0]    <= fetch_out_pc;
+        dbuf_ctl[dbuf_take ? 1 : 0]   <= dbuf_ctl_new;
         dbuf_valid[dbuf_take ? 1 : 0] <= 1'b1;
       end
-      // Count: one push, one take, never both to the same slot.
       dbuf_cnt <= dbuf_cnt + {1'b0, dbuf_push} - {1'b0, dbuf_take};
     end
   end
@@ -357,43 +544,9 @@ module mosaic_core (
   // ==========================================================================
   // 3. Rename
   // ==========================================================================
-  logic                    ren_alloc_req, ren_alloc_accepted, ren_alloc_exhausted;
-  logic                    ren_alloc_squashed, ren_alloc_is_x0, ren_alloc_new_valid;
-  logic [CORE_TAG_W-1:0]   ren_new_tag;
-  logic [CORE_IGEN_W-1:0]  ren_new_gen;
-  logic                    ren_old_valid;
-  logic [CORE_TAG_W-1:0]   ren_old_tag;
-  logic [CORE_IGEN_W-1:0]  ren_old_gen;
-  logic [4:0]              ren_rs1_addr, ren_rs2_addr;
-  logic                    ren_rs1_is_x0, ren_rs2_is_x0;
-  logic                    ren_rs1_ready, ren_rs2_ready;
-  logic [CORE_TAG_W-1:0]   ren_rs1_tag, ren_rs2_tag;
-  logic [CORE_IGEN_W-1:0]  ren_rs1_gen, ren_rs2_gen;
-  logic                    ren_wb_valid;
-  logic [CORE_TAG_W-1:0]   ren_wb_tag;
-  logic [CORE_IGEN_W-1:0]  ren_wb_gen;
-  logic                    ren_wb_accepted, ren_wb_stale, ren_wb_duplicate;
-  logic                    ren_free_valid;
-  logic [CORE_TAG_W-1:0]   ren_free_tag;
-  logic [CORE_IGEN_W-1:0]  ren_free_gen;
-  logic                    ren_free_accepted, ren_free_stale, ren_free_double;
-  logic                    ren_commit_valid;
-  logic [4:0]              ren_commit_rd;
-  logic [CORE_TAG_W-1:0]   ren_commit_tag;
-  logic [CORE_IGEN_W-1:0]  ren_commit_gen;
-  logic                    ren_commit_accepted, ren_commit_x0_dropped;
-  logic                    ren_commit2_valid;
-  logic [4:0]              ren_commit2_rd;
-  logic [CORE_TAG_W-1:0]   ren_commit2_tag;
-  logic [CORE_IGEN_W-1:0]  ren_commit2_gen;
-  logic                    ren_commit2_accepted, ren_commit2_x0_dropped;
-  logic                    ren_squash_accepted, ren_squash_underflow, ren_journal_overflow;
-  logic [CORE_TAG_W:0]     ren_free_count;
-
   mosaic_rename u_rename (
       .clk              (clk),
       .rst              (rst),
-
       .alloc_req        (ren_alloc_req),
       .alloc_rd         (alloc_rd_w),
       .alloc_accepted   (ren_alloc_accepted),
@@ -485,18 +638,6 @@ module mosaic_core (
   // ==========================================================================
   // 4. Descriptor store
   // ==========================================================================
-  logic                      desc_wr_valid;
-  logic [CORE_IDX_W-1:0]     desc_wr_index;
-  logic [CORE_TAG_W-1:0]     desc_wr_tag;
-  logic [CORE_PGEN_W-1:0]    desc_wr_gen;
-  logic [4:0]                desc_wr_rd;
-  logic                      desc_wr_reg_we;
-  logic                      desc_walk_start, desc_walk_busy;
-  logic                      desc_free_valid;
-  logic [CORE_TAG_W-1:0]     desc_free_tag;
-  logic [CORE_PGEN_W-1:0]    desc_free_gen;
-  logic [31:0]               desc_free_ctr, desc_live_ctr;
-
   mosaic_macro_desc u_desc (
       .clk             (clk),
       .rst             (rst),
@@ -533,54 +674,9 @@ module mosaic_core (
       .o_live_ctr      (desc_live_ctr)
   );
 
-  // The descriptor store reads by ROB index; the ROB is empty during the walk,
-  // so the retire-lane reads are the only ones and their consumers gate on the
-  // ROB head validity.
-  logic desc_rd_valid0, desc_rd_valid1;
-  logic [4:0] desc_rd0, desc_rd1;
-  logic desc_reg_we0, desc_reg_we1;
-  logic [1:0] retire_clr_valid;
-  logic [1:0][CORE_IDX_W-1:0] retire_clr_index;
-
   // ==========================================================================
   // 5. ROB
   // ==========================================================================
-  logic                     rob_alloc_valid;
-  logic [CORE_TAG_W-1:0]    rob_alloc_tag;
-  logic [CORE_XLEN-1:0]     rob_alloc_pc;
-  logic [3:0]               rob_alloc_num_uops;
-  logic                     rob_alloc_exc, rob_alloc_open;
-  logic                     rob_alloc_ok, rob_alloc_refused, rob_alloc_full;
-  logic                     rob_alloc_bad_uops;
-  logic [CORE_IDX_W-1:0]    rob_alloc_index;
-  logic [CORE_RGEN_W-1:0]   rob_alloc_gen;
-  logic                     rob_cmp_valid;
-  logic [CORE_IDX_W-1:0]    rob_cmp_index;
-  logic [CORE_RGEN_W-1:0]   rob_cmp_gen;
-  logic [CORE_UOP_W-1:0]    rob_cmp_uop;
-  logic                     rob_cmp_exc;
-  logic                     rob_cmp_accepted, rob_cmp_duplicate, rob_cmp_stale;
-  logic                     rob_cmp_bad_uop;
-  logic [CORE_RET_N-1:0]    rob_retire_req, rob_retire_ack;
-  logic                     rob_retire_req_next, rob_retire_ack_next;
-  logic                     rob_head_valid, rob_head_ready, rob_head_complete;
-  logic                     rob_head_exc, rob_head_closed, rob_head_replay;
-  logic [CORE_IDX_W-1:0]    rob_head_index;
-  logic [CORE_RGEN_W-1:0]   rob_head_gen;
-  logic [CORE_TAG_W-1:0]    rob_head_tag;
-  logic [CORE_XLEN-1:0]     rob_head_pc;
-  logic [3:0]               rob_head_num_uops;
-  logic [7:0]               rob_head_done_mask;
-  logic [3:0]               rob_head_done_cnt;
-  logic                     rob_head1_valid, rob_head1_ready, rob_head1_complete;
-  logic                     rob_head1_exc, rob_head1_closed;
-  logic [CORE_IDX_W-1:0]    rob_head1_index;
-  logic [CORE_RGEN_W-1:0]   rob_head1_gen;
-  logic [CORE_TAG_W-1:0]    rob_head1_tag;
-  logic [CORE_XLEN-1:0]     rob_head1_pc;
-  logic [31:0]              rob_alloc_total, rob_retired_total, rob_squashed_total;
-  logic [6:0]               rob_occupied, rob_free_rob;
-
   mosaic_rob u_rob (
       .clk             (clk),
       .rst             (rst),
@@ -610,7 +706,7 @@ module mosaic_core (
       .cmp_duplicate   (rob_cmp_duplicate),
       .cmp_stale       (rob_cmp_stale),
       .cmp_bad_uop     (rob_cmp_bad_uop),
-      .retire_req      (rob_retire_req[0]),
+      .retire_req      (ret_req[0]),
       .retire_ack      (rob_retire_ack[0]),
       .retire_req_next (rob_retire_req_next),
       .retire_ack_next (rob_retire_ack_next),
@@ -629,7 +725,7 @@ module mosaic_core (
       .head_done_cnt   (rob_head_done_cnt),
       .head1_valid     (rob_head1_valid),
       .head1_ready     (rob_head1_ready),
-      .head1_replay    (),
+      .head1_replay    (rob_head1_replay),
       .head1_complete  (rob_head1_complete),
       .head1_exc       (rob_head1_exc),
       .head1_closed    (rob_head1_closed),
@@ -664,51 +760,6 @@ module mosaic_core (
   // ==========================================================================
   // 6. Clusters
   // ==========================================================================
-  logic                    c0_ins_valid, c0_ins_ready;
-  logic [CORE_UOP_ID_W-1:0] c0_ins_uop;
-  mosaic_uop_pkg::uop_meta_t c0_ins_meta;
-  logic [CORE_XLEN-1:0]    c0_ins_imm;
-  logic [CORE_TAG_W-1:0]   c0_s1_tag, c0_s2_tag;
-  logic [CORE_IGEN_W-1:0]  c0_s1_gen, c0_s2_gen;
-  logic                    c0_s1_rdy, c0_s2_rdy;
-  logic [CORE_XLEN-1:0]    c0_s1_val, c0_s2_val;
-  logic [CORE_TAG_W-1:0]   c0_dst_tag;
-  logic [CORE_IGEN_W-1:0]  c0_dst_gen;
-  logic [CORE_XLEN-1:0]    imem_rsp_dummy;
-
-  logic                    c1_ins_valid, c1_ins_ready;
-  logic [CORE_UOP_ID_W-1:0] c1_ins_uop;
-  mosaic_uop_pkg::uop_meta_t c1_ins_meta;
-  logic [CORE_XLEN-1:0]    c1_ins_imm;
-  logic [CORE_TAG_W-1:0]   c1_s1_tag, c1_s2_tag;
-  logic [CORE_IGEN_W-1:0]  c1_s1_gen, c1_s2_gen;
-  logic                    c1_s1_rdy, c1_s2_rdy;
-  logic [CORE_XLEN-1:0]    c1_s1_val, c1_s2_val;
-  logic [CORE_TAG_W-1:0]   c1_dst_tag;
-  logic [CORE_IGEN_W-1:0]  c1_dst_gen;
-
-  mosaic_uop_pkg::wb_event_t c0_wb_ev, c1_wb_ev, md_wb_ev;
-  logic                    c0_wb_valid, c0_wb_ready;
-  logic                    c1_wb_valid, c1_wb_ready;
-  logic                    md_wb_valid, md_wb_ready;
-
-  logic                    c0_redir_valid, c1_redir_valid;
-  logic [CORE_XLEN-1:0]    c0_redir_pc, c1_redir_pc;
-  logic [CORE_IDX_W-1:0]   c0_redir_idx, c1_redir_idx;
-  logic [CORE_RGEN_W-1:0]  c0_redir_gen, c1_redir_gen;
-  logic                    c0_redir_taken, c1_redir_taken;
-  logic [CORE_RET_N-1:0]   redir_ack_vec;
-
-  logic                    c0_flush_busy, c1_flush_busy;
-  logic                    cluster_flush_pulse;
-
-  logic                    wu_valid;
-  logic [CORE_TAG_W-1:0]   wu_tag;
-  logic [CORE_IGEN_W-1:0]  wu_gen;
-  logic [CORE_XLEN-1:0]    wu_val;
-
-  logic [31:0]             c0_count, c1_count;
-
   mosaic_cluster u_c0 (
       .clk             (clk),
       .rst             (rst),
@@ -760,11 +811,11 @@ module mosaic_core (
       .o_ins_total     (),
       .o_grant_total   (),
       .o_kill_total    (),
-      .o_grant_valid   (o_c0_grant_valid),
-      .o_grant_uop     (o_c0_grant_uop),
-      .o_alu_ctr       (o_c0_alu_ctr),
-      .o_branch_ctr    (o_c0_branch_ctr),
-      .o_md_ctr        (o_muldiv_ctr),
+      .o_grant_valid   (c0_grant_valid),
+      .o_grant_uop     (c0_grant_uop),
+      .o_alu_ctr       (c0_alu_ctr),
+      .o_branch_ctr    (c0_br_ctr),
+      .o_md_ctr        (md_ctr),
       .o_refuse_ctr    (),
       .o_purge_ctr     (),
       .o_wu_miss_ctr   ()
@@ -821,10 +872,10 @@ module mosaic_core (
       .o_ins_total     (),
       .o_grant_total   (),
       .o_kill_total    (),
-      .o_grant_valid   (o_c1_grant_valid),
-      .o_grant_uop     (o_c1_grant_uop),
-      .o_alu_ctr       (o_c1_alu_ctr),
-      .o_branch_ctr    (o_c1_branch_ctr),
+      .o_grant_valid   (c1_grant_valid),
+      .o_grant_uop     (c1_grant_uop),
+      .o_alu_ctr       (c1_alu_ctr),
+      .o_branch_ctr    (c1_br_ctr),
       .o_md_ctr        (),
       .o_refuse_ctr    (),
       .o_purge_ctr     (),
@@ -834,34 +885,8 @@ module mosaic_core (
   // ==========================================================================
   // 7. Shared MUL/DIV and the destination latch for its out-of-band result
   // ==========================================================================
-  logic                    md_req_valid, md_req_ready_gated;
-  mosaic_pkg::md_op_e      md_req_op;
-  logic                    md_req_w;
-  logic [CORE_XLEN-1:0]    md_req_a, md_req_b;
-  logic [CORE_IDX_W-1:0]   md_req_rob_index;
-  logic [CORE_RGEN_W-1:0]  md_req_rob_gen;
-  logic [CORE_UOP_W-1:0]   md_req_uop_index;
-  logic [CORE_TAG_W-1:0]   md_req_dst_tag;
-  logic [CORE_IGEN_W-1:0]  md_req_dst_gen;
-
-  logic                    md_req_ready_raw;
-  logic                    md_res_valid, md_res_ready;
-  logic [CORE_XLEN-1:0]    md_res_data;
-  logic [CORE_IDX_W-1:0]   md_res_rob_index;
-  logic [CORE_RGEN_W-1:0]  md_res_rob_gen;
-  logic [CORE_UOP_W-1:0]   md_res_uop_index;
-
-  // One operation in flight, so one latched destination identity. It is taken
-  // when the shared unit accepts a request and released when its result has
-  // been handed to the writeback arbiter; a flush cancels the operation and the
-  // latch with it, because a cancelled operation never produces a result.
-  logic                    md_dst_valid;
-  logic [CORE_TAG_W-1:0]   md_dst_tag_q;
-  logic [CORE_IGEN_W-1:0]  md_dst_gen_q;
-
   assign md_req_ready_gated = md_req_ready_raw && !md_dst_valid;
-  logic md_req_fire;
-  assign md_req_fire = md_req_valid && md_req_ready_gated;
+  assign md_req_fire        = md_req_valid && md_req_ready_gated;
 
   mosaic_muldiv u_muldiv (
       .clk_i           (clk),
@@ -890,6 +915,10 @@ module mosaic_core (
       .o_killed_res_ctr()
   );
 
+  // One operation in flight, so one latched destination identity. It is taken
+  // when the shared unit accepts a request and released when its result has
+  // been handed to the writeback arbiter; a flush cancels the operation and the
+  // latch with it, because a cancelled operation never produces a result.
   always_ff @(posedge clk) begin
     if (rst) begin
       md_dst_valid <= 1'b0;
@@ -927,17 +956,12 @@ module mosaic_core (
     md_wb_ev.is_load      = 1'b0;
   end
 
-  assign md_wb_valid = md_res_valid && md_dst_valid;
+  assign md_wb_valid  = md_res_valid && md_dst_valid;
   assign md_res_ready = md_wb_ready && md_dst_valid;
 
   // ==========================================================================
   // 8. Writeback arbiter
   // ==========================================================================
-  logic [CORE_BANKS-1:0]        prf_wr_en, prf_wr_gen_valid;
-  logic [CORE_BANKS*CORE_TAG_W-1:0]  prf_wr_tag;
-  logic [CORE_BANKS*CORE_PGEN_W-1:0] prf_wr_gen;
-  logic [CORE_BANKS*CORE_XLEN-1:0]   prf_wr_data;
-
   mosaic_wb_arbiter u_wb (
       .clk                 (clk),
       .rst                 (rst),
@@ -975,8 +999,8 @@ module mosaic_core (
       .wu_gen              (wu_gen),
       .wu_val              (wu_val),
       .q_valid             ({2'b00, disp_rq_valid}),
-      .q_tag               ({{2{CORE_TAG_W{1'b0}}}, disp_rq_tag}),
-      .q_gen               ({{2{CORE_IGEN_W{1'b0}}}, disp_rq_gen}),
+      .q_tag               ({{(2*CORE_TAG_W){1'b0}}, disp_rq_tag}),
+      .q_gen               ({{(2*CORE_IGEN_W){1'b0}}, disp_rq_gen}),
       .q_written           ({disp_rq_written_hi, disp_rq_written}),
       .stash_rd0           (rob_head_index),
       .stash_rd1           (rob_head1_index),
@@ -984,15 +1008,15 @@ module mosaic_core (
       .stash_value0        (stash_value0),
       .stash_valid1        (stash_valid1),
       .stash_value1        (stash_value1),
-      .o_wr_ctr            (o_wb_wr_ctr),
-      .o_wake_ctr          (o_wb_wake_ctr),
-      .o_stale_ctr         (o_wb_stale_ctr),
-      .o_dup_ctr           (o_wb_dup_ctr),
+      .o_wr_ctr            (wb_wr_ctr),
+      .o_wake_ctr          (wb_wake_ctr),
+      .o_stale_ctr         (wb_stale_ctr),
+      .o_dup_ctr           (wb_dup_ctr),
       .o_rob_stale_ctr     (),
       .o_rob_dup_ctr       (),
       .o_rob_ok_ctr        (),
-      .o_collision_ctr     (o_wb_collision_ctr),
-      .o_drop_ctr          (),
+      .o_collision_ctr     (wb_collision_ctr),
+      .o_drop_ctr          (wb_drop_ctr),
       .o_pub_ctr           (),
       .o_wide_gen_ctr      (),
       .o_store_ctr         (),
@@ -1004,22 +1028,9 @@ module mosaic_core (
       .o_pub_value         (o_wb_pub_value)
   );
 
-  logic [1:0]                disp_rq_valid, disp_rq_written, disp_rq_written_hi;
-  logic [1:0][CORE_TAG_W-1:0] disp_rq_tag;
-  logic [1:0][CORE_IGEN_W-1:0] disp_rq_gen;
-  logic                      stash_valid0, stash_valid1;
-  logic [CORE_XLEN-1:0]      stash_value0, stash_value1;
-
   // ==========================================================================
   // 9. PRF
   // ==========================================================================
-  logic [CORE_BANKS-1:0]        prf_rd_valid;
-  logic [CORE_BANKS-1:0]        prf_rd_ready;
-  logic [CORE_BANKS*CORE_TAG_W-1:0]  prf_rd_tag;
-  logic [CORE_BANKS*CORE_PGEN_W-1:0] prf_rd_gen;
-  logic [CORE_BANKS-1:0]        prf_rsp_valid, prf_rsp_bad, prf_rsp_never;
-  logic [CORE_BANKS*CORE_XLEN-1:0] prf_rsp_data;
-
   mosaic_prf u_prf (
       .clk_i               (clk),
       .rst_i               (rst),
@@ -1049,10 +1060,6 @@ module mosaic_core (
   // ==========================================================================
   // 10. Dispatch
   // ==========================================================================
-  logic                    disp_take;
-  logic                    disp_uc_alloc_ok;
-  logic                    disp_unsupported;
-
   mosaic_dispatch u_disp (
       .clk              (clk),
       .rst              (rst),
@@ -1138,11 +1145,11 @@ module mosaic_core (
       .c1_ins_dst_gen   (c1_dst_gen),
       .recovering       (recovering),
       .stop             (disp_unsupported),
+      .o_take           (disp_take),
       .o_alloc_ctr      (),
-      .o_alloc_ok       (disp_uc_alloc_ok),
       .o_ins_ctr        (),
       .o_unsupported_ctr(o_unsupported_ctr),
-      .o_illegal_ctr    (),
+      .o_illegal_ctr    (o_illegal_ctr),
       .o_exhausted_ctr  (),
       .o_squashed_ctr   (),
       .o_stall_ctr      (),
@@ -1155,15 +1162,12 @@ module mosaic_core (
       .o_queue_full     ()
   );
 
-  logic [4:0] alloc_rd_w;
-  assign disp_take  = disp_uc_alloc_ok || disp_unsupported;
-  assign core_stop  = disp_unsupported;
+  assign core_stop = disp_unsupported;
+  assign disp_rq_written_hi = 2'b00;
 
   // ==========================================================================
   // 11. Redirect arbitration
   // ==========================================================================
-  logic redir_act_ctr_unused;
-
   mosaic_redirect_arb u_redir (
       .clk             (clk),
       .rst             (rst),
@@ -1176,7 +1180,7 @@ module mosaic_core (
       .head_valid      (rob_head_valid),
       .head_index      (rob_head_index),
       .head_gen        (rob_head_gen),
-      .head_occupied   ({1'b0, rob_occupied}),
+      .head_occupied   (rob_occupied),
       .head_retire     (rob_retire_ack[0]),
       .redirect_valid  (redirect_valid),
       .redirect_pc     (redirect_pc),
@@ -1191,13 +1195,10 @@ module mosaic_core (
   // ==========================================================================
   // 12. Flush and recovery control
   // ==========================================================================
-  logic rob_flush_pulse;
-  logic squash_pulse;
-
-  assign rob_flush_pulse  = redirect_valid;
-  assign squash_pulse     = redirect_valid;
-  assign cluster_flush_pulse = redirect_valid;
-  assign desc_walk_start  = redirect_valid;
+  assign rob_flush_pulse      = redirect_valid;
+  assign squash_pulse         = redirect_valid;
+  assign cluster_flush_pulse  = redirect_valid;
+  assign desc_walk_start      = redirect_valid;
 
   always_ff @(posedge clk) begin
     if (rst) begin
@@ -1217,11 +1218,26 @@ module mosaic_core (
   // ==========================================================================
   // 13. Retire
   // ==========================================================================
-  logic [CORE_RET_N-1:0]        ret_req;
-  logic [CORE_RET_N*CORE_XLEN-1:0] retire_pay_value;
+  assign retire_pay_value = {stash_value1, stash_value0};
 
-  logic [CORE_RET_ID_W-1:0]     ret_rob_id00;
-  assign ret_rob_id00 = {rob_head_gen, rob_head_tag};
+  // Lane 1 must not retire when the head is a taken branch whose redirect is
+  // pending: that entry is the first wrong-path instruction and the redirect is
+  // about to discard it. A not-taken branch falls through, so it gates nothing.
+  always_comb begin
+    head_pending_taken =
+        (c0_redir_valid && c0_redir_taken &&
+         (c0_redir_idx == rob_head_index) && (c0_redir_gen == rob_head_gen)) ||
+        (c1_redir_valid && c1_redir_taken &&
+         (c1_redir_idx == rob_head_index) && (c1_redir_gen == rob_head_gen));
+  end
+  assign rob_retire_req_next = ret_req[1] && !head_pending_taken;
+
+  always_comb begin
+    retire_clr_valid[0] = rob_retire_ack[0];
+    retire_clr_valid[1] = rob_retire_ack_next;
+    retire_clr_index[0] = rob_head_index;
+    retire_clr_index[1] = rob_head1_index;
+  end
 
   mosaic_retire u_retire (
       .clk            (clk),
@@ -1293,29 +1309,6 @@ module mosaic_core (
       .o_order_fault  ()
   );
 
-  assign retire_pay_value = {stash_value1, stash_value0};
-
-  assign rob_retire_req[0]  = ret_req[0];
-  // Lane 1 must not retire when the head is a taken branch whose redirect is
-  // pending: that entry is the first wrong-path instruction and the redirect is
-  // about to discard it. A not-taken branch falls through, so it gates nothing.
-  logic head_pending_taken;
-  always_comb begin
-    head_pending_taken =
-        (c0_redir_valid && c0_redir_taken &&
-         (c0_redir_idx == rob_head_index) && (c0_redir_gen == rob_head_gen)) ||
-        (c1_redir_valid && c1_redir_taken &&
-         (c1_redir_idx == rob_head_index) && (c1_redir_gen == rob_head_gen));
-  end
-  assign rob_retire_req_next = ret_req[1] && !head_pending_taken;
-
-  always_comb begin
-    retire_clr_valid[0] = rob_retire_ack[0];
-    retire_clr_valid[1] = rob_retire_ack_next;
-    retire_clr_index[0] = rob_head_index;
-    retire_clr_index[1] = rob_head1_index;
-  end
-
   // ==========================================================================
   // 14. Core-level evidence and the unused data port
   // ==========================================================================
@@ -1327,34 +1320,58 @@ module mosaic_core (
   assign dmem_req.wdata = {CORE_XLEN{1'b0}};
   assign dmem_rsp_ready = 1'b1;
 
-  assign o_c0_count    = c0_count;
-  assign o_c1_count    = c1_count;
-  assign o_free_count  = ren_free_count;
+  assign o_c0_count     = c0_count;
+  assign o_c1_count     = c1_count;
+  assign o_c0_grant_valid = c0_grant_valid;
+  assign o_c1_grant_valid = c1_grant_valid;
+  assign o_c0_grant_uop = c0_grant_uop;
+  assign o_c1_grant_uop = c1_grant_uop;
+  assign o_c0_alu_ctr   = c0_alu_ctr;
+  assign o_c1_alu_ctr   = c1_alu_ctr;
+  assign o_c0_branch_ctr= c0_br_ctr;
+  assign o_c1_branch_ctr= c1_br_ctr;
+  assign o_muldiv_ctr   = md_ctr;
+  assign o_free_count   = ren_free_count;
+  assign o_free_stale_ctr = free_stale_ctr;
+  assign o_free_double_ctr= free_double_ctr;
+  assign o_squash_underflow_ctr = squash_under_ctr;
+  assign o_journal_overflow_ctr = journal_ovf_ctr;
   assign o_rob_occupied = 32'(rob_occupied);
-  assign o_rob_free    = 32'(rob_free_rob);
-  assign o_desc_live   = desc_live_ctr;
-  assign o_stopped     = core_stop;
-
-  logic [31:0] commit_ctr, redirect_ctr, recovering_ctr, stop_ctr, cycle_ctr;
+  assign o_rob_free     = 32'(rob_free_rob);
+  assign o_desc_live    = desc_live_ctr;
+  assign o_stopped      = core_stop;
+  assign o_wb_wr_ctr    = wb_wr_ctr;
+  assign o_wb_wake_ctr  = wb_wake_ctr;
+  assign o_wb_stale_ctr = wb_stale_ctr;
+  assign o_wb_dup_ctr   = wb_dup_ctr;
+  assign o_wb_collision_ctr = wb_collision_ctr;
+  assign o_wb_drop_ctr  = wb_drop_ctr;
 
   always_ff @(posedge clk) begin
     if (rst) begin
-      commit_ctr    <= 32'd0;
-      redirect_ctr  <= 32'd0;
-      recovering_ctr<= 32'd0;
-      stop_ctr      <= 32'd0;
-      cycle_ctr     <= 32'd0;
+      commit_ctr     <= 32'd0;
+      redirect_ctr   <= 32'd0;
+      recovering_ctr <= 32'd0;
+      stop_ctr       <= 32'd0;
+      cycle_ctr      <= 32'd0;
+      free_stale_ctr <= 32'd0;
+      free_double_ctr<= 32'd0;
+      squash_under_ctr <= 32'd0;
+      journal_ovf_ctr  <= 32'd0;
+      core_stop_prev   <= 1'b0;
     end else begin
       cycle_ctr      <= cycle_ctr + 32'd1;
-      commit_ctr     <= commit_ctr + {31'd0, rob_retire_ack[0]} + {31'd0, rob_retire_ack_next};
+      commit_ctr     <= commit_ctr + {31'd0, rob_retire_ack[0]} +
+                                   {31'd0, rob_retire_ack_next};
       redirect_ctr   <= redirect_ctr + {31'd0, redirect_valid};
       recovering_ctr <= recovering_ctr + {31'd0, recovering};
       stop_ctr       <= stop_ctr + {31'd0, core_stop && !core_stop_prev};
+      free_stale_ctr <= free_stale_ctr + {31'd0, ren_free_stale};
+      free_double_ctr<= free_double_ctr + {31'd0, ren_free_double};
+      squash_under_ctr <= squash_under_ctr + {31'd0, ren_squash_underflow};
+      journal_ovf_ctr  <= journal_ovf_ctr + {31'd0, ren_journal_overflow};
+      core_stop_prev   <= core_stop;
     end
-  end
-  logic core_stop_prev;
-  always_ff @(posedge clk) begin
-    if (rst) core_stop_prev <= 1'b0; else core_stop_prev <= core_stop;
   end
 
   assign o_commit_ctr    = commit_ctr;
@@ -1362,9 +1379,8 @@ module mosaic_core (
   assign o_recovering_ctr= recovering_ctr;
   assign o_stop_ctr      = stop_ctr;
   assign o_cycle_ctr     = cycle_ctr;
-  assign imem_rsp_dummy  = {CORE_XLEN{1'b0}};
-  assign redir_act_ctr_unused = 1'b0;
-  assign imem_rsp_dummy   = imem_rsp_dummy;
+
+  /* verilator lint_on PINCONNECTEMPTY */
 
 endmodule : mosaic_core
 

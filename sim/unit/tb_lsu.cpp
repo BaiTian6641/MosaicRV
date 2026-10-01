@@ -379,6 +379,7 @@ struct ExpRsp {
   uint64_t addr_valid_from = ~0ull;
   bool mem_accepted = false;
   uint64_t mem_accept_cycle = ~0ull;
+  bool composed = false;
   bool misaligned = false;
   uint64_t accepted_baseline = 0;
 };
@@ -780,7 +781,27 @@ class Bench {
     // 6. the counters, against the driver's own tally of what it saw.
     CheckCounters(o);
 
-    // 7. the last fault pair the endpoint reported.
+    // 7. conservation, stated on the endpoint's own outputs and checked in
+    //    every cycle of every phase, the soak included. A request that has been
+    //    accepted is either still inside the endpoint, or has had its response
+    //    composed; a composed response is either being offered or has been
+    //    delivered. `pending` is the one accepted request whose response is not
+    //    composed yet, and `o.rsp_valid` is the one composed response that has
+    //    not been delivered yet -- the endpoint holds exactly one of each.
+    const uint32_t pending = (exp_.active && !exp_.composed) ? 1u : 0u;
+    const uint32_t held = o.rsp_valid ? 1u : 0u;
+    Check(o.load_ctr + o.store_ctr == o.rsp_ctr + pending, "conservation-accepted",
+          "accepted " + std::to_string(o.load_ctr + o.store_ctr) +
+              " != composed " + std::to_string(o.rsp_ctr) + " + pending " +
+              std::to_string(pending));
+    Check(o.rsp_ctr == uint32_t(delivered_) + held, "conservation-composed",
+          "composed " + std::to_string(o.rsp_ctr) + " != delivered " +
+              std::to_string(delivered_) + " + offered " + std::to_string(held));
+    Check(in_flight_ == uint64_t(held) + uint64_t(pending), "conservation-inflight",
+          "in flight " + std::to_string(in_flight_) + " != offered " +
+              std::to_string(held) + " + pending " + std::to_string(pending));
+
+    // 8. the last fault pair the endpoint reported.
     Check(o.last_fault_cause == last_fault_cause_, "last-fault-cause",
           "expected " + U64(last_fault_cause_) + ", got " + U64(o.last_fault_cause));
     Check(o.last_fault_tval == last_fault_tval_, "last-fault-tval",
@@ -837,6 +858,7 @@ class Bench {
       // The memory answered; the endpoint composes the response this edge and
       // offers it from the next one.
       t_.rsp++;
+      exp_.composed = true;
       exp_.fault = mem_.last_fault();
       exp_.cause = exp_.we ? kCauseStoreAccess : kCauseLoadAccess;
       exp_.tval = exp_.addr;
@@ -872,6 +894,7 @@ class Bench {
         // the memory must never be asked.
         t_.misaligned++;
         t_.rsp++;
+        exp_.composed = true;
         exp_.misaligned = true;
         exp_.accepted_baseline = accepted_pre;
         exp_.fault = true;
@@ -898,6 +921,7 @@ class Bench {
       in_flight_--;
       exp_.active = false;
       rsp_takes_++;
+      delivered_++;
     }
   }
 
@@ -906,6 +930,7 @@ class Bench {
     in_flight_ = 0;
     t_ = Tallies();
     presented_ = 0;
+    delivered_ = 0;
     prev_rsp_valid_ = false;
     hold_valid_ = false;
     last_fault_cause_ = 0;
@@ -946,6 +971,7 @@ class Bench {
   Tallies run_totals_;
   uint64_t in_flight_ = 0;
   uint64_t presented_ = 0;
+  uint64_t delivered_ = 0;
   bool prev_rsp_valid_ = false;
   uint64_t rsp_takes_ = 0;
   uint64_t req_stall_cycles_ = 0;
