@@ -47,7 +47,7 @@
 //   * The muldiv unit (I-012) consumes `a`, `b` and the M opcode directly; this
 //     block does not implement `mul`/`div`/`rem` and must not grow a partial
 //     version of them.
-//   * Address generation uses ALU_PASSB to carry an operand through untouched,
+//   * Address generation uses mosaic_pkg::ALU_PASSB to carry an operand through untouched,
 //     which is why the pass-through exists as a first-class op rather than as a
 //     special case of `add`.
 //
@@ -138,16 +138,16 @@ module mosaic_alu #(
 `endif
 
     case (op)
-      ALU_ADD:  result = a + b;
-      ALU_SUB:  result = a - b;
-      ALU_SLL:  result = a << shamt_wide;
-      ALU_SRL:  result = a >> shamt_wide;
-      ALU_SRA:  result = sra_result;
-      ALU_XOR:  result = a ^ b;
-      ALU_OR:   result = a | b;
-      ALU_AND:  result = a & b;
+      mosaic_pkg::ALU_ADD:  result = a + b;
+      mosaic_pkg::ALU_SUB:  result = a - b;
+      mosaic_pkg::ALU_SLL:  result = a << shamt_wide;
+      mosaic_pkg::ALU_SRL:  result = a >> shamt_wide;
+      mosaic_pkg::ALU_SRA:  result = sra_result;
+      mosaic_pkg::ALU_XOR:  result = a ^ b;
+      mosaic_pkg::ALU_OR:   result = a | b;
+      mosaic_pkg::ALU_AND:  result = a & b;
 
-      ALU_SLT:
+      mosaic_pkg::ALU_SLT:
 `ifdef MOSAIC_ALU_MUTANT_4
         // NEGATIVE CONTROL: slt implemented with the unsigned comparison, so
         // -1 < 1 answers 0.
@@ -156,19 +156,19 @@ module mosaic_alu #(
         result = lt_signed ? LOGIC_ONE : LOGIC_ZERO;
 `endif
 
-      ALU_SLTU: result = lt_unsigned ? LOGIC_ONE : LOGIC_ZERO;
+      mosaic_pkg::ALU_SLTU: result = lt_unsigned ? LOGIC_ONE : LOGIC_ZERO;
 
-      ALU_ADDW: begin
+      mosaic_pkg::ALU_ADDW: begin
         word   = a_low + b_low;
         result = extend_word(word);
       end
 
-      ALU_SUBW: begin
+      mosaic_pkg::ALU_SUBW: begin
         word   = a_low - b_low;
         result = extend_word(word);
       end
 
-      ALU_SLLW: begin
+      mosaic_pkg::ALU_SLLW: begin
 `ifdef MOSAIC_ALU_MUTANT_3
         // NEGATIVE CONTROL: six shift bits on a 32-bit operand, so a shift
         // amount of 32..63 does not wrap back to 0.
@@ -179,17 +179,17 @@ module mosaic_alu #(
         result = extend_word(word);
       end
 
-      ALU_SRLW: begin
+      mosaic_pkg::ALU_SRLW: begin
         word   = a_low >> shamt_w;
         result = extend_word(word);
       end
 
-      ALU_SRAW: begin
+      mosaic_pkg::ALU_SRAW: begin
         word   = $signed(a_low) >>> shamt_w;
         result = extend_word(word);
       end
 
-      ALU_PASSB: result = b;
+      mosaic_pkg::ALU_PASSB: result = b;
 
       // Unreachable: every one of the sixteen 4-bit encodings is covered above.
       // Present so that a future edit which adds an op cannot fall through

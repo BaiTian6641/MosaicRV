@@ -223,11 +223,11 @@ module mosaic_decoder (
   localparam mosaic_pkg::decode_ctl_t CTL_ILLEGAL = '{
       valid:        1'b0,
       illegal:      1'b1,
-      alu_op:       ALU_PASSB,   // defined "no ALU operation" encoding
-      md_op:        MD_MUL,
-      mem_kind:     MEM_NONE,
-      mem_size:     SZ_BYTE,
-      csr_op:       CSR_NONE,
+      alu_op:       mosaic_pkg::ALU_PASSB,   // defined "no ALU operation" encoding
+      md_op:        mosaic_pkg::MD_MUL,
+      mem_kind:     mosaic_pkg::MEM_NONE,
+      mem_size:     mosaic_pkg::SZ_BYTE,
+      csr_op:       mosaic_pkg::CSR_NONE,
       default:      '0
   };
 
@@ -241,30 +241,30 @@ module mosaic_decoder (
 
     case (opcode)
       // ------------------------------------------------------------- loads
-      OP_LOAD: begin
+      mosaic_pkg::OP_LOAD: begin
         ctl.uses_rs1  = 1'b1;
         ctl.uses_imm  = 1'b1;
         ctl.rs1       = rs1_f;
         ctl.rd        = rd_f;
         ctl.imm       = imm_i;
         ctl.reg_write = (rd_f != 5'd0);
-        ctl.mem_kind  = MEM_LOAD;
+        ctl.mem_kind  = mosaic_pkg::MEM_LOAD;
         ctl.uses_alu  = 1'b1;
-        ctl.alu_op    = ALU_ADD;   // effective address = rs1 + imm
+        ctl.alu_op    = mosaic_pkg::ALU_ADD;   // effective address = rs1 + imm
         legal         = 1'b1;
         case (funct3)
-          F3_ADD_SUB: begin ctl.mem_size = SZ_BYTE; ctl.mem_signed = 1'b1; end  // lb
-          F3_SLL:     begin ctl.mem_size = SZ_HALF; ctl.mem_signed = 1'b1; end  // lh
-          F3_SLT:     begin ctl.mem_size = SZ_WORD; ctl.mem_signed = 1'b1; end  // lw
-          F3_SLTU:    begin ctl.mem_size = SZ_DBL;  ctl.mem_signed = 1'b1; end  // ld
-          F3_XOR:     begin ctl.mem_size = SZ_BYTE; ctl.mem_signed = 1'b0; end  // lbu
-          3'd5:       begin ctl.mem_size = SZ_HALF; ctl.mem_signed = 1'b0; end  // lhu
+          mosaic_pkg::F3_ADD_SUB: begin ctl.mem_size = mosaic_pkg::SZ_BYTE; ctl.mem_signed = 1'b1; end  // lb
+          mosaic_pkg::F3_SLL:     begin ctl.mem_size = mosaic_pkg::SZ_HALF; ctl.mem_signed = 1'b1; end  // lh
+          mosaic_pkg::F3_SLT:     begin ctl.mem_size = mosaic_pkg::SZ_WORD; ctl.mem_signed = 1'b1; end  // lw
+          mosaic_pkg::F3_SLTU:    begin ctl.mem_size = mosaic_pkg::SZ_DBL;  ctl.mem_signed = 1'b1; end  // ld
+          mosaic_pkg::F3_XOR:     begin ctl.mem_size = mosaic_pkg::SZ_BYTE; ctl.mem_signed = 1'b0; end  // lbu
+          3'd5:       begin ctl.mem_size = mosaic_pkg::SZ_HALF; ctl.mem_signed = 1'b0; end  // lhu
           // funct3 110 and 111 are reserved: RV64I has no load wider than ld
           // and no store-by-width encoding beyond the six defined above.
           3'd7: begin
             // Mutation: accept a reserved funct3 as a signed doubleword load.
             if (MutReservedF3) begin
-              ctl.mem_size   = SZ_DBL;
+              ctl.mem_size   = mosaic_pkg::SZ_DBL;
               ctl.mem_signed = 1'b1;
             end else begin
               legal = 1'b0;
@@ -275,19 +275,19 @@ module mosaic_decoder (
       end
 
       // -------------------------------------------------- fence / fence.i
-      OP_MISC_MEM: begin
+      mosaic_pkg::OP_MISC_MEM: begin
         // Only funct3 000 (fence) and 001 (fence.i) are defined. The
         // fm/pred/succ fields of fence are all legal values and are not
         // decoded here: the memory system owns them.
-        if ((funct3 == F3_ADD_SUB) || (funct3 == F3_SLL)) begin
+        if ((funct3 == mosaic_pkg::F3_ADD_SUB) || (funct3 == mosaic_pkg::F3_SLL)) begin
           ctl.is_miscmem = 1'b1;              // fence or fence.i
-          ctl.is_fence_i = (funct3 == F3_SLL);  // funct3 001 is fence.i
+          ctl.is_fence_i = (funct3 == mosaic_pkg::F3_SLL);  // funct3 001 is fence.i
           legal         = 1'b1;
         end
       end
 
       // ----------------------------------------------------------- OP-IMM
-      OP_IMM: begin
+      mosaic_pkg::OP_IMM: begin
         ctl.uses_rs1  = 1'b1;
         ctl.uses_imm  = 1'b1;
         ctl.rs1       = rs1_f;
@@ -301,40 +301,40 @@ module mosaic_decoder (
           // funct3 000 is addi whatever insn[31:26] says, so this defect shows
           // up as `addi` decoding as `srai` -- a register write with the wrong
           // operation and the wrong immediate width.
-          F3_ADD_SUB: begin
+          mosaic_pkg::F3_ADD_SUB: begin
             if (MutSraiFunct3 && (insn[31:26] == 6'h10)) begin
-              ctl.alu_op = ALU_SRA;
+              ctl.alu_op = mosaic_pkg::ALU_SRA;
               ctl.imm    = imm_slli;
             end else begin
-              ctl.alu_op = ALU_ADD;   // addi
+              ctl.alu_op = mosaic_pkg::ALU_ADD;   // addi
             end
           end
-          F3_SLL: begin                          // slli
-            ctl.alu_op = ALU_SLL;
+          mosaic_pkg::F3_SLL: begin                          // slli
+            ctl.alu_op = mosaic_pkg::ALU_SLL;
             // Mutation: ignore insn[31:26], so "shift by 64" (shamt field
             // zero with a nonzero upper field) decodes as a legal slli.
             if (MutShiftUpper || (insn[31:26] == 6'h00)) ctl.imm = imm_slli;
             else                                          legal = 1'b0;
           end
-          F3_SLT:  ctl.alu_op = ALU_SLT;        // slti
-          F3_SLTU: ctl.alu_op = ALU_SLTU;       // sltiu; immediate sign-extended
-          F3_XOR:  ctl.alu_op = ALU_XOR;        // xori
-          F3_SRL_SRA: begin                       // srli / srai
+          mosaic_pkg::F3_SLT:  ctl.alu_op = mosaic_pkg::ALU_SLT;        // slti
+          mosaic_pkg::F3_SLTU: ctl.alu_op = mosaic_pkg::ALU_SLTU;       // sltiu; immediate sign-extended
+          mosaic_pkg::F3_XOR:  ctl.alu_op = mosaic_pkg::ALU_XOR;        // xori
+          mosaic_pkg::F3_SRL_SRA: begin                       // srli / srai
             // funct3 101 alone does not say which one: insn[31:26] does.
             // Mutation: drop the funct3 101 requirement from the srai arm.
             if (insn[31:26] == 6'h00) begin
-              ctl.alu_op = ALU_SRL;
+              ctl.alu_op = mosaic_pkg::ALU_SRL;
               ctl.imm    = imm_slli;
             end else if ((insn[31:26] == 6'h10) &&
-                         (MutSraiFunct3 || (funct3 == F3_SRL_SRA))) begin
-              ctl.alu_op = ALU_SRA;
+                         (MutSraiFunct3 || (funct3 == mosaic_pkg::F3_SRL_SRA))) begin
+              ctl.alu_op = mosaic_pkg::ALU_SRA;
               ctl.imm    = imm_slli;
             end else begin
               legal = 1'b0;
             end
           end
-          F3_OR:   ctl.alu_op = ALU_OR;         // ori
-          F3_AND:  ctl.alu_op = ALU_AND;        // andi
+          mosaic_pkg::F3_OR:   ctl.alu_op = mosaic_pkg::ALU_OR;         // ori
+          mosaic_pkg::F3_AND:  ctl.alu_op = mosaic_pkg::ALU_AND;        // andi
           default: legal = 1'b0;
         endcase
       end
@@ -350,47 +350,47 @@ module mosaic_decoder (
         ctl.rd        = rd_f;
         ctl.reg_write = (rd_f != 5'd0);
         ctl.uses_alu  = 1'b1;
-        ctl.alu_op    = ALU_PASSB;
+        ctl.alu_op    = mosaic_pkg::ALU_PASSB;
         legal         = 1'b1;
       end
 
       // ------------------------------------------------------------- auipc
       // funct3 is not part of the encoding: every value is auipc.
-      OP_AUIPC: begin
+      mosaic_pkg::OP_AUIPC: begin
         ctl.uses_imm  = 1'b1;
         ctl.imm       = imm_u;
         ctl.rd        = rd_f;
         ctl.reg_write = (rd_f != 5'd0);
         ctl.is_auipc  = 1'b1;      // ALU operand A is the PC
         ctl.uses_alu  = 1'b1;
-        ctl.alu_op    = ALU_ADD;
+        ctl.alu_op    = mosaic_pkg::ALU_ADD;
         legal         = 1'b1;
       end
 
       // ------------------------------------------------------------ stores
-      OP_STORE: begin
+      mosaic_pkg::OP_STORE: begin
         ctl.uses_rs1 = 1'b1;
         ctl.uses_rs2 = 1'b1;
         ctl.uses_imm = 1'b1;
         ctl.rs1      = rs1_f;
         ctl.rs2      = rs2_f;     // insn[11:7] is imm[4:0], not rd
         ctl.imm      = imm_s;
-        ctl.mem_kind = MEM_STORE;
+        ctl.mem_kind = mosaic_pkg::MEM_STORE;
         ctl.uses_alu = 1'b1;
-        ctl.alu_op   = ALU_ADD;
+        ctl.alu_op   = mosaic_pkg::ALU_ADD;
         legal        = 1'b1;
         case (funct3)
-          F3_ADD_SUB: ctl.mem_size = SZ_BYTE;   // sb
-          3'd1:       ctl.mem_size = SZ_HALF;   // sh
-          F3_SLT:     ctl.mem_size = SZ_WORD;   // sw
-          3'd3:       ctl.mem_size = SZ_DBL;    // sd
+          mosaic_pkg::F3_ADD_SUB: ctl.mem_size = mosaic_pkg::SZ_BYTE;   // sb
+          3'd1:       ctl.mem_size = mosaic_pkg::SZ_HALF;   // sh
+          mosaic_pkg::F3_SLT:     ctl.mem_size = mosaic_pkg::SZ_WORD;   // sw
+          3'd3:       ctl.mem_size = mosaic_pkg::SZ_DBL;    // sd
           default:    legal = 1'b0;              // funct3 100..111 reserved
         endcase
       end
 
       // ------------------------------------------------------- OP-IMM-32
       // RV64 only: the 32-bit word forms live on OP-32, which is illegal here.
-      OP_IMM_32: begin
+      mosaic_pkg::OP_IMM_32: begin
         ctl.uses_rs1  = 1'b1;
         ctl.uses_imm  = 1'b1;
         ctl.rs1       = rs1_f;
@@ -400,18 +400,18 @@ module mosaic_decoder (
         ctl.imm       = imm_i;
         legal         = 1'b1;
         case (funct3)
-          F3_ADD_SUB: ctl.alu_op = ALU_ADDW;    // addiw
-          F3_SLL: begin                          // slliw
-            ctl.alu_op = ALU_SLLW;
+          mosaic_pkg::F3_ADD_SUB: ctl.alu_op = mosaic_pkg::ALU_ADDW;    // addiw
+          mosaic_pkg::F3_SLL: begin                          // slliw
+            ctl.alu_op = mosaic_pkg::ALU_SLLW;
             if (funct7 == F7_BASE) ctl.imm = {59'd0, shamt_w};
             else                   legal = 1'b0;
           end
-          F3_SRL_SRA: begin                       // srliw / sraiw
+          mosaic_pkg::F3_SRL_SRA: begin                       // srliw / sraiw
             if (funct7 == F7_BASE) begin
-              ctl.alu_op = ALU_SRLW;
+              ctl.alu_op = mosaic_pkg::ALU_SRLW;
               ctl.imm    = {59'd0, shamt_w};
             end else if (funct7 == F7_ALT) begin
-              ctl.alu_op = ALU_SRAW;
+              ctl.alu_op = mosaic_pkg::ALU_SRAW;
               ctl.imm    = {59'd0, shamt_w};
             end else begin
               legal = 1'b0;
@@ -422,7 +422,7 @@ module mosaic_decoder (
       end
 
       // ------------------------------------------------------- OP and M
-      OP_MUL_DIV: begin
+      mosaic_pkg::OP_MUL_DIV: begin
         ctl.uses_rs1  = 1'b1;
         ctl.uses_rs2 = 1'b1;
         ctl.rs1       = rs1_f;
@@ -439,38 +439,38 @@ module mosaic_decoder (
         end else begin
           ctl.uses_alu = 1'b1;
           case (funct3)
-            F3_ADD_SUB: begin
-              if (funct7 == F7_BASE)     ctl.alu_op = ALU_ADD;
-              else if (funct7 == F7_ALT) ctl.alu_op = ALU_SUB;
+            mosaic_pkg::F3_ADD_SUB: begin
+              if (funct7 == F7_BASE)     ctl.alu_op = mosaic_pkg::ALU_ADD;
+              else if (funct7 == F7_ALT) ctl.alu_op = mosaic_pkg::ALU_SUB;
               else                          legal = 1'b0;
             end
-            F3_SLL: begin
-              if (funct7 == F7_BASE)     ctl.alu_op = ALU_SLL;
+            mosaic_pkg::F3_SLL: begin
+              if (funct7 == F7_BASE)     ctl.alu_op = mosaic_pkg::ALU_SLL;
               else                          legal = 1'b0;
             end
-            F3_SLT: begin
-              if (funct7 == F7_BASE)     ctl.alu_op = ALU_SLT;
+            mosaic_pkg::F3_SLT: begin
+              if (funct7 == F7_BASE)     ctl.alu_op = mosaic_pkg::ALU_SLT;
               else                          legal = 1'b0;
             end
-            F3_SLTU: begin
-              if (funct7 == F7_BASE)     ctl.alu_op = ALU_SLTU;
+            mosaic_pkg::F3_SLTU: begin
+              if (funct7 == F7_BASE)     ctl.alu_op = mosaic_pkg::ALU_SLTU;
               else                          legal = 1'b0;
             end
-            F3_XOR: begin
-              if (funct7 == F7_BASE)     ctl.alu_op = ALU_XOR;
+            mosaic_pkg::F3_XOR: begin
+              if (funct7 == F7_BASE)     ctl.alu_op = mosaic_pkg::ALU_XOR;
               else                          legal = 1'b0;
             end
-            F3_SRL_SRA: begin
-              if (funct7 == F7_BASE)     ctl.alu_op = ALU_SRL;
-              else if (funct7 == F7_ALT) ctl.alu_op = ALU_SRA;
+            mosaic_pkg::F3_SRL_SRA: begin
+              if (funct7 == F7_BASE)     ctl.alu_op = mosaic_pkg::ALU_SRL;
+              else if (funct7 == F7_ALT) ctl.alu_op = mosaic_pkg::ALU_SRA;
               else                          legal = 1'b0;
             end
-            F3_OR: begin
-              if (funct7 == F7_BASE)     ctl.alu_op = ALU_OR;
+            mosaic_pkg::F3_OR: begin
+              if (funct7 == F7_BASE)     ctl.alu_op = mosaic_pkg::ALU_OR;
               else                          legal = 1'b0;
             end
             default: begin
-              if (funct7 == F7_BASE)     ctl.alu_op = ALU_AND;
+              if (funct7 == F7_BASE)     ctl.alu_op = mosaic_pkg::ALU_AND;
               else                          legal = 1'b0;
             end
           endcase
@@ -478,7 +478,7 @@ module mosaic_decoder (
       end
 
       // ------------------------------------------------------------ branch
-      OP_BRANCH: begin
+      mosaic_pkg::OP_BRANCH: begin
         ctl.uses_rs1     = 1'b1;
         ctl.uses_rs2     = 1'b1;
         ctl.uses_imm     = 1'b1;
@@ -491,17 +491,17 @@ module mosaic_decoder (
         // reserved pair is funct3 010 and 011 -- the branch encoding reuses the
         // funct3 space but not the ALU's meaning of it, so funct3 100 is blt
         // here and not a reserved value.
-        if ((funct3 == F3_ADD_SUB) || (funct3 == F3_SLL)  ||
-            (funct3 == F3_XOR)     || (funct3 == F3_SRL_SRA) ||
-            (funct3 == F3_OR)      || (funct3 == F3_AND)) begin
+        if ((funct3 == mosaic_pkg::F3_ADD_SUB) || (funct3 == mosaic_pkg::F3_SLL)  ||
+            (funct3 == mosaic_pkg::F3_XOR)     || (funct3 == mosaic_pkg::F3_SRL_SRA) ||
+            (funct3 == mosaic_pkg::F3_OR)      || (funct3 == mosaic_pkg::F3_AND)) begin
           legal = 1'b1;
         end
       end
 
       // -------------------------------------------------------------- jalr
-      OP_JALR: begin
+      mosaic_pkg::OP_JALR: begin
         // jalr has exactly one funct3; every other value is reserved.
-        if (funct3 == F3_ADD_SUB) begin
+        if (funct3 == mosaic_pkg::F3_ADD_SUB) begin
           ctl.uses_rs1    = 1'b1;
           ctl.uses_imm    = 1'b1;
           ctl.rs1         = rs1_f;
@@ -516,7 +516,7 @@ module mosaic_decoder (
 
       // --------------------------------------------------------------- jal
       // funct3 is not part of the encoding: every value is jal.
-      OP_JAL: begin
+      mosaic_pkg::OP_JAL: begin
         ctl.uses_imm    = 1'b1;
         ctl.imm         = imm_j;
         ctl.rd          = rd_f;
@@ -527,9 +527,9 @@ module mosaic_decoder (
       end
 
       // ------------------------------------------------------------ system
-      OP_SYSTEM: begin
+      mosaic_pkg::OP_SYSTEM: begin
         case (funct3)
-          F3_ADD_SUB: begin
+          mosaic_pkg::F3_ADD_SUB: begin
             // funct3 000 carries the twelve system instructions. Only the three
             // this core defines are legal, and only in their exact encoding:
             // rd and rs1 are not part of ecall/ebreak/mret, so a nonzero value
@@ -545,7 +545,7 @@ module mosaic_decoder (
             end
           end
           // csrrw, csrrs, csrrc.
-          F3_SLL, F3_SLT, F3_SLTU: begin
+          mosaic_pkg::F3_SLL, mosaic_pkg::F3_SLT, mosaic_pkg::F3_SLTU: begin
             ctl.is_system   = 1'b1;
             ctl.csr_imm_form = 1'b0;
             ctl.csr_addr    = insn[31:20];
@@ -553,22 +553,22 @@ module mosaic_decoder (
             ctl.rs1         = rs1_f;
             ctl.rd          = rd_f;
             ctl.reg_write   = (rd_f != 5'd0);
-            ctl.csr_op      = (funct3 == F3_SLL) ? CSR_RW :
-                              (funct3 == F3_SLT) ? CSR_RS : CSR_RC;
+            ctl.csr_op      = (funct3 == mosaic_pkg::F3_SLL) ? mosaic_pkg::CSR_RW :
+                              (funct3 == mosaic_pkg::F3_SLT) ? mosaic_pkg::CSR_RS : mosaic_pkg::CSR_RC;
             // csrrw always writes; csrrs/csrrc write only when rs1 != x0.
             // csrrw reads only when rd != x0, because with rd == x0 there is
             // nowhere to put the old value -- that read must not happen, since
             // it could have side effects.
             ctl.csr_writes = MutCsrIntent ? 1'b1
-                              : (ctl.csr_op == CSR_RW) || (rs1_f != 5'd0);
+                              : (ctl.csr_op == mosaic_pkg::CSR_RW) || (rs1_f != 5'd0);
             ctl.csr_reads  = MutCsrIntent ? 1'b1
-                              : (ctl.csr_op != CSR_RW) || (rd_f != 5'd0);
+                              : (ctl.csr_op != mosaic_pkg::CSR_RW) || (rd_f != 5'd0);
             legal          = 1'b1;
           end
           // csrrwi, csrrsi, csrrci: insn[19:15] is a zero-extended 5-bit
           // immediate, not a register index. funct3 101/110/111, cross-checked
           // against riscv64-elf-objdump -M no-aliases.
-          F3_SRL_SRA, F3_OR, F3_AND: begin
+          mosaic_pkg::F3_SRL_SRA, mosaic_pkg::F3_OR, mosaic_pkg::F3_AND: begin
             ctl.is_system    = 1'b1;
             ctl.csr_imm_form = 1'b1;
             ctl.csr_addr     = insn[31:20];
@@ -576,12 +576,12 @@ module mosaic_decoder (
             ctl.rs1          = rs1_f;
             ctl.rd           = rd_f;
             ctl.reg_write    = (rd_f != 5'd0);
-            ctl.csr_op       = (funct3 == F3_SRL_SRA) ? CSR_RW :
-                               (funct3 == F3_OR)      ? CSR_RS : CSR_RC;
+            ctl.csr_op       = (funct3 == mosaic_pkg::F3_SRL_SRA) ? mosaic_pkg::CSR_RW :
+                               (funct3 == mosaic_pkg::F3_OR)      ? mosaic_pkg::CSR_RS : mosaic_pkg::CSR_RC;
             ctl.csr_writes = MutCsrIntent ? 1'b1
-                              : (ctl.csr_op == CSR_RW) || (rs1_f != 5'd0);
+                              : (ctl.csr_op == mosaic_pkg::CSR_RW) || (rs1_f != 5'd0);
             ctl.csr_reads  = MutCsrIntent ? 1'b1
-                              : (ctl.csr_op != CSR_RW) || (rd_f != 5'd0);
+                              : (ctl.csr_op != mosaic_pkg::CSR_RW) || (rd_f != 5'd0);
             legal           = 1'b1;
           end
           // funct3 100 is reserved: there is no fourth register form and no
@@ -606,18 +606,18 @@ module mosaic_decoder (
         ctl.uses_alu  = 1'b1;
         legal         = 1'b1;
         case (funct3)
-          F3_ADD_SUB: begin
-            if (funct7 == F7_BASE)     ctl.alu_op = ALU_ADDW;
-            else if (funct7 == F7_ALT) ctl.alu_op = ALU_SUBW;
+          mosaic_pkg::F3_ADD_SUB: begin
+            if (funct7 == F7_BASE)     ctl.alu_op = mosaic_pkg::ALU_ADDW;
+            else if (funct7 == F7_ALT) ctl.alu_op = mosaic_pkg::ALU_SUBW;
             else                          legal = 1'b0;
           end
-          F3_SLL: begin
-            if (funct7 == F7_BASE)     ctl.alu_op = ALU_SLLW;
+          mosaic_pkg::F3_SLL: begin
+            if (funct7 == F7_BASE)     ctl.alu_op = mosaic_pkg::ALU_SLLW;
             else                          legal = 1'b0;
           end
-          F3_SRL_SRA: begin
-            if (funct7 == F7_BASE)     ctl.alu_op = ALU_SRLW;
-            else if (funct7 == F7_ALT) ctl.alu_op = ALU_SRAW;
+          mosaic_pkg::F3_SRL_SRA: begin
+            if (funct7 == F7_BASE)     ctl.alu_op = mosaic_pkg::ALU_SRLW;
+            else if (funct7 == F7_ALT) ctl.alu_op = mosaic_pkg::ALU_SRAW;
             else                          legal = 1'b0;
           end
           default: legal = 1'b0;

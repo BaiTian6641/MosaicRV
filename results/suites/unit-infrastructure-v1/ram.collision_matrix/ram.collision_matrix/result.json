@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "case": "ram.collision_matrix",
+  "verdict": "PASS",
+  "detail": "collision matrix complete: 5410 shadow comparisons, 5487 cycles, seed 0",
+  "seed": 0,
+  "max_cycles": 20000,
+  "checks": 1,
+  "failures": 0,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-01T02:19:34Z",
+  "first_mismatch": ""
+}

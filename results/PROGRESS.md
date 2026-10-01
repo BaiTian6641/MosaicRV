@@ -311,3 +311,46 @@ I-008 is delivered with one documented open item: a mutation control that cannot
 fail, and therefore one architectural rule — that `csrrs`/`csrrc` with `rs1 == x0`
 must not write — that has no observable coverage in this profile. The hardware is
 not in question; the coverage gap is.
+
+---
+
+## 2026-09-30 — synthesis check, and four more of my own defects
+
+`make test PROFILE=p0` now runs end to end and exits 0. Getting there exposed
+problems that had been invisible because nothing was running Yosys:
+
+1. **The synthesis top did not exist.** `synth_check.py` named `mosaic_top`, which is
+   not in the tree. `hierarchy -check` would have failed, but for a reason that looks
+   like a design fault rather than a configuration one. The tool now picks the largest
+   single-module RTL file, which is a real design object.
+2. **Packages were listed after their users** — the *third* tool in this project to
+   get that ordering wrong, after the Verilator linter and the unit runner. All three
+   produced errors that read exactly like a scoping mistake in the RTL. That pattern
+   is now called out in each tool's docstring rather than left to the caller.
+3. **The file list was split across lines.** Yosys parses one command per line and
+   reports `No filename given`.
+4. **Yosys cannot parse `import`, and the RTL depends on it.** The first workaround
+   I reached for — strip the import into a scratch copy — produced a *new* failure,
+   because `mosaic_alu.sv` genuinely relied on the import for unqualified `ALU_*`
+   references. My assumption that every package reference was already qualified was
+   wrong, and checking it took one command.
+
+**The actual fix belongs in the RTL, not the tool.** Every package type and enum
+reference is now fully qualified (`mosaic_pkg::ALU_ADD`, `mosaic_pkg::decode_ctl_t`),
+which is the portable form and is what the import was papering over. Verilator lint
+stays clean and `decode.rv64im_reserved`, `alu.boundaries` and
+`core.bringup_vs_reference` all still pass.
+
+**And then a genuine tool limit, reported rather than papered over.** Yosys 0.69 does
+not support SystemVerilog assignment patterns — verified with a three-line
+reproduction, so this is the tool and not this design. I did **not** rewrite readable,
+vendor-supported RTL into something one open-source tool can parse. That would trade
+portability we actually have for coverage of a tool we do not, on the grounds that it
+is the only tool available.
+
+`synth_check.py` therefore distinguishes three outcomes: **PASS**, **FAIL** (a real
+design problem), and **BLOCKED** (exit 2, a tool limitation). The Makefile surfaces
+BLOCKED explicitly rather than folding it into either verdict. `make test` passing
+therefore means "every check that could run did run and passed, and the one that
+could not is named" — which is the honest claim, and not the same as "synthesis was
+verified".

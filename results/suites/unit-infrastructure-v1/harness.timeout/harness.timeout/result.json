@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "case": "harness.timeout",
+  "verdict": "PASS",
+  "detail": "cycle limit enforced after 520 cycles",
+  "seed": 0,
+  "max_cycles": 2000,
+  "checks": 4,
+  "failures": 0,
+  "image": "",
+  "expect": "",
+  "tool": "mosaic harness I-004",
+  "timestamp": "2026-10-01T02:19:34Z",
+  "first_mismatch": ""
+}

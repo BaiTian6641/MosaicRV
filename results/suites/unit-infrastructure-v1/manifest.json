@@ -1,0 +1,50 @@
+{
+  "cases": [
+    {
+      "case": "fifo.backpressure",
+      "exit_code": 0,
+      "seconds": 0.118,
+      "verdict": "PASS"
+    },
+    {
+      "case": "ram.collision_matrix",
+      "exit_code": 0,
+      "seconds": 0.117,
+      "verdict": "PASS"
+    },
+    {
+      "case": "harness.reset_load_exit",
+      "exit_code": 0,
+      "seconds": 0.123,
+      "verdict": "PASS"
+    },
+    {
+      "case": "harness.bad_image",
+      "exit_code": 0,
+      "seconds": 0.121,
+      "verdict": "PASS"
+    },
+    {
+      "case": "harness.timeout",
+      "exit_code": 0,
+      "seconds": 0.12,
+      "verdict": "PASS"
+    },
+    {
+      "case": "harness.injected_mismatch",
+      "exit_code": 0,
+      "seconds": 0.123,
+      "verdict": "PASS"
+    }
+  ],
+  "command": "python3 tools/verify.py --profile p0 --suite unit-infrastructure-v1",
+  "profile": "p0",
+  "schema_version": 1,
+  "seed": 0,
+  "suite": "unit-infrastructure-v1",
+  "tool_versions": {
+    "python": "3.14.7",
+    "verilator": "Verilator 5.052 2026-09-05 rev vUNKNOWN-built20260905"
+  },
+  "verdict": "PASS"
+}

@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "case": "harness.bad_image",
+  "verdict": "PASS",
+  "detail": "every malformed image was refused with a named reason",
+  "seed": 0,
+  "max_cycles": 2000,
+  "checks": 11,
+  "failures": 0,
+  "image": "",
+  "expect": "",
+  "tool": "mosaic harness I-004",
+  "timestamp": "2026-10-01T02:19:34Z",
+  "first_mismatch": ""
+}

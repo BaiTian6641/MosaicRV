@@ -225,10 +225,24 @@ print(json.dumps({"status":"PASS", "original_documents":3,
 
 ## 4. 验证记录
 
-下方记录必须由实际检查结果更新。任何失败保留原因并修正规划，不减少检查范围使其通过。本文没有执行 RTL 测试、Verilator 程序、FPGA 工具、板测或 ASIC 工具。
+下方记录必须由实际检查结果更新。任何失败保留原因并修正规划，不减少检查范围使其通过。每条记录只对它列明的对象、命令和范围有效；ACT4/Sail 校准不得标成 MosaicRV DUT 通过，未实跑的 XiangShan/NEMU/FPGA/ASIC 项保持 BLOCKED。
 
 ## 5. 当前检查结果
 
 2026-09-29 本轮执行 §1 嵌入式检查器：`PASS`；三份原文 hash 保持不变，102 个原文标题全覆盖，239 个任务（98 I/90 V/51 H）、90 行跨文档集成依赖、641 条依赖边无环，62 个引用 ID、110 个本地链接、22 份已跟踪文档和 11 份 stage 指南/239 张任务卡通过；12 项 claim gate 检查与 Git whitespace 检查通过。另以同一图实跑六组依赖闭包正反例：无 cache p0、有序三板 p0、独立 ASIC、RVA23 Core、ASIC Secure、ASIC DCLS 物理；所需祖先存在且各自可选项目未被无条件串入。此为文档/来源/图检查，不代表任何 RTL、CPU 仿真、实板或 ASIC 测试已运行。
 
 2026-09-30 RVA23 细查后复核：§1 嵌入式检查器再次 `PASS`；仍是 239 个任务（98 I/90 V/51 H）、90 行集成依赖、642 条无环依赖边、62 个引用、111 个本地链接、22 份文档、11 份指南与 239 张任务卡，Git whitespace 为 PASS。另以针对脚本核对 RVA23U64/S64 的 59 个 mandatory/Sha 名称与 23 个 ratified option 在实施、验证、RVA23 阶段指南中均有归属，并在平台/README 中明确 Core、项目选项组合与 Server Platform 边界。此证据只覆盖规划文档完整性，不声称任何 CPU 功能、DIEL 实测、板测或 ASIC 结果。
+
+## 6. 2026-09-30 外部 ISA/ACT 工具环境与校准结果
+
+本记录针对当前 Darwin arm64 工作站，不是可移植 runner 镜像。当前无 Docker/Podman/Colima，也没有配置 SSH Linux 主机；计划要求的 Linux x86-64 XiangShan/NEMU 环境因此仍 BLOCKED。
+
+- **Sail**：安装官方 [`0.14.1` Mac-arm64 release](https://github.com/riscv/sail-riscv/releases/tag/0.14.1)，资产 `sail-riscv-Mac-arm64.tar.gz` SHA-256 为 `bc35be7b45a21f60d32915ccd8f9f1746f5a342399e4d65a8fb2b7c1e81babdf`；`sail_riscv_sim --version` 实际输出 `0.14.1`。源码 commit `e4b243f4eb5d1ed05bbbc030ad338c2a32c45d72`；工具安装在 `$HOME/mosaic-ref/sail-riscv-0.14.1`。
+- **ACT4**：[`riscv/riscv-arch-test`](https://github.com/riscv/riscv-arch-test/commit/96493a91448ca50780013fd892daec2c204487ba) checkout 固定在 `96493a91448ca50780013fd892daec2c204487ba`，source checkout clean。`mise 2026.9.15` 已安装；ACT4 `.mise.toml` 的 Ruby `3.4.11`、uv `0.11.33`、Bundler `4.0.21`、prek `0.5.3`、ShellCheck `0.11.0` 均已安装并实查版本。ACT Python CLI `uv run act --help` 正常。
+- **UDB/Z3 适配**：ACT4 首次 UDB 检查失败，UDB `0.1.17` 试图在 Darwin 加载 Linux AArch64 `libz3.so`（Mach-O loader 拒绝 ELF）。已安装 Homebrew Z3 `5.1.0`，并在隔离 `$HOME/mosaic-ref/act4-native-cache` 中将 UDB 预期的 `libz3.so` 名称指向原生 `libz3.dylib`；再次配置检查通过，未修改上游 gem 或仓库代码。
+- **ACT4/Sail/calibration smoke**：使用上游 `config/sail/sail-rv64-max` 样例参考配置、仅过滤 `EXTENSIONS=I`，生成 51 个 RV64I ELF；逐个通过上游 `run_tests.py` 在 Sail 0.14.1 上执行，`summary.log` 为 51/51 `RVCP-SUMMARY: TEST PASSED`。51 个 ELF 的 SHA-256 清单保存在 `$HOME/mosaic-ref/act4-calibration-work-nativez3/sail-rv64-max/elfs.sha256`。这只校准生成器、UDB、编译器、Sail 与 ACT runner 的连通性：测试基于 Sail max 配置并在同一 Sail 模型回放，不是独立 oracle，也不是 MosaicRV DUT 验收；ACT 官方明确其不是 verification tests。
+- **交叉工具链边界**：当前 Homebrew `riscv64-elf-gcc` 为 GCC `16.2.0`、Binutils `2.47.20260726`。固定 ACT4 README 列 GCC `15`/Binutils `2.44` 或 LLVM `22` 为其当时受支持/CI 测试基线。上述 ACT smoke 实际使用 GCC 16，虽通过，不代表闭合精确工具链兼容性；交叉工具链 source/hash 仍需冻结。
+- **Spike 与环境审计**：Spike commit `0bff12123b1fd510e19e19634dd997dbade70e54` 的本地 `spike --help` 输出 `1.1.1-dev`。`python3 tools/check_upstream.py --require riscv-arch-test --require sail_riscv_sim --require spike --require riscv64-elf-gcc --require riscv64-elf-objdump` 通过，且明确列出 XiangShan/NEMU 的 BLOCKED 原因。
+- **未完成集成**：尚无 MosaicRV 专属 ACT4 UDB/Sail/linker/`rvmodel_macros.h` 配置或 DUT ELF runner；不得拿 `sail-rv64-max` 样例或上述 51/51 冒称 p0 通过。XiangShan `e7bab53e66dfb3c4a1d11cf9519b0396f8576cae` 递归 source closure/build，以及 NEMU `f39e3077d7bac3cd9a3a853a9300a5f8f0293a2c` reference build/ABI calibration，仍需 Linux x86-64 runner。
+
+后续补齐 Linux runner 或 MosaicRV DUT ACT 配置时，另起带版本与哈希的 run record；本条不自动升级为 DUT PASS。

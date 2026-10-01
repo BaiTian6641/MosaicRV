@@ -81,6 +81,8 @@ TOOLS = [
     {"name": "sail_riscv_sim",
      "cmd": [os.path.join(REF_ROOT, "sail-riscv-0.14.1", "bin", "sail_riscv_sim"), "--version"],
      "licence": "Other (see upstream LICENCE)", "used_for": ["V-002", "V-006", "V-043"]},
+    {"name": "z3", "cmd": ["z3", "--version"],
+     "licence": "MIT", "used_for": ["V-043"]},
 ]
 
 # References and second DUTs blocked on the documented Linux x86-64 environment.

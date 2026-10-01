@@ -347,9 +347,9 @@ module mosaic_bringup_core #(
   // Byte mask for an encoded access size.
   function automatic logic [63:0] size_mask(input logic [2:0] sz);
     case (sz)
-      SZ_BYTE:  size_mask = 64'h00000000000000ff;
-      SZ_HALF:  size_mask = 64'h000000000000ffff;
-      SZ_WORD:  size_mask = 64'h00000000ffffffff;
+      mosaic_pkg::SZ_BYTE:  size_mask = 64'h00000000000000ff;
+      mosaic_pkg::SZ_HALF:  size_mask = 64'h000000000000ffff;
+      mosaic_pkg::SZ_WORD:  size_mask = 64'h00000000ffffffff;
       default:  size_mask = 64'hffffffffffffffff;
     endcase
   endfunction
@@ -359,18 +359,18 @@ module mosaic_bringup_core #(
   // neither is guessed at by the consumer.
   function automatic logic [3:0] size_in_bytes(input logic [2:0] sz);
     case (sz)
-      SZ_BYTE: size_in_bytes = 4'd1;
-      SZ_HALF: size_in_bytes = 4'd2;
-      SZ_WORD: size_in_bytes = 4'd4;
+      mosaic_pkg::SZ_BYTE: size_in_bytes = 4'd1;
+      mosaic_pkg::SZ_HALF: size_in_bytes = 4'd2;
+      mosaic_pkg::SZ_WORD: size_in_bytes = 4'd4;
       default: size_in_bytes = 4'd8;
     endcase
   endfunction
 
   function automatic logic [63:0] size_bytes(input logic [2:0] sz);
     case (sz)
-      SZ_BYTE:  size_bytes = 64'd1;
-      SZ_HALF:  size_bytes = 64'd2;
-      SZ_WORD:  size_bytes = 64'd4;
+      mosaic_pkg::SZ_BYTE:  size_bytes = 64'd1;
+      mosaic_pkg::SZ_HALF:  size_bytes = 64'd2;
+      mosaic_pkg::SZ_WORD:  size_bytes = 64'd4;
       default:  size_bytes = 64'd8;
     endcase
   endfunction
@@ -382,11 +382,11 @@ module mosaic_bringup_core #(
                                                   input logic [2:0] sz,
                                                   input logic is_signed);
     case (sz)
-      SZ_BYTE:  load_extend = is_signed ? {{(XLEN - 8){raw[7]}},  raw[7:0]}
+      mosaic_pkg::SZ_BYTE:  load_extend = is_signed ? {{(XLEN - 8){raw[7]}},  raw[7:0]}
                                         : {{(XLEN - 8){1'b0}},  raw[7:0]};
-      SZ_HALF:  load_extend = is_signed ? {{(XLEN - 16){raw[15]}}, raw[15:0]}
+      mosaic_pkg::SZ_HALF:  load_extend = is_signed ? {{(XLEN - 16){raw[15]}}, raw[15:0]}
                                         : {{(XLEN - 16){1'b0}}, raw[15:0]};
-      SZ_WORD:  load_extend = is_signed ? {{(XLEN - 32){raw[31]}}, raw[31:0]}
+      mosaic_pkg::SZ_WORD:  load_extend = is_signed ? {{(XLEN - 32){raw[31]}}, raw[31:0]}
                                         : {{(XLEN - 32){1'b0}}, raw[31:0]};
       default:  load_extend = raw;
     endcase
@@ -405,39 +405,39 @@ module mosaic_bringup_core #(
     shifted = $signed(a) >>> b[5:0];
 
     case (op)
-      ALU_ADD:   alu_eval = a + b;
-      ALU_SUB:   alu_eval = a - b;
-      ALU_SLL:   alu_eval = a << b[5:0];
-      ALU_SLT:   alu_eval = ($signed(a) < $signed(b)) ? 64'd1 : 64'd0;
-      ALU_SLTU:  alu_eval = (a < b) ? 64'd1 : 64'd0;
-      ALU_XOR:   alu_eval = a ^ b;
-      ALU_SRL:   alu_eval = a >> b[5:0];
-      ALU_SRA:   alu_eval = shifted;
-      ALU_OR:    alu_eval = a | b;
-      ALU_AND:   alu_eval = a & b;
+      mosaic_pkg::ALU_ADD:   alu_eval = a + b;
+      mosaic_pkg::ALU_SUB:   alu_eval = a - b;
+      mosaic_pkg::ALU_SLL:   alu_eval = a << b[5:0];
+      mosaic_pkg::ALU_SLT:   alu_eval = ($signed(a) < $signed(b)) ? 64'd1 : 64'd0;
+      mosaic_pkg::ALU_SLTU:  alu_eval = (a < b) ? 64'd1 : 64'd0;
+      mosaic_pkg::ALU_XOR:   alu_eval = a ^ b;
+      mosaic_pkg::ALU_SRL:   alu_eval = a >> b[5:0];
+      mosaic_pkg::ALU_SRA:   alu_eval = shifted;
+      mosaic_pkg::ALU_OR:    alu_eval = a | b;
+      mosaic_pkg::ALU_AND:   alu_eval = a & b;
 
-      ALU_ADDW: begin
+      mosaic_pkg::ALU_ADDW: begin
         word = a[31:0] + b[31:0];
         alu_eval = {{(XLEN - 32){word[31]}}, word};
       end
-      ALU_SUBW: begin
+      mosaic_pkg::ALU_SUBW: begin
         word = a[31:0] - b[31:0];
         alu_eval = {{(XLEN - 32){word[31]}}, word};
       end
-      ALU_SLLW: begin
+      mosaic_pkg::ALU_SLLW: begin
         word = a[31:0] << b[4:0];
         alu_eval = {{(XLEN - 32){word[31]}}, word};
       end
-      ALU_SRLW: begin
+      mosaic_pkg::ALU_SRLW: begin
         word = a[31:0] >> b[4:0];
         alu_eval = {{(XLEN - 32){word[31]}}, word};
       end
-      ALU_SRAW: begin
+      mosaic_pkg::ALU_SRAW: begin
         word = $signed(a[31:0]) >>> b[4:0];
         alu_eval = {{(XLEN - 32){word[31]}}, word};
       end
 
-      ALU_PASSB: alu_eval = b;
+      mosaic_pkg::ALU_PASSB: alu_eval = b;
       default:   alu_eval = 64'd0;
     endcase
   endfunction
@@ -479,10 +479,10 @@ module mosaic_bringup_core #(
     prod_uu_lo = XLEN'({{XLEN{1'b0}}, a} * {{XLEN{1'b0}}, b});
 
     case (op)
-      MD_MUL:    muldiv_eval = prod_uu_lo;
-      MD_MULH:   muldiv_eval = prod_ss_hi;
-      MD_MULHSU: muldiv_eval = prod_su_hi;
-      MD_MULHU:  muldiv_eval = prod_uu_hi;
+      mosaic_pkg::MD_MUL:    muldiv_eval = prod_uu_lo;
+      mosaic_pkg::MD_MULH:   muldiv_eval = prod_ss_hi;
+      mosaic_pkg::MD_MULHSU: muldiv_eval = prod_su_hi;
+      mosaic_pkg::MD_MULHU:  muldiv_eval = prod_uu_hi;
 
 
       // Division by zero is defined, not undefined: the quotient is all ones and
@@ -490,7 +490,7 @@ module mosaic_bringup_core #(
       // most-negative value divided by minus one) is likewise defined rather
       // than a trap.  The quotient truncates toward zero and the remainder takes
       // the sign of the dividend, which is what RV64 specifies.
-      MD_DIV: begin
+      mosaic_pkg::MD_DIV: begin
         if (b == {XLEN{1'b0}}) begin
           muldiv_eval = {XLEN{1'b1}};
         end else if ((a == MIN_VALUE) && (b == NEG_ONE)) begin
@@ -504,11 +504,11 @@ module mosaic_bringup_core #(
           muldiv_eval = quo;
         end
       end
-      MD_DIVU: begin
+      mosaic_pkg::MD_DIVU: begin
         if (b == {XLEN{1'b0}}) muldiv_eval = {XLEN{1'b1}};
         else                  muldiv_eval = a / b;
       end
-      MD_REM: begin
+      mosaic_pkg::MD_REM: begin
         if (b == {XLEN{1'b0}}) begin
           muldiv_eval = a;
         end else if ((a == MIN_VALUE) && (b == NEG_ONE)) begin
@@ -519,7 +519,7 @@ module mosaic_bringup_core #(
           muldiv_eval = rem;
         end
       end
-      MD_REMU: begin
+      mosaic_pkg::MD_REMU: begin
         if (b == {XLEN{1'b0}}) muldiv_eval = a;
         else                  muldiv_eval = a % b;
       end
@@ -530,8 +530,8 @@ module mosaic_bringup_core #(
   // A decode_ctl_t that is unambiguously illegal: nothing valid, nothing
   // usable, illegal set.  One construction, so no illegal path can leave a
   // half-populated field behind.
-  function automatic decode_ctl_t illegal_op();
-    decode_ctl_t d;
+  function automatic mosaic_pkg::decode_ctl_t illegal_op();
+    mosaic_pkg::decode_ctl_t d;
     d = '0;
     d.illegal = 1'b1;
     illegal_op = d;
@@ -565,8 +565,8 @@ module mosaic_bringup_core #(
   localparam logic [6:0]  OP_FP         = 7'b1000011;
 `endif
 
-  function automatic decode_ctl_t decode(input logic [31:0] ir);
-    decode_ctl_t      d;
+  function automatic mosaic_pkg::decode_ctl_t decode(input logic [31:0] ir);
+    mosaic_pkg::decode_ctl_t      d;
     logic [6:0]       opcode;
     logic [2:0]       funct3;
     logic [6:0]       funct7;
@@ -590,7 +590,7 @@ module mosaic_bringup_core #(
       d.uses_rs1  = 1'b1;
       d.uses_rs2  = 1'b1;
       d.uses_alu  = 1'b1;
-      d.alu_op    = ALU_ADD;
+      d.alu_op    = mosaic_pkg::ALU_ADD;
       d.reg_write = 1'b1;
       d.valid     = 1'b1;
       decode      = d;
@@ -600,46 +600,46 @@ module mosaic_bringup_core #(
 
     case (opcode)
       // ---------------------------------------------------------------- LOAD
-      OP_LOAD: begin
+      mosaic_pkg::OP_LOAD: begin
         imm = sext({{(XLEN - 12){ir[31]}}, ir[31:20]}, 12);
         d.uses_rs1  = 1'b1;
         d.uses_imm  = 1'b1;
         d.imm       = imm;
-        d.mem_kind  = MEM_LOAD;
+        d.mem_kind  = mosaic_pkg::MEM_LOAD;
         d.reg_write = 1'b1;
         d.valid     = 1'b1;
         case (funct3)
-          F3_ADD_SUB:  begin d.mem_size = SZ_BYTE; d.mem_signed = 1'b1; end  // lb
-          F3_SLL:      begin d.mem_size = SZ_HALF; d.mem_signed = 1'b1; end  // lh
-          F3_SLT:      begin d.mem_size = SZ_WORD; d.mem_signed = 1'b1; end  // lw
-          F3_SLTU:     begin d.mem_size = SZ_DBL;  d.mem_signed = 1'b1; end  // ld
-          F3_XOR:      begin d.mem_size = SZ_BYTE; d.mem_signed = 1'b0; end  // lbu
-          F3_SRL_SRA:  begin d.mem_size = SZ_HALF; d.mem_signed = 1'b0; end  // lhu
-          F3_OR:       begin d.mem_size = SZ_WORD; d.mem_signed = 1'b0; end  // lwu
+          mosaic_pkg::F3_ADD_SUB:  begin d.mem_size = mosaic_pkg::SZ_BYTE; d.mem_signed = 1'b1; end  // lb
+          mosaic_pkg::F3_SLL:      begin d.mem_size = mosaic_pkg::SZ_HALF; d.mem_signed = 1'b1; end  // lh
+          mosaic_pkg::F3_SLT:      begin d.mem_size = mosaic_pkg::SZ_WORD; d.mem_signed = 1'b1; end  // lw
+          mosaic_pkg::F3_SLTU:     begin d.mem_size = mosaic_pkg::SZ_DBL;  d.mem_signed = 1'b1; end  // ld
+          mosaic_pkg::F3_XOR:      begin d.mem_size = mosaic_pkg::SZ_BYTE; d.mem_signed = 1'b0; end  // lbu
+          mosaic_pkg::F3_SRL_SRA:  begin d.mem_size = mosaic_pkg::SZ_HALF; d.mem_signed = 1'b0; end  // lhu
+          mosaic_pkg::F3_OR:       begin d.mem_size = mosaic_pkg::SZ_WORD; d.mem_signed = 1'b0; end  // lwu
           default:     d = illegal_op();                                      // 111
         endcase
       end
 
       // --------------------------------------------------------------- STORE
-      OP_STORE: begin
+      mosaic_pkg::OP_STORE: begin
         imm = sext({{(XLEN - 12){ir[31]}}, ir[31:25], ir[11:7]}, 12);
         d.uses_rs1 = 1'b1;
         d.uses_rs2 = 1'b1;
         d.uses_imm = 1'b1;
         d.imm      = imm;
-        d.mem_kind = MEM_STORE;
+        d.mem_kind = mosaic_pkg::MEM_STORE;
         d.valid    = 1'b1;
         case (funct3)
-          F3_ADD_SUB: d.mem_size = SZ_BYTE;
-          F3_SLL:     d.mem_size = SZ_HALF;
-          F3_SLT:     d.mem_size = SZ_WORD;
-          F3_SLTU:    d.mem_size = SZ_DBL;
+          mosaic_pkg::F3_ADD_SUB: d.mem_size = mosaic_pkg::SZ_BYTE;
+          mosaic_pkg::F3_SLL:     d.mem_size = mosaic_pkg::SZ_HALF;
+          mosaic_pkg::F3_SLT:     d.mem_size = mosaic_pkg::SZ_WORD;
+          mosaic_pkg::F3_SLTU:    d.mem_size = mosaic_pkg::SZ_DBL;
           default:    d = illegal_op();
         endcase
       end
 
       // ------------------------------------------------------- integer imm
-      OP_IMM: begin
+      mosaic_pkg::OP_IMM: begin
         imm = sext({{(XLEN - 12){ir[31]}}, ir[31:20]}, 12);
         d.uses_rs1  = 1'b1;
         d.uses_imm  = 1'b1;
@@ -648,29 +648,29 @@ module mosaic_bringup_core #(
         d.reg_write = 1'b1;
         d.valid     = 1'b1;
         case (funct3)
-          F3_ADD_SUB: d.alu_op = ALU_ADD;
-          F3_SLL: begin
+          mosaic_pkg::F3_ADD_SUB: d.alu_op = mosaic_pkg::ALU_ADD;
+          mosaic_pkg::F3_SLL: begin
             // RV64 shifts the XLEN register by 6 bits; bit 25 belongs to the
             // immediate in RV32 and is reserved here.
             if (ir[31:26] != 6'b000000) d = illegal_op();
-            else                          d.alu_op = ALU_SLL;
+            else                          d.alu_op = mosaic_pkg::ALU_SLL;
           end
-          F3_SLT:     d.alu_op = ALU_SLT;
-          F3_SLTU:    d.alu_op = ALU_SLTU;
-          F3_XOR:     d.alu_op = ALU_XOR;
-          F3_SRL_SRA: begin
+          mosaic_pkg::F3_SLT:     d.alu_op = mosaic_pkg::ALU_SLT;
+          mosaic_pkg::F3_SLTU:    d.alu_op = mosaic_pkg::ALU_SLTU;
+          mosaic_pkg::F3_XOR:     d.alu_op = mosaic_pkg::ALU_XOR;
+          mosaic_pkg::F3_SRL_SRA: begin
             if (ir[31:26] != 6'b000000) d = illegal_op();
-            else if (ir[25])            d.alu_op = ALU_SRA;
-            else                        d.alu_op = ALU_SRL;
+            else if (ir[25])            d.alu_op = mosaic_pkg::ALU_SRA;
+            else                        d.alu_op = mosaic_pkg::ALU_SRL;
           end
-          F3_OR:      d.alu_op = ALU_OR;
-          F3_AND:     d.alu_op = ALU_AND;
+          mosaic_pkg::F3_OR:      d.alu_op = mosaic_pkg::ALU_OR;
+          mosaic_pkg::F3_AND:     d.alu_op = mosaic_pkg::ALU_AND;
           default:    d = illegal_op();
         endcase
       end
 
       // ---------------------------------------------------- integer imm, 32-bit
-      OP_IMM_32: begin
+      mosaic_pkg::OP_IMM_32: begin
         imm = sext({{(XLEN - 12){ir[31]}}, ir[31:20]}, 12);
         d.uses_rs1  = 1'b1;
         d.uses_imm  = 1'b1;   // the shift amount travels in imm, not in rs2
@@ -679,15 +679,15 @@ module mosaic_bringup_core #(
         d.reg_write = 1'b1;
         d.valid     = 1'b1;
         case (funct3)
-          F3_ADD_SUB: d.alu_op = ALU_ADDW;
-          F3_SLL: begin
+          mosaic_pkg::F3_ADD_SUB: d.alu_op = mosaic_pkg::ALU_ADDW;
+          mosaic_pkg::F3_SLL: begin
             if (ir[25]) d = illegal_op();
-            else        d.alu_op = ALU_SLLW;
+            else        d.alu_op = mosaic_pkg::ALU_SLLW;
           end
-          F3_SRL_SRA: begin
+          mosaic_pkg::F3_SRL_SRA: begin
             if (ir[31:26] != 6'b000000) d = illegal_op();
-            else if (ir[25])            d.alu_op = ALU_SRAW;
-            else                        d.alu_op = ALU_SRLW;
+            else if (ir[25])            d.alu_op = mosaic_pkg::ALU_SRAW;
+            else                        d.alu_op = mosaic_pkg::ALU_SRLW;
           end
           default: d = illegal_op();
         endcase
@@ -702,26 +702,26 @@ module mosaic_bringup_core #(
         d.uses_imm  = 1'b1;
         d.imm       = imm;
         d.uses_alu  = 1'b1;
-        d.alu_op    = ALU_ADD;
+        d.alu_op    = mosaic_pkg::ALU_ADD;
         d.reg_write = 1'b1;
         d.valid     = 1'b1;
       end
 
       // --------------------------------------------------------------- AUIPC
-      OP_AUIPC: begin
+      mosaic_pkg::OP_AUIPC: begin
         imm = sext({{(XLEN - 32){ir[31]}}, ir[31:12], 12'b0}, 32);
         d.uses_rs1  = 1'b0;
         d.uses_imm  = 1'b1;
         d.imm       = imm;
         d.is_auipc  = 1'b1;
         d.uses_alu  = 1'b1;
-        d.alu_op    = ALU_ADD;
+        d.alu_op    = mosaic_pkg::ALU_ADD;
         d.reg_write = 1'b1;
         d.valid     = 1'b1;
       end
 
       // -------------------------------------------------------------- BRANCH
-      OP_BRANCH: begin
+      mosaic_pkg::OP_BRANCH: begin
         imm = sext({{(XLEN - 13){ir[31]}}, ir[31], ir[7], ir[30:25], ir[11:8],
                     1'b0}, 13);
         d.uses_rs1     = 1'b1;
@@ -736,7 +736,7 @@ module mosaic_bringup_core #(
       end
 
       // --------------------------------------------------------- JAL / JALR
-      OP_JAL: begin
+      mosaic_pkg::OP_JAL: begin
         imm = sext({{(XLEN - 21){ir[31]}}, ir[31], ir[19:12], ir[20], ir[30:21],
                     1'b0}, 21);
         d.uses_imm   = 1'b1;
@@ -747,7 +747,7 @@ module mosaic_bringup_core #(
         d.valid      = 1'b1;
       end
 
-      OP_JALR: begin
+      mosaic_pkg::OP_JALR: begin
         imm = sext({{(XLEN - 12){ir[31]}}, ir[31:20]}, 12);
         d.uses_rs1    = 1'b1;
         d.uses_imm    = 1'b1;
@@ -756,16 +756,16 @@ module mosaic_bringup_core #(
         d.writes_link = 1'b1;
         d.reg_write   = 1'b1;
         d.valid       = 1'b1;
-        if (funct3 != F3_ADD_SUB) d = illegal_op();
+        if (funct3 != mosaic_pkg::F3_ADD_SUB) d = illegal_op();
       end
 
       // ---------------------------------------------------------- FENCE / .I
-      OP_MISC_MEM: begin
+      mosaic_pkg::OP_MISC_MEM: begin
         d.is_miscmem = 1'b1;
         d.valid      = 1'b1;
-        if (funct3 == F3_ADD_SUB) begin
+        if (funct3 == mosaic_pkg::F3_ADD_SUB) begin
           d.is_fence_i = 1'b0;                     // fence
-        end else if (funct3 == F3_SLL) begin
+        end else if (funct3 == mosaic_pkg::F3_SLL) begin
           d.is_fence_i = 1'b1;                     // fence.i
           if (ir[31:28] != 4'b0000) d = illegal_op();
         end else begin
@@ -776,7 +776,7 @@ module mosaic_bringup_core #(
       end
 
       // ------------------------------------------------------- OP (reg, reg)
-      OP_MUL_DIV: begin
+      mosaic_pkg::OP_MUL_DIV: begin
         d.uses_rs1 = 1'b1;
         d.uses_rs2 = 1'b1;
         d.valid    = 1'b1;
@@ -784,31 +784,31 @@ module mosaic_bringup_core #(
           d.is_muldiv = 1'b1;
           d.reg_write = 1'b1;
           case (funct3)
-            F3_ADD_SUB: d.md_op = MD_MUL;
-            F3_SLL:     d.md_op = MD_MULH;
-            F3_SLT:     d.md_op = MD_MULHSU;
-            F3_SLTU:    d.md_op = MD_MULHU;
+            mosaic_pkg::F3_ADD_SUB: d.md_op = mosaic_pkg::MD_MUL;
+            mosaic_pkg::F3_SLL:     d.md_op = mosaic_pkg::MD_MULH;
+            mosaic_pkg::F3_SLT:     d.md_op = mosaic_pkg::MD_MULHSU;
+            mosaic_pkg::F3_SLTU:    d.md_op = mosaic_pkg::MD_MULHU;
             // funct3 100 is `div` and 101 is `divu`; F3_XOR is 100 and
             // F3_SRL_SRA is 101, so the pairing below is by encoding, not by
             // what the mnemonic happens to be called.
-            F3_XOR:     begin d.md_op = MD_DIV;  d.md_signed = 1'b1; end
-            F3_SRL_SRA: begin d.md_op = MD_DIVU; d.md_signed = 1'b0; end
-            F3_OR:      begin d.md_op = MD_REM;  d.md_signed = 1'b1; end
-            F3_AND:     begin d.md_op = MD_REMU; d.md_signed = 1'b0; end
+            mosaic_pkg::F3_XOR:     begin d.md_op = mosaic_pkg::MD_DIV;  d.md_signed = 1'b1; end
+            mosaic_pkg::F3_SRL_SRA: begin d.md_op = mosaic_pkg::MD_DIVU; d.md_signed = 1'b0; end
+            mosaic_pkg::F3_OR:      begin d.md_op = mosaic_pkg::MD_REM;  d.md_signed = 1'b1; end
+            mosaic_pkg::F3_AND:     begin d.md_op = mosaic_pkg::MD_REMU; d.md_signed = 1'b0; end
             default:    d = illegal_op();
           endcase
         end else if (funct7 == 7'b0000000) begin
           d.uses_alu  = 1'b1;
           d.reg_write = 1'b1;
           case (funct3)
-            F3_ADD_SUB: d.alu_op = ALU_ADD;
-            F3_SLL:     d.alu_op = ALU_SLL;
-            F3_SLT:     d.alu_op = ALU_SLT;
-            F3_SLTU:    d.alu_op = ALU_SLTU;
-            F3_XOR:     d.alu_op = ALU_XOR;
-            F3_SRL_SRA: d.alu_op = ALU_SRL;
-            F3_OR:      d.alu_op = ALU_OR;
-            F3_AND:     d.alu_op = ALU_AND;
+            mosaic_pkg::F3_ADD_SUB: d.alu_op = mosaic_pkg::ALU_ADD;
+            mosaic_pkg::F3_SLL:     d.alu_op = mosaic_pkg::ALU_SLL;
+            mosaic_pkg::F3_SLT:     d.alu_op = mosaic_pkg::ALU_SLT;
+            mosaic_pkg::F3_SLTU:    d.alu_op = mosaic_pkg::ALU_SLTU;
+            mosaic_pkg::F3_XOR:     d.alu_op = mosaic_pkg::ALU_XOR;
+            mosaic_pkg::F3_SRL_SRA: d.alu_op = mosaic_pkg::ALU_SRL;
+            mosaic_pkg::F3_OR:      d.alu_op = mosaic_pkg::ALU_OR;
+            mosaic_pkg::F3_AND:     d.alu_op = mosaic_pkg::ALU_AND;
             default:    d = illegal_op();
           endcase
         end else if (funct7 == 7'b0100000) begin
@@ -818,8 +818,8 @@ module mosaic_bringup_core #(
           d.uses_alu  = 1'b1;
           d.reg_write = 1'b1;
           case (funct3)
-            F3_ADD_SUB: d.alu_op = ALU_SUB;
-            F3_SRL_SRA: d.alu_op = ALU_SRA;
+            mosaic_pkg::F3_ADD_SUB: d.alu_op = mosaic_pkg::ALU_SUB;
+            mosaic_pkg::F3_SRL_SRA: d.alu_op = mosaic_pkg::ALU_SRA;
             default:    d = illegal_op();
           endcase
         end else begin
@@ -840,16 +840,16 @@ module mosaic_bringup_core #(
         case (funct7)
           7'b0000000: begin
             case (funct3)
-              F3_ADD_SUB: d.alu_op = ALU_ADDW;
-              F3_SLL:     d.alu_op = ALU_SLLW;
-              F3_SRL_SRA: d.alu_op = ALU_SRLW;
+              mosaic_pkg::F3_ADD_SUB: d.alu_op = mosaic_pkg::ALU_ADDW;
+              mosaic_pkg::F3_SLL:     d.alu_op = mosaic_pkg::ALU_SLLW;
+              mosaic_pkg::F3_SRL_SRA: d.alu_op = mosaic_pkg::ALU_SRLW;
               default:    d = illegal_op();
             endcase
           end
           7'b0100000: begin
             case (funct3)
-              F3_ADD_SUB: d.alu_op = ALU_SUBW;
-              F3_SRL_SRA: d.alu_op = ALU_SRAW;
+              mosaic_pkg::F3_ADD_SUB: d.alu_op = mosaic_pkg::ALU_SUBW;
+              mosaic_pkg::F3_SRL_SRA: d.alu_op = mosaic_pkg::ALU_SRAW;
               default:    d = illegal_op();
             endcase
           end
@@ -858,9 +858,9 @@ module mosaic_bringup_core #(
       end
 
       // -------------------------------------------------------------- SYSTEM
-      OP_SYSTEM: begin
+      mosaic_pkg::OP_SYSTEM: begin
         d.is_system = 1'b1;
-        if (funct3 == F3_ADD_SUB) begin
+        if (funct3 == mosaic_pkg::F3_ADD_SUB) begin
           if (ir == 32'h00000073) begin
             d.is_ecall = 1'b1;
           end else if (ir == 32'h00100073) begin
@@ -887,12 +887,12 @@ module mosaic_bringup_core #(
           // back in, which silently discards the write.  The literals are
           // therefore spelled out rather than aliased to misleading names.
           case (funct3)
-            F3_CSRRW:  d.csr_op = CSR_RW;   // csrrw
-            F3_CSRRS:  d.csr_op = CSR_RS;   // csrrs
-            F3_CSRRC:  d.csr_op = CSR_RC;   // csrrc
-            F3_CSRRWI: begin d.csr_op = CSR_RW; d.csr_imm_form = 1'b1; end
-            F3_CSRRSI: begin d.csr_op = CSR_RS; d.csr_imm_form = 1'b1; end
-            F3_CSRRCI: begin d.csr_op = CSR_RC; d.csr_imm_form = 1'b1; end
+            F3_CSRRW:  d.csr_op = mosaic_pkg::CSR_RW;   // csrrw
+            F3_CSRRS:  d.csr_op = mosaic_pkg::CSR_RS;   // csrrs
+            F3_CSRRC:  d.csr_op = mosaic_pkg::CSR_RC;   // csrrc
+            F3_CSRRWI: begin d.csr_op = mosaic_pkg::CSR_RW; d.csr_imm_form = 1'b1; end
+            F3_CSRRSI: begin d.csr_op = mosaic_pkg::CSR_RS; d.csr_imm_form = 1'b1; end
+            F3_CSRRCI: begin d.csr_op = mosaic_pkg::CSR_RC; d.csr_imm_form = 1'b1; end
             default:    d = illegal_op();
           endcase
         end
@@ -1016,7 +1016,7 @@ module mosaic_bringup_core #(
   // (is_fence_i, md_signed and the immediate of a memory instruction, for
   // example).  The waiver covers this one declaration.
   /* verilator lint_off UNUSEDSIGNAL */
-  decode_ctl_t      ctl;
+  mosaic_pkg::decode_ctl_t      ctl;
   /* verilator lint_on UNUSEDSIGNAL */
   logic [XLEN-1:0]  rs1_val;
   logic [XLEN-1:0]  rs2_val;
@@ -1047,7 +1047,7 @@ module mosaic_bringup_core #(
   assign ifetch_req_o  = (state_q == S_FETCH);
   assign ifetch_addr_o = pc_q;
   assign dmem_req_o    = (state_q == S_DREQ);
-  assign dmem_we_o     = (ctl.mem_kind == MEM_STORE);
+  assign dmem_we_o     = (ctl.mem_kind == mosaic_pkg::MEM_STORE);
   assign dmem_addr_o   = daddr_q;
   assign dmem_size_o   = dsize_q;
   assign dmem_wdata_o  = dwdata_q;
@@ -1077,29 +1077,29 @@ module mosaic_bringup_core #(
     // ---- ALU operand selection -------------------------------------------
     alu_a  = {XLEN{1'b0}};
     alu_b  = {XLEN{1'b0}};
-    alu_op = ALU_PASSB;
+    alu_op = mosaic_pkg::ALU_PASSB;
     if (ctl.valid && !ctl.illegal) begin
-      if (ctl.mem_kind != MEM_NONE) begin
+      if (ctl.mem_kind != mosaic_pkg::MEM_NONE) begin
         // Address generation is always rs1 + imm, including for a store where
         // rs2 is the value rather than a second address operand.
         alu_a  = rs1_val;
         alu_b  = ctl.imm;
-        alu_op = ALU_ADD;
+        alu_op = mosaic_pkg::ALU_ADD;
       end else if (ctl.is_branch) begin
         alu_a  = rs1_val;
         alu_b  = rs2_val;
         // Branch funct3 is a *branch* encoding, not the F3_* ALU encoding, so
         // the literals are written out rather than aliased to misleading names.
         case (ctl.branch_funct)
-          3'b000, 3'b001:  alu_op = ALU_XOR;    // beq / bne
-          3'b100, 3'b101:  alu_op = ALU_SLT;    // blt / bge
-          3'b110, 3'b111:  alu_op = ALU_SLTU;   // bltu / bgeu
-          default:         alu_op = ALU_PASSB;
+          3'b000, 3'b001:  alu_op = mosaic_pkg::ALU_XOR;    // beq / bne
+          3'b100, 3'b101:  alu_op = mosaic_pkg::ALU_SLT;    // blt / bge
+          3'b110, 3'b111:  alu_op = mosaic_pkg::ALU_SLTU;   // bltu / bgeu
+          default:         alu_op = mosaic_pkg::ALU_PASSB;
         endcase
       end else if (ctl.is_muldiv || ctl.is_system) begin
         alu_a  = rs1_val;
         alu_b  = ctl.imm;
-        alu_op = ALU_PASSB;
+        alu_op = mosaic_pkg::ALU_PASSB;
       end else begin
         // `uses_rs1` is honoured here rather than assumed: `lui` shares an
         // opcode with OP-IMM but has no rs1 field at all, so its operand A is a
@@ -1122,28 +1122,28 @@ module mosaic_bringup_core #(
     csr_operand = ctl.csr_imm_form ? {{(XLEN - 5){1'b0}}, ir_q[19:15]} : rs1_val;
     csr_rdata   = csr_read(ctl.csr_addr);
     case (ctl.csr_op)
-      CSR_RW:  csr_wdata = csr_operand;
-      CSR_RS:  csr_wdata = csr_rdata | csr_operand;
-      CSR_RC:  csr_wdata = csr_rdata & ~csr_operand;
+      mosaic_pkg::CSR_RW:  csr_wdata = csr_operand;
+      mosaic_pkg::CSR_RS:  csr_wdata = csr_rdata | csr_operand;
+      mosaic_pkg::CSR_RC:  csr_wdata = csr_rdata & ~csr_operand;
       default: csr_wdata = csr_rdata;
     endcase
 
     // The two read/write suppression rules from the Privileged Specification:
     // csrrw with rd == x0 does not read, and csrrs/csrrc with rs1 == x0 do not
     // write.
-    csr_reads = (ctl.csr_op == CSR_RS) || (ctl.csr_op == CSR_RC) ||
-                ((ctl.csr_op == CSR_RW) && (ctl.rd != 5'd0));
+    csr_reads = (ctl.csr_op == mosaic_pkg::CSR_RS) || (ctl.csr_op == mosaic_pkg::CSR_RC) ||
+                ((ctl.csr_op == mosaic_pkg::CSR_RW) && (ctl.rd != 5'd0));
 
 `ifdef MOSAIC_BRINGUP_MUTANT_4
     // NEGATIVE CONTROL: csrrs/csrrc with a zero source still writes the CSR, so
     // a read-only probe such as `csrrs mscratch, x0, x0` clears the register.
-    csr_writes = (ctl.csr_op == CSR_RW) ||
-                 (((ctl.csr_op == CSR_RS) || (ctl.csr_op == CSR_RC)) &&
+    csr_writes = (ctl.csr_op == mosaic_pkg::CSR_RW) ||
+                 (((ctl.csr_op == mosaic_pkg::CSR_RS) || (ctl.csr_op == mosaic_pkg::CSR_RC)) &&
                   ((csr_operand != {XLEN{1'b0}}) ||
                    (csr_is_legal(ctl.csr_addr) && csr_is_writable(ctl.csr_addr))));
 `else
-    csr_writes = (ctl.csr_op == CSR_RW) ||
-                 (((ctl.csr_op == CSR_RS) || (ctl.csr_op == CSR_RC)) &&
+    csr_writes = (ctl.csr_op == mosaic_pkg::CSR_RW) ||
+                 (((ctl.csr_op == mosaic_pkg::CSR_RS) || (ctl.csr_op == mosaic_pkg::CSR_RC)) &&
                   (csr_operand != {XLEN{1'b0}}));
 `endif
 
@@ -1151,7 +1151,7 @@ module mosaic_bringup_core #(
     // instruction, and so is a write to one of its read-only entries.  Only a
     // genuine CSR access can be illegal: every other instruction leaves
     // csr_addr at 0, which is not in the table.
-    csr_illegal = (ctl.csr_op != CSR_NONE) &&
+    csr_illegal = (ctl.csr_op != mosaic_pkg::CSR_NONE) &&
                   (!csr_is_legal(ctl.csr_addr) ||
                    (csr_writes && !csr_is_writable(ctl.csr_addr)));
 
@@ -1187,7 +1187,7 @@ module mosaic_bringup_core #(
       rd_val = md_result;
     end else if (ctl.is_system) begin
       rd_val = csr_reads ? csr_rdata : {XLEN{1'b0}};
-    end else if (ctl.mem_kind == MEM_LOAD) begin
+    end else if (ctl.mem_kind == mosaic_pkg::MEM_LOAD) begin
       rd_val = load_extend(dmem_rdata_i, ctl.mem_size, ctl.mem_signed);
     end
 
@@ -1200,7 +1200,7 @@ module mosaic_bringup_core #(
     rd_we = (ctl.reg_write | ctl.writes_link | csr_reads) && (ctl.rd != 5'd0);
 `endif
 
-    commit_store = ctl.valid && !ctl.illegal && (ctl.mem_kind == MEM_STORE);
+    commit_store = ctl.valid && !ctl.illegal && (ctl.mem_kind == mosaic_pkg::MEM_STORE);
 
     // ---- synchronous traps, in the order the spec resolves them -----------
     trap_now   = 1'b0;
@@ -1209,19 +1209,19 @@ module mosaic_bringup_core #(
     if (ctl.valid && !ctl.illegal) begin
       if (csr_illegal) begin
         trap_now   = 1'b1;
-        trap_cause = EXC_ILLEGAL_INSN;
+        trap_cause = mosaic_pkg::EXC_ILLEGAL_INSN;
         trap_tval  = {{(XLEN - 32){1'b0}}, ir_q};
       end else if (ctl.is_ecall) begin
         trap_now   = 1'b1;
-        trap_cause = EXC_ECALL_M;
+        trap_cause = mosaic_pkg::EXC_ECALL_M;
         trap_tval  = {XLEN{1'b0}};
       end else if (ctl.is_ebreak) begin
         trap_now   = 1'b1;
-        trap_cause = EXC_BREAKPOINT;
+        trap_cause = mosaic_pkg::EXC_BREAKPOINT;
         // The spec lets the platform choose what a breakpoint writes to mtval;
         // the breakpoint's own PC is the informative choice.
         trap_tval  = pc_q;
-      end else if (ctl.mem_kind == MEM_LOAD) begin
+      end else if (ctl.mem_kind == mosaic_pkg::MEM_LOAD) begin
 `ifdef MOSAIC_BRINGUP_MUTANT_3
         // NEGATIVE CONTROL: the load-misalignment check is skipped, so a
         // misaligned load succeeds instead of trapping with cause 4.
@@ -1229,14 +1229,14 @@ module mosaic_bringup_core #(
 `else
         if ((eff_addr & (size_bytes(ctl.mem_size) - 64'd1)) != {XLEN{1'b0}}) begin
           trap_now   = 1'b1;
-          trap_cause = EXC_LOAD_MISALIGNED;
+          trap_cause = mosaic_pkg::EXC_LOAD_MISALIGNED;
           trap_tval  = eff_addr;
         end
 `endif
-      end else if (ctl.mem_kind == MEM_STORE) begin
+      end else if (ctl.mem_kind == mosaic_pkg::MEM_STORE) begin
         if ((eff_addr & (size_bytes(ctl.mem_size) - 64'd1)) != {XLEN{1'b0}}) begin
           trap_now   = 1'b1;
-          trap_cause = EXC_STORE_MISALIGNED;
+          trap_cause = mosaic_pkg::EXC_STORE_MISALIGNED;
           trap_tval  = eff_addr;
         end
       end
@@ -1247,11 +1247,11 @@ module mosaic_bringup_core #(
     // instruction those are the low half of the fetched word.
     if (!trap_now && (ir_q[1:0] != 2'b11)) begin
       trap_now   = 1'b1;
-      trap_cause = EXC_ILLEGAL_INSN;
+      trap_cause = mosaic_pkg::EXC_ILLEGAL_INSN;
       trap_tval  = {{(XLEN - 16){1'b0}}, ir_q[15:0]};
     end else if (!trap_now && (!ctl.valid || ctl.illegal)) begin
       trap_now   = 1'b1;
-      trap_cause = EXC_ILLEGAL_INSN;
+      trap_cause = mosaic_pkg::EXC_ILLEGAL_INSN;
       trap_tval  = {{(XLEN - 32){1'b0}}, ir_q};
     end
   end
@@ -1284,7 +1284,7 @@ module mosaic_bringup_core #(
         if (pc_q[1:0] != 2'b00) begin
           commit_now     = 1'b1;
           commit_is_trap = 1'b1;
-          commit_cause   = EXC_INSN_MISALIGNED;
+          commit_cause   = mosaic_pkg::EXC_INSN_MISALIGNED;
           commit_tval    = pc_q;
         end
       end
@@ -1292,7 +1292,7 @@ module mosaic_bringup_core #(
         if (ifetch_ack_i && ifetch_fault_i) begin
           commit_now     = 1'b1;
           commit_is_trap = 1'b1;
-          commit_cause   = EXC_INSN_ACCESS;
+          commit_cause   = mosaic_pkg::EXC_INSN_ACCESS;
           commit_tval    = pc_q;
           commit_insn    = 32'h00000000;   // nothing was fetched
         end
@@ -1303,7 +1303,7 @@ module mosaic_bringup_core #(
           commit_is_trap = 1'b1;
           commit_cause   = trap_cause;
           commit_tval    = trap_tval;
-        end else if (ctl.mem_kind == MEM_NONE) begin
+        end else if (ctl.mem_kind == mosaic_pkg::MEM_NONE) begin
           commit_now     = 1'b1;
           commit_is_trap = 1'b0;
         end
@@ -1312,8 +1312,8 @@ module mosaic_bringup_core #(
         if (dmem_ack_i) begin
           commit_now     = 1'b1;
           commit_is_trap = dmem_fault_i;
-          commit_cause   = (ctl.mem_kind == MEM_STORE) ? EXC_STORE_ACCESS
-                                                       : EXC_LOAD_ACCESS;
+          commit_cause   = (ctl.mem_kind == mosaic_pkg::MEM_STORE) ? mosaic_pkg::EXC_STORE_ACCESS
+                                                       : mosaic_pkg::EXC_LOAD_ACCESS;
           commit_tval    = daddr_q;
         end
       end
@@ -1378,7 +1378,7 @@ module mosaic_bringup_core #(
     case (state_q)
       S_FETCH:  if (pc_q[1:0] == 2'b00) state_n = S_FWAIT;
       S_FWAIT:  if (ifetch_ack_i && !ifetch_fault_i) state_n = S_EXEC;
-      S_EXEC:   if (!trap_now && (ctl.mem_kind != MEM_NONE)) state_n = S_DREQ;
+      S_EXEC:   if (!trap_now && (ctl.mem_kind != mosaic_pkg::MEM_NONE)) state_n = S_DREQ;
       S_DREQ:   state_n = S_DWAIT;
       S_DWAIT:  if (dmem_ack_i && !dmem_fault_i) state_n = S_FETCH;
       default:  state_n = S_FETCH;
@@ -1442,7 +1442,7 @@ module mosaic_bringup_core #(
       minstret_q <= {XLEN{1'b0}};
       daddr_q    <= {XLEN{1'b0}};
       dwdata_q   <= {XLEN{1'b0}};
-      dsize_q    <= SZ_DBL;
+      dsize_q    <= mosaic_pkg::SZ_DBL;
       evt_valid_o      <= 1'b0;
       evt_trap_o       <= 1'b0;
       evt_pc_o         <= {XLEN{1'b0}};
@@ -1493,10 +1493,10 @@ module mosaic_bringup_core #(
         ir_q <= ifetch_rdata_i;
       end
 
-      if ((state_q == S_EXEC) && !trap_now && (ctl.mem_kind != MEM_NONE)) begin
+      if ((state_q == S_EXEC) && !trap_now && (ctl.mem_kind != mosaic_pkg::MEM_NONE)) begin
         daddr_q  <= eff_addr;
         dsize_q  <= ctl.mem_size;
-        dwdata_q <= (ctl.mem_kind == MEM_STORE)
+        dwdata_q <= (ctl.mem_kind == mosaic_pkg::MEM_STORE)
                       ? (rs2_val & size_mask(ctl.mem_size))
                       : {XLEN{1'b0}};
       end

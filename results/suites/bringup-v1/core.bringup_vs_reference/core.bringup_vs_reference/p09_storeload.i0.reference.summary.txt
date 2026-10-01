@@ -1,0 +1,11 @@
+outcome tohost
+events 71072
+steps 71072
+cycles 248742
+minstret 71072
+tohost 0000000000000001
+uart_writes 0
+sig0 0123456789abcdef
+sig1 ffffffff89abcdef
+sig2 000000000000ff00
+sig3 aaaaaaaaaaaaaaaa
