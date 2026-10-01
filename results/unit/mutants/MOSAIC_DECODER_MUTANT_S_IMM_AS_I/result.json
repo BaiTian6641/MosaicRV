@@ -10,7 +10,7 @@
   "image": "",
   "expect": "",
   "tool": "Verilator 5.052 2026-09-05",
-  "timestamp": "2026-10-01T00:42:23Z",
+  "timestamp": "2026-10-01T00:47:48Z",
   "first_mismatch": "insn=0xfe530823.imm: expected 0xfffffffffffffff0, got 0xffffffffffffffe5",
   "failed_checks": ["decoder disagrees with the reference at insn=0xfe530823", "decoder disagrees with the reference at insn=0xfe530823"]
 }

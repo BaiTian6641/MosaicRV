@@ -66,15 +66,14 @@ p13_t1:
     /* fold the trap log into the signature */
     la      t0, __traplog_start
     ld      t1, 0(t0)                          /* mcause of record 0   */
-    la      t2, __traplog_count
+    la      t2, mosaic_traplog_count
     ld      t3, 0(t2)                          /* records written      */
     slli    t4, t3, 8
     or      t6, t1, t4                         /* (count << 8) | mcause */
     xor     t6, t6, s7                         /* s7 is 0 unless the
-                                                 * store was not trapped  */
-    xor     t6, t6, a0                         /* a0 = 0 here; kept so the
-                                                 * fold always consumes the
-                                                 * input like the others do */
+                                                 * store was not trapped, so
+                                                 * a silently-dropped store is
+                                                 * visible in the signature */
 
     SIG0    s4
     SIG1    s5

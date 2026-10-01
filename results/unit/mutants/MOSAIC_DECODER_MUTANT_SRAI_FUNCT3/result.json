@@ -1,15 +1,16 @@
 {
   "schema_version": 1,
   "case": "decode.rv64im_reserved",
-  "verdict": "PASS",
-  "detail": "166701 instructions (84469 legal, 82232 illegal), 0 mismatches, 1428 named reserved checks",
+  "verdict": "FAIL",
+  "detail": "4681 instructions compared, 2 failure(s)",
   "seed": 1,
   "max_cycles": 200000,
-  "checks": 169428,
-  "failures": 0,
+  "checks": 6251,
+  "failures": 2,
   "image": "",
   "expect": "",
   "tool": "Verilator 5.052 2026-09-05",
-  "timestamp": "2026-10-01T00:42:21Z",
-  "first_mismatch": ""
+  "timestamp": "2026-10-01T00:47:46Z",
+  "first_mismatch": "insn=0x40730293.imm: expected 0x0000000000000407, got 0x0000000000000007",
+  "failed_checks": ["decoder disagrees with the reference at insn=0x40730293", "decoder disagrees with the reference at insn=0x40730293"]
 }

@@ -509,6 +509,28 @@ def p11_bigmuldiv(a: int, b: int, c: int) -> tuple:
     return [sig0, sig1, sig2, sig3], []
 
 
+def p13_romstore(a: int, b: int, c: int) -> tuple:
+    """A store into the read-only boot_rom region.
+
+    The trap log must contain exactly one record whose cause is 7 (store/AMO
+    access fault).  The count is folded into the signature as well, so an
+    implementation that raised the right fault twice, or dropped the store and
+    let it succeed, is caught as well as one that raised the wrong fault.
+    """
+    sig0 = a & 0xFF                                  # lbu
+    sig1 = sext(u64(a >> 32), 32)                    # lw, sign-extends
+    sig2 = sext((a >> 48) & 0xFFFF, 16)              # lh
+    _check(sig2 == sext_masked((a >> 48) & 0xFFFF, 16), "p13 sig2")
+    causes = [7]
+    acc = 0
+    for cause in causes:
+        acc = u64((len(causes) << 8) | cause)
+    sig3 = acc                                      # s7 term is 0
+    traps = [{"cause": 7,
+              "note": "sw at 0x0, boot_rom is readable but not writable"}]
+    return [sig0, sig1, sig2, sig3], traps
+
+
 def p12_memwalk(a: int, b: int, c: int) -> tuple:
     words = [u64(a ^ c)]
     for _ in range(15):
@@ -539,6 +561,7 @@ MODELS = {
     "p10_jalr_link": p10_jalr_link,
     "p11_bigmuldiv": p11_bigmuldiv,
     "p12_memwalk": p12_memwalk,
+    "p13_romstore": p13_romstore,
 }
 
 

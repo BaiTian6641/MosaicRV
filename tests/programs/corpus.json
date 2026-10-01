@@ -730,6 +730,74 @@
           "expect_traps": []
         }
       ]
+    },
+    {
+      "name": "p13_romstore",
+      "title": "store into read-only boot_rom must raise a store access fault",
+      "oracle": "p13_romstore",
+      "covers": [
+        "SD",
+        "SW",
+        "LBU",
+        "LW",
+        "LH",
+        "TRAP"
+      ],
+      "split_from": "p08_misaligned",
+      "split_reason": "this case does not depend on the frozen misalignment policy, so a reference that services misaligned accesses natively can still adjudicate it",
+      "inputs": [
+        {
+          "a": "0x0123456789abcdef",
+          "b": "0xfedcba9876543210",
+          "c": "0x0000000000000007",
+          "expect_sig": [
+            "0x00000000000000ef",
+            "0x0000000001234567",
+            "0x0000000000000123",
+            "0x0000000000000107"
+          ],
+          "expect_traps": [
+            {
+              "cause": 7,
+              "note": "sw at 0x0, boot_rom is readable but not writable"
+            }
+          ]
+        },
+        {
+          "a": "0x8000000000000000",
+          "b": "0x0000000000000000",
+          "c": "0x0000000000000000",
+          "expect_sig": [
+            "0x0000000000000000",
+            "0xffffffff80000000",
+            "0xffffffffffff8000",
+            "0x0000000000000107"
+          ],
+          "expect_traps": [
+            {
+              "cause": 7,
+              "note": "sw at 0x0, boot_rom is readable but not writable"
+            }
+          ]
+        },
+        {
+          "a": "0xffffffffffffffff",
+          "b": "0xffffffffffffffff",
+          "c": "0xffffffffffffffff",
+          "expect_sig": [
+            "0x00000000000000ff",
+            "0xffffffffffffffff",
+            "0xffffffffffffffff",
+            "0x0000000000000107"
+          ],
+          "expect_traps": [
+            {
+              "cause": 7,
+              "note": "sw at 0x0, boot_rom is readable but not writable"
+            }
+          ]
+        }
+      ]
     }
   ]
 }
