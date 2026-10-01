@@ -11,6 +11,7 @@
 `define MOSAIC_PKG_SV_
 
 package mosaic_pkg;
+  /* verilator lint_off UNUSEDPARAM */
 
   // ------------------------------------------------------------- opcode map
   // RV64IM only in p0. Compressed instructions are decoded by I-041 in p1 and
@@ -166,6 +167,7 @@ package mosaic_pkg;
     logic [63:0] value;
   } reg_write_t;
 
+  /* verilator lint_on UNUSEDPARAM */
 endpackage : mosaic_pkg
 
 `endif  // MOSAIC_PKG_SV_

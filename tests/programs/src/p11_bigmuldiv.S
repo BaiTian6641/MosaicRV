@@ -35,6 +35,12 @@ main:
     div     t0, a0, a1
     divu    t1, a0, a1
     xor     s4, t0, t1                         /* sig0 */
+    bnez    a1, 1f                              /* see p05: a zero divisor makes
+                                               * the signed/unsigned exclusive
+                                               * -or vanish, so mark it */
+    li      t2, MOSAIC_DIVZERO_MARK
+    xor     s4, s4, t2
+1:
 
     rem     t0, a0, a1
     remu    t1, a0, a1
@@ -53,3 +59,6 @@ main:
 
     FINISH_PASS
     .size   main, . - main
+
+/* The three compiled-in inputs for this (program, input) pair. */
+    MOSAIC_PROGRAM_INPUTS

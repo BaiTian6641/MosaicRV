@@ -117,3 +117,6 @@ main:
 p02_stub:
     ret
     .size   p02_stub, . - p02_stub
+
+/* The three compiled-in inputs for this (program, input) pair. */
+    MOSAIC_PROGRAM_INPUTS

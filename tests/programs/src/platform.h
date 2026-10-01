@@ -43,6 +43,13 @@
 #define MOSAIC_SIGNATURE_WORDS    4
 #define MOSAIC_PASS_CODE          1              /* bit 0 of tohost          */
 
+/* Folded into a signature word when a divisor is zero, so that a
+ * divide-by-zero case is observable.  DIV(a,0) and DIVU(a,0) are both all
+ * ones and REM(a,0) and REMU(a,0) are both the dividend, so comparing the
+ * signed and unsigned forms alone cannot distinguish a correct
+ * implementation from one that returns anything else for a zero divisor. */
+#define MOSAIC_DIVZERO_MARK       0x5555555555555555UL
+
 /* ------------------------------------------------------------------ */
 /* Firmware-owned RAM areas (see linker/mosaic_p0.ld)                 */
 /*                                                                     */
@@ -217,6 +224,31 @@ static inline void mosaic_write_mepc(unsigned long value)
     la      s0, __signature_start
     la      s1, __scratch_start
     la      s2, mosaic_prog_inputs
+.endm
+
+/* Compiled-in program inputs.  Each corpus program emits exactly one table,
+ * so the table is part of that program's object file and is recompiled
+ * whenever corpus.json changes.  Putting it in shared boot code instead would
+ * make the boot object a function of every program's inputs at once. */
+#ifndef PROG_INPUT0
+#define PROG_INPUT0 0
+#endif
+#ifndef PROG_INPUT1
+#define PROG_INPUT1 0
+#endif
+#ifndef PROG_INPUT2
+#define PROG_INPUT2 0
+#endif
+
+.macro MOSAIC_PROGRAM_INPUTS
+    .section .rodata, "a", @progbits
+    .balign 8
+    .globl  mosaic_prog_inputs
+mosaic_prog_inputs:
+    .dword  PROG_INPUT0
+    .dword  PROG_INPUT1
+    .dword  PROG_INPUT2
+    .size   mosaic_prog_inputs, . - mosaic_prog_inputs
 .endm
 
 /* sig[0..3] = signature word 0..3 */

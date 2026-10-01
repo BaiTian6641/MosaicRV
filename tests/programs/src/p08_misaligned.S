@@ -147,3 +147,6 @@ p08_t5:
 
     FINISH_PASS
     .size   main, . - main
+
+/* The three compiled-in inputs for this (program, input) pair. */
+    MOSAIC_PROGRAM_INPUTS

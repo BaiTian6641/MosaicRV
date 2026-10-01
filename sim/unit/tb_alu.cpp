@@ -307,8 +307,8 @@ class Bench {
       }
     }
     for (uint8_t op = 0; op < kOpCount; ++op) {
-      const uint64_t probe = ReferenceAlu(op, 0x0123456789ABCDEFull,
-                                         0x1111111111111111ull);
+      const uint64_t probe =
+          ReferenceAlu(op, 0x0123456789ABCDEFull, 0x1111111111111111ull);
       if (probe == 0xDEADBEEFDEADBEEFull) {
         consistent = false;
         rep_->Mismatch("reference model", "every op implemented",
@@ -319,12 +319,19 @@ class Bench {
   }
 
   void ReportCoverage() {
+    if (halted_) {
+      // The run stopped at the failure limit, so the coverage facts below would
+      // report the truncation rather than anything about the stimulus.
+      std::fprintf(stderr,
+                   "coverage: not asserted, the run halted at the failure limit\n");
+      return;
+    }
     for (uint8_t op = 0; op < kOpCount; ++op) {
       rep_->Check(per_op_[op] > 0,
                   std::string("coverage: op ") + kOpName[op] + " was exercised");
-      rep_->Check(zero_result_ops_[op] > 0, std::string("coverage: op ") +
-                                                kOpName[op] +
-                                                " produced a zero result");
+      rep_->Check(zero_result_ops_[op] > 0,
+                  std::string("coverage: op ") + kOpName[op] +
+                      " produced a zero result");
       rep_->Check(nonzero_result_ops_[op] > 0,
                   std::string("coverage: op ") + kOpName[op] +
                       " produced a non-zero result");
@@ -337,14 +344,14 @@ class Bench {
     // these drops out of the stimulus the case fails, because a run that no
     // longer distinguishes signed from unsigned, 5-bit from 6-bit shift
     // masking, or arithmetic from logical shift is no longer testing anything.
-    rep_->Check(saw_slt_negative_,
-                "coverage: slt saw -1 against 1");
-    rep_->Check(saw_sltu_negative_,
-                "coverage: sltu saw -1 against 1");
+    rep_->Check(saw_slt_negative_, "coverage: slt saw -1 against 1");
+    rep_->Check(saw_sltu_negative_, "coverage: sltu saw -1 against 1");
     rep_->Check(saw_sra_negative_,
                 "coverage: sra saw an operand with bit 63 set");
     rep_->Check(saw_sllw_amount_32_,
                 "coverage: sllw saw a shift amount that masks to 32");
+    rep_->Check(saw_sll_amount_64_,
+                "coverage: sll saw a shift amount that masks to 0 but is not 0");
     rep_->Check(saw_addw_sign_,
                 "coverage: addw produced a sign-extended negative word result");
     rep_->Check(saw_sraw_sign_,
@@ -435,7 +442,8 @@ int main(int argc, char** argv) {
   }
 
   Verilated::commandArgs(argc, argv);
-  mosaic::Reporter rep(opt, std::string("Verilator ") + Verilated::productVersion());
+  mosaic::Reporter rep(opt,
+                       std::string("Verilator ") + Verilated::productVersion());
   Vmosaic_alu_tb* top = new Vmosaic_alu_tb;
   Bench bench(opt, &rep, top);
 
@@ -454,7 +462,8 @@ int main(int argc, char** argv) {
     bench.Expect(kMinusOne, 1, kSlt, 1, false, "slt(-1,1) is 1, signed");
     bench.Expect(kMinusOne, 1, kSltu, 0, true,
                  "sltu(-1,1) is 0, -1 is the largest unsigned value");
-    bench.Expect(0x8000000000000000ull, 1, kSlt, 1, false, "slt(INT64_MIN,1) is 1");
+    bench.Expect(0x8000000000000000ull, 1, kSlt, 1, false,
+                 "slt(INT64_MIN,1) is 1");
     bench.Expect(0x8000000000000000ull, 1, kSltu, 0, true,
                  "sltu(INT64_MIN,1) is 0");
     bench.Expect(0x8000000000000000ull, 1, kSra, 0xC000000000000000ull, false,
@@ -494,14 +503,12 @@ int main(int argc, char** argv) {
   }
 
   // ---- the full 2x2 operand matrix, every op -------------------------------
-  for (uint8_t op = 0; op < kOpCount && !bench.halted() && !bench.out_of_budget();
-       ++op) {
-    for (size_t i = 0; i < kValueCount && !bench.halted() &&
-                      !bench.out_of_budget();
-         ++i) {
-      for (size_t j = 0; j < kValueCount && !bench.halted() &&
-                        !bench.out_of_budget();
-           ++j) {
+  for (uint8_t op = 0;
+       op < kOpCount && !bench.halted() && !bench.out_of_budget(); ++op) {
+    for (size_t i = 0;
+         i < kValueCount && !bench.halted() && !bench.out_of_budget(); ++i) {
+      for (size_t j = 0;
+           j < kValueCount && !bench.halted() && !bench.out_of_budget(); ++j) {
         bench.Apply(kValues[i], kValues[j], op, "matrix");
       }
     }
@@ -510,15 +517,13 @@ int main(int argc, char** argv) {
   // ---- the shift-amount sweep ----------------------------------------------
   // Every boundary operand as the shifted value against every shift amount,
   // which is where the 5-bit and 6-bit masking rules separate.
-  for (size_t s = 0; s < kShiftOpCount && !bench.halted() && !bench.out_of_budget();
-       ++s) {
+  for (size_t s = 0;
+       s < kShiftOpCount && !bench.halted() && !bench.out_of_budget(); ++s) {
     const uint8_t op = kShiftOps[s];
-    for (size_t i = 0; i < kValueCount && !bench.halted() &&
-                      !bench.out_of_budget();
-         ++i) {
-      for (size_t k = 0; k < kShiftCount && !bench.halted() &&
-                        !bench.out_of_budget();
-           ++k) {
+    for (size_t i = 0;
+         i < kValueCount && !bench.halted() && !bench.out_of_budget(); ++i) {
+      for (size_t k = 0;
+           k < kShiftCount && !bench.halted() && !bench.out_of_budget(); ++k) {
         bench.Apply(kValues[i], kShiftAmounts[k], op, "shift-sweep");
         // ...and the operand order the other way round, so an implementation
         // that only looks at one side of the ALU cannot slip past.
@@ -563,7 +568,7 @@ int main(int argc, char** argv) {
       a = fill & rng.Next();
       b = rng.Next() & rng.Next();
     } else if (shape < 95) {
-      // Sign-crossing pairs: the two operands differ in sign but not in
+      // Sign-crossing pairs: the operands may differ in sign but not in
       // magnitude, which is where a signed/unsigned confusion shows up.
       const uint64_t low = rng.Next() & 0xFFFFFFFFull;
       a = low | (rng.Chance(50) ? 0xFFFFFFFF00000000ull : 0ull);

@@ -21,222 +21,714 @@
     "scratch": 2147488000,
     "scratch_bytes": 128
   },
-  "input_names": ["a", "b", "c"],
+  "input_names": [
+    "a",
+    "b",
+    "c"
+  ],
   "programs": [
     {
       "name": "p01_addsub",
       "title": "add / sub / shift / logic with sign-extension and overflow edges",
       "oracle": "p01_addsub",
-      "covers": ["ADDI", "ADD", "SUB", "ANDI", "SRA", "SLTU", "SLLI", "SRLI", "XORI"],
+      "covers": [
+        "ADDI",
+        "ADD",
+        "SUB",
+        "ANDI",
+        "SRA",
+        "SLTU",
+        "SLLI",
+        "SRLI",
+        "XORI"
+      ],
       "inputs": [
-        {"a": "0x0123456789abcdef", "b": "0xfedcba9876543210", "c": 13,
-         "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
-         "expect_traps": []},
-        {"a": "0x7fffffffffffffff", "b": "0x0000000000000001", "c": 1,
-         "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
-         "expect_traps": []},
-        {"a": "0x8000000000000000", "b": "0xffffffffffffffff", "c": 63,
-         "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
-         "expect_traps": []}
+        {
+          "a": "0x0123456789abcdef",
+          "b": "0xfedcba9876543212",
+          "c": "0xd",
+          "expect_sig": [
+            "0x0000000000000001",
+            "0x02468acf13579bdd",
+            "0x0000000000000000",
+            "0x02468acf13579b30"
+          ],
+          "expect_traps": []
+        },
+        {
+          "a": "0x7fffffffffffffff",
+          "b": "0x1",
+          "c": "0x1",
+          "expect_sig": [
+            "0x8000000000000000",
+            "0x7ffffffffffffffe",
+            "0xc000000000000000",
+            "0x80000000000000fe"
+          ],
+          "expect_traps": []
+        },
+        {
+          "a": "0x8000000000000000",
+          "b": "0xfffffffffffffffe",
+          "c": "0x3f",
+          "expect_sig": [
+            "0x7ffffffffffffffe",
+            "0x8000000000000002",
+            "0x0000000000000000",
+            "0x8000000000000003"
+          ],
+          "expect_traps": []
+        }
       ]
     },
     {
       "name": "p02_branch",
       "title": "all six branch conditions, JAL/JALR, JALR bit-0 clear rule",
       "oracle": "p02_branch",
-      "covers": ["BEQ", "BNE", "BLT", "BGE", "BLTU", "BGEU", "JAL", "JALR", "RET", "SLTU"],
+      "covers": [
+        "BEQ",
+        "BNE",
+        "BLT",
+        "BGE",
+        "BLTU",
+        "BGEU",
+        "JAL",
+        "JALR",
+        "RET",
+        "SLTU"
+      ],
       "inputs": [
-        {"a": "0x0000000000000000", "b": "0x0000000000000001", "c": 3,
-         "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
-         "expect_traps": []},
-        {"a": "0x8000000000000000", "b": "0x7fffffffffffffff", "c": 5,
-         "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
-         "expect_traps": []},
-        {"a": "0xffffffffffffffff", "b": "0xffffffffffffffff", "c": 9,
-         "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
-         "expect_traps": []}
+        {
+          "a": "0x0",
+          "b": "0x1",
+          "c": "0x3",
+          "expect_sig": [
+            "0x0000000000000016",
+            "0x0000000000000003",
+            "0x0000000000000004",
+            "0x0000000000000001"
+          ],
+          "expect_traps": []
+        },
+        {
+          "a": "0x8000000000000000",
+          "b": "0x7fffffffffffffff",
+          "c": "0x5",
+          "expect_sig": [
+            "0x0000000000000026",
+            "0x0000000000000003",
+            "0x0000000000000006",
+            "0x7fffffffffffffff"
+          ],
+          "expect_traps": []
+        },
+        {
+          "a": "0xffffffffffffffff",
+          "b": "0xffffffffffffffff",
+          "c": "0x9",
+          "expect_sig": [
+            "0x0000000000000029",
+            "0x0000000000000003",
+            "0x0000000000000002",
+            "0xffffffffffffffff"
+          ],
+          "expect_traps": []
+        }
       ]
     },
     {
       "name": "p03_loadstore",
       "title": "byte/half/word/double stores at every width with matching loads",
       "oracle": "p03_loadstore",
-      "covers": ["SD", "SW", "SH", "SB", "LD", "LW", "LHU", "LH", "LB", "LBU"],
+      "covers": [
+        "SD",
+        "SW",
+        "SH",
+        "SB",
+        "LD",
+        "LW",
+        "LHU",
+        "LH",
+        "LB",
+        "LBU"
+      ],
       "inputs": [
-        {"a": "0x0123456789abcdef", "b": "0xfedcba9876543210", "c": 7,
-         "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
-         "expect_traps": []},
-        {"a": "0x8000000000000001", "b": "0x0000000000000002", "c": "0xffffffffffffffff",
-         "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
-         "expect_traps": []},
-        {"a": "0x0000000000000000", "b": "0xffffffffffffffff", "c": "0x8000000000000000",
-         "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
-         "expect_traps": []}
+        {
+          "a": "0x0123456789abcdef",
+          "b": "0xfedcba9876543210",
+          "c": "0x7",
+          "expect_sig": [
+            "0x0123456788888888",
+            "0x000000000000ffff",
+            "0xffffffffffffffff",
+            "0xffffffffffffffe6"
+          ],
+          "expect_traps": []
+        },
+        {
+          "a": "0x8000000000000001",
+          "b": "0x180",
+          "c": "0xffffffffffffffff",
+          "expect_sig": [
+            "0x8000000080000001",
+            "0x0000000000000181",
+            "0x0000000000000081",
+            "0x8000000000000180"
+          ],
+          "expect_traps": []
+        },
+        {
+          "a": "0x0",
+          "b": "0xffffffffffffffff",
+          "c": "0x8000000000000000",
+          "expect_sig": [
+            "0x0000000000000000",
+            "0xffffffffffffffff",
+            "0x00000000000000ff",
+            "0x7fffffffffffffff"
+          ],
+          "expect_traps": []
+        }
       ]
     },
     {
       "name": "p04_mul",
       "title": "MUL / MULH / MULHSU / MULHU including signed-high cases",
       "oracle": "p04_mul",
-      "covers": ["MUL", "MULH", "MULHSU", "MULHU"],
+      "covers": [
+        "MUL",
+        "MULH",
+        "MULHSU",
+        "MULHU"
+      ],
       "inputs": [
-        {"a": "0x0123456789abcdef", "b": "0xfedcba9876543210", "c": "0x8000000000000001",
-         "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
-         "expect_traps": []},
-        {"a": "0xffffffffffffffff", "b": "0xffffffffffffffff", "c": "0x8000000000000000",
-         "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
-         "expect_traps": []},
-        {"a": "0x8000000000000000", "b": "0x8000000000000000", "c": "0x7fffffffffffffff",
-         "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
-         "expect_traps": []}
+        {
+          "a": "0x0123456789abcdef",
+          "b": "0xfedcba9876543210",
+          "c": "0x8000000000000001",
+          "expect_sig": [
+            "0x2236d88fe5618cf0",
+            "0xfffeb49923cc0953",
+            "0x0121fa00ad77d742",
+            "0x7e4d182bb281d4e7"
+          ],
+          "expect_traps": []
+        },
+        {
+          "a": "0xffffffffffffffff",
+          "b": "0xffffffffffffffff",
+          "c": "0x8000000000000000",
+          "expect_sig": [
+            "0x0000000000000001",
+            "0x0000000000000000",
+            "0xfffffffffffffffe",
+            "0x8000000000000000"
+          ],
+          "expect_traps": []
+        },
+        {
+          "a": "0x8000000000000000",
+          "b": "0x8000000000000001",
+          "c": "0x0123456789abcdef",
+          "expect_sig": [
+            "0x8000000000000000",
+            "0x3fffffffffffffff",
+            "0x4000000000000000",
+            "0x7f6e5d4c3b2a1908"
+          ],
+          "expect_traps": []
+        }
       ]
     },
     {
       "name": "p05_divrem",
       "title": "DIV/DIVU/REM/REMU with divide-by-zero and MIN/-1 overflow",
       "oracle": "p05_divrem",
-      "covers": ["DIV", "DIVU", "REM", "REMU"],
+      "covers": [
+        "DIV",
+        "DIVU",
+        "REM",
+        "REMU"
+      ],
       "inputs": [
-        {"a": "0x0123456789abcdef", "b": "0x0000000000000010", "c": "0x0000000000000003",
-         "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
-         "expect_traps": []},
-        {"a": "0x8000000000000000", "b": "0xffffffffffffffff", "c": "0x0000000000000000",
-         "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
-         "expect_traps": []},
-        {"a": "0xffffffffffffffff", "b": "0x0000000000000000", "c": "0xffffffffffffffff",
-         "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
-         "expect_traps": []}
+        {
+          "a": "0xfedcba9876543210",
+          "b": "0x10",
+          "c": "0x3",
+          "expect_sig": [
+            "0xf000000000000000",
+            "0x0000000000000000",
+            "0xab6ad6efaedaabeb",
+            "0xffffffffffffffff"
+          ],
+          "expect_traps": []
+        },
+        {
+          "a": "0x8000000000000000",
+          "b": "0xffffffffffffffff",
+          "c": "0x3",
+          "expect_sig": [
+            "0x8000000000000000",
+            "0x8000000000000000",
+            "0xfffffffffffffffc",
+            "0xfffffffffffffffc"
+          ],
+          "expect_traps": []
+        },
+        {
+          "a": "0xffffffffffffffff",
+          "b": "0x0",
+          "c": "0xffffffffffffffff",
+          "expect_sig": [
+            "0x5555555555555555",
+            "0x0000000000000000",
+            "0x0000000000000000",
+            "0x0000000000000000"
+          ],
+          "expect_traps": []
+        }
       ]
     },
     {
       "name": "p06_shiftlogic",
       "title": "shifts, bitwise logic, SLT/SLTU",
       "oracle": "p06_shiftlogic",
-      "covers": ["SLLI", "SRLI", "SRAI", "SLL", "SRL", "SRA", "ANDI", "ORI", "XORI", "AND", "OR", "XOR", "SLT", "SLTU"],
+      "covers": [
+        "SLLI",
+        "SRLI",
+        "SRAI",
+        "SLL",
+        "SRL",
+        "SRA",
+        "ANDI",
+        "ORI",
+        "XORI",
+        "AND",
+        "OR",
+        "XOR",
+        "SLT",
+        "SLTU"
+      ],
       "inputs": [
-        {"a": "0x8000000000000001", "b": "0x0000000000000003", "c": 1,
-         "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
-         "expect_traps": []},
-        {"a": "0xffffffffffffffff", "b": "0xffffffffffffffff", "c": 63,
-         "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
-         "expect_traps": []},
-        {"a": "0x00000000000000ff", "b": "0xffffffffffffff00", "c": 40,
-         "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
-         "expect_traps": []}
+        {
+          "a": "0x8000000000000001",
+          "b": "0x3",
+          "c": "0x1",
+          "expect_sig": [
+            "0x0000000000000002",
+            "0x4000000000000000",
+            "0xc000000000000000",
+            "0x0000000000000000"
+          ],
+          "expect_traps": []
+        },
+        {
+          "a": "0xffffffffffffffff",
+          "b": "0xffffffffffffffff",
+          "c": "0x3f",
+          "expect_sig": [
+            "0x8000000000000000",
+            "0x0000000000000001",
+            "0xffffffffffffffff",
+            "0x000000000000ffff"
+          ],
+          "expect_traps": []
+        },
+        {
+          "a": "0xffffffffffffff00",
+          "b": "0xffffffffffffff00",
+          "c": "0x4",
+          "expect_sig": [
+            "0xfffffffffffff000",
+            "0x0ffffffffffffff0",
+            "0xfffffffffffffff0",
+            "0x000000000000ffff"
+          ],
+          "expect_traps": []
+        }
       ]
     },
     {
       "name": "p07_byteops",
       "title": "signed vs unsigned byte and half loads",
       "oracle": "p07_byteops",
-      "covers": ["SB", "SH", "SW", "LB", "LBU", "LH", "LHU", "SLLI", "SRLI", "ANDI", "OR"],
+      "covers": [
+        "SB",
+        "SH",
+        "SW",
+        "LB",
+        "LBU",
+        "LH",
+        "LHU",
+        "SLLI",
+        "SRLI",
+        "ANDI",
+        "OR"
+      ],
       "inputs": [
-        {"a": "0x0000000000008080", "b": "0x0000000000007f7f", "c": "0x000000000000ffff",
-         "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
-         "expect_traps": []},
-        {"a": "0x0000000000007f7f", "b": "0x0000000000008080", "c": "0x0000000000008000",
-         "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
-         "expect_traps": []},
-        {"a": "0xffffffffffffffff", "b": "0x0000000000000000", "c": "0xffffffffffffffff",
-         "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
-         "expect_traps": []}
+        {
+          "a": "0x8080",
+          "b": "0x7f7f",
+          "c": "0xffff",
+          "expect_sig": [
+            "0x0000000000000080",
+            "0xffffffffffffff80",
+            "0x0000000000007f7f",
+            "0x000000000000ffff"
+          ],
+          "expect_traps": []
+        },
+        {
+          "a": "0xff7f",
+          "b": "0x8080",
+          "c": "0x8000",
+          "expect_sig": [
+            "0x000000000000007f",
+            "0xffffffffffffffff",
+            "0xffffffffffff8080",
+            "0x0000000000008000"
+          ],
+          "expect_traps": []
+        },
+        {
+          "a": "0xffffffffffffffff",
+          "b": "0x0",
+          "c": "0xffffffffffffffff",
+          "expect_sig": [
+            "0x00000000000000ff",
+            "0xffffffffffffffff",
+            "0x0000000000000000",
+            "0x000000000000ffff"
+          ],
+          "expect_traps": []
+        }
       ]
     },
     {
       "name": "p08_misaligned",
       "title": "misaligned loads/stores must trap; aligned neighbours must not",
       "oracle": "p08_misaligned",
-      "covers": ["LH", "LW", "SH", "SD", "SW", "LBU", "LH", "LW", "TRAP"],
+      "covers": [
+        "LH",
+        "LW",
+        "SH",
+        "SD",
+        "SW",
+        "LBU",
+        "LH",
+        "LW",
+        "TRAP"
+      ],
       "inputs": [
-        {"a": "0x0123456789abcdef", "b": "0xfedcba9876543210", "c": "0x5a5a5a5a5a5a5a5a",
-         "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
-         "expect_traps": [{"cause": 4, "note": "lh at scratch+9, odd address"},
-                          {"cause": 4, "note": "lw at scratch+10, address%4==2"},
-                          {"cause": 6, "note": "sh at scratch+7, odd address"},
-                          {"cause": 6, "note": "sd at scratch+12, address%8==4"},
-                          {"cause": 7, "note": "sw at 0x0, boot_rom is not writable"}]},
-        {"a": "0x8000000000000000", "b": "0x0000000000000000", "c": "0x0000000000000000",
-         "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
-         "expect_traps": [{"cause": 4, "note": "lh at scratch+9, odd address"},
-                          {"cause": 4, "note": "lw at scratch+10, address%4==2"},
-                          {"cause": 6, "note": "sh at scratch+7, odd address"},
-                          {"cause": 6, "note": "sd at scratch+12, address%8==4"},
-                          {"cause": 7, "note": "sw at 0x0, boot_rom is not writable"}]},
-        {"a": "0xffffffffffffffff", "b": "0xffffffffffffffff", "c": "0xffffffffffffffff",
-         "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
-         "expect_traps": [{"cause": 4, "note": "lh at scratch+9, odd address"},
-                          {"cause": 4, "note": "lw at scratch+10, address%4==2"},
-                          {"cause": 6, "note": "sh at scratch+7, odd address"},
-                          {"cause": 6, "note": "sd at scratch+12, address%8==4"},
-                          {"cause": 7, "note": "sw at 0x0, boot_rom is not writable"}]}
+        {
+          "a": "0x0123456789abcdef",
+          "b": "0xfedcba9876543210",
+          "c": "0x5a5a5a5a5a5a5a5a",
+          "expect_sig": [
+            "0x00000000000000ef",
+            "0x0000000001234567",
+            "0x0000000000000123",
+            "0x000000101018181f"
+          ],
+          "expect_traps": [
+            {
+              "cause": 4,
+              "note": "lh at scratch+9, odd address"
+            },
+            {
+              "cause": 4,
+              "note": "lw at scratch+10, address%4==2"
+            },
+            {
+              "cause": 6,
+              "note": "sh at scratch+7, odd address"
+            },
+            {
+              "cause": 6,
+              "note": "sd at scratch+12, address%8==4"
+            },
+            {
+              "cause": 7,
+              "note": "sw at 0x0, boot_rom is not writable"
+            }
+          ]
+        },
+        {
+          "a": "0x8000000000000000",
+          "b": "0x0",
+          "c": "0x0",
+          "expect_sig": [
+            "0x0000000000000000",
+            "0x0000000080000000",
+            "0xffffffffffff8000",
+            "0x000000101018181f"
+          ],
+          "expect_traps": [
+            {
+              "cause": 4,
+              "note": "lh at scratch+9, odd address"
+            },
+            {
+              "cause": 4,
+              "note": "lw at scratch+10, address%4==2"
+            },
+            {
+              "cause": 6,
+              "note": "sh at scratch+7, odd address"
+            },
+            {
+              "cause": 6,
+              "note": "sd at scratch+12, address%8==4"
+            },
+            {
+              "cause": 7,
+              "note": "sw at 0x0, boot_rom is not writable"
+            }
+          ]
+        },
+        {
+          "a": "0xffffffffffffffff",
+          "b": "0xffffffffffffffff",
+          "c": "0xffffffffffffffff",
+          "expect_sig": [
+            "0x00000000000000ff",
+            "0x00000000ffffffff",
+            "0xffffffffffffffff",
+            "0x000000101018181f"
+          ],
+          "expect_traps": [
+            {
+              "cause": 4,
+              "note": "lh at scratch+9, odd address"
+            },
+            {
+              "cause": 4,
+              "note": "lw at scratch+10, address%4==2"
+            },
+            {
+              "cause": 6,
+              "note": "sh at scratch+7, odd address"
+            },
+            {
+              "cause": 6,
+              "note": "sd at scratch+12, address%8==4"
+            },
+            {
+              "cause": 7,
+              "note": "sw at 0x0, boot_rom is not writable"
+            }
+          ]
+        }
       ]
     },
     {
       "name": "p09_storeload",
       "title": "load/store to the same address back to back at several widths",
       "oracle": "p09_storeload",
-      "covers": ["SD", "LD", "SW", "LW", "SH", "SB", "XOR"],
+      "covers": [
+        "SD",
+        "LD",
+        "SW",
+        "LW",
+        "SH",
+        "SB",
+        "XOR"
+      ],
       "inputs": [
-        {"a": "0x0123456789abcdef", "b": "0xfedcba9876543210", "c": "0xaaaaaaaaaaaaaaaa",
-         "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
-         "expect_traps": []},
-        {"a": "0x0000000000000000", "b": "0xffffffffffffffff", "c": "0x0000000000000000",
-         "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
-         "expect_traps": []},
-        {"a": "0xffffffffffffffff", "b": "0x0000000000000000", "c": "0x5555555555555555",
-         "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
-         "expect_traps": []}
+        {
+          "a": "0x0123456789abcdef",
+          "b": "0xfedcba9876543210",
+          "c": "0xaaaaaaaaaaaaaaaa",
+          "expect_sig": [
+            "0x0123456789abcdef",
+            "0x0000000089abcdef",
+            "0x000000000000ff00",
+            "0xaaaaaaaaaaaaaaaa"
+          ],
+          "expect_traps": []
+        },
+        {
+          "a": "0xdeadbeefcafebabe",
+          "b": "0xffffffffffffffff",
+          "c": "0x0",
+          "expect_sig": [
+            "0xdeadbeefcafebabe",
+            "0x00000000cafebabe",
+            "0x0000000000004500",
+            "0x0000000000000000"
+          ],
+          "expect_traps": []
+        },
+        {
+          "a": "0xffffffffffffffff",
+          "b": "0x0",
+          "c": "0x5555555555555555",
+          "expect_sig": [
+            "0xffffffffffffffff",
+            "0x00000000ffffffff",
+            "0x000000000000ff00",
+            "0x5555555555555555"
+          ],
+          "expect_traps": []
+        }
       ]
     },
     {
       "name": "p10_jalr_link",
       "title": "JAL/JALR link registers, JALR bit-0 clear, rd==rs1, nested call",
       "oracle": "p10_jalr_link",
-      "covers": ["JAL", "JALR", "RET", "ADD", "SUB", "XOR", "ADDI"],
+      "covers": [
+        "JAL",
+        "JALR",
+        "RET",
+        "ADD",
+        "SUB",
+        "XOR",
+        "ADDI"
+      ],
       "inputs": [
-        {"a": "0x0123456789abcdef", "b": "0x0000000000000010", "c": 0,
-         "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
-         "expect_traps": []},
-        {"a": "0xffffffffffffffff", "b": "0x0000000000000001", "c": 0,
-         "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
-         "expect_traps": []},
-        {"a": "0x8000000000000000", "b": "0xffffffffffffffff", "c": 0,
-         "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
-         "expect_traps": []}
+        {
+          "a": "0x0123456789abcdef",
+          "b": "0x10",
+          "c": "0x0",
+          "expect_sig": [
+            "0x0000000000000000",
+            "0x0000000000000000",
+            "0x0123456789abce10",
+            "0x02468acf13579c31"
+          ],
+          "expect_traps": []
+        },
+        {
+          "a": "0xffffffffffffffff",
+          "b": "0x1",
+          "c": "0x0",
+          "expect_sig": [
+            "0x0000000000000000",
+            "0x0000000000000000",
+            "0x0000000000000002",
+            "0x0000000000000004"
+          ],
+          "expect_traps": []
+        },
+        {
+          "a": "0x8000000000000000",
+          "b": "0xffffffffffffffff",
+          "c": "0x0",
+          "expect_sig": [
+            "0x0000000000000000",
+            "0x0000000000000000",
+            "0x7fffffffffffffff",
+            "0x0000000000000004"
+          ],
+          "expect_traps": []
+        }
       ]
     },
     {
       "name": "p11_bigmuldiv",
       "title": "dependent division chain through the M-extension corner cases",
       "oracle": "p11_bigmuldiv",
-      "covers": ["DIV", "DIVU", "REM", "REMU", "ADD", "XOR"],
+      "covers": [
+        "DIV",
+        "DIVU",
+        "REM",
+        "REMU",
+        "ADD",
+        "XOR"
+      ],
       "inputs": [
-        {"a": "0x0123456789abcdef", "b": "0x0000000000000011", "c": "0x0000000000000005",
-         "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
-         "expect_traps": []},
-        {"a": "0x8000000000000000", "b": "0xffffffffffffffff", "c": "0x0000000000000007",
-         "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
-         "expect_traps": []},
-        {"a": "0xffffffffffffffff", "b": "0x0000000000000000", "c": "0xffffffffffffffff",
-         "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
-         "expect_traps": []}
+        {
+          "a": "0xfedcba9876543210",
+          "b": "0x11",
+          "c": "0x5",
+          "expect_sig": [
+            "0xf11331177113311e",
+            "0xfffffffffffffffe",
+            "0x0000000000000000",
+            "0x000000000000000e"
+          ],
+          "expect_traps": []
+        },
+        {
+          "a": "0x8000000000000000",
+          "b": "0xfffffffffffffffe",
+          "c": "0x7",
+          "expect_sig": [
+            "0x4000000000000000",
+            "0x8000000000000000",
+            "0x3ffffffffffffffc",
+            "0x8000000000000007"
+          ],
+          "expect_traps": []
+        },
+        {
+          "a": "0xffffffffffffffff",
+          "b": "0x0",
+          "c": "0xffffffffffffffff",
+          "expect_sig": [
+            "0x5555555555555555",
+            "0x0000000000000000",
+            "0xffffffffffffffff",
+            "0x0000000000000001"
+          ],
+          "expect_traps": []
+        }
       ]
     },
     {
       "name": "p12_memwalk",
       "title": "16-word pattern build plus a load-only walk with an input-dependent trip count",
       "oracle": "p12_memwalk",
-      "covers": ["SD", "LD", "SLLI", "XOR", "ADD", "ANDI", "BNEZ", "BGEU", "ADDI", "SRLI"],
+      "covers": [
+        "SD",
+        "LD",
+        "SLLI",
+        "XOR",
+        "ADD",
+        "ANDI",
+        "BNEZ",
+        "BGEU",
+        "ADDI",
+        "SRLI"
+      ],
       "inputs": [
-        {"a": "0x0123456789abcdef", "b": "0x1111111111111111", "c": 5,
-         "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
-         "expect_traps": []},
-        {"a": "0xffffffffffffffff", "b": "0x0000000000000001", "c": 2,
-         "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
-         "expect_traps": []},
-        {"a": "0x8000000000000000", "b": "0xaaaaaaaaaaaaaaaa", "c": 8,
-         "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
-         "expect_traps": []}
+        {
+          "a": "0x0123456789abcdef",
+          "b": "0x1111111111111111",
+          "c": "0x5",
+          "expect_sig": [
+            "0x438587e9cc0e086c",
+            "0x23456789abcdea0f",
+            "0x0000000000000008",
+            "0x01234567a39081b7"
+          ],
+          "expect_traps": []
+        },
+        {
+          "a": "0xffffffffffffffff",
+          "b": "0x1",
+          "c": "0x2",
+          "expect_sig": [
+            "0xfffffffffffff7f8",
+            "0xfffffffffffffbff",
+            "0x000000000000000a",
+            "0xffffffff00000002"
+          ],
+          "expect_traps": []
+        },
+        {
+          "a": "0x8000000000000000",
+          "b": "0xaaaaaaaaaaaaaaaa",
+          "c": "0x8",
+          "expect_sig": [
+            "0x7ffffffffffffb2e",
+            "0x5555555555555166",
+            "0x0000000000000000",
+            "0x800000005555555d"
+          ],
+          "expect_traps": []
+        }
       ]
     }
   ]

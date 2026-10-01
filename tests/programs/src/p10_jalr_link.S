@@ -27,7 +27,7 @@
  *   sig0 = jal link delta        (0)
  *   sig1 = jalr link delta       (0)
  *   sig2 = a0 after the chain    = a + 1 + 2b
- *   sig3 = a1 ^ a2               = (b - 1) ^ ((a + 1 + 2b) ^ (b - 1))
+ *   sig3 = a1 ^ a2               = (b - 1) ^ (2 * (a + 3b))
  */
 
 #include "platform.h"
@@ -94,6 +94,10 @@ p10_outer:
 
     .balign 4
 p10_inner:
-    xor     a2, a0, a1
+    add     a2, a0, a1
+    slli    a2, a2, 1
     ret
     .size   p10_inner, . - p10_inner
+
+/* The three compiled-in inputs for this (program, input) pair. */
+    MOSAIC_PROGRAM_INPUTS

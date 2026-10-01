@@ -68,8 +68,11 @@ __progtext_base   = 0x80001200;
  * conventional `tohost`/`fromhost` symbol names (Spike's HTIF, among
  * others) find the device without a side-channel.  Defining them changes no
  * address and no behaviour. */
-PROVIDE( tohost = 0x00102000 );
-PROVIDE( fromhost = 0x00102008 );
+/* Plain assignments, not PROVIDE: PROVIDE only materialises a symbol when a
+ * relocation references it, and nothing in the firmware references these, so
+ * PROVIDE would leave them out of the symbol table entirely. */
+tohost   = 0x00102000;
+fromhost = 0x00102008;
 
 SECTIONS
 {

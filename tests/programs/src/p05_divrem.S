@@ -32,10 +32,18 @@ main:
     MOSAIC_SETUP_BASES
     MOSAIC_LOAD_INPUTS
 
+    /* DIV(a, 0) and DIVU(a, 0) are both all ones and REM(a, 0) and
+     * REMU(a, 0) are both the dividend, so the exclusive-or of the signed
+     * and unsigned forms is identically zero whenever the divisor is zero.
+     * The marker below makes a divide-by-zero case observable instead of
+     * vacuously correct. */
     div     t0, a0, a1
     divu    t1, a0, a1
     xor     s4, t0, t1                         /* sig0 */
-
+    bnez    a1, 1f
+    li      t2, MOSAIC_DIVZERO_MARK
+    xor     s4, s4, t2
+1:
     rem     t0, a0, a1
     remu    t1, a0, a1
     xor     s5, t0, t1                         /* sig1 */
@@ -43,7 +51,10 @@ main:
     div     t0, a0, a2
     divu    t1, a0, a2
     xor     s6, t0, t1                         /* sig2 */
-
+    bnez    a2, 2f
+    li      t2, MOSAIC_DIVZERO_MARK
+    xor     s6, s6, t2
+2:
     rem     t0, a0, a2
     remu    t1, a0, a2
     xor     s7, t0, t1                         /* sig3 */
@@ -55,3 +66,6 @@ main:
 
     FINISH_PASS
     .size   main, . - main
+
+/* The three compiled-in inputs for this (program, input) pair. */
+    MOSAIC_PROGRAM_INPUTS

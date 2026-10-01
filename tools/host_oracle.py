@@ -392,10 +392,24 @@ def p04_mul(a: int, b: int, c: int) -> tuple:
             u64(MULHSU(a, c) ^ MUL(a, c))], []
 
 
+DIVZERO_MARK = 0x5555555555555555
+
+
+def div_mark(divisor: int) -> int:
+    """Marker folded in when the divisor is zero.
+
+    DIV(a,0) and DIVU(a,0) are both all ones; REM(a,0) and REMU(a,0) are
+    both the dividend.  The exclusive-or of the signed and unsigned forms is
+    therefore identically zero for a zero divisor, which would make a
+    divide-by-zero case vacuously pass.  The marker makes it observable.
+    """
+    return 0 if divisor != 0 else DIVZERO_MARK
+
+
 def p05_divrem(a: int, b: int, c: int) -> tuple:
-    sig0 = u64(DIV(a, b) ^ DIVU(a, b))
+    sig0 = u64(DIV(a, b) ^ DIVU(a, b) ^ div_mark(b))
     sig1 = u64(REM(a, b) ^ REMU(a, b))
-    sig2 = u64(DIV(a, c) ^ DIVU(a, c))
+    sig2 = u64(DIV(a, c) ^ DIVU(a, c) ^ div_mark(c))
     sig3 = u64(REM(a, c) ^ REMU(a, c))
     return [sig0, sig1, sig2, sig3], []
 
@@ -476,14 +490,15 @@ def p10_jalr_link(a: int, b: int, c: int) -> tuple:
     a0 = u64(a0 + b)                      # p10_jalr_b
     a0 = u64(a0 + b)                      # p10_jalr_b again (rd == rs1)
     a1 = u64(b - 1)                       # p10_outer
-    a2 = u64(a0 ^ a1)                     # p10_inner
+    a2 = u64(u64(a0 + a1) << 1)           # p10_inner: (a0 + a1) << 1
     sig2 = a0
     sig3 = u64(a1 ^ a2)
+    _check(sig3 != sig2, "p10 sig3 must not alias sig2")
     return [sig0, sig1, sig2, sig3], []
 
 
 def p11_bigmuldiv(a: int, b: int, c: int) -> tuple:
-    sig0 = u64(DIV(a, b) ^ DIVU(a, b))
+    sig0 = u64(DIV(a, b) ^ DIVU(a, b) ^ div_mark(b))
     sig1 = u64(REM(a, b) ^ REMU(a, b))
     dividend = u64(REMU(a, b) + c)
     quotient = DIV(dividend, b)
@@ -637,11 +652,16 @@ def check_declared(document: dict, only: str) -> list:
             failures.append(
                 "%s.i%d traps: oracle %s, declared %s"
                 % (program["name"], index, computed_traps, declared_traps))
-        # An input-insensitive signature is a bad test; refuse to pass it.
-        if len(set(signature)) != len(signature):
+        # A signature whose four words are all equal detects nothing: a DUT
+        # could return the same wrong value everywhere.  Two or more distinct
+        # words is the floor.  Requiring all four to differ would reject
+        # legitimate cases: p10's two link checks are both 0 by design, and
+        # the MIN/-1 overflow case makes DIV and DIVU coincide.
+        if len(set(signature)) < 2:
             failures.append(
-                "%s.i%d: signature words are not distinct, the case cannot "
-                "detect a substitution" % (program["name"], index))
+                "%s.i%d: all four signature words are equal, so a single "
+                "wrong value would satisfy the whole case"
+                % (program["name"], index))
     return failures
 
 

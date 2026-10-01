@@ -74,24 +74,40 @@ help:
 
 # ---------------------------------------------------------------------
 # Build rules
+#
+# The compiled-in program inputs reach the image through the PROGRAM object,
+# not through shared boot code: each program emits its own three-word input
+# table (see MOSAIC_PROGRAM_INPUTS in platform.h).  Program objects are
+# therefore named <program>.i<n>.o and depend on corpus.json, so changing an
+# input recompiles exactly the objects that embed it.  crt0.o and trap.o are
+# input-independent and stay shared.
 # ---------------------------------------------------------------------
-$(OBJDIR)/%.o: $(SRCDIR)/%.S $(SRCDIR)/platform.h | $(OBJDIR)
+$(OBJDIR)/%.i0.o: $(SRCDIR)/%.S $(SRCDIR)/platform.h corpus.json | $(OBJDIR)
+	$(CC) $(CFLAGS) -DPROG_INPUT0=$(PROG_INPUT0) -DPROG_INPUT1=$(PROG_INPUT1) \
+	    -DPROG_INPUT2=$(PROG_INPUT2) -c $< -o $@
+
+$(OBJDIR)/%.i1.o: $(SRCDIR)/%.S $(SRCDIR)/platform.h corpus.json | $(OBJDIR)
+	$(CC) $(CFLAGS) -DPROG_INPUT0=$(PROG_INPUT0) -DPROG_INPUT1=$(PROG_INPUT1) \
+	    -DPROG_INPUT2=$(PROG_INPUT2) -c $< -o $@
+
+$(OBJDIR)/%.i2.o: $(SRCDIR)/%.S $(SRCDIR)/platform.h corpus.json | $(OBJDIR)
+	$(CC) $(CFLAGS) -DPROG_INPUT0=$(PROG_INPUT0) -DPROG_INPUT1=$(PROG_INPUT1) \
+	    -DPROG_INPUT2=$(PROG_INPUT2) -c $< -o $@
+
+$(OBJDIR)/crt0.o: $(SRCDIR)/crt0.S $(SRCDIR)/platform.h | $(OBJDIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(BUILDDIR)/%.i0.elf: $(OBJDIR)/%.o $(BOOT_OBJS) $(LDSCRIPT) corpus.json | $(BUILDDIR)
-	$(CC) $(LDFLAGS) -DPROG_INPUT0=$(PROG_INPUT0) -DPROG_INPUT1=$(PROG_INPUT1) \
-	    -DPROG_INPUT2=$(PROG_INPUT2) \
-	    -o $@ $(OBJDIR)/$*.o $(BOOT_OBJS)
+$(OBJDIR)/trap.o: $(SRCDIR)/trap.S $(SRCDIR)/platform.h | $(OBJDIR)
+	$(CC) $(CFLAGS) -c $< -o $@
 
-$(BUILDDIR)/%.i1.elf: $(OBJDIR)/%.o $(BOOT_OBJS) $(LDSCRIPT) corpus.json | $(BUILDDIR)
-	$(CC) $(LDFLAGS) -DPROG_INPUT0=$(PROG_INPUT0) -DPROG_INPUT1=$(PROG_INPUT1) \
-	    -DPROG_INPUT2=$(PROG_INPUT2) \
-	    -o $@ $(OBJDIR)/$*.o $(BOOT_OBJS)
+$(BUILDDIR)/%.i0.elf: $(OBJDIR)/%.i0.o $(BOOT_OBJS) $(LDSCRIPT) | $(BUILDDIR)
+	$(CC) $(LDFLAGS) -o $@ $(OBJDIR)/$*.i0.o $(BOOT_OBJS)
 
-$(BUILDDIR)/%.i2.elf: $(OBJDIR)/%.o $(BOOT_OBJS) $(LDSCRIPT) corpus.json | $(BUILDDIR)
-	$(CC) $(LDFLAGS) -DPROG_INPUT0=$(PROG_INPUT0) -DPROG_INPUT1=$(PROG_INPUT1) \
-	    -DPROG_INPUT2=$(PROG_INPUT2) \
-	    -o $@ $(OBJDIR)/$*.o $(BOOT_OBJS)
+$(BUILDDIR)/%.i1.elf: $(OBJDIR)/%.i1.o $(BOOT_OBJS) $(LDSCRIPT) | $(BUILDDIR)
+	$(CC) $(LDFLAGS) -o $@ $(OBJDIR)/$*.i1.o $(BOOT_OBJS)
+
+$(BUILDDIR)/%.i2.elf: $(OBJDIR)/%.i2.o $(BOOT_OBJS) $(LDSCRIPT) | $(BUILDDIR)
+	$(CC) $(LDFLAGS) -o $@ $(OBJDIR)/$*.i2.o $(BOOT_OBJS)
 
 $(BUILDDIR) $(OBJDIR):
 	@mkdir -p $@

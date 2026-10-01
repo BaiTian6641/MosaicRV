@@ -26,21 +26,6 @@
     .equ MOSAIC_STACK_SIZE,  16384
     .equ MOSAIC_STACK_ALIGN, 16
 
-/* Per-input compiled-in defaults, overridden by the Makefile with
- * -DPROG_INPUT0/-DPROG_INPUT1/-DPROG_INPUT2 so that each (program, input)
- * pair gets its own ELF.  They live in .rodata, which is ordinary RAM as far
- * as the hart is concerned, so the FROMHOST override can be written straight
- * over word 0 without a copy. */
-#ifndef PROG_INPUT0
-#define PROG_INPUT0 0
-#endif
-#ifndef PROG_INPUT1
-#define PROG_INPUT1 0
-#endif
-#ifndef PROG_INPUT2
-#define PROG_INPUT2 0
-#endif
-
 /* ================================================================== */
 /* .bss: firmware-private scalar state.  Zeroed by _start.             */
 /* ================================================================== */
@@ -128,19 +113,6 @@ _start:
     li      a1, 1
     call    tohost_finish
     .size   _start, . - _start
-
-/* ================================================================== */
-/* Compiled-in input defaults (read-only by convention, lives in the   */
-/* loadable image so the harness loader has nothing extra to map)       */
-/* ================================================================== */
-    .section .rodata, "a", @progbits
-    .balign 8
-    .globl  mosaic_prog_inputs
-mosaic_prog_inputs:
-    .dword  PROG_INPUT0
-    .dword  PROG_INPUT1
-    .dword  PROG_INPUT2
-    .size   mosaic_prog_inputs, . - mosaic_prog_inputs
 
 /* ================================================================== */
 /* Shared runtime helpers.  These live in the boot region because they  */
