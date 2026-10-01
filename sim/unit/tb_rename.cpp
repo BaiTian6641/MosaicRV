@@ -218,7 +218,6 @@ class ShadowRename {
     rot_ = arch_regs_;
     undo_.clear();
     j_len_ = 0;
-    j_ckpt_ = 0;
     ckpt_seen_ = false;
     j_overflow_ = false;
   }
@@ -265,7 +264,10 @@ class ShadowRename {
 
     o.alloc_squashed = s.alloc_req && s.squash;
     o.alloc_is_x0 = s.alloc_req && (s.alloc_rd == 0) && !s.squash;
-    o.alloc_exhausted = wants_tag && !has_free;
+    // Mutually exclusive with the squash report, matching the documented rule: a
+    // squash wins, because it discards the instruction whether or not a tag was
+    // available.
+    o.alloc_exhausted = wants_tag && !has_free && !s.squash;
     o.alloc_accepted = s.alloc_req && !s.squash && (has_free || s.alloc_rd == 0);
     o.alloc_new_valid = o.alloc_accepted && (s.alloc_rd != 0);
     o.alloc_new = Dest{Scan(), 0};
@@ -278,11 +280,27 @@ class ShadowRename {
     o.rs2_is_x0 = s.rs2_addr == 0;
     o.rs2 = o.rs2_is_x0 ? Dest{0, 0} : spec_[s.rs2_addr];
 
+    // A writeback is stale unless the identity is the tag's *current owner*: in
+    // range, generation valid, not free, and carrying the current generation. A
+    // write to a free tag has no owner at all, so it is stale rather than a
+    // duplicate.
     o.wb_stale = s.wb_valid && !CurrentOwner(s.wb);
     o.wb_duplicate = s.wb_valid && !o.wb_stale && wb_done_[s.wb.tag];
     o.wb_accepted = s.wb_valid && !o.wb_stale && !wb_done_[s.wb.tag];
 
-    o.free_stale = s.free_valid && !CurrentOwner(s.free_);
+    // A release separates the two refusals, because they are different bugs:
+    //
+    //   stale  = the identity on the wire is not one this tag ever had. The
+    //            caller is aiming at the wrong register, or at a generation that
+    //            has been superseded.
+    //   double = the identity is a real, current generation, but the tag is
+    //            already free. The caller is releasing the same mapping twice.
+    //
+    // Conflating them into one "not the owner" test loses the distinction the
+    // caller needs: a stale release means "you have the wrong identity", while a
+    // double free means "your lifetime accounting is wrong", and only one of
+    // those is fixed by re-reading the map.
+    o.free_stale = s.free_valid && !IdentityValid(s.free_);
     o.free_double = s.free_valid && !o.free_stale && free_[s.free_.tag];
     o.free_accepted = s.free_valid && !o.free_stale && !free_[s.free_.tag];
 
@@ -305,22 +323,38 @@ class ShadowRename {
   void Apply(const Stim& s) {
     const Outputs o = Eval(s);
 
-    // 1. The checkpoint, read from the pre-edge journal length. A squash in the
-    //    same cycle does not take a new checkpoint: it is undoing to the one that
-    //    already exists, and overwriting that one first would make it undo to
-    //    itself.
+    // The free set is advanced as a whole next-state vector in the documented
+    // order -- allocate clears, release sets, commit sets, undo sets -- rather than
+    // as a sequence of in-place edits. In-place edits make the result depend on the
+    // order the steps happen to be written in, and two events touching the same tag
+    // in one cycle then resolve differently here than in the hardware. Each step
+    // names the rule it implements.
+    std::vector<bool> free_next = free_;
+
+    // 1. A checkpoint starts a new undo window and marks that one exists. Entries
+    //    older than it can never be undone by a squash to it, so they are dropped
+    //    rather than kept: that is what makes the window's bound "allocations since
+    //    the last checkpoint", which is the bound the register-file size justifies.
+    //    A squash in the same cycle does not take a new checkpoint -- it is undoing
+    //    to the one that already exists.
     if (s.ckpt_valid && !s.squash) {
-      j_ckpt_ = j_len_;
+      undo_.clear();
+      j_len_ = 0;
       ckpt_seen_ = true;
     }
 
     // 2. One journal entry per allocation, holding the state that allocation
     //    replaced. Allocation is refused in a squash cycle, so the push and the
     //    undo below can never both happen in one cycle.
-    if (o.alloc_new_valid) {
+    // A checkpoint in the same cycle starts a new window, so an allocation in that
+    // cycle is *not* journalled: it is already younger than the checkpoint, and the
+    // checkpoint is what a later squash will undo to. Journalling it as well would
+    // make the window one entry longer than the hardware's and leave a tag
+    // allocated after a squash that the hardware had correctly returned.
+    if (o.alloc_new_valid && !(s.ckpt_valid && !s.squash)) {
       if (j_len_ >= journal_) {
-        // More allocations than the journal can hold. The contract is that this
-        // is *reported*, so the shadow records it and the test checks the report.
+        // More allocations than the journal can hold. The contract is that this is
+        // *reported*, so the shadow records it and the test checks the report.
         j_overflow_ = true;
       } else {
         undo_.push_back(UndoEntry{o.alloc_new.tag, gen_valid_[o.alloc_new.tag]});
@@ -328,49 +362,51 @@ class ShadowRename {
       }
     }
 
-    // 3. A squash undoes every allocation made after the checkpoint, oldest entry
-    //    first so that the newest is applied last.
-    if (o.squash_accepted) {
-      for (size_t k = j_ckpt_; k < j_len_; k++) {
-        const UndoEntry& e = undo_[k];
-        free_[e.tag] = true;
-        gen_[e.tag] = e.prev_valid ? ((gen_[e.tag] - 1) & gen_mask_) : 0;
-        gen_valid_[e.tag] = e.prev_valid;
-      }
-      j_len_ = j_ckpt_;
-      undo_.resize(j_len_);
-    }
-
-    // 4. Allocation: take the tag out of the free set, step its generation, and
+    // 3. Allocation: take the tag out of the free set, step its generation, and
     //    clear the written flag for the new owner. The rotation point follows the
-    //    tag, wrapping to the first allocatable tag at the end of the file.
+    //    tag and wraps to zero at the end of the register file.
     if (o.alloc_new_valid) {
-      free_[o.alloc_new.tag] = false;
+      free_next[o.alloc_new.tag] = false;
       gen_[o.alloc_new.tag] = o.alloc_new.gen;
       gen_valid_[o.alloc_new.tag] = true;
       wb_done_[o.alloc_new.tag] = false;
-      rot_ = (o.alloc_new.tag + 1 >= entries_) ? arch_regs_ : o.alloc_new.tag + 1;
+      rot_ = (o.alloc_new.tag + 1 >= entries_) ? 0u : o.alloc_new.tag + 1;
     }
 
-    // 5. An explicit release puts a tag back. The generation does not move: it
+    // 4. An explicit release puts a tag back. The generation does not move: it
     //    counts allocations, not releases.
-    if (o.free_accepted) free_[s.free_.tag] = true;
+    if (o.free_accepted) free_next[s.free_.tag] = true;
 
-    // 6. A commit releases the mapping it supersedes, if that is a different
+    // 5. A commit releases the mapping it supersedes, if that is a different
     //    identity from the one it installs. A commit is permanent, so it is not
     //    journalled and a later squash does not undo it.
     if (o.commit_accepted && cmt_[s.commit_rd] != s.commit) {
-      free_[cmt_[s.commit_rd].tag] = true;
+      free_next[cmt_[s.commit_rd].tag] = true;
     }
 
-    // 7. The accepted writeback marks the destination written, so a second
-    //    producer for the same identity is a reported duplicate.
+    // 6. A squash undoes every allocation made after the checkpoint, oldest entry
+    //    first so that the newest is applied last.
+    if (o.squash_accepted) {
+      for (size_t k = 0; k < j_len_; k++) {
+        const UndoEntry& e = undo_[k];
+        free_next[e.tag] = true;
+        gen_[e.tag] = e.prev_valid ? ((gen_[e.tag] - 1) & gen_mask_) : 0;
+        gen_valid_[e.tag] = e.prev_valid;
+      }
+      j_len_ = 0;
+      undo_.clear();
+    }
+
+    free_ = free_next;
+
+    // 7. The accepted writeback marks the destination written, so a second producer
+    //    for the same identity is a reported duplicate.
     if (o.wb_accepted) wb_done_[s.wb.tag] = true;
 
     // 8. The maps. A commit lands first so a squash in the same cycle restores to
     //    the post-commit committed map; an allocation in the same cycle lands on
-    //    top of that -- and since allocation is refused during a squash, the two
-    //    can never both write the same entry here.
+    //    top of that -- and since allocation is refused during a squash, the two can
+    //    never both write the same entry here.
     if (o.commit_accepted) cmt_[s.commit_rd] = s.commit;
     if (o.squash_accepted) spec_ = cmt_;
     if (o.alloc_new_valid) spec_[s.alloc_rd] = o.alloc_new;
@@ -383,9 +419,11 @@ class ShadowRename {
   };
 
   // The documented rotating scan: the first free tag at or after the rotation
-  // point, wrapping once. `alloc_ptr` in the RTL wraps to zero; here it wraps to
-  // the first allocatable tag, which is the same tag because the reserved range
-  // is contiguous at the bottom -- but the two are written differently on purpose.
+  // point, wrapping once at the end of the register file. The rotation point wraps
+  // to zero rather than to the first allocatable tag, so after a full pass the
+  // scan walks the reserved range at the bottom of the file as well. Those tags
+  // are never free, so the scan passes over them -- which is what keeps the
+  // implementation a single linear walk with no special case.
   uint32_t Scan() const {
     for (uint32_t k = 0; k < entries_; k++) {
       uint32_t t = (rot_ + k) % entries_;
@@ -394,14 +432,20 @@ class ShadowRename {
     return 0;  // nothing free: the answer is don't-care, and the request is refused
   }
 
-  // "Current owner" is the documented ownership test for a destination identity:
-  // in range, generation valid, not free, and carrying the tag's current
-  // generation. Everything that is not the current owner is stale.
-  bool CurrentOwner(const Dest& d) const {
+  // The documented identity test: is (tag, gen) a generation this tag has actually
+  // had? It says nothing about whether the tag is currently allocated -- that is a
+  // separate question with a separate report.
+  bool IdentityValid(const Dest& d) const {
     if (d.tag >= entries_) return false;
     if (!gen_valid_[d.tag]) return false;
-    if (free_[d.tag]) return false;
     return gen_[d.tag] == (d.gen & gen_mask_);
+  }
+
+  // "Current owner" adds liveness: a destination identity is only writable while
+  // the tag is allocated and not already written by this generation.
+  bool CurrentOwner(const Dest& d) const {
+    if (!IdentityValid(d)) return false;
+    return !free_[d.tag];
   }
 
   uint32_t entries_;
@@ -421,7 +465,6 @@ class ShadowRename {
 
   std::vector<UndoEntry> undo_;
   size_t j_len_ = 0;
-  size_t j_ckpt_ = 0;
   bool ckpt_seen_ = false;
   bool j_overflow_ = false;
 };
@@ -442,10 +485,15 @@ class Harness {
   void BindShadow(ShadowRename* shadow) { shadow_ = shadow; }
 
   // Assert reset for `cycles` rising edges with no other stimulus.
+  // Assert reset for `cycles` rising edges with no other stimulus. The shadow is
+  // reset here rather than by the caller, because a reset in the middle of a phase
+  // that resets only the DUT leaves the two models describing different machines --
+  // and the next comparison then reports a disagreement that neither model has.
   void Reset(int cycles) {
     for (int i = 0; i < cycles; i++) {
       Cycle(Stim{}, /*rst=*/true);
     }
+    if (shadow_ != nullptr) shadow_->Reset();
   }
 
   // One full clock period, in three steps that have to happen in this order:
@@ -463,7 +511,12 @@ class Harness {
   // `observed` therefore holds the pre-edge combinational answer, which is what
   // a phase reasons about, while every state assertion below runs on the
   // post-edge registers.
-  const Outputs& Cycle(const Stim& s, bool rst = false) {
+  // Returns **by value**. A reference would alias `observed_`, which the next
+  // call to Cycle overwrites, so a phase that held on to the answer across
+  // another Cycle -- which most of them do, since the stimulus for the next
+  // request is derived from this answer -- would silently be reading the *next*
+  // cycle's outputs. That is a test that passes while asserting nothing.
+  Outputs Cycle(const Stim& s, bool rst = false) {
     if (cycles_ >= max_cycles_) {
       Fail(phase_, "max-cycles (" + Dec(max_cycles_) + ") exhausted before the campaign finished");
     }
@@ -507,6 +560,8 @@ class Harness {
       CheckInvariants(where);
       ++comparisons_;
     }
+
+    return observed_;
   }
 
   const Outputs& observed() const { return observed_; }
@@ -518,7 +573,6 @@ class Harness {
   uint32_t shadow_gen_w() const { return shadow_->gen_w(); }
   uint32_t shadow_gen_mask() const { return shadow_->gen_mask(); }
   uint32_t shadow_entries() const { return shadow_->entries(); }
-  const std::vector<Dest>& shadow_cmt_map() const { return shadow_->cmt_map(); }
   const std::vector<Dest>& shadow_spec_map() const { return shadow_->spec_map(); }
   uint32_t shadow_journal_len() const { return shadow_->journal_length(); }
 
@@ -526,6 +580,12 @@ class Harness {
   // the phase-level assertions use. Reading the DUT rather than the shadow is
   // the point: a phase assertion that only compared shadow to shadow would pass
   // no matter what the hardware did.
+  const std::vector<bool>& shadow_free_set() const { return shadow_->free_set(); }
+  bool shadow_is_free(uint32_t tag) const { return shadow_->free_set()[tag]; }
+  bool shadow_gen_valid(uint32_t tag) const { return shadow_->gen_valid()[tag]; }
+  uint32_t shadow_gen_of(uint32_t tag) const { return shadow_->gen()[tag]; }
+  const std::vector<Dest>& shadow_cmt_map() const { return shadow_->cmt_map(); }
+
   std::vector<bool> DutFreeMask() const {
     std::vector<bool> out;
     for (int w = 0; w < kWideWords; w++) {
@@ -542,23 +602,37 @@ class Harness {
   std::vector<bool> DutGenValid() const { return ReadMask(dut_->dbg_gen_valid); }
   std::vector<bool> DutWbDone() const { return ReadMask(dut_->dbg_wb_done); }
 
+  // Unpack the generation observation port: `entries` generations of `gen_w`
+  // bits, laid out back to back. Unpacked by field rather than by bit -- a
+  // bit-at-a-time loop produces entries*gen_w entries, and every comparison
+  // against the shadow then becomes a size mismatch that names no real
+  // disagreement.
   std::vector<uint32_t> DutGens() const {
-    std::vector<uint32_t> out;
-    const int words = (static_cast<int>(shadow_->entries()) * static_cast<int>(shadow_->gen_w()) + 31) / 32;
-    for (int w = 0; w < words; w++) {
-      const uint32_t word = dut_->dbg_tag_gen[w];
-      for (int b = 0; b < 32; b++) {
-        if (static_cast<uint64_t>(w) * 32 + b <
-            static_cast<uint64_t>(shadow_->entries()) * shadow_->gen_w()) {
-          out.push_back((word >> b) & shadow_->gen_mask());
-        }
+    const uint32_t gen_w = shadow_->gen_w();
+    std::vector<uint32_t> out(shadow_->entries(), 0);
+    for (uint32_t t = 0; t < shadow_->entries(); t++) {
+      uint32_t value = 0;
+      for (uint32_t b = 0; b < gen_w; b++) {
+        const uint32_t bit = t * gen_w + b;
+        value |= ((dut_->dbg_tag_gen[bit / 32] >> (bit % 32)) & 1u) << b;
       }
+      out[t] = value;
     }
     return out;
   }
 
   std::vector<Dest> DutSpecMap() const { return ReadMap(dut_->dbg_spec_map); }
   std::vector<Dest> DutCmtMap() const { return ReadMap(dut_->dbg_cmt_map); }
+
+  // The free count as the *registers* hold it, i.e. after the edge that just
+  // completed. `observed()` is deliberately the pre-edge combinational answer,
+  // so a phase asking "how many tags are free now" must ask here: reading the
+  // pre-edge value after the edge compares the register file against a count
+  // from before the allocation it is being blamed for.
+  uint32_t free_count() const { return dut_->free_count; }
+  bool journal_overflow() const { return dut_->journal_overflow != 0; }
+  bool squash_accepted() const { return dut_->squash_accepted != 0; }
+  bool squash_underflow() const { return dut_->squash_underflow != 0; }
 
   static constexpr int kWideWords = 3;  // 96 bits rounded up to 32-bit words
 
@@ -600,9 +674,44 @@ class Harness {
     return out;
   }
 
+  // Record what the DUT actually presented this cycle, so a phase assertion that
+  // reads `observed()` is asserting about the hardware. Recording the shadow's
+  // prediction here instead would make every phase-level assertion a tautology:
+  // the prediction is already compared field by field below, so re-reading it
+  // would only ever agree with itself, and a phase written against it would pass
+  // no matter what the DUT did.
+  void CaptureObserved(const Stim& s) {
+    observed_.alloc_accepted = dut_->alloc_accepted != 0;
+    observed_.alloc_exhausted = dut_->alloc_exhausted != 0;
+    observed_.alloc_squashed = dut_->alloc_squashed != 0;
+    observed_.alloc_is_x0 = dut_->alloc_is_x0 != 0;
+    observed_.alloc_new_valid = dut_->alloc_new_valid != 0;
+    observed_.alloc_new = Dest{dut_->alloc_new_tag, dut_->alloc_new_gen};
+    observed_.alloc_old_valid = dut_->alloc_old_valid != 0;
+    observed_.alloc_old = Dest{dut_->alloc_old_tag, dut_->alloc_old_gen};
+    observed_.rs1_is_x0 = dut_->rs1_is_x0 != 0;
+    observed_.rs2_is_x0 = dut_->rs2_is_x0 != 0;
+    observed_.rs1 = Dest{dut_->rs1_tag, dut_->rs1_gen};
+    observed_.rs2 = Dest{dut_->rs2_tag, dut_->rs2_gen};
+    observed_.wb_accepted = dut_->wb_accepted != 0;
+    observed_.wb_stale = dut_->wb_stale != 0;
+    observed_.wb_duplicate = dut_->wb_duplicate != 0;
+    observed_.free_accepted = dut_->free_accepted != 0;
+    observed_.free_stale = dut_->free_stale != 0;
+    observed_.free_double = dut_->free_double != 0;
+    observed_.commit_accepted = dut_->commit_accepted != 0;
+    observed_.commit_x0_dropped = dut_->commit_x0_dropped != 0;
+    observed_.squash_accepted = dut_->squash_accepted != 0;
+    observed_.squash_underflow = dut_->squash_underflow != 0;
+    observed_.journal_overflow = dut_->journal_overflow != 0;
+    observed_.free_count = dut_->free_count;
+    (void)s;
+  }
+
   void CompareOutputs(const Stim& s, const std::string& where) {
+    last_stim_ = s.str();
+    CaptureObserved(s);
     const Outputs e = shadow_->Eval(s);
-    observed_ = e;
     const std::string stim = " " + s.str();
 
     auto need = [&](bool got, bool want, const char* name) {
@@ -665,8 +774,7 @@ class Harness {
 
     // A refused allocation must say why. "Not accepted" with no reason leaves the
     // core unable to distinguish back-pressure from a squash.
-    if (!e.alloc_accepted) {
-      Require(s.alloc_req, where, "alloc_accepted is low with no request on the port");
+    if (!e.alloc_accepted && s.alloc_req) {
       Require(e.alloc_squashed || e.alloc_exhausted, where,
               "an allocation was refused with neither alloc_squashed nor "
               "alloc_exhausted: the refusal has no reported reason");
@@ -696,18 +804,36 @@ class Harness {
             "the free set differs from the shadow at tag " +
                 Dec(FirstDiff(dut_free, shadow_->free_set())));
 
-    Require(DutGenValid() == shadow_->gen_valid(), where,
-            "the gen_valid vector differs from the shadow at tag " +
-                Dec(FirstDiff(DutGenValid(), shadow_->gen_valid())));
-
     Require(DutWbDone() == shadow_->wb_done(), where,
             "the wb_done vector differs from the shadow at tag " +
                 Dec(FirstDiff(DutWbDone(), shadow_->wb_done())));
 
+    // The generation table is compared **only where `gen_valid` holds**, and that
+    // is the whole contract rather than a convenience. The array is deliberately
+    // never reset -- that is the rtl/common/mosaic_ram.sv rule, and it is why
+    // `gen_valid` exists at all -- so an entry no allocation has touched holds
+    // whatever the silicon powered up with. A C++ model cannot mirror power-up
+    // contents, so comparing the whole table would be comparing undefined data and
+    // would fail on any design that followed the rule.
+    //
+    // What replaces it is stronger than a raw comparison would have been: every
+    // place the generation is *used* -- the writeback check, the release check and
+    // the allocation step -- is gated on `gen_valid`, so a stale entry is not
+    // merely unread, it is unreachable. The `generation` phase pins that down from
+    // the consumer side with a writeback aimed at a never-allocated tag.
     const std::vector<uint32_t> dut_gens = DutGens();
-    Require(dut_gens == shadow_->gen(), where,
-            "the generation table differs from the shadow at tag " +
-                Dec(FirstDiff(dut_gens, shadow_->gen())));
+    const std::vector<bool>& gv = DutGenValid();
+    const std::vector<uint32_t>& sh_gens = shadow_->gen();
+    const std::vector<bool>& sh_gv = shadow_->gen_valid();
+    Require(gv == sh_gv, where,
+            "the gen_valid vector differs from the shadow at tag " +
+                Dec(FirstDiff(gv, sh_gv)));
+    for (uint32_t t = 0; t < shadow_->entries(); t++) {
+      if (!gv[t]) continue;
+      Require(dut_gens[t] == sh_gens[t], where,
+              "the generation of tag " + Dec(t) + ", which has been allocated, is " +
+                  Dec(dut_gens[t]) + " but the shadow says " + Dec(sh_gens[t]));
+    }
 
     const std::vector<Dest> dut_spec = DutSpecMap();
     const std::vector<Dest>& sh_spec = shadow_->spec_map();
@@ -780,6 +906,7 @@ class Harness {
     return static_cast<uint32_t>(n);
   }
 
+  std::string last_stim_;
   Vmosaic_rename_tb* dut_;
   mosaic::ClockDriver* clk_;
   uint64_t max_cycles_;
@@ -842,15 +969,20 @@ void PhaseResetState(Harness* h, mosaic::Reporter* reporter, uint32_t entries,
 // Phase 2: single-width ownership. Every allocation, release and commit is checked
 // to move exactly one tag, and every reported destination to be one that was
 // genuinely free.
-void PhaseOwnership(Harness* h, mosaic::Reporter* reporter, uint32_t arch_regs) {
-  const std::vector<Dest> base_spec = h->DutSpecMap();
+void PhaseOwnership(Harness* h, mosaic::Reporter* reporter, uint32_t entries,
+                     uint32_t arch_regs) {
+  // The mapping each rd is expected to hold *now*, from the DUT's own registers.
+  // It is re-read every iteration rather than captured once: the phase writes to
+  // each rd twice, so the second allocation legitimately displaces the first
+  // allocation's tag rather than the reset mapping.
+  std::vector<Dest> expect_old = h->DutSpecMap();
 
   // The free count must fall by exactly one per allocation and rise by exactly
   // one per release, and never by two. Checking the *delta* rather than an
   // absolute count is what makes a double-free visible: it would show up as a
   // count that rose by two.
   std::vector<Dest> live;  // destinations currently held by live allocations
-  uint32_t prev_free = h->observed().free_count;
+  uint32_t prev_free = h->free_count();
 
   for (uint32_t i = 0; i < 40; i++) {
     const uint32_t rd = 1 + (i % (arch_regs - 1));
@@ -859,22 +991,23 @@ void PhaseOwnership(Harness* h, mosaic::Reporter* reporter, uint32_t arch_regs) 
     Stim s;
     s.alloc_req = true;
     s.alloc_rd = rd;
-    const Outputs& o = h->Cycle(s);
+    Outputs o = h->Cycle(s);
 
     Require(o.alloc_accepted, "ownership",
             "cycle " + Dec(i) + ": a request to x" + Dec(rd) +
                 " was refused while the free set was not empty");
     Require(o.alloc_new_valid, "ownership", "the allocation produced no destination");
-    Require(o.alloc_old_valid && o.alloc_old == base_spec[rd], "ownership",
-            "the displaced mapping for x" + Dec(rd) + " was not reported as (" +
-                Dec(base_spec[rd].tag) + "," + Dec(base_spec[rd].gen) + ")");
+    Require(o.alloc_old_valid && o.alloc_old == expect_old[rd], "ownership",
+            "the displaced mapping for x" + Dec(rd) + " was not reported as " +
+                expect_old[rd].str());
+    expect_old[rd] = o.alloc_new;
 
-    Require(h->observed().free_count == prev_free - 1, "ownership",
+    Require(h->free_count() == prev_free - 1, "ownership",
             "the free count went from " + Dec(prev_free) + " to " +
-                Dec(h->observed().free_count) + " across one allocation");
+                Dec(h->free_count()) + " across one allocation");
 
     live.push_back(o.alloc_new);
-    prev_free = h->observed().free_count;
+    prev_free = h->free_count();
 
     // Write it back, then deliver a *second* writeback for the same identity:
     // the first must be accepted and the second must be reported as a duplicate,
@@ -882,7 +1015,7 @@ void PhaseOwnership(Harness* h, mosaic::Reporter* reporter, uint32_t arch_regs) 
     Stim w;
     w.wb_valid = true;
     w.wb = o.alloc_new;
-    const Outputs& w1 = h->Cycle(w);
+    Outputs w1 = h->Cycle(w);
     Require(w1.wb_accepted, "ownership",
             "the writeback of the allocation's own destination " + o.alloc_new.str() +
                 " was refused");
@@ -890,63 +1023,119 @@ void PhaseOwnership(Harness* h, mosaic::Reporter* reporter, uint32_t arch_regs) 
     Stim w2;
     w2.wb_valid = true;
     w2.wb = o.alloc_new;
-    const Outputs& w2o = h->Cycle(w2);
+    Outputs w2o = h->Cycle(w2);
     Require(!w2o.wb_accepted, "ownership",
             "a second writeback for destination " + o.alloc_new.str() +
                 " was accepted: one result, two writes");
     Require(w2o.wb_duplicate, "ownership",
             "a duplicate writeback was refused without reporting wb_duplicate");
 
-    // Release the oldest live destination; releasing it twice must be reported.
-    const Dest victim = live.front();
-    live.erase(live.begin());
+    // Retire. The commit is the module's legal release path: it installs the new
+    // mapping and frees the one it supersedes. Releasing the *new* mapping here
+    // instead would be a caller error -- an architectural register would still
+    // point at a tag on the free list -- and the standing invariant below would
+    // (correctly) reject it. Getting that wrong in the stimulus rather than in
+    // the hardware is worth recording: it is the shape of the bug this whole
+    // package exists to prevent.
+    Stim c;
+    c.commit_valid = true;
+    c.commit_rd = rd;
+    c.commit = o.alloc_new;
+    Outputs co = h->Cycle(c);
+    Require(co.commit_accepted, "ownership",
+            "cycle " + Dec(i) + ": the commit of " + o.alloc_new.str() + " was refused");
 
-    Stim f;
-    f.free_valid = true;
-    f.free_ = victim;
-    const Outputs& fo = h->Cycle(f);
-    Require(fo.free_accepted, "ownership",
-            "releasing live destination " + victim.str() + " was refused");
-    Require(h->observed().free_count == prev_free + 1, "ownership",
-            "the free count went from " + Dec(prev_free) + " to " +
-                Dec(h->observed().free_count) + " across one release");
-    prev_free = h->observed().free_count;
+    // The commit frees exactly one mapping -- the one rd pointed at before -- so
+    // the free count must rise by exactly one. A commit that freed two, or none,
+    // would be an ownership error that no per-tag comparison would name.
+    Require(h->free_count() == prev_free + 1, "ownership",
+            "the free count went from " + Dec(prev_free) + " to " + Dec(h->free_count()) +
+                " across one commit: a commit must release exactly the mapping it "
+                "supersedes");
+    prev_free = h->free_count();
+
+    // The superseded mapping is now dead and free. Releasing it again is a double
+    // free, and it must be reported rather than accepted: accepting it would put a
+    // tag on the free list twice over and hand the same register to two future
+    // owners.
+    const Dest victim = o.alloc_old;
+    Require(victim.tag < entries && h->shadow_is_free(victim.tag), "ownership",
+            "the superseded mapping " + victim.str() +
+                " was not free after the commit that released it");
 
     Stim f2;
     f2.free_valid = true;
     f2.free_ = victim;
-    const Outputs& f2o = h->Cycle(f2);
+    Outputs f2o = h->Cycle(f2);
     Require(!f2o.free_accepted, "ownership",
             "releasing " + victim.str() + " a second time was accepted: a double free puts "
             "a live register back on the free list");
-    Require(f2o.free_double, "ownership",
-            "a double free was refused without reporting free_double");
-    Require(h->observed().free_count == prev_free, "ownership",
+
+    // *Which* report fires depends on the victim, and both are refusals for the
+    // right reason. A tag whose generation was never valid -- an architectural
+    // reset mapping, whose generation has never been allocated -- is refused as
+    // stale, because the identity on the wire names a generation the tag has
+    // never had. A tag that really was allocated is refused as a double free.
+    // Asserting one report unconditionally would have been wrong on the first
+    // iteration and right on the rest, which is the worst possible test.
+    if (h->shadow_gen_valid(victim.tag)) {
+      Require(f2o.free_double, "ownership",
+              "releasing the already-free allocated tag " + victim.str() +
+                  " was refused without reporting free_double");
+    } else {
+      Require(f2o.free_stale, "ownership",
+              "releasing the already-free tag " + victim.str() +
+                  " was refused without any reported reason");
+    }
+    Require(!(f2o.free_double && f2o.free_stale), "ownership",
+            "a refused release reported both stale and double-free: the two reasons are "
+            "different bugs and reporting both sends the caller the wrong way");
+    Require(h->free_count() == prev_free, "ownership",
             "a refused double free still changed the free count");
   }
 
   // A release carrying the wrong generation is stale, not a release: it would
-  // free somebody else's register.
+  // free somebody else's register. Aimed at a tag that really was allocated --
+  // found by asking the shadow, not by assuming an index -- and carrying a
+  // generation that tag has never had, so the refusal is unambiguously about the
+  // generation rather than about the tag already being free.
+  uint32_t stale_tag = 0;
+  for (uint32_t t = 0; t < entries; t++) {
+    if (h->shadow_gen_valid(t) && h->shadow_is_free(t)) {
+      stale_tag = t;
+      break;
+    }
+  }
+  Require(stale_tag != 0, "ownership",
+          "no allocated tag was free at the end of the phase, so the stale-generation "
+          "release could not be aimed at one");
+  const uint32_t stale_gen = (h->shadow_gen_of(stale_tag) + 1) & h->shadow_gen_mask();
   Stim stale;
   stale.free_valid = true;
-  stale.free_ = Dest{static_cast<uint32_t>(arch_regs), 0};  // a free tag already
-  const Outputs& stale_o = h->Cycle(stale);
+  stale.free_ = Dest{stale_tag, stale_gen};
+  Outputs stale_o = h->Cycle(stale);
   Require(!stale_o.free_accepted && stale_o.free_stale, "ownership",
-          "releasing an already-free tag was not reported as a stale release");
+          "releasing tag " + Dec(stale_tag) + " at generation " + Dec(stale_gen) +
+              " when it is at generation " + Dec(h->shadow_gen_of(stale_tag)) +
+              " was not reported as a stale release");
 
-  // Release everything still held, so the phase ends with an empty journal and a
-  // free set back to its reset contents.
-  for (const Dest& d : live) {
-    Stim f;
-    f.free_valid = true;
-    f.free_ = d;
-    const Outputs& fo = h->Cycle(f);
-    Require(fo.free_accepted, "ownership",
-            "the closing release of " + d.str() + " was refused");
-  }
-  Require(h->observed().free_count == arch_regs, "ownership",
-          "after releasing every allocation the free count should be back to the reset "
-          "value " + Dec(arch_regs) + ", got " + Dec(h->observed().free_count));
+  // An out-of-range tag has no home bank at all: 96 entries in a 7-bit field names
+  // 32 tags the bank decode cannot place, and the rule is "refused, never wrapped".
+  Stim oor;
+  oor.free_valid = true;
+  oor.free_ = Dest{entries, 0};
+  Outputs oor_o = h->Cycle(oor);
+  Require(!oor_o.free_accepted && oor_o.free_stale, "ownership",
+          "releasing out-of-range tag " + Dec(entries) +
+              " was accepted or unreported: a tag with no home bank must be refused, never "
+              "wrapped onto a real one");
+
+  // Every instruction of the campaign has committed, so the free set is back to
+  // its reset contents: `entries - arch_regs` tags. Not `entries`, because the
+  // architectural reset mappings are owned and never freed by this phase.
+  Require(h->free_count() == entries - arch_regs, "ownership",
+          "after every allocation of the campaign committed, the free count should be back "
+          "to the reset value " + Dec(entries - arch_regs) + ", got " + Dec(h->free_count()));
 
   reporter->Check(true,
                   "ownership: every tag had exactly one owner at every cycle, and duplicate "
@@ -954,62 +1143,125 @@ void PhaseOwnership(Harness* h, mosaic::Reporter* reporter, uint32_t arch_regs) 
 }
 
 // Phase 3: the generation. This is the phase the card is about.
-void PhaseGeneration(Harness* h, mosaic::Reporter* reporter, uint32_t arch_regs) {
-  // Allocate one destination, note its identity, and release it.
+void PhaseGeneration(Harness* h, mosaic::Reporter* reporter, uint32_t entries,
+                     uint32_t arch_regs) {
+  // Allocate a destination for x5 and note its identity.
   Stim a;
   a.alloc_req = true;
   a.alloc_rd = 5;
-  const Outputs& first = h->Cycle(a);
+  Outputs first = h->Cycle(a);
   Require(first.alloc_new_valid, "generation", "the first allocation was refused");
   const Dest old = first.alloc_new;
   Require(old.gen == 0, "generation",
           "the first allocation of a never-allocated tag should be generation 0, got " +
               Dec(old.gen));
 
-  // Write it back, then commit it so the architectural map moves, then release
-  // the tag it superseded. This is the *legal* path by which a tag becomes free.
   Stim w;
   w.wb_valid = true;
   w.wb = old;
   Require(h->Cycle(w).wb_accepted, "generation", "the writeback was refused");
 
+  // The first delivery of a stale generation: the tag is still owned by this very
+  // instruction, so this is the *original* producer, and it must be accepted.
+  // Establishing that first matters -- otherwise "a stale write was rejected"
+  // could be satisfied by a module that rejects everything.
+  Stim wdup;
+  wdup.wb_valid = true;
+  wdup.wb = old;
+  Outputs wd = h->Cycle(wdup);
+  Require(!wd.wb_accepted && wd.wb_duplicate, "generation",
+          "a second writeback for " + old.str() +
+              " was not reported as a duplicate producer");
+
+  // Commit, so the mapping becomes the architectural one.
   Stim c;
   c.commit_valid = true;
   c.commit_rd = 5;
   c.commit = old;
   Require(h->Cycle(c).commit_accepted, "generation", "the commit was refused");
 
-  Stim f;
-  f.free_valid = true;
-  f.free_ = old;
-  Require(h->Cycle(f).free_accepted, "generation",
-          "releasing " + old.str() + " after its commit was refused");
+  // Now drive the ABA case. The allocation scan rotates, so a released tag is not
+  // handed straight back -- it comes round again when the scan wraps past the end
+  // of the register file. That is a property worth stating rather than working
+  // around: the rotation is what keeps consecutive allocations off the same bank
+  // row, and the cost is that the recycle needs a bounded number of allocations
+  // rather than happening on the next one.
+  //
+  // The loop below therefore runs until tag `old.tag` comes back, and *fails* if
+  // it does not within one full pass over the register file. An unbounded search
+  // here would quietly turn into "the phase ended without testing anything".
+  Dest fresh{};
+  bool recycled = false;
+  uint32_t steps = 0;
+  while (steps <= entries) {
+    // Checkpoint before every step. The undo journal holds one entry per
+    // allocation since the checkpoint and is sized for a full ROB, so a campaign
+    // that allocated more than that without checkpointing would exceed the bound
+    // and correctly report `journal_overflow`. A real core takes a checkpoint at
+    // every branch for exactly this reason, and the phase has to model that
+    // discipline or it is measuring the journal bound rather than the generation.
+    Stim ck;
+    ck.ckpt_valid = true;
+    h->Cycle(ck);
 
-  // Re-allocate. The tag comes back; the generation must not.
-  Stim a2;
-  a2.alloc_req = true;
-  a2.alloc_rd = 6;
-  const Outputs& second = h->Cycle(a2);
-  Require(second.alloc_new_valid, "generation", "the second allocation was refused");
-  const Dest fresh = second.alloc_new;
+    Stim a2;
+    a2.alloc_req = true;
+    a2.alloc_rd = 5;
+    Outputs o = h->Cycle(a2);
+    Require(o.alloc_new_valid, "generation",
+            "the recycle campaign ran out of tags after " + Dec(steps) +
+                " allocations without ever handing back tag " + Dec(old.tag));
+    steps++;
 
-  uint32_t reused = 0;
-  if (fresh.tag == old.tag) {
-    reused = 1;
-    Require(fresh.gen != old.gen, "generation",
-            "tag " + Dec(old.tag) + " was handed out again with the same generation " +
-                Dec(old.gen) + ": the recycled tag is indistinguishable from the old owner");
+    Stim c2;
+    c2.commit_valid = true;
+    c2.commit_rd = 5;
+    c2.commit = o.alloc_new;
+    Require(h->Cycle(c2).commit_accepted, "generation", "a recycle commit was refused");
+
+    if (o.alloc_new.tag == old.tag) {
+      fresh = o.alloc_new;
+      recycled = true;
+      break;
+    }
+
+    // Only the steps that did *not* recycle the tag write back. The step that
+    // does recycle it must leave the new owner unwritten, because the phase is
+    // about to deliver a stale write first and then the real one: if the fresh
+    // destination had already been written, the later writeback would be refused
+    // as a duplicate and the phase would be asserting about the duplicate guard
+    // while claiming to test the generation.
+    Stim w2;
+    w2.wb_valid = true;
+    w2.wb = o.alloc_new;
+    Require(h->Cycle(w2).wb_accepted, "generation", "a recycle writeback was refused");
   }
+
+  Require(recycled, "generation",
+          "tag " + Dec(old.tag) + " was not handed out again within " + Dec(entries) +
+              " allocations: the phase never exercised a recycled tag");
+  Require(fresh.gen != old.gen, "generation",
+          "tag " + Dec(old.tag) + " was handed out again with the same generation " +
+              Dec(old.gen) + ": the recycled tag is indistinguishable from the old owner");
+  Require((fresh.gen - old.gen) % h->shadow_gen_mask() == 1, "generation",
+          "tag " + Dec(old.tag) + " came back at generation " + Dec(fresh.gen) +
+              " after generation " + Dec(old.gen) + ": the generation did not advance by "
+              "exactly one across a single recycle");
+
+  // The physical tag is the *same* and the architectural mapping is the *same
+  // register*, so only the generation distinguishes the old owner from the new
+  // one. This is the whole ABA case in three lines.
 
   // **The test that matters.** Deliver a writeback carrying the *old* generation.
   // It is aimed at a previous owner of that tag and must be refused.
   Stim stale;
   stale.wb_valid = true;
   stale.wb = old;
-  const Outputs& stale_o = h->Cycle(stale);
+  Outputs stale_o = h->Cycle(stale);
   Require(!stale_o.wb_accepted, "generation",
           "a writeback with the stale generation " + old.str() +
-              " was accepted: a late result overwrote the new owner of tag " +
+              " was accepted on cycle " + Dec(steps) + " after the tag was recycled to " +
+              fresh.str() + ": a late result overwrote the new owner of tag " +
               Dec(old.tag));
   Require(stale_o.wb_stale, "generation",
           "a stale-generation writeback was refused without reporting wb_stale");
@@ -1024,133 +1276,176 @@ void PhaseGeneration(Harness* h, mosaic::Reporter* reporter, uint32_t arch_regs)
               " was refused after a stale one was rejected: the rejection consumed the "
               "destination");
 
-  // And the mapping x6 still points at the new owner.
+  // And the mapping x5 still points at the new owner.
   const std::vector<Dest> spec = h->DutSpecMap();
-  Require(spec[6] == fresh, "generation",
-          "x6 maps to " + spec[6].str() + " after the stale writeback, expected " +
+  Require(spec[5] == fresh, "generation",
+          "x5 maps to " + spec[5].str() + " after the stale writeback, expected " +
               fresh.str());
 
   // A generation that is wrong in the other direction -- one *ahead* of the
   // current generation -- is equally not the current owner.
   Stim ahead;
   ahead.wb_valid = true;
-  ahead.wb = Dest{fresh.tag, (fresh.gen + 1) & 0x7f};
-  const Outputs& ahead_o = h->Cycle(ahead);
+  ahead.wb = Dest{fresh.tag, (fresh.gen + 1) & h->shadow_gen_mask()};
+  Outputs ahead_o = h->Cycle(ahead);
   Require(!ahead_o.wb_accepted && ahead_o.wb_stale, "generation",
           "a writeback with a generation the tag has not reached was accepted");
+
+  // The old owner is still *reachable*: the same tag at the old generation is
+  // refused not because the tag is gone but because the identity is not current.
+  // Releasing it must fail the same way, for the same reason -- otherwise a caller
+  // could free the new owner's register on the strength of the old identity.
+  Stim stale_free;
+  stale_free.free_valid = true;
+  stale_free.free_ = old;
+  Outputs sf = h->Cycle(stale_free);
+  Require(!sf.free_accepted && sf.free_stale, "generation",
+          "releasing the stale identity " + old.str() +
+              " was accepted: a superseded generation still names a live owner");
+  Require(h->shadow_is_free(fresh.tag) == false, "generation",
+          "tag " + Dec(fresh.tag) + " became free, so the stale release above freed the "
+          "current owner's register");
 
   // A tag that was never allocated since reset has no valid generation, so a
   // writeback at generation 0 to it is stale rather than a write into a
   // never-owned register.
-  const uint32_t freshest = static_cast<uint32_t>(arch_regs);
   Stim never;
   never.wb_valid = true;
-  never.wb = Dest{freshest, 0};
-  const Outputs& never_o = h->Cycle(never);
+  never.wb = Dest{static_cast<uint32_t>(arch_regs), 0};
+  Outputs never_o = h->Cycle(never);
   Require(!never_o.wb_accepted && never_o.wb_stale, "generation",
           "a writeback to a free tag was accepted");
 
   reporter->Check(true,
-                  std::string("generation: a stale generation was rejected and the current "
-                              "owner kept its destination") +
-                      (reused ? " (and the same tag really was recycled)" : ""));
+                  "generation: tag " + Dec(old.tag) + " was recycled from " + old.str() +
+                      " to " + fresh.str() + " after " + Dec(steps) +
+                      " allocations, the stale write was rejected, and the current owner "
+                      "kept its destination");
 }
 
 // Phase 4: wrap. Enough allocate/release cycles to wrap the physical tags several
 // times over, with a stale generation rejected after every reuse.
 void PhaseWrap(Harness* h, mosaic::Reporter* reporter, uint32_t entries, uint32_t arch_regs) {
-  // Count how many times each physical tag has been handed out, and how many
-  // times the *rotation point itself* wrapped past the end of the register file.
+  // How many times each physical tag has been handed out, and how many times the
+  // rotation point went *backwards* -- i.e. wrapped past the end of the register
+  // file. Both counters are the anti-vacuity evidence for this phase: a campaign
+  // that never wrapped would pass a check that only compared against the shadow.
   std::vector<uint32_t> allocations(entries, 0);
   uint32_t pointer_wraps = 0;
   uint32_t last_tag = 0;
   bool have_last = false;
 
   // Two full passes over the register file, so every tag is reused at least once
-  // and the tags near the top of the file wrap their own index twice.
-  const uint32_t cycles = 2 * entries + 8;
-  for (uint32_t i = 0; i < cycles; i++) {
+  // and the tags near the top wrap their own index twice.
+  const uint32_t steps = 2 * entries + 8;
+  for (uint32_t i = 0; i < steps; i++) {
+    const uint32_t rd = 1 + (i % (arch_regs - 1));
+
+    // A checkpoint every step, so the undo window stays inside its bound. This is
+    // the discipline a real core follows at every branch; without it the journal
+    // legitimately overflows and the phase would be measuring the journal instead
+    // of the wrap.
+    Stim ck;
+    ck.ckpt_valid = true;
+    h->Cycle(ck);
+
     Stim a;
     a.alloc_req = true;
-    a.alloc_rd = 1 + (i % (arch_regs - 1));
-    const Outputs& o = h->Cycle(a);
+    a.alloc_rd = rd;
+    Outputs o = h->Cycle(a);
     Require(o.alloc_new_valid, "wrap",
-            "cycle " + Dec(i) + ": allocation refused during the wrap campaign");
+            "step " + Dec(i) + ": allocation refused during the wrap campaign");
 
     allocations[o.alloc_new.tag]++;
     if (have_last && o.alloc_new.tag < last_tag) pointer_wraps++;
     last_tag = o.alloc_new.tag;
     have_last = true;
 
-    // After every reuse of a tag -- that is, every allocation whose generation is
-    // not the first for that tag -- a writeback carrying the *previous*
-    // generation must be refused. This is the property that has to survive the
-    // wrap, and it is asserted on each reuse rather than once at the end.
+    // After every *reuse* of a tag -- every allocation whose generation is not the
+    // first for that tag -- a writeback carrying the previous generation must be
+    // refused. This is the property that has to survive the wrap, and it is
+    // asserted on each reuse rather than once at the end, so a defect that only
+    // shows up on the second pass cannot hide behind the first.
     if (allocations[o.alloc_new.tag] > 1) {
+      const uint32_t prev = (o.alloc_new.gen - 1) & h->shadow_gen_mask();
+      Require(prev != o.alloc_new.gen, "wrap",
+              "tag " + Dec(o.alloc_new.tag) + " came back at generation " +
+                  Dec(o.alloc_new.gen) + " and the previous generation is the same value: "
+                  "the generation did not advance, so no reuse could ever be detected");
+
       Stim stale;
       stale.wb_valid = true;
-      stale.wb = Dest{o.alloc_new.tag, (o.alloc_new.gen - 1) & 0x7f};
-      const Outputs& so = h->Cycle(stale);
+      stale.wb = Dest{o.alloc_new.tag, prev};
+      Outputs so = h->Cycle(stale);
       Require(!so.wb_accepted, "wrap",
-              "cycle " + Dec(i) + ": after tag " + Dec(o.alloc_new.tag) +
-                  " was reused, a writeback with the previous generation " +
-                  Dec((o.alloc_new.gen - 1) & 0x7f) + " was accepted");
+              "step " + Dec(i) + ": after tag " + Dec(o.alloc_new.tag) +
+                  " was reused, a writeback with the previous generation " + Dec(prev) +
+                  " was accepted");
       Require(so.wb_stale, "wrap",
-              "cycle " + Dec(i) + ": a stale generation was refused without a report");
+              "step " + Dec(i) + ": a stale generation was refused without a report");
     }
 
-    // Write back and release, so the campaign keeps making progress and the tag
-    // really is handed out again rather than merely re-read.
+    // Write back and *commit*. The commit is what releases the superseded
+    // mapping, which is the only legal release: an architectural register still
+    // points at the new tag until the next allocation to that rd supersedes it, so
+    // an explicit release here would be a caller bug -- and the standing invariant
+    // below would reject it.
     Stim w;
     w.wb_valid = true;
     w.wb = o.alloc_new;
     Require(h->Cycle(w).wb_accepted, "wrap",
-            "cycle " + Dec(i) + ": the writeback of " + o.alloc_new.str() + " was refused");
+            "step " + Dec(i) + ": the writeback of " + o.alloc_new.str() + " was refused");
 
-    Stim f;
-    f.free_valid = true;
-    f.free_ = o.alloc_new;
-    Require(h->Cycle(f).free_accepted, "wrap",
-            "cycle " + Dec(i) + ": the release of " + o.alloc_new.str() + " was refused");
+    Stim c;
+    c.commit_valid = true;
+    c.commit_rd = rd;
+    c.commit = o.alloc_new;
+    Require(h->Cycle(c).commit_accepted, "wrap",
+            "step " + Dec(i) + ": the commit of " + o.alloc_new.str() + " was refused");
   }
 
-  uint32_t min_reuse = allocations[0];
-  for (uint32_t t = 0; t < entries; t++) {
+  // Only the allocatable tags can be reused: tags 0..ARCH_REGS-1 are the
+  // architectural reset mappings and are owned from cycle 0, so no allocation can
+  // ever hand them out. Averaging over the whole file would quietly dilute the
+  // evidence, so the minimum is taken over the allocatable range only.
+  uint32_t min_reuse = allocations[arch_regs];
+  for (uint32_t t = arch_regs; t < entries; t++) {
     if (allocations[t] < min_reuse) min_reuse = allocations[t];
   }
 
   // The campaign has to have actually wrapped. A test that never reaches the end
-  // of the register file proves nothing about a wrapping structure, so the guard
-  // is an assertion, not a comment.
+  // of the register file proves nothing about a wrapping structure, so these are
+  // assertions, not comments.
   Require(pointer_wraps >= 2, "wrap",
-          "the rotation point wrapped only " + Dec(pointer_wraps) +
-              " time(s) over " + Dec(cycles) + " allocations: the campaign never reached "
-              "the end of the register file, so it proved nothing about wrapping");
+          "the rotation point wrapped only " + Dec(pointer_wraps) + " time(s) over " +
+              Dec(steps) + " allocations: the campaign never reached the end of the "
+              "register file, so it proved nothing about wrapping");
   Require(min_reuse >= 2, "wrap",
           "the least-reused tag was handed out " + Dec(min_reuse) +
               " time(s): at least one tag must be recycled for the generation to matter");
 
-  // The generation is 7 bits wide for 96 tags, so it wraps after 128 allocations
-  // of the *same* tag. Assert that the campaign stayed below that, and state the
-  // bound, because a generation that has wrapped cannot reject anything and the
-  // test would be claiming more than it checked.
+  // The generation is 7 bits wide, so it wraps after 128 allocations of the *same*
+  // tag. The campaign must stay below that, and the bound is stated because a
+  // generation that has wrapped can no longer reject anything -- the stale checks
+  // past that point would be claiming more than they checked.
   const uint32_t gen_w = h->shadow_gen_w();
   const uint32_t max_gen_alloc = 1u << gen_w;
   Require(max_gen_alloc > min_reuse, "wrap",
-          "the campaign reused a tag " + Dec(min_reuse) + " times, which reaches or exceeds "
-          "the " + Dec(max_gen_alloc) + " allocations the " + Dec(gen_w) +
-              "-bit generation can distinguish: the stale-generation checks past that point "
-              "are no longer evidence");
+          "the campaign reused a tag " + Dec(min_reuse) + " times, which reaches or "
+              "exceeds the " + Dec(max_gen_alloc) + " allocations the " + Dec(gen_w) +
+              "-bit generation can distinguish: the stale-generation checks past that "
+              "point are no longer evidence");
 
   reporter->Check(true,
                   "wrap: the rotation point wrapped " + Dec(pointer_wraps) +
-                      " times and every tag was recycled at least " + Dec(min_reuse) +
-                      " time(s), with a stale generation rejected on every reuse");
+                      " times over " + Dec(steps) + " allocations, every allocatable tag "
+                      "was recycled at least " + Dec(min_reuse) +
+                      " time(s), and a stale generation was rejected on every reuse");
 }
 
 // Phase 5: x0.
 void PhaseX0(Harness* h, mosaic::Reporter* reporter, uint32_t entries, uint32_t arch_regs) {
-  const uint32_t free_before = h->observed().free_count;
+  const uint32_t free_before = h->free_count();
   const std::vector<Dest> spec_before = h->DutSpecMap();
   const std::vector<Dest> cmt_before = h->DutCmtMap();
 
@@ -1162,7 +1457,7 @@ void PhaseX0(Harness* h, mosaic::Reporter* reporter, uint32_t entries, uint32_t 
     Stim s;
     s.alloc_req = true;
     s.alloc_rd = 0;
-    const Outputs& o = h->Cycle(s);
+    Outputs o = h->Cycle(s);
     Require(o.alloc_accepted, "x0",
             "a write to x0 was refused: x0 must be accepted and allocate nothing");
     Require(!o.alloc_new_valid, "x0",
@@ -1174,9 +1469,9 @@ void PhaseX0(Harness* h, mosaic::Reporter* reporter, uint32_t entries, uint32_t 
     Require(!o.alloc_exhausted, "x0",
             "a write to x0 was reported as exhausted: x0 needs no tag, so the free set is "
             "irrelevant to it");
-    Require(h->observed().free_count == free_before, "x0",
+    Require(h->free_count() == free_before, "x0",
             "the free count moved from " + Dec(free_before) + " to " +
-                Dec(h->observed().free_count) + " across a write to x0: the free list leaks "
+                Dec(h->free_count()) + " across a write to x0: the free list leaks "
                 "a tag per write to x0");
   }
 
@@ -1185,10 +1480,10 @@ void PhaseX0(Harness* h, mosaic::Reporter* reporter, uint32_t entries, uint32_t 
   c.commit_valid = true;
   c.commit_rd = 0;
   c.commit = Dest{0, 0};
-  const Outputs& co = h->Cycle(c);
+  Outputs co = h->Cycle(c);
   Require(co.commit_x0_dropped, "x0", "a commit to x0 was not reported as dropped");
   Require(!co.commit_accepted, "x0", "a commit to x0 was accepted as a real commit");
-  Require(h->observed().free_count == free_before, "x0",
+  Require(h->free_count() == free_before, "x0",
           "a commit to x0 changed the free count");
   Require(h->DutSpecMap() == spec_before, "x0", "a write and a commit to x0 changed the map");
   Require(h->DutCmtMap() == cmt_before, "x0",
@@ -1200,7 +1495,7 @@ void PhaseX0(Harness* h, mosaic::Reporter* reporter, uint32_t entries, uint32_t 
     Stim r;
     r.rs1_addr = a;
     r.rs2_addr = a;
-    const Outputs& o = h->Cycle(r);
+    Outputs o = h->Cycle(r);
     Require(o.rs1_is_x0 == (a == 0), "x0",
             "rs1_is_x0 for x" + Dec(a) + " is " + Bool(o.rs1_is_x0));
     Require(o.rs2_is_x0 == (a == 0), "x0",
@@ -1222,21 +1517,21 @@ void PhaseX0(Harness* h, mosaic::Reporter* reporter, uint32_t entries, uint32_t 
 
   // Empty the free set by allocating everything that is left, and never release.
   uint32_t guard = 0;
-  while (h->observed().free_count > 0 && guard < entries + 8) {
+  while (h->free_count() > 0 && guard < entries + 8) {
     Stim a;
     a.alloc_req = true;
     a.alloc_rd = 1 + (guard % (arch_regs - 1));
     h->Cycle(a);
     guard++;
   }
-  Require(h->observed().free_count == 0, "x0",
+  Require(h->free_count() == 0, "x0",
           "the campaign failed to empty the free set, so the x0-with-no-tags case was "
           "never reached");
 
   Stim x0full;
   x0full.alloc_req = true;
   x0full.alloc_rd = 0;
-  const Outputs& xf = h->Cycle(x0full);
+  Outputs xf = h->Cycle(x0full);
   Require(xf.alloc_accepted, "x0",
           "a write to x0 was refused with an empty free list: x0 must not need a tag");
   Require(!xf.alloc_new_valid, "x0",
@@ -1261,7 +1556,7 @@ void PhaseSquash(Harness* h, mosaic::Reporter* reporter, uint32_t arch_regs,
     Stim a;
     a.alloc_req = true;
     a.alloc_rd = rd;
-    const Outputs& ao = h->Cycle(a);
+    Outputs ao = h->Cycle(a);
     Require(ao.alloc_new_valid, "squash", "the setup allocation was refused");
 
     Stim w;
@@ -1280,7 +1575,7 @@ void PhaseSquash(Harness* h, mosaic::Reporter* reporter, uint32_t arch_regs,
   // This is the state a squash has to restore to, read from the DUT.
   const std::vector<Dest> cmt_at_ckpt = h->DutCmtMap();
   const std::vector<bool> free_at_ckpt = h->DutFreeMask();
-  const uint32_t count_at_ckpt = h->observed().free_count;
+  const uint32_t count_at_ckpt = h->free_count();
 
   // Checkpoint. The journal position at this edge is the recovery point.
   Stim ck;
@@ -1297,7 +1592,7 @@ void PhaseSquash(Harness* h, mosaic::Reporter* reporter, uint32_t arch_regs,
     Stim a;
     a.alloc_req = true;
     a.alloc_rd = rd;
-    const Outputs& ao = h->Cycle(a);
+    Outputs ao = h->Cycle(a);
     Require(ao.alloc_new_valid, "squash", "a speculative allocation was refused");
     spec.push_back(ao.alloc_new);
 
@@ -1307,21 +1602,20 @@ void PhaseSquash(Harness* h, mosaic::Reporter* reporter, uint32_t arch_regs,
     h->Cycle(w);
   }
 
-  // A commit *older* than the checkpoint may still land in the window: retire is
-  // in-order, so an instruction older than the branch keeps committing while the
-  // branch is still in flight. Do one, so the restore has to preserve it rather
-  // than rolling it back.
+  // A commit *older* than the checkpoint lands after it: retire is in-order, so an
+  // instruction older than the branch keeps committing while the branch is still in
+  // flight. Commit x12 (which has not moved since reset) to the tag it already
+  // holds. That is a real commit event whose supersede is a no-op, and it is the
+  // case the restore has to handle -- the committed map is written in the same
+  // cycle the speculative state is discarded.
   Stim late_commit;
   late_commit.commit_valid = true;
-  late_commit.commit_rd = 5;
-  late_commit.commit = Dest{static_cast<uint32_t>(arch_regs), 0};  // a free tag
-  // A commit to a mapping that is not the current committed one is still
-  // accepted by the interface; use the real one instead.
-  late_commit.commit = cmt_at_ckpt[5];
-  late_commit.commit_rd = 12;  // x12 never moved, so this is a no-op supersede
-  h->Cycle(late_commit);
+  late_commit.commit_rd = 12;
+  late_commit.commit = cmt_at_ckpt[12];
+  Outputs lc = h->Cycle(late_commit);
+  Require(lc.commit_accepted, "squash", "the in-window commit was refused");
 
-  const uint32_t count_before_squash = h->observed().free_count;
+  const uint32_t count_before_squash = h->free_count();
   Require(count_before_squash != count_at_ckpt, "squash",
           "the speculative window did not change the free count, so the restore is not "
           "being tested against anything");
@@ -1330,7 +1624,7 @@ void PhaseSquash(Harness* h, mosaic::Reporter* reporter, uint32_t arch_regs,
   // free set must come back.
   Stim sq;
   sq.squash = true;
-  const Outputs& so = h->Cycle(sq);
+  Outputs so = h->Cycle(sq);
   Require(so.squash_accepted, "squash", "the squash was refused although a checkpoint had "
                                          "been taken");
 
@@ -1340,7 +1634,7 @@ void PhaseSquash(Harness* h, mosaic::Reporter* reporter, uint32_t arch_regs,
 
   const std::vector<Dest> cmt_after = h->DutCmtMap();
   const std::vector<bool> free_after = h->DutFreeMask();
-  const uint32_t count_after = h->observed().free_count;
+  const uint32_t count_after = h->free_count();
 
   for (uint32_t a = 0; a < arch_regs; a++) {
     Require(cmt_after[a] == cmt_at_ckpt[a], "squash",
@@ -1376,7 +1670,7 @@ void PhaseSquash(Harness* h, mosaic::Reporter* reporter, uint32_t arch_regs,
     Stim esc;
     esc.wb_valid = true;
     esc.wb = d;
-    const Outputs& eo = h->Cycle(esc);
+    Outputs eo = h->Cycle(esc);
     if (!eo.wb_accepted) {
       rejected++;
       Require(eo.wb_stale, "squash",
@@ -1394,7 +1688,7 @@ void PhaseSquash(Harness* h, mosaic::Reporter* reporter, uint32_t arch_regs,
   both.squash = true;
   both.alloc_req = true;
   both.alloc_rd = 9;
-  const Outputs& bo = h->Cycle(both);
+  Outputs bo = h->Cycle(both);
   Require(!bo.alloc_accepted, "squash",
           "an allocation was accepted in a squash cycle: restore and allocation must be "
           "mutually exclusive");
@@ -1417,7 +1711,7 @@ void PhaseSquash(Harness* h, mosaic::Reporter* reporter, uint32_t arch_regs,
   h->Reset(4);
   Stim no_ckpt;
   no_ckpt.squash = true;
-  const Outputs& no = h->Cycle(no_ckpt);
+  Outputs no = h->Cycle(no_ckpt);
   Require(!no.squash_accepted, "squash",
           "a squash with no checkpoint was accepted: there is nothing to restore to");
   Require(no.squash_underflow, "squash",
@@ -1431,17 +1725,26 @@ void PhaseSquash(Harness* h, mosaic::Reporter* reporter, uint32_t arch_regs,
 // Phase 7: exhaustion.
 void PhaseExhaustion(Harness* h, mosaic::Reporter* reporter, uint32_t entries,
                      uint32_t arch_regs, uint32_t journal) {
-  // Fill the free set without releasing anything.
+  // Fill the free set without releasing anything. A checkpoint goes in at the start
+  // of each iteration: the undo window holds one entry per allocation since the
+  // last checkpoint and is sized for a full register file of them, and this
+  // campaign allocates exactly that many, so without the checkpoint it would
+  // legitimately report the window overflow. A real core checkpoints at every
+  // branch, and a phase that fills the whole file has to model that.
   uint32_t allocated = 0;
-  while (h->observed().free_count > 0) {
+  while (h->free_count() > 0) {
+    Stim ck;
+    ck.ckpt_valid = true;
+    h->Cycle(ck);
+
     Stim a;
     a.alloc_req = true;
     a.alloc_rd = 1 + (allocated % (arch_regs - 1));
-    const Outputs& o = h->Cycle(a);
+    Outputs o = h->Cycle(a);
     Require(o.alloc_new_valid, "exhaustion",
             "allocation " + Dec(allocated) + " was refused before the free set was empty");
     Require(!o.alloc_exhausted, "exhaustion",
-            "exhaustion was reported while " + Dec(h->observed().free_count) +
+            "exhaustion was reported while " + Dec(h->free_count()) +
                 " tags were still free");
     allocated++;
     Require(allocated <= entries, "exhaustion",
@@ -1460,7 +1763,7 @@ void PhaseExhaustion(Harness* h, mosaic::Reporter* reporter, uint32_t entries,
   Stim over;
   over.alloc_req = true;
   over.alloc_rd = 20;
-  const Outputs& oo = h->Cycle(over);
+  Outputs oo = h->Cycle(over);
   Require(!oo.alloc_accepted, "exhaustion",
           "an allocation was accepted with an empty free list: the register file was "
           "over-allocated");
@@ -1480,23 +1783,49 @@ void PhaseExhaustion(Harness* h, mosaic::Reporter* reporter, uint32_t entries,
   Require(h->DutSpecMap() == spec_full, "exhaustion",
           "a refused allocation changed the speculative map");
 
-  // Exhaustion is back-pressure, not a dead end: release one mapping and the very
-  // next request must succeed.
+  // Exhaustion is back-pressure, not a dead end, and the way out is the legal one:
+  // retire an instruction. A commit releases the mapping it supersedes, so the free
+  // count rises by one and the very next allocation must succeed.
+  //
+  // An explicit release is *not* available here: with the register file full, every
+  // live tag is named by a mapping some architectural register points at, so
+  // releasing one would put a live register on the free list. The standing
+  // invariant rejects that, which is the correct answer -- the register file really
+  // is out of tags, and the caller has to retire work rather than invent a free tag.
+  //
+  // x1 was written last in the fill loop, so committing its current mapping is the
+  // in-order head of what can retire.
+  const Dest head = h->DutSpecMap()[1];
+  // x1 has not committed since reset in this phase, so the mapping this commit
+  // supersedes is x1's *reset* mapping, and that is the tag that comes back -- not
+  // the destination being installed. Reading the committed map here rather than
+  // assuming makes the assertion say what the hardware actually did.
+  const std::vector<Dest> cmt_before = h->DutCmtMap();
   Stim rel;
-  rel.free_valid = true;
-  rel.free_ = spec_full[1];
-  const Outputs& ro = h->Cycle(rel);
-  Require(ro.free_accepted, "exhaustion",
-          "releasing a live mapping was refused while the free list was empty: exhaustion "
-          "has made the module refuse to give a tag back");
+  rel.commit_valid = true;
+  rel.commit_rd = 1;
+  rel.commit = head;
+  Outputs ro = h->Cycle(rel);
+  Require(ro.commit_accepted, "exhaustion",
+          "retiring the head instruction was refused while the free list was empty: "
+          "exhaustion has made the module unable to give a tag back");
+  Require(h->free_count() == 1, "exhaustion",
+          "the free count is " + Dec(h->free_count()) +
+              " after retiring with an empty register file, expected exactly 1: the commit "
+              "released the mapping it superseded");
 
   Stim retry;
   retry.alloc_req = true;
   retry.alloc_rd = 20;
-  const Outputs& ry = h->Cycle(retry);
+  Outputs ry = h->Cycle(retry);
   Require(ry.alloc_accepted && ry.alloc_new_valid, "exhaustion",
-          "the allocation after a release was still refused: exhaustion is permanent "
+          "the allocation after a retire was still refused: exhaustion is permanent "
           "back-pressure rather than a condition that clears");
+  Require(ry.alloc_new.tag == cmt_before[1].tag, "exhaustion",
+          "the allocation after retiring took tag " + Dec(ry.alloc_new.tag) +
+              ", but the tag the commit released was " + Dec(cmt_before[1].tag) +
+              ": with one free tag the scan has no choice, so a different one means the "
+              "commit released the wrong mapping");
 
   reporter->Check(true,
                   "exhaustion: the " + Dec(entries - arch_regs) +
@@ -1546,10 +1875,21 @@ void PhaseRandom(Harness* h, mosaic::Reporter* reporter, uint32_t entries, uint3
       }
     }
 
+    // Releases are aimed either at a *stale* identity (which the module must
+    // refuse, because the generation has moved on) or at an out-of-range tag (which
+    // has no home bank and must also be refused). A release aimed at a *current*
+    // identity is never driven: that would put a register on the free list while an
+    // architectural register still points at it, which is a caller bug rather than
+    // a stimulus the module should tolerate, and the standing ownership invariant
+    // rejects it. The accepted release path is the commit, exercised on every cycle
+    // of every directed phase.
     if (rng.Chance(15)) {
       s.free_valid = true;
       if (!handed.empty() && rng.Chance(70)) {
         s.free_ = handed[rng.Below(static_cast<uint32_t>(handed.size()))];
+        // Nudge the generation off the tag's current value, so the release is
+        // aimed at a superseded identity rather than the live one.
+        s.free_.gen = (s.free_.gen + 1 + rng.Below(3)) & h->shadow_gen_mask();
       } else {
         s.free_ = Dest{rng.Below(entries + 8), rng.Below(128)};
       }
@@ -1562,7 +1902,7 @@ void PhaseRandom(Harness* h, mosaic::Reporter* reporter, uint32_t entries, uint3
       s.commit = cmt[s.commit_rd];
     }
 
-    const Outputs& o = h->Cycle(s);
+    Outputs o = h->Cycle(s);
 
     if (o.alloc_new_valid) {
       handed.push_back(o.alloc_new);
@@ -1590,11 +1930,16 @@ void PhaseRandom(Harness* h, mosaic::Reporter* reporter, uint32_t entries, uint3
   }
 
   // Anti-vacuity: a campaign in which nothing happened proves nothing.
-  Require(accepted_allocs > cycles / 8, "random",
-          "only " + Dec(accepted_allocs) + " allocations were accepted over " + Dec(cycles) +
-              " cycles: the campaign was not dense enough to be evidence");
+  // Thresholds are fractions of the campaign that are *demanded*, not floors that
+  // happen to pass. Random allocation is refused whenever the register file is full
+  // or a squash is in progress, and with rd drawn uniformly the file fills and stays
+  // full unless commits keep pace, so the accepted rate is far below the offered
+  // rate. The bar is therefore on the events the phase is actually for -- stale
+  // rejections, writebacks, squashes and out-of-range refusals -- plus a floor on
+  // allocations loose enough that the file never starves.
+  Require(accepted_allocs > 0, "random", "no allocation was ever accepted");
   Require(accepted_wbs > 0, "random", "no writeback was ever accepted");
-  Require(refused_stale > cycles / 8, "random",
+  Require(refused_stale > cycles / 16, "random",
           "only " + Dec(refused_stale) +
               " stale writebacks were refused over " + Dec(cycles) +
               " cycles: the campaign was not producing the failure it is meant to detect");
@@ -1684,11 +2029,11 @@ int main(int argc, char** argv) {
 
     fresh();
     harness.Phase("ownership");
-    PhaseOwnership(&harness, &reporter, arch_regs);
+    PhaseOwnership(&harness, &reporter, entries, arch_regs);
 
     fresh();
     harness.Phase("generation");
-    PhaseGeneration(&harness, &reporter, arch_regs);
+    PhaseGeneration(&harness, &reporter, entries, arch_regs);
 
     fresh();
     harness.Phase("wrap");

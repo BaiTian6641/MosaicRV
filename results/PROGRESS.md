@@ -666,3 +666,52 @@ the target is the sequential `pc+4`, so "no target" and "my target is the
 fall-through address" would otherwise be the same 64-bit value.
 
 Stage 1 is open. Stage 0 remains 11 of 239 work packages.
+
+---
+
+## 2026-10-01 — I-016 delivered; I-022 honestly incomplete
+
+**I-016 (ROB) delivered and independently verified.** Case PASS with 1,235,977
+shadow comparisons, 78,309 of them sweeping every slot. I rebuilt and ran all six
+mutants myself; each fails with exit 1: `COMPLETE_ON_ANY_BIT`, `NO_GEN_CHECK`,
+`NO_FULL_CHECK`, `NO_DUP_REPORT`, `RETIRE_OVER_EXCEPTION`, `FLUSH_CLEARS_COMMITTED`.
+
+The property that makes this module hard is handled as the card demands: a macro
+is complete when its `done_mask` equals its expected mask — never when a count or
+an index says so. The `COMPLETE_ON_ANY_BIT` mutant reproduces precisely the failure
+the card names, a three-uop macro completing on its last-numbered uop alone.
+
+**Wrap is observed rather than assumed.** The test computes the exact allocation
+count needed for the pointer to *write* a vacated slot — the +1 matters, and the
+first draft omitted it, so the phase correctly failed with "the wrap did not
+happen" rather than passing on a wrap that never occurred. It then fires the
+victim's late completion at the live recycled slot and requires `stale`.
+
+Three of the agent's own testbench defects and **one real RTL defect** came out of
+this: `squashed_total + occ_cnt` silently truncated for any occupancy width other
+than 7, found only because the test elaborated a deliberately non-power-of-two
+geometry. That is the value of parameterising a test rather than tuning it to the
+default.
+
+**I-022 (issue queue) is NOT complete and is not recorded as such.** The agent
+reported INCOMPLETE with a specific list rather than claiming success, and I
+verified the claim: case FAIL, 23,323,747 of 59,382,130 checks failing, lint clean.
+It found and fixed one real bug — `IsOlder` was inverted, so an entry one step
+*younger* read as the older one, caught immediately by the independent absolute-age
+shadow. Six mutant `ifdef` blocks exist but none has been run, and running them
+against a failing base would prove nothing, so no mutant result is claimed.
+
+That reasoning has been vindicated twice in this project where mutants "passed"
+because their `` `ifdef `` block did not exist.
+
+The failures concentrate on `o_dst_conflict`. My hypothesis, which the agent should
+check before assuming its phase script is wrong: that detector answers "will two
+live entries write the same register?", and a shadow that counts *every* entry
+carrying a destination tag will disagree with hardware that counts only entries
+which will actually write — loads that trap, or destinations that are x0. The check
+is phrased "matches the shadow's duplicate-destination search", so one of the two is
+wrong, and the DUT is not privileged by default.
+
+Handed back with that observation and an instruction to locate that single failure
+before re-deriving anything else. 23M failures is one bad check counted on every
+subsequent cycle, not 23M independent defects.

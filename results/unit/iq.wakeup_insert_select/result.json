@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "case": "iq.wakeup_insert_select",
+  "verdict": "FAIL",
+  "detail": "23323747 failed of 59382130 checks over 199800 cycles",
+  "seed": 1,
+  "max_cycles": 200000,
+  "checks": 59382130,
+  "failures": 23323747,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-01T07:16:06Z",
+  "first_mismatch": "",
+  "failed_checks": ["same-cycle: the entry left after being accepted", "c0: o_dst_conflict matches the shadow's duplicate-destination search", "c1: o_dst_conflict matches the shadow's duplicate-destination search", "c0: o_dst_conflict matches the shadow's duplicate-destination search", "c1: o_dst_conflict matches the shadow's duplicate-destination search", "c0: o_dst_conflict matches the shadow's duplicate-destination search", "c1: o_dst_conflict matches the shadow's duplicate-destination search", "c0: o_dst_conflict matches the shadow's duplicate-destination search", "c1: o_dst_conflict matches the shadow's duplicate-destination search", "c0: o_dst_conflict matches the shadow's duplicate-destination search", "c1: o_dst_conflict matches the shadow's duplicate-destination search", "c0: o_dst_conflict matches the shadow's duplicate-destination search", "c1: o_dst_conflict matches the shadow's duplicate-destination search", "c0: o_dst_conflict matches the shadow's duplicate-destination search", "c1: o_dst_conflict matches the shadow's duplicate-destination search", "c0: o_dst_conflict matches the shadow's duplicate-destination search", "c1: o_dst_conflict matches the shadow's duplicate-destination search", "c0: o_dst_conflict matches the shadow's duplicate-destination search", "c1: o_dst_conflict matches the shadow's duplicate-destination search", "c0: granted uop identity", "c0: granted immediate", "c0: granted operand b", "c0: granted dst tag", "c0: grant_index names the slot presented", "c1: granted uop identity", "c1: granted immediate", "c1: granted operand b", "c1: granted dst tag", "c1: grant_index names the slot presented", "c0: alloc_index is the first free slot from the pointer", "c0: the valid vector is exactly the shadow's live slots", "c0: o_age_ctr is the shadow's absolute counter reduced modulo the age width"]
+}

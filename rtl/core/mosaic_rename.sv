@@ -376,11 +376,14 @@ module mosaic_rename (
   logic [REN_TAG_W-1:0]  j_tag [REN_ROB];
   logic                  j_prev_valid [REN_ROB];
 
-  // Control state: the rotation point of the allocation scan, the journal
-  // length, the checkpoint, and the two conditions the journal can report.
+  // Control state: the rotation point of the allocation scan, the length of the
+  // undo window, whether any checkpoint has ever been taken, and the report that
+  // the window overflowed. There is no checkpoint *position* to save: a
+  // checkpoint empties the window rather than marking a point inside it, which is
+  // what makes the window's bound equal to "allocations since the last
+  // checkpoint" -- the quantity the ROB size justifies.
   logic [REN_TAG_W-1:0]  alloc_ptr;
   logic [REN_JLEN_W-1:0] j_len;
-  logic [REN_JLEN_W-1:0] j_ckpt;
   logic                  ckpt_seen;
   logic                  j_overflow;
 
@@ -485,7 +488,12 @@ module mosaic_rename (
   assign alloc_exhausted = 1'b0;
   assign alloc_accepted  = alloc_req && !squash;
 `else
-  assign alloc_exhausted = alloc_wants_tag && !has_free;
+  // The two refusal reasons are mutually exclusive, and they have to be. A squash
+  // is going to discard this instruction regardless of whether a tag was available,
+  // so reporting exhaustion as well would leave the caller unable to tell "retry
+  // after the squash" from "retry when a tag frees" -- and the two need opposite
+  // behaviour from everything upstream. A squash wins.
+  assign alloc_exhausted = alloc_wants_tag && !has_free && !squash;
   assign alloc_accepted  = alloc_req && !squash && (has_free || (alloc_rd == 5'd0));
 `endif
 
@@ -547,16 +555,6 @@ module mosaic_rename (
   // narrower than the length, which also has to be able to say "full".
   localparam int unsigned REN_JIDX_W = (REN_ROB <= 1) ? 1 : $clog2(REN_ROB);
 
-  // The journal slot the k-th undo step touches, counting from the oldest entry
-  // inside the checkpoint window. Iterating *oldest first* matters: the
-  // generation undo is a decrement, so the newest entry has to be applied last
-  // for a tag that was allocated, freed and re-allocated inside the window to
-  // land back on the generation the checkpoint saw. The free-set update is
-  // order-independent, so the same order serves both.
-  function automatic logic [REN_JIDX_W-1:0] undo_slot(input logic [REN_JLEN_W-1:0] step);
-    return REN_JIDX_W'(j_ckpt + step);
-  endfunction
-
   assign free_in_range = (free_tag < REN_TAG_W'(REN_ENTRIES));
 
 `ifdef MOSAIC_RENAME_MUTANT_NO_GEN_CHECK
@@ -602,8 +600,8 @@ module mosaic_rename (
   logic [REN_JLEN_W-1:0] undo_n;
 
   always_comb begin
-    if (squash_accepted && (j_len > j_ckpt)) begin
-      undo_n = j_len - j_ckpt;
+    if (squash_accepted) begin
+      undo_n = j_len;
     end else begin
       undo_n = {REN_JLEN_W{1'b0}};
     end
@@ -687,12 +685,12 @@ module mosaic_rename (
 `endif
     for (int unsigned k = 0; k < REN_ROB; k++) begin
       if (REN_JLEN_W'(k) < undo_apply) begin
-        free_q[j_tag[undo_slot(REN_JLEN_W'(k))]] = 1'b1;
-        gen_q[j_tag[undo_slot(REN_JLEN_W'(k))]]  =
-            j_prev_valid[undo_slot(REN_JLEN_W'(k))]
-              ? (gen[j_tag[undo_slot(REN_JLEN_W'(k))]] - REN_GEN_W'(1))
+        free_q[j_tag[REN_JIDX_W'(k)]] = 1'b1;
+        gen_q[j_tag[REN_JIDX_W'(k)]]  =
+            j_prev_valid[REN_JIDX_W'(k)]
+              ? (gen[j_tag[REN_JIDX_W'(k)]] - REN_GEN_W'(1))
               : {REN_GEN_W{1'b0}};
-        genv_q[j_tag[undo_slot(REN_JLEN_W'(k))]] = j_prev_valid[undo_slot(REN_JLEN_W'(k))];
+        genv_q[j_tag[REN_JIDX_W'(k)]] = j_prev_valid[REN_JIDX_W'(k)];
       end
     end
 
@@ -744,10 +742,6 @@ module mosaic_rename (
     j_len_q      = j_len;
     j_overflow_q = j_overflow;
 
-    // j_ckpt and ckpt_seen are pure register writes in the sequential block,
-    // so they are deliberately absent here: a next-state vector *and* a
-    // register write for the same signal is two drivers.
-
     if (alloc_new_valid) begin
       if (j_len < REN_JLEN_W'(REN_ROB)) begin
         j_len_q = j_len + REN_JLEN_W'(1);
@@ -759,8 +753,18 @@ module mosaic_rename (
       end
     end
 
+    // A new checkpoint starts a new undo window. Entries older than it can never
+    // be undone by a squash to that checkpoint, so keeping them would fill the
+    // journal from reset onwards and report `journal_overflow` on a machine that
+    // had squashed correctly every time. Resetting the length here is what makes
+    // the bound mean "allocations since the last checkpoint", which is the bound
+    // the ROB size actually justifies.
+    if (ckpt_valid && !squash) begin
+      j_len_q = {REN_JLEN_W{1'b0}};
+    end
+
     if (squash_accepted) begin
-      j_len_q = j_ckpt;
+      j_len_q = {REN_JLEN_W{1'b0}};
     end
   end
 
@@ -783,7 +787,6 @@ module mosaic_rename (
       // reserved range.
       alloc_ptr  <= REN_TAG_W'(REN_ARCH_REGS);
       j_len      <= {REN_JLEN_W{1'b0}};
-      j_ckpt     <= {REN_JLEN_W{1'b0}};
       ckpt_seen  <= 1'b0;
       j_overflow <= 1'b0;
     end else begin
@@ -811,7 +814,7 @@ module mosaic_rename (
       // replaced. The previous generation itself is not stored: the undo is the
       // exact inverse of the allocation's increment, so one bit is the whole
       // undo state.
-      if (alloc_new_valid && (j_len < REN_JLEN_W'(REN_ROB))) begin
+      if (alloc_new_valid && !ckpt_valid && (j_len < REN_JLEN_W'(REN_ROB))) begin
         j_tag[REN_JIDX_W'(j_len)] <= scan_tag;
         j_prev_valid[REN_JIDX_W'(j_len)] <= gen_valid[scan_tag];
       end
@@ -819,7 +822,6 @@ module mosaic_rename (
       j_len      <= j_len_q;
       j_overflow <= j_overflow_q;
       if (ckpt_valid && !squash) begin
-        j_ckpt    <= j_len;
         ckpt_seen <= 1'b1;
       end
     end

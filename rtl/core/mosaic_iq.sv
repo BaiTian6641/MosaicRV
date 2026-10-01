@@ -76,40 +76,38 @@
 //
 // The bound is **structural**, not an assumption about the workload:
 //
-//   INVARIANT.  At every cycle, the ages of the live entries are exactly
-//               {B, B+1, ..., B+n-1} in absolute terms, for some base B and some
-//               n <= DEPTH, and `age_ctr` is B + n -- the absolute age the next
-//               insertion will take.
+//   INVARIANT.  At every cycle the live entries' ages are exactly a contiguous
+//               window {B, B+1, ..., B+n-1} modulo the modulus, for some base B
+//               and some n <= DEPTH, and `age_ctr` is B + n -- the age the next
+//               insertion takes. All arithmetic is modulo the modulus.
 //
 //   * An insertion appends at the top: it takes `age_ctr`, and `age_ctr` moves up
 //     by one.
-//   * A removal closes the hole it left: every surviving entry younger than the
-//     removed one has its age decremented by one, so the survivors are again a
-//     contiguous window, and `age_ctr` moves down by one per removal.
-//   * A cycle that does both composes: the removals renumber the survivors, the
-//     insertion lands on top of the result.
+//   * A removal closes the hole it left: every surviving entry *younger* than a
+//     removed entry steps down by one per removed entry below it, so the
+//     survivors are again contiguous and the window does not grow.
+//   * When the removed entry *was* the base, the survivors are **not** stepped
+//     down for it: the window is allowed to slide up instead. That is the whole
+//     mechanism by which the counter wraps, and it is the difference between an
+//     age field that never wraps (and so never exercises the modular
+//     comparison) and one that does.
 //
 // So the live ages stay inside a window of at most DEPTH values however long the
 // machine runs and however badly the removals interleave, and the maximum true
 // distance the modular comparison ever has to resolve is DEPTH - 1. That is what
-// makes the inequality above a proof rather than a hope. A design that let
-// `age_ctr` free-run while the survivors kept their original stamps would have
-// an *unbounded* separation between two long-lived entries, and no width would
-// save it: this is the failure the bound is about.
+// makes the inequality above a proof rather than a hope. A design that let the
+// window grow -- by leaving a hole unfilled, which is the tempting "just let
+// `age_ctr` free-run" simplification -- has an *unbounded* separation between
+// two long-lived entries and no width saves it. That is the failure the bound
+// is about, and it is what `MOSAIC_IQ_MUTANT_NARROW_AGE` is sized against: at a
+// modulus of 8 a full window of 8 spans 7, which is more than half the modulus,
+// so the extremes of a full queue are no longer ordered and the oldest entry
+// stops being recognisable as the oldest.
 //
-// The window is not pinned, though: it slides. Every insertion raises `age_ctr`
-// and every removal lowers it, so a queue that is drained faster than it is
-// filled walks its window right around the modulus. The ages really do wrap, they
-// wrap within a few dozen cycles, and the unit test drives them across the wrap
-// and checks that the selection is still the oldest one.
-//
-// A modulus of exactly 2*(DEPTH-1) is the defect the plan names: the extremes of
-// a full window would then be exactly half the modulus apart, the modular
-// difference would be ambiguous, and the oldest entry of a *full* queue would
-// stop being recognisable as the oldest. The elaboration guard below turns that
-// into a build error rather than a comment. `MOSAIC_IQ_MUTANT_NARROW_AGE` builds
-// exactly that queue with the guard disabled, so the mutation test demonstrates
-// the wrong *answer* rather than a build failure.
+// The window slides whenever the oldest entry leaves, so a queue that is
+// issued steadily walks its window right around the modulus: the counter wraps
+// after 32 grants for p0, and the unit test drives it across the wrap with a
+// full queue live and checks that the selection is still the oldest one.
 //
 // ----------------------------------------------------------- the four ports
 //
@@ -257,8 +255,8 @@ module mosaic_iq #(
   // See the `define above the module for the mutant and for the derivation.
   localparam int unsigned AGE_W        = `MOSAIC_IQ_AGE_W,
 
-  // Derived, and therefore not overridable.
-  localparam int unsigned AGE_MOD  = 1 << AGE_W,
+  // Derived, and therefore not overridable. The age modulus is written out in
+  // the guard below rather than named here, so there is no second place for it.
   localparam int unsigned IDX_W    = (DEPTH <= 1) ? 1 : $clog2(DEPTH),
   localparam int unsigned CNT_W    = $clog2(DEPTH + 1),
   localparam int unsigned UOP_ID_W = ROB_INDEX_W + ROB_GEN_W + UOP_W
@@ -330,6 +328,10 @@ module mosaic_iq #(
   output logic [AGE_W-1:0]         obs_age,
   output logic                     obs_ready,       // both sources ready as stored
   output logic                     obs_granted,     // presented, not yet accepted
+  output logic [TAG_W-1:0]         obs_src1_tag,
+  output logic [TAG_GEN_W-1:0]     obs_src1_gen,
+  output logic [TAG_W-1:0]         obs_src2_tag,
+  output logic [TAG_GEN_W-1:0]     obs_src2_gen,
   output logic [UOP_ID_W-1:0]      obs_uop,
   output logic [3:0]               obs_alu_op,
   output logic [XLEN-1:0]          obs_imm,
@@ -359,7 +361,7 @@ module mosaic_iq #(
 `ifdef MOSAIC_IQ_MUTANT_NARROW_AGE
   localparam bit AGE_MOD_TOO_SMALL = 1'b0;  // disabled on purpose, see above
 `else
-  localparam bit AGE_MOD_TOO_SMALL = (AGE_MOD <= 2 * (DEPTH - 1));
+  localparam bit AGE_MOD_TOO_SMALL = ((1 << AGE_W) <= 2 * (DEPTH - 1));
 `endif
 
   // $clog2 can name indices past a smaller queue, so an entry count that does
@@ -392,17 +394,25 @@ module mosaic_iq #(
   endgenerate
 
   // --------------------------------------------------------------- helpers
-  // "a is strictly older than b" in the wrapping age space. The forward
-  // distance from b to a is `a - b`; it is a real age when it is non-zero and
-  // below half the modulus. "Below half the modulus" is exactly what the
-  // modulus sizing in the header buys, and the window invariant is what keeps
-  // every live pair inside it. A full window at exactly half the modulus is the
-  // ambiguous case the guard above rules out.
+  // "a is strictly older than b" in the wrapping age space.
+  //
+  // The forward distance from a to b is `b - a` modulo the modulus, and that is
+  // a real age exactly when it is non-zero. So a is older than b when the
+  // *other* difference, `a - b`, is non-zero and has its top bit set: a real
+  // age d has `a - b = M - d`, which lands in the upper half of the modulus
+  // for every d below M/2, and wraps to the lower half for every d above it.
+  //
+  // "Below M/2" is exactly what the modulus sizing in the header buys, and the
+  // window invariant is what keeps every live pair inside it. A full window at
+  // exactly M/2 is the ambiguous case the guard above rules out. Written the
+  // other way round -- testing the top bit is clear -- the comparison is exactly
+  // inverted, and an entry one step *younger* than its neighbour reads as the
+  // older one.
   function automatic logic IsOlder(input logic [AGE_W-1:0] a,
                                    input logic [AGE_W-1:0] b);
     logic [AGE_W-1:0] gap;   // `dist` is a SystemVerilog keyword
     gap = a - b;
-    IsOlder = (gap != {AGE_W{1'b0}}) && !gap[AGE_W-1];
+    IsOlder = (gap != {AGE_W{1'b0}}) && gap[AGE_W-1];
   endfunction
 
   function automatic logic [CNT_W-1:0] PopCount(input logic [DEPTH-1:0] mask);
@@ -440,9 +450,18 @@ module mosaic_iq #(
   logic [3:0]           ent_alu_op  [0:DEPTH-1];
   logic [XLEN-1:0]      ent_imm     [0:DEPTH-1];
   logic [TAG_W-1:0]     ent_s1_tag  [0:DEPTH-1];
-  logic [TAG_GEN_W-1:0] ent_s1_gen  [0:DEPTH-1];
   logic [TAG_W-1:0]     ent_s2_tag  [0:DEPTH-1];
+`ifdef MOSAIC_IQ_MUTANT_NO_GEN_CHECK
+  // The mutant drops the generation comparison from the wakeup match, which
+  // makes the stored generations dead *by construction* -- that is the defect,
+  // stated as a dead net rather than as a subtle one.
+  /* verilator lint_off UNUSEDSIGNAL */
+`endif
+  logic [TAG_GEN_W-1:0] ent_s1_gen  [0:DEPTH-1];
   logic [TAG_GEN_W-1:0] ent_s2_gen  [0:DEPTH-1];
+`ifdef MOSAIC_IQ_MUTANT_NO_GEN_CHECK
+  /* verilator lint_on UNUSEDSIGNAL */
+`endif
   logic [XLEN-1:0]      ent_s1_val  [0:DEPTH-1];
   logic [XLEN-1:0]      ent_s2_val  [0:DEPTH-1];
   logic [TAG_W-1:0]     ent_dst_tag [0:DEPTH-1];
@@ -533,10 +552,25 @@ module mosaic_iq #(
   // NEGATIVE CONTROL 2: the generation is not compared. A broadcast for a
   // previous occupant of a recycled tag is then taken as the current one, and a
   // stale value is installed into a live uop -- a wrong result, silently.
-  assign wu_hit1 = wu_valid & slot_valid & ~ent_s1_rdy & (ent_s1_tag == wu_tag);
-  assign wu_hit2 = wu_valid & slot_valid & ~ent_s2_rdy & (ent_s2_tag == wu_tag);
-  assign wu_dup1 = wu_valid & slot_valid &  ent_s1_rdy & (ent_s1_tag == wu_tag);
-  assign wu_dup2 = wu_valid & slot_valid &  ent_s2_rdy & (ent_s2_tag == wu_tag);
+  always_comb begin
+    for (int unsigned i = 0; i < DEPTH; i++) begin
+      wu_hit1[i] = wu_valid && slot_valid[i] && !ent_s1_rdy[i] &&
+                   (ent_s1_tag[i] == wu_tag);
+      wu_hit2[i] = wu_valid && slot_valid[i] && !ent_s2_rdy[i] &&
+                   (ent_s2_tag[i] == wu_tag);
+      wu_dup1[i] = wu_valid && slot_valid[i] && ent_s1_rdy[i] &&
+                   (ent_s1_tag[i] == wu_tag);
+      wu_dup2[i] = wu_valid && slot_valid[i] && ent_s2_rdy[i] &&
+                   (ent_s2_tag[i] == wu_tag);
+    end
+  end
+  always_comb begin
+    for (int unsigned i = 0; i < DEPTH; i++) begin
+      wu_tag_seen[i] = wu_valid && slot_valid[i] &&
+                       ((ent_s1_tag[i] == wu_tag) || (ent_s2_tag[i] == wu_tag));
+    end
+  end
+
 `else
   always_comb begin
     for (int unsigned i = 0; i < DEPTH; i++) begin
@@ -744,7 +778,7 @@ module mosaic_iq #(
   // NEGATIVE CONTROL 5: the entry is removed as soon as it is *presented*, so a
   // grant the functional unit never accepts loses the uop. This is the card's
   // blocking rule, "grant 未被 FU 接受就移除 entry", stated as a defect.
-  assign grant_taken = grant_valid;
+  assign grant_taken = grant_fire || grant_valid;
 `else
   assign grant_taken = grant_fire;
 `endif
@@ -774,10 +808,44 @@ module mosaic_iq #(
   assign rm_count = PopCount(rm_mask);
 
   // ---------------------------------------------------------------- the ages
-  // Every resident removal closes the hole it left in the window by pulling
-  // every survivor younger than the removed entry down one step. This is the
-  // whole of the age machinery: it is what keeps the live ages contiguous, and
-  // therefore what makes the modular comparison exact.
+  // The whole of the age machinery, and it is two rules:
+  //
+  //   1. A removal closes the hole it left. Every surviving entry steps down by
+  //      one for each removed entry that was *older* than it, so the live ages
+  //      are a contiguous window again and the window never grows.
+  //   2. When the removed entry was the window's **base** -- its oldest live
+  //      entry -- the survivors are *not* stepped down for it. They keep their
+  //      ages, the window base slides up by one, and that slide is the only way
+  //      the age counter ever wraps.
+  //
+  // Rule 2 is what a "just let `age_ctr` free-run" simplification gets wrong, and
+  // the difference is not cosmetic: without the slide the age field never wraps
+  // at all, so the modular comparison is never exercised and a width that is too
+  // narrow passes every test that does not happen to build a full window. With
+  // the slide, a queue that issues one entry per cycle walks its base right
+  // around the modulus in 32 cycles and the narrow-modulus defect appears.
+  //
+  // `base_removed` is the base leaving; `rm_count` is every resident leaving.
+  logic oldest_slot_found;
+  logic [IDX_W-1:0] oldest_slot;
+  logic base_removed;
+
+  always_comb begin
+    logic [AGE_W-1:0] best_age;
+    oldest_slot_found = 1'b0;
+    oldest_slot       = {IDX_W{1'b0}};
+    best_age         = {AGE_W{1'b0}};
+    for (int unsigned i = 0; i < DEPTH; i++) begin
+      if (slot_valid[i] && (!oldest_slot_found || IsOlder(ent_age[i], best_age))) begin
+        oldest_slot_found = 1'b1;
+        oldest_slot       = IDX_W'(i);
+        best_age          = ent_age[i];
+      end
+    end
+  end
+
+  assign base_removed = oldest_slot_found && rm_mask[oldest_slot];
+
   logic [AGE_W-1:0] ent_age_next [0:DEPTH-1];
   always_comb begin
     for (int unsigned i = 0; i < DEPTH; i++) begin
@@ -788,20 +856,24 @@ module mosaic_iq #(
           older_removed = older_removed + CNT_W'(1);
         end
       end
+      // Rule 2: the base's own removal is not a hole below anybody, because
+      // there is nobody below it. Subtracting it would drag the whole window
+      // back down and pin the base forever.
+      if (base_removed) older_removed = older_removed - CNT_W'(1);
       ent_age_next[i] = ent_age[i] - AGE_W'(older_removed);
     end
   end
 
-  // The age of an entry inserted this cycle: the top of the window *after* this
-  // cycle's removals have renumbered the survivors. There is no combinational
-  // loop, because the removal count depends on the resident selection, which
-  // never depends on the offered entry's age: the offered entry is always the
-  // youngest and is considered only when nothing resident is eligible.
+  // The age an entry inserted this cycle takes: the top of the window *after*
+  // this cycle's removals have closed their holes and after any base slide.
+  // There is no combinational loop: the removal count and the base slide depend
+  // on the resident selection, which never depends on the offered entry's age --
+  // the offered entry is always the youngest and is considered only when nothing
+  // resident is eligible.
   logic [AGE_W-1:0] ins_age;
   logic [AGE_W-1:0] age_ctr_next;
-  assign ins_age      = age_ctr - AGE_W'(rm_count);
-  assign age_ctr_next = age_ctr - AGE_W'(rm_count) +
-                        AGE_W'((ins_fire && !ins_taken) ? 1 : 0);
+  assign ins_age      = age_ctr - AGE_W'(rm_count) + AGE_W'(base_removed);
+  assign age_ctr_next = ins_age + AGE_W'((ins_fire && !ins_taken) ? 1 : 0);
 
   // ---------------------------------------------------------- grant payload
   always_comb begin
@@ -860,7 +932,9 @@ module mosaic_iq #(
 `ifdef MOSAIC_IQ_MUTANT_NO_DST_CHECK
   // NEGATIVE CONTROL 6: the duplicate-destination detector is dead, so a second
   // producer for a live destination is neither reported nor prevented.
-  assign o_dst_conflict = 1'b0;
+  // Written as a mask rather than a constant so the detector is still
+  // elaborated: a constant would be dead code the linter is right to remove.
+  assign o_dst_conflict = dst_conflict && 1'b0;
 `else
   assign o_dst_conflict = dst_conflict;
 `endif
@@ -870,6 +944,10 @@ module mosaic_iq #(
   assign obs_age        = ent_age[obs_index_s];
   assign obs_ready      = ent_s1_rdy[obs_index_s] && ent_s2_rdy[obs_index_s];
   assign obs_granted    = slot_granted[obs_index_s];
+  assign obs_src1_tag   = ent_s1_tag[obs_index_s];
+  assign obs_src1_gen   = ent_s1_gen[obs_index_s];
+  assign obs_src2_tag   = ent_s2_tag[obs_index_s];
+  assign obs_src2_gen   = ent_s2_gen[obs_index_s];
   assign obs_uop        = ent_uop[obs_index_s];
   assign obs_alu_op     = ent_alu_op[obs_index_s];
   assign obs_imm        = ent_imm[obs_index_s];
