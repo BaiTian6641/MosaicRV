@@ -10,7 +10,7 @@
   "image": "",
   "expect": "",
   "tool": "Verilator 5.052 2026-09-05",
-  "timestamp": "2026-10-01T07:25:43Z",
+  "timestamp": "2026-10-01T07:29:12Z",
   "first_mismatch": "c0 back-pressure: expected grant_valid still high, got grant_valid dropped",
   "failed_checks": ["full: entries issue in age order", "full: entries issue in age order", "full: entries issue in age order", "full: entries issue in age order", "full: entries issue in age order", "full: entries issue in age order", "full: entries issue in age order", "full: entries issue in age order", "c0: grant_valid matches the shadow's prediction", "c0: granted uop identity", "c0: granted alu_op", "c0: granted immediate", "c0: granted operand a", "c0: granted operand b", "c0: granted dst tag", "c0: granted dst generation", "c0: o_grant_total", "c0: o_grant_total", "c0: grant_valid matches the shadow's prediction", "c0: granted uop identity", "c0: granted alu_op", "c0: granted immediate", "c0: granted operand a", "c0: granted operand b", "c0: granted dst tag", "c0: granted dst generation", "c0: o_grant_total", "c0: o_grant_total", "c0: o_grant_total", "c0: o_grant_total", "c0: o_grant_total", "c0: o_grant_total"]
 }

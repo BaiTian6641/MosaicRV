@@ -119,7 +119,12 @@ lint-slang: check-valid-profile manifest
 	@if [ -z "$(RTL_SRCS)" ]; then \
 	  echo "lint-slang: no RTL sources yet" >&2; exit 1; \
 	fi
-	$(SLANG_TIDY) --std 1800-2017 -I $(BUILD_DIR)/rtl $(RTL_SRCS)
+	# --single-unit matters: without it slang compiles each file in its own unit,
+	# so a macro defined by the first file's `include of the generated config
+	# package is not visible to the second, and every package is reported as a
+	# duplicate definition. Verilator is invoked as one unit, so without this flag
+	# the two tools disagree about the same source for no real reason.
+	$(SLANG_TIDY) --std 1800-2017 --single-unit -I $(BUILD_DIR)/rtl $(RTL_SRCS)
 
 # Our own C++ is held to a stricter standard than the simulator's runtime, which
 # is compiled with the same CFLAGS and is not -Wextra clean.
