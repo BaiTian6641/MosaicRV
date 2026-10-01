@@ -27,18 +27,25 @@
 //     re-sign-extends it, so there is no second place where a W immediate could be
 //     widened.
 //
-// `is_taken` and `branch_funct`
-// ----------------------------
-//   `is_taken` is high for JALR, for a branch whose comparator said yes, and
-//   whenever `branch_funct` names no RV64I condition at all. The branch funct3
-//   encodings are BEQ=000, BNE=001, BLT=100, BGE=101, BLTU=110, BGEU=111;
-//   funct3 = 010 and 011 name no condition, and the decoder marks them illegal.
-//   The last term exists because this unit's port list has `is_jalr` but no
-//   `is_jal`, so an unconditional JAL is otherwise indistinguishable from a
-//   branch that did not fire. A caller that additionally holds `branch_taken`
-//   high for JAL gets the same answer, and the two terms are ORed so that
-//   neither convention has to be honoured: the term can only ever make an
-//   unconditional transfer look taken, never make a taken branch look untaken.
+// What decides control transfer
+// -----------------------------
+//   `is_taken = is_jal | is_jalr | (is_branch & branch_taken)`.
+//
+//   Nothing here sniffs the instruction encoding. An earlier revision of this
+//   module was given a port list without `is_branch`/`is_jal`, and inferred "this
+//   is an unconditional jump" from a `branch_funct` that named no RV64I condition
+//   (funct3 = 010 or 011). That was wrong in kind rather than in degree: it
+//   invented semantics for two reserved encodings, so any future instruction
+//   whose funct3 collided with the pattern would have had `is_taken` disagree with
+//   real control flow, and would have disagreed only for instructions nobody was
+//   thinking about. `decode_ctl_t` already carries `is_branch`, `is_jal` and
+//   `is_jalr` as separate fields, so the decoder states what the instruction is
+//   and this unit does the arithmetic.
+//
+//   A useful property falls out of the `&`: a caller that leaves `is_branch` low
+//   but drives `branch_taken` high still gets `is_taken = 0`, which is the correct
+//   answer for an instruction that named no branch. A wrongly wired comparator is
+//   therefore loud -- it cannot silently redirect a JAL or an AUIPC.
 //
 // Negative controls
 // -----------------
@@ -46,6 +53,8 @@
 //   * `MOSAIC_BRANCH_TARGET_MUTANT_2` -- `link` is `pc + 2` instead of `pc + 4`.
 //   * `MOSAIC_BRANCH_TARGET_MUTANT_3` -- a not-taken branch returns the branch
 //     target instead of `pc + 4`.
+//   * `MOSAIC_BRANCH_CMP_MUTANT_1`    -- BLTU/BGEU compare with the signed
+//     relation instead of the unsigned one (in mosaic_branch_cmp.sv).
 //
 
 `default_nettype none
@@ -54,21 +63,17 @@ module mosaic_branch_target #(
     parameter int XLEN = 64
 ) (
     input  wire [XLEN-1:0] pc,
-    input  wire [XLEN-1:0] imm,         // already sign-extended by the decoder
-    input  wire         is_jalr,       // JALR clears bit 0 of the target
-    input  wire [2:0]   branch_funct,  // BEQ/BNE/BLT/BGE/BLTU/BGEU
-    input  wire         branch_taken,  // the comparison result
-    output logic [XLEN-1:0] link,      // PC + 4, for JAL/JALR
-    output logic [XLEN-1:0] target,    // the address the PC will take
-    output logic            is_taken   // does control actually transfer
+    input  wire [XLEN-1:0] imm,        // already sign-extended by the decoder
+    input  wire         is_branch,    // a conditional branch: BEQ..BGEU
+    input  wire         is_jal,       // unconditional jump with its own immediate
+    input  wire         is_jalr,      // unconditional jump, target bit 0 forced 0
+    input  wire         branch_taken, // result of mosaic_branch_cmp, or 0
+    output logic [XLEN-1:0] link,     // always pc + 4
+    output logic [XLEN-1:0] target,   // the address control transfers to
+    output logic            is_taken  // does control actually transfer
 );
-  // RV64I branch funct3. 3'b010 and 3'b011 name no condition.
-  localparam logic [2:0] BR_NONE_A = 3'b010;
-  localparam logic [2:0] BR_NONE_B = 3'b011;
-
   logic [XLEN-1:0] sum;      // pc + imm
   logic [XLEN-1:0] aligned; // the transfer target, with JALR's bit 0 cleared
-  logic            names_condition;
 
   always_comb begin
 `ifdef MOSAIC_BRANCH_TARGET_MUTANT_2
@@ -87,8 +92,7 @@ module mosaic_branch_target #(
     aligned = is_jalr ? {sum[XLEN-1:1], 1'b0} : sum;
 `endif
 
-    names_condition = (branch_funct != BR_NONE_A) && (branch_funct != BR_NONE_B);
-    is_taken        = is_jalr | ~names_condition | branch_taken;
+    is_taken = is_jal | is_jalr | (is_branch & branch_taken);
 
 `ifdef MOSAIC_BRANCH_TARGET_MUTANT_3
     // NEGATIVE CONTROL: a not-taken branch leaks the branch target, so the

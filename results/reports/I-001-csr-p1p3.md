@@ -6,20 +6,27 @@ Deliverables:
 | --- | --- | --- |
 | [`config/csr/mode_su.json`](../../config/csr/mode_su.json) | `p1`, `p2`, `p3` | shipped |
 | [`config/csr/vector.json`](../../config/csr/vector.json) | `p2`, `p3` | shipped |
-| `config/csr/hypervisor.json` | `p3` | **not written — schema gap, see [§3](#3-hypervisor-the-schema-cannot-express-an-absent-extension)** |
+| [`config/csr/hypervisor.json`](../../config/csr/hypervisor.json) | `p3` | shipped: zero CSRs defined, four absent ranges declared — see [§3](#3-hypervisor-an-extension-that-is-absent) |
 
 Model: the frozen M-mode table
 [`config/csr/mode_m.json`](../../config/csr/mode_m.json) and its report
 [`results/reports/I-001-csr-m.md`](I-001-csr-m.md). Schema:
-[`config/schema/csr.schema.json`](../../config/schema/csr.schema.json), fixed, not
-extended.
+[`config/schema/csr.schema.json`](../../config/schema/csr.schema.json).
 
-Current gate state (`python3 tools/check_profile.py --all`):
+Current gate state, all observed with the commands below:
 
 ```
-p0 configuration OK   p1 configuration OK   p2 configuration OK
-p3: 1 problem — "csr table csr/hypervisor.json: cannot read config/csr/hypervisor.json"
+$ python3 tools/check_profile.py --all
+profile p0: configuration OK
+profile p1: configuration OK
+profile p2: configuration OK
+profile p3: configuration OK            exit 0
+
+$ python3 tools/check_profile.py --profile p3 --negative
+negative controls: 22/22 illegal configurations rejected   exit 0
 ```
+
+`p0` 47/47, `p1` 34/34, `p2` 30/30, `p3` 22/22 on the negative controls.
 
 ---
 
@@ -308,13 +315,21 @@ instruction exception".
 
 ---
 
-## 3. Hypervisor: the schema cannot express an absent extension
+## 3. Hypervisor: an extension that is absent
 
-**`config/csr/hypervisor.json` was not written.** `p3` claims neither the `H`
-extension nor a second translation stage, so the architecturally correct table
-is the empty one, and the schema forbids an empty table. This is reported as a
-schema gap rather than worked around, because every way of getting past the
-schema produces a table that lies.
+**`config/csr/hypervisor.json` defines no CSRs at all.** `p3` claims neither the
+`H` extension nor a second translation stage, so the architecturally correct
+table is the empty one, and the table says so in a form the checker can verify:
+`"modes": []` plus four `absent_csr_ranges` entries covering every CSR number
+band that the privileged specification allocates to the hypervisor privilege
+level. A table full of plausible-looking hypervisor CSRs would advertise
+two-stage translation that MosaicRV does not implement, which is the exact
+failure this configuration layer exists to prevent.
+
+This section records how that conclusion was reached, because the obvious ways
+to get a file that validates all produce a table that lies. Each was written
+into a throwaway copy of `config/` and fed to
+`config_check.load("p3", config_root=...)`, not assumed.
 
 ### 3.1 What the architecture says must happen
 
@@ -365,44 +380,61 @@ returning zero. L114-L115 requires an illegal instruction there. Shipping (c)
 would put a false statement into the frozen contract, and a downstream
 config→RTL generator would have no way to tell it apart from a real CSR.
 
-### 3.3 What the schema would need
+### 3.3 What the schema needed, and what was adopted
 
-In preference order, all of which are changes to files this task does not own:
+The table as originally specified could not say "this range is deliberately
+unimplemented", and the fix was not in this task's file set. The integrator
+adopted the recommended option: `csr.schema.json` now sets `modes` to
+`minItems: 0` and adds a top-level `absent_csr_ranges` array of
+`{first, last, reason, spec_clause}` objects, and `config_check.py` enforces
+three rules on it — `first` must not exceed `last`; a table with no `modes` must
+declare at least one absent range; and no CSR defined by *any* table of the
+profile may fall inside a declared range. The third rule is the valuable one:
+it means "define `hstatus` while also declaring the hypervisor range
+unimplemented" is now a hard configuration error rather than a contradiction
+for a human to notice. Verified in a throwaway copy of `config/`:
 
-1. **Recommended.** Relax `modes` to `minItems: 0` and add a declarative
-   sibling of `modes` to `csr.schema.json`, e.g.
+| Injected fault | Verdict |
+| --- | --- |
+| define `hstatus` (0x600) in an `S` block | `address 0x600 lies inside a range this profile declares unimplemented` |
+| define `hgatp` (0x680) in an `S` block | `address 0x680 lies inside a range this profile declares unimplemented` |
+| empty table, no `absent_csr_ranges` | `defines no CSRs and declares no absent ranges; an empty table must say what it is deliberately leaving out and why` |
+| range with `first` > `last` | `range 0x2ff..0x200 has first > last` |
 
-   ```json
-   "absent_csr_ranges": {
-     "type": "array",
-     "items": {
-       "type": "object",
-       "additionalProperties": false,
-       "required": ["first", "last", "reason", "spec_clause"],
-       "properties": {
-         "first": {"type": "integer", "minimum": 0, "maximum": 4095},
-         "last":  {"type": "integer", "minimum": 0, "maximum": 4095},
-         "reason": {"type": "string", "minLength": 1},
-         "spec_clause": {"type": "string", "minLength": 1}
-       }
-     }
-   }
-   ```
+The rejected option remains option 3 above: adding `"H"` to the mode enum. It
+would require a ladder row and a `privilege_modes` change for a mode `p3` does
+not implement, and it would turn "the extension is absent" into "the extension
+is present but empty" — the opposite of the truth.
 
-   `hypervisor.json` then becomes
-   `{"schema_version": 1, "profiles": ["p3"], "modes": [], "absent_csr_ranges": [...]}`
-   and the absence is machine-readable instead of only prose — which is what a
-   downstream illegal-instruction check actually needs.
-2. **Minimal.** Relax `modes` to `minItems: 0` only. `hypervisor.json` is then
-   an empty marker file, and the absence lives in this report. Cheap, and it
-   keeps `config_check.py` unchanged.
-3. **Rejected.** Adding `"H"` to the mode enum. It requires a ladder row and a
-   `privilege_modes` change for a mode `p3` does not implement, and it turns
-   "the extension is absent" into "the extension is present but empty" — the
-   opposite of the truth.
+### 3.4 The ranges actually declared, and why
 
-Until one of 1 or 2 is adopted, `--all` cannot exit 0 for `p3`, and the single
-remaining failure is the missing file. No other profile is affected.
+`priv-csrs.tex` L80-L91 allocates ten CSR number bands to `csr[9:8] = 0b10`, the
+hypervisor privilege level, and L36-L37 says that field "encode[s] the lowest
+privilege level that can access the CSR". `p3`'s lowest mode above U is S, so
+that level does not exist and no address in those bands can be accessed from any
+implemented mode. The shipped table declares four contiguous mergers of those
+ten bands:
+
+| Declared range | Merged bands | Contents |
+| --- | --- | --- |
+| `0x200-0x2FF` (512-767) | L82 | `vsstatus`, `vsie`, `vstvec`, `vsscratch`, `vsepc`, `vscause`, `vstval`, `vsip`, `vsatp` |
+| `0x600-0x6FF` (1536-1791) | L83, L84, L85 | `hstatus`, `hedeleg`, `hideleg`, `hie`, `htimedelta`, `hcounteren`, `hgeie`, `henvcfg`, `henvcfgh`, `htimedeltah`, `htval`, `hip`, `hvip`, `htinst`, `hgatp`, `hcontext`, plus the custom RW band |
+| `0xA00-0xAFF` (2560-2815) | L86, L87, L88 | no CSR named in the ratified table; standard and custom RW bands at hypervisor level |
+| `0xE00-0xEFF` (3584-3839) | L89, L90, L91 | `hgeip` (0xE12), plus the custom RO bands |
+
+Coverage of all ten bands and the absence of any conflict with the 42 CSRs
+`p3` defines across its four tables were both checked programmatically.
+
+**Corrections applied to the draft of this file.** The version of
+`hypervisor.json` that appeared in the working tree when this section was
+written carried three factual errors, all corrected here: it labelled
+`0x600-0x67F` as "Virtual Supervisor CSRs" (those are the *Hypervisor* CSRs; the
+VS CSRs are `0x200-0x2FF`), it labelled `0x200-0x23F` as "Debug/Trace and
+trigger CSRs" (that band is the VS CSR band, truncated mid-range at 0x240), and
+it omitted the hypervisor-level bands `0xA00-0xAFF` and `0xE00-0xEFF` entirely,
+which is where `hgeip` lives. Correcting them matters: an absent range that is
+misnamed or truncated under-reports the illegal-instruction surface the CSR unit
+has to implement.
 
 ---
 
@@ -554,12 +586,20 @@ U-mode counter path stays unreachable until `mcounteren` is made writable for
 `p1`–`p3`. An implementation task must not treat `scounteren` alone as enabling
 a counter.
 
-### 5.3 `sstatus.FS`/`VS` versus the frozen `mstatus.FS`/`VS`
+### 5.3 `sstatus.FS`/`VS` versus `mstatus.FS`/`VS` — found, reported, resolved
 
 Described in §2.2. The specification is unambiguous (`machine.tex` L925-L926,
-L941-L942) and the frozen M-mode table is not. This table follows the
-specification; `mode_m.json` must be corrected by its owner, or the two tables
-describe contradictory hardware.
+L941-L942) and the M-mode table as this delivery found it was not. This table
+follows the specification: `sstatus.FS` (14:13) and `sstatus.VS` (10:9) are
+writable, which is mandatory for `p2`/`p3` and permitted for `p1` by
+L930-L931/L946-L947. The integrator has since corrected `mode_m.json` to the
+same disposition, and `config_check.py` now enforces the direction that
+matters — a profile that claims `F` (resp. `V`) may not declare bits 14:13
+(resp. 10:9) read-only zero — with two dedicated negative controls. The
+opposite direction is deliberately not enforced, because `mode_su.json` is
+shared by `p1`, `p2` and `p3` and a writable field that reads zero in a profile
+without `F` is the correct single description of "no floating-point state
+exists", not a violation. See also §7.
 
 ### 5.4 Which traps set `stval` informatively — open
 
@@ -622,38 +662,42 @@ and L225 `0x154 SRW siph` — while address `0x120` is **not** `sstatush` at all
 but `scountinhibit` (L216). All three are therefore absent from this table; see
 §6.
 
-### 5.10 Pre-existing defects in the negative-control harness
+### 5.10 Defects in the negative-control harness — found, reported, resolved
 
-`python3 tools/check_profile.py --profile p2 --negative` now reports
-**5 of 47 wrongly accepted**: "claims PMP one rung too early", "claims S one
-rung too early", "claims Sv39 one rung too early", "claims U one rung too
-early", and "VLEN declared without claiming V". `--profile p3 --negative` has
-the identical five. `--profile p0 --negative` is 47/47 and `--profile p1` is
-40/40.
+While this delivery was in progress, `python3 tools/check_profile.py --profile
+p2 --negative` was found to report **5 of 47 wrongly accepted**: "claims PMP
+one rung too early", "claims S one rung too early", "claims Sv39 one rung too
+early", "claims U one rung too early", and "VLEN declared without claiming V".
+`--profile p3 --negative` had the identical five, while `p0` was 47/47 and
+`p1` was 40/40.
 
-Cause, in `tools/check_profile.py` L135-L138: `future` is built as
-`cap["min_profile"] != self.profile`, which for any profile above `p0` also
-includes capabilities *below* that profile. For `p2`/`p3` those five names are
-the ones the profile does not already list, and `_check_capabilities`
-(L214-L232) finds nothing wrong with them. The remaining cases in `future` are
-already in `p2`/`p3`'s extension list, so the control is rejected for the wrong
-reason — "array items are not unique" — which is a false pass. The VLEN control
-(L174-L177) sets `vlen: 128`, which `p2`/`p3` already have, so the mutation is a
-no-op.
+Cause, in the then-current `tools/check_profile.py` L135-L138: `future` was
+built as `cap["min_profile"] != self.profile`, which for any profile above
+`p0` also includes capabilities *below* that profile. For `p2`/`p3` those five
+names are the ones the profile did not already list, and
+`_check_capabilities` found nothing wrong with them. The remaining cases were
+rejected only for the wrong reason — "array items are not unique" — which is a
+false pass. The VLEN control set `vlen: 128`, which `p2`/`p3` already had, so
+the mutation was a no-op. Before this delivery those two profiles reported a
+clean count only because their base configuration failed to load, which made
+every control trivially "rejected" — a vacuous pass, not a working gate.
 
-**This is not caused by the tables in this delivery, and no CSR table can cause
-it:** `add_extension` and `patch_profile` (L86-L100, L102-L108) write only
-`profiles/p3.json`; the failure is entirely in the ladder/profile logic. Before
-this delivery the same command printed a clean count for `p2` and `p3` only
-because their base configuration failed to load, which made every control
-trivially "rejected". Fix: make `future` the capabilities strictly *above* the
-profile, and make the VLEN control clear `vlen` instead of setting it.
+**This was never caused by the tables in this delivery, and no CSR table could
+cause it:** the mutators write only `profiles/<p>.json`; the failure was
+entirely in the ladder/profile logic. The integrator has fixed the `future`
+computation and the VLEN control, and added two new controls covering the
+`mstatus.FS`/`mstatus.VS` rule. Current state, all observed:
 
-`--profile p3 --negative` cannot yet be run meaningfully at all, because `p3`'s
-base configuration does not load (§3). When it was run against a throwaway copy
-of `config/` with `csr/hypervisor.json` removed from `p3`'s `csr_files` — i.e.
-with `mode_m.json`, `mode_su.json` and `vector.json` all loaded — it produced
-exactly the same five failures and no others.
+```
+$ python3 tools/check_profile.py --profile p0 --negative   47/47 rejected   exit 0
+$ python3 tools/check_profile.py --profile p1 --negative   34/34 rejected   exit 0
+$ python3 tools/check_profile.py --profile p2 --negative   30/30 rejected   exit 0
+$ python3 tools/check_profile.py --profile p3 --negative   22/22 rejected   exit 0
+```
+
+The `p3` run is now meaningful rather than vacuous: its base configuration
+loads, so every control is exercised against a valid configuration and rejected
+on its own merits. One gap remains — see §7.
 
 ---
 

@@ -296,7 +296,18 @@ module mosaic_decoder (
         ctl.imm       = imm_i;
         legal         = 1'b1;
         case (funct3)
-          F3_ADD_SUB: ctl.alu_op = ALU_ADD;    // addi
+          // Mutation: accept srai with funct3 000. On a real RV64 core
+          // funct3 000 is addi whatever insn[31:26] says, so this defect shows
+          // up as `addi` decoding as `srai` -- a register write with the wrong
+          // operation and the wrong immediate width.
+          F3_ADD_SUB: begin
+            if (MutSraiFunct3 && (insn[31:26] == 6'h10)) begin
+              ctl.alu_op = ALU_SRA;
+              ctl.imm    = imm_slli;
+            end else begin
+              ctl.alu_op = ALU_ADD;   // addi
+            end
+          end
           F3_SLL: begin                          // slli
             ctl.alu_op = ALU_SLL;
             // Mutation: ignore insn[31:26], so "shift by 64" (shamt field

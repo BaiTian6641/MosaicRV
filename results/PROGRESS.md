@@ -341,3 +341,78 @@ Spike cannot yet *terminate* on this corpus because the firmware does not define
 `tohost`/`fromhost` symbols. Recorded as an open item for I-007 rather than
 worked around. This matters more than it looks: a reference the harness cannot
 stop is a reference it cannot diff.
+
+---
+
+## 2026-09-30 — I-007 — DONE with one open defect — firmware corpus and host oracle
+
+36 ELFs (12 programs × 3 inputs), an independent Python oracle, a disassembly
+audit, and a Spike cross-check. Verified here:
+
+```
+$ python3 tools/host_oracle.py --all      -> 36 case(s) computed, exit 0
+$ make -C tests/programs audit            -> 36 ELF(s), 7758 instructions, all in
+                                             rv64im_zicsr_zifencei; no libgcc, no libc,
+                                             no relocations, entry 0x80000000
+```
+
+A single bit flipped in one golden signature makes the oracle fail with
+`p01_addsub.i0 sig0: oracle 0x0000000000000001, golden 0x0000000000000000`, so
+the comparison is not vacuous. Every program's three inputs give distinct
+signatures.
+
+**The Spike cross-check earned its keep immediately**: it found ten real bugs
+that no self-consistent check would have, including an SLTU select block lost in
+an edit, a `jalr` loop that never terminated, `ra` clobbered by `jalr a3,a3` when
+`rd == ra`, a firmware trap handler that reported PASS with an all-zero
+signature, and two independent `LW` sign-extension errors — one in the firmware
+and one in the oracle. A reference that disagrees with you is the only kind worth
+having.
+
+**Open defect, not hidden:** `p08_misaligned` fails the Spike cross-check on all
+three inputs, ending with `tohost=4` (FAIL, `mcause=2` illegal instruction) after
+at least one correctly-recovered trap. Ruled out: the p0 ISA set (the image
+passes the audit), the trap log layout, the arming protocol. Suspected but
+unverified: the `boot_rom` store at address 0, the only access outside RAM. Until
+it is fixed, `p08` counts as **no evidence** for the misalignment policy. Its
+expected trace `[4,4,6,6,7]` is the encoded specification that the oracle
+validates, not a validated DUT result.
+
+---
+
+## 2026-09-30 — I-010, I-011 — DONE — decoder, ALU, branch comparator and target
+
+`rtl/core/mosaic_decoder.sv`, `mosaic_alu.sv`, `mosaic_branch_cmp.sv`,
+`mosaic_branch_target.sv`. Verified here:
+
+```
+$ python3 tools/run_unit.py --case decode.rv64im_reserved   -> PASS
+$ python3 tools/run_unit.py --case alu.boundaries           -> PASS
+$ python3 tools/lint_rtl.py                                 -> 7 of 9 clean (bring-up core
+                                                               still in flight)
+```
+
+`alu.boundaries` runs 108560 ALU and 32352 branch stimulus vectors, 339694
+checks, zero failures. Nine mutants were built and each makes the case fail with
+exit 1, including `BLTU` comparing signed and `JALR` not clearing bit 0.
+
+**Two process findings worth keeping.** First, one mutant "passed" on its first
+run because the `ifdef` block had never been written — `-D` compiled to nothing,
+so the mutant build was identical to the shipping build and the test passed while
+proving nothing. That is why `tools/lint_rtl.py --self-test` now lints a
+deliberately latching module and requires a real `LATCH` warning. Second, four
+hand-written expected constants were wrong on first run — a 6-bit versus 64-bit
+`sll` reading, an `srlw` extension, a branch target written as `link` where the
+answer was `pc+imm`, and `blt(-1,1)` written false where it is true. The RTL
+caught all four immediately. A reference model that is wrong in the same
+direction as the DUT is worse than no model; these were caught because the
+boundary set was chosen to disagree.
+
+**Interface decision reversed.** The `mosaic_branch_target` port list I gave the
+agent omitted `is_jal`, so an unconditional `JAL` was indistinguishable from a
+not-taken branch and the unit inferred "unconditional" from funct3 values 010
+and 011. Sniffing reserved encodings to invent semantics was rejected: it is
+harmless today and silently wrong the day an instruction collides with the
+pattern. The unit now takes `is_branch`, `is_jal` and `is_jalr` explicitly,
+which `decode_ctl_t` already carries. My port list was under-specified; that is
+what happened.
