@@ -107,6 +107,18 @@ localparam int unsigned CORE_OCC_W   = $clog2(CORE_ROB_N + 1);
 localparam int unsigned CORE_ARCH_N  = mosaic_cfg_pkg::MOSAIC_ARCH_INT_REGS;
 localparam int unsigned CORE_PRF_N   = mosaic_cfg_pkg::MOSAIC_INT_PRF_ENTRIES;
 localparam int unsigned CORE_MAP_W   = CORE_TAG_W + CORE_IGEN_W;
+// The memory path's geometry, from the generated profile like everything else.
+localparam int unsigned CORE_LQ_N    = mosaic_cfg_pkg::MOSAIC_LQ_ENTRIES;
+localparam int unsigned CORE_SQ_N    = mosaic_cfg_pkg::MOSAIC_SQ_ENTRIES;
+localparam int unsigned CORE_MEM_CNT_W = $clog2(CORE_LQ_N + 1);   // == clog2(SQ_N+1); p0: 4
+// The store queue's exported entry layout, re-expressed here because a wire
+// width has to be declared before the instance that drives it. The three fields
+// below ARE the layout mosaic_store_queue and mosaic_load_queue both document
+// (data_valid, data, size, imm, base, id at those offsets); the case asserts the
+// three-way agreement at startup rather than trusting three copies of a formula.
+localparam int unsigned CORE_MEM_ID_W  = $bits(mosaic_uop_pkg::uop_id_t);
+localparam int unsigned CORE_SQ_ENTRY_W =
+    2 + CORE_XLEN + 3 + CORE_XLEN + CORE_XLEN + CORE_MEM_ID_W;
 
 module mosaic_core (
     input  logic                        clk,
@@ -148,6 +160,40 @@ module mosaic_core (
     output logic [CORE_RET_N*CORE_SIZE_W-1:0] ev_store_size,
 
     /* verilator lint_on UNUSEDSIGNAL */
+
+    // ---------------------------------------------- the memory path (I-033..I-038)
+    // The integrated LSU's evidence, brought out so CASE=core.mem_program can
+    // state what the memory path did rather than infer it from the final memory
+    // image: how many accesses were allocated, issued to the endpoint and
+    // completed; how many load bytes came from a store and how many from memory;
+    // how many stores were authorised, drained and squashed; and how often a
+    // memory insert had to wait. They are counters, not control -- nothing in
+    // the core reads them.
+    output logic [31:0]                 o_mem_lq_alloc,
+    output logic [31:0]                 o_mem_lq_issue,
+    output logic [31:0]                 o_mem_lq_done,
+    output logic [31:0]                 o_mem_lq_replay,
+    output logic [31:0]                 o_mem_lq_blocked,
+    output logic [31:0]                 o_mem_lq_fwd_bytes,
+    output logic [31:0]                 o_mem_lq_mem_bytes,
+    output logic [31:0]                 o_mem_lq_fault,
+    output logic [31:0]                 o_mem_lq_query_mismatch,
+    output logic [31:0]                 o_mem_lq_occupied,
+    output logic [31:0]                 o_mem_sq_alloc,
+    output logic [31:0]                 o_mem_sq_commit,
+    output logic [31:0]                 o_mem_sq_commit2,
+    output logic [31:0]                 o_mem_sq_commit_stale,
+    output logic [31:0]                 o_mem_sq_drain,
+    output logic [31:0]                 o_mem_sq_squash,
+    output logic [31:0]                 o_mem_sq_spared,
+    output logic [31:0]                 o_mem_sq_occupied,
+    output logic [31:0]                 o_mem_sq_auth,
+    output logic [31:0]                 o_mem_sq_fault,
+    output logic [31:0]                 o_mem_lsu_txn,
+    output logic [31:0]                 o_mem_lsu_misaligned,
+    output logic [31:0]                 o_mem_lsu_access_fault,
+    output logic [31:0]                 o_mem_ins_stall,
+    output logic                        o_mem_squash_valid,
 
     // -------------------------------------------------------------- evidence
     output logic [31:0]                 o_commit_ctr,
@@ -470,6 +516,73 @@ module mosaic_core (
   logic [31:0] squash_under_ctr, journal_ovf_ctr;
   logic [31:0] squash_acc_ctr, ckpt_ctr;
   logic [31:0] disp_alloc_ctr, disp_ins_ctr;
+
+  // ------------------------------------------------------- the memory path
+  // Everything the integrated LSU needs between dispatch, the two queues and
+  // the endpoint. Declared here with the rest: a port connection must see its
+  // net, and the whole point of this file's ordering rule is that nothing is
+  // declared where it happens to be convenient.
+  logic                       disp_mem_valid, disp_mem_ready, disp_mem_is_store;
+  logic [CORE_XLEN-1:0]       disp_mem_base, disp_mem_imm, disp_mem_data;
+  logic [2:0]                 disp_mem_size;
+  logic                       disp_mem_signed;
+  logic [CORE_UOP_ID_W-1:0]   disp_mem_id;
+  logic [CORE_MEM_ID_W-1:0]   disp_mem_full_id;
+  logic [CORE_TAG_W-1:0]      disp_mem_dst_tag;
+  logic [CORE_IGEN_W-1:0]     disp_mem_dst_gen;
+  logic                       disp_mem_dst_x0;
+  logic [31:0]                mem_ins_stall_ctr;
+
+  logic                       lq_alloc_valid, lq_alloc_ready;
+  logic                       lq_req_valid, lq_req_ready;
+  mosaic_uop_pkg::lsu_req_t   lq_req;
+  logic                       lq_rsp_valid, lq_rsp_ready;
+  logic                       lq_result_valid, lq_result_ready;
+  mosaic_uop_pkg::uop_id_t    lq_result_id;
+  logic [CORE_TAG_W-1:0]      lq_result_dst_tag;
+  logic [CORE_IGEN_W-1:0]     lq_result_dst_gen;
+  logic                       lq_result_dst_x0;
+  logic [CORE_XLEN-1:0]       lq_result_data, lq_result_cause, lq_result_tval;
+  logic                       lq_result_fault;
+  logic                       lq_flush;
+  logic                       lq_query_valid, lq_query_blocked;
+  logic [CORE_XLEN-1:0]       lq_query_addr, lq_query_data;
+  logic [2:0]                 lq_query_size;
+  logic [31:0]                lq_alloc_ctr, lq_issue_ctr, lq_done_ctr, lq_replay_ctr;
+  logic [31:0]                lq_blocked_ctr, lq_fwd_byte_ctr, lq_mem_byte_ctr;
+  logic [31:0]                lq_fault_ctr, lq_mismatch_ctr;
+  logic [CORE_MEM_CNT_W-1:0]  lq_count;
+
+  logic                       sq_alloc_valid, sq_alloc_ready;
+  logic                       sq_commit_valid;
+  logic                       sq_commit2_valid, sq_commit2_ok;
+  mosaic_uop_pkg::uop_id_t    sq_commit_id, sq_commit2_id;
+  logic [31:0]                sq_commit2_ctr;
+  logic                       sq_drain_valid, sq_drain_ready;
+  mosaic_uop_pkg::lsu_req_t   sq_drain_req;
+  logic                       sq_rsp_valid, sq_rsp_ready;
+  logic                       sq_squash_valid, sq_squash_all;
+  logic [CORE_IDX_W-1:0]      sq_squash_from, sq_squash_tail;
+  logic [CORE_RGEN_W-1:0]     sq_squash_gen;
+  logic [CORE_MEM_CNT_W-1:0]  sq_count, sq_auth_cnt;
+  logic [CORE_SQ_N*CORE_SQ_ENTRY_W-1:0] sq_entry_pay;
+  logic [31:0]                sq_alloc_ctr, sq_commit_ctr, sq_commit_stale_ctr;
+  logic [31:0]                sq_drain_ctr, sq_squash_ctr, sq_spared_ctr, sq_fault_ctr;
+
+  logic                       ep_req_valid, ep_req_ready;
+  mosaic_uop_pkg::lsu_req_t   ep_req;
+  logic                       ep_rsp_valid, ep_rsp_ready;
+  mosaic_uop_pkg::lsu_rsp_t   ep_rsp;
+  logic                       ep_owner_q;
+  logic [31:0]                lsu_txn_ctr, lsu_misaligned_ctr, lsu_access_fault_ctr;
+
+  logic                       lsu_wb_valid, lsu_wb_ready;
+  mosaic_uop_pkg::wb_event_t  lsu_wb_ev, store_wb_ev, lq_wb_ev;
+  logic                       store_cmp_valid;
+
+  logic                       desc_is_store0, desc_is_store1;
+  logic                       desc_wr_is_store;
+  logic [CORE_IDX_W-1:0]      rob_alloc_ptr;
   logic [31:0] squash_nc_ctr;
   logic        core_stop_prev;
 
@@ -834,7 +947,7 @@ module mosaic_core (
       .wr_gen          ({{CORE_PGEN_W{1'b0}}, desc_wr_gen}),
       .wr_rd           ({5'd0, desc_wr_rd}),
       .wr_reg_we       ({1'b0, desc_wr_reg_we}),
-      .wr_is_store     (2'd0),
+      .wr_is_store     ({1'b0, desc_wr_is_store}),
       .rd_index0       (rob_head_index),
       .rd_index1       (rob_head1_index),
       .rd_valid0       (),
@@ -842,13 +955,13 @@ module mosaic_core (
       .rd_gen0         (desc_gen0),
       .rd_rd0          (desc_rd0),
       .rd_reg_we0      (desc_reg_we0),
-      .rd_is_store0    (),
+      .rd_is_store0    (desc_is_store0),
       .rd_valid1       (),
       .rd_tag1         (),
       .rd_gen1         (desc_gen1),
       .rd_rd1          (desc_rd1),
       .rd_reg_we1      (desc_reg_we1),
-      .rd_is_store1    (),
+      .rd_is_store1    (desc_is_store1),
       .clr_valid       (retire_clr_valid),
       .clr_index       (retire_clr_index),
       .o_write_ctr     (),
@@ -930,7 +1043,7 @@ module mosaic_core (
       .obs_exc         (),
       .obs_closed      (),
       .o_head_ptr      (),
-      .o_alloc_ptr     (),
+      .o_alloc_ptr     (rob_alloc_ptr),
       .o_occupied      (rob_occupied),
       .o_free          (rob_free_rob),
       .o_alloc_total   (),
@@ -1156,6 +1269,13 @@ module mosaic_core (
       .wb_ev2              (md_wb_ev),
       .wb_valid2           (md_wb_valid),
       .wb_ready2           (md_wb_ready),
+      // The memory path's producer: a load's merged value or a store's
+      // destination-less completion. One port, because the two can never be
+      // offered in the same cycle (the core holds the store insert while a load
+      // result waits, and vice versa).
+      .wb_ev3              (lsu_wb_ev),
+      .wb_valid3           (lsu_wb_valid),
+      .wb_ready3           (lsu_wb_ready),
       .prf_wr_en           (prf_wr_en),
       .prf_wr_gen_valid    (prf_wr_gen_valid),
       .prf_wr_tag          (prf_wr_tag),
@@ -1285,6 +1405,20 @@ module mosaic_core (
       .desc_wr_gen      (desc_wr_gen),
       .desc_wr_rd       (desc_wr_rd),
       .desc_wr_reg_we   (desc_wr_reg_we),
+      .desc_wr_is_store (desc_wr_is_store),
+      // ---------------------------------------------------------- memory insert
+      .mem_ins_valid    (disp_mem_valid),
+      .mem_ins_ready    (disp_mem_ready),
+      .mem_ins_is_store (disp_mem_is_store),
+      .mem_ins_id       (disp_mem_id),
+      .mem_ins_base     (disp_mem_base),
+      .mem_ins_imm      (disp_mem_imm),
+      .mem_ins_size     (disp_mem_size),
+      .mem_ins_signed   (disp_mem_signed),
+      .mem_ins_data     (disp_mem_data),
+      .mem_ins_dst_tag  (disp_mem_dst_tag),
+      .mem_ins_dst_gen  (disp_mem_dst_gen),
+      .mem_ins_dst_x0   (disp_mem_dst_x0),
       .rq_valid         (disp_rq_valid),
       .rq_tag           (disp_rq_tag),
       .rq_gen           (disp_rq_gen),
@@ -1601,15 +1735,359 @@ module mosaic_core (
   );
 
   // ==========================================================================
-  // 14. Core-level evidence and the unused data port
+  // 14. The memory path (I-033..I-038) at the integration boundary
   // ==========================================================================
-  assign dmem_req_valid = 1'b0;
-  assign dmem_req.we    = 1'b0;
-  assign dmem_req.addr  = {CORE_XLEN{1'b0}};
-  assign dmem_req.size  = mosaic_pkg::SZ_WORD;
-  assign dmem_req.wstrb = {(CORE_XLEN/8){1'b0}};
-  assign dmem_req.wdata = {CORE_XLEN{1'b0}};
-  assign dmem_rsp_ready = 1'b1;
+  //
+  //     dispatch --- allocate ---> load queue ---+
+  //                   |                          +--> mosaic_lsu_endpoint --> dmem
+  //                   +- allocate ---> store queue+
+  //                                        ^
+  //     ROB retire -- commit(1,2) ----------+   (authorisation)
+  //     redirect ---- squash_all -----------+   (both queues)
+  //
+  // A load is allocated into the load queue when its base operand is readable; a
+  // store is allocated into the store queue when its base *and* payload are, and
+  // the store's ROB completion is offered in that same cycle, because a store's
+  // work is done the moment its address and data are known -- what remains is an
+  // authorisation, not an execution.
+  //
+  // Both queues share the endpoint's single upstream port. The store drain has
+  // priority: it is the side-effecting path and its entries cannot be released
+  // any other way (a load that waits costs a cycle, a store that waits costs
+  // capacity, and capacity is what the front end stalls on). Neither can starve
+  // the other: a store is only ever offered after it has retired, and a load in
+  // front of it in the endpoint's queue is served as soon as the drain in
+  // progress completes.
+  //
+  // The endpoint owns the fault boundary and computes `base + imm` once, in one
+  // adder, so the strobes, the misalignment test and the reported `tval` cannot
+  // disagree about which bytes the access owns.
+  assign ep_req_valid = sq_drain_valid | lq_req_valid;
+  assign ep_req       = sq_drain_valid ? sq_drain_req : lq_req;
+  assign sq_drain_ready = ep_req_ready;
+  assign lq_req_ready   = ep_req_ready && !sq_drain_valid;
+
+  // Which queue the endpoint's response belongs to. The endpoint holds one
+  // transaction and refuses a second request until it has returned that
+  // transaction's response (`accept_c` requires ST_IDLE), so the owner recorded
+  // at acceptance is exact and a response can never be delivered to the wrong
+  // queue.
+  always_ff @(posedge clk) begin
+    if (rst) begin
+      ep_owner_q <= 1'b0;
+    end else if (ep_req_valid && ep_req_ready) begin
+      ep_owner_q <= sq_drain_valid;
+    end
+  end
+  assign lq_rsp_valid = ep_rsp_valid && !ep_owner_q;
+  assign sq_rsp_valid = ep_rsp_valid &&  ep_owner_q;
+  assign ep_rsp_ready = ep_owner_q ? sq_rsp_ready : lq_rsp_ready;
+
+  mosaic_lsu_endpoint u_lsu (
+      .clk                  (clk),
+      .rst                  (rst),
+      .req_valid_i          (ep_req_valid),
+      .req_ready_o          (ep_req_ready),
+      .req_i                (ep_req),
+      .rsp_valid_o          (ep_rsp_valid),
+      .rsp_ready_o          (ep_rsp_ready),
+      .rsp_o                (ep_rsp),
+      .mem_req_valid_o      (dmem_req_valid),
+      .mem_req_ready_i      (dmem_req_ready),
+      .mem_req_o            (dmem_req),
+      .mem_rsp_valid_i      (dmem_rsp_valid),
+      .mem_rsp_ready_o      (dmem_rsp_ready),
+      .mem_rsp_i            (dmem_rsp),
+      .o_busy               (),
+      .o_load_ctr           (),
+      .o_store_ctr          (),
+      .o_txn_ctr            (lsu_txn_ctr),
+      .o_misaligned_ctr     (lsu_misaligned_ctr),
+      .o_access_fault_ctr   (lsu_access_fault_ctr),
+      .o_rsp_ctr            (),
+      .o_last_fault_cause   (),
+      .o_last_fault_tval    (),
+      .o_inflight_addr      (),
+      .o_inflight_size      ()
+  );
+
+  mosaic_load_queue u_lq (
+      .clk                  (clk),
+      .rst                  (rst),
+      .alloc_valid_i        (lq_alloc_valid),
+      .alloc_ready_o        (lq_alloc_ready),
+      .alloc_id_i           (disp_mem_full_id),
+      .alloc_base_i         (disp_mem_base),
+      .alloc_imm_i          (disp_mem_imm),
+      .alloc_size_i         (disp_mem_size),
+      .alloc_signed_i       (disp_mem_signed),
+      .alloc_dst_tag_i      (disp_mem_dst_tag),
+      .alloc_dst_gen_i      (disp_mem_dst_gen),
+      .alloc_dst_x0_i       (disp_mem_dst_x0),
+      .flush_valid_i        (lq_flush),
+      .sq_entry_pay_i       (sq_entry_pay),
+      .sq_count_i           (sq_count),
+      .sq_query_addr_o      (lq_query_addr),
+      .sq_query_size_o      (lq_query_size),
+      .sq_query_valid_i     (lq_query_valid),
+      .sq_query_data_i      (lq_query_data),
+      .sq_query_blocked_i   (lq_query_blocked),
+      .req_valid_o          (lq_req_valid),
+      .req_ready_i          (lq_req_ready),
+      .req_o                (lq_req),
+      .rsp_valid_i          (lq_rsp_valid),
+      .rsp_ready_o          (lq_rsp_ready),
+      .rsp_i                (ep_rsp),
+      .result_valid_o       (lq_result_valid),
+      .result_ready_i       (lq_result_ready),
+      .result_id_o          (lq_result_id),
+      .result_dst_tag_o     (lq_result_dst_tag),
+      .result_dst_gen_o     (lq_result_dst_gen),
+      .result_dst_x0_o      (lq_result_dst_x0),
+      .result_data_o        (lq_result_data),
+      .result_cause_o       (lq_result_cause),
+      .result_tval_o        (lq_result_tval),
+      .result_fault_o       (lq_result_fault),
+      .result_fwd_mask_o    (),
+      .o_count              (lq_count),
+      .o_occ                (),
+      .o_alloc_ctr          (lq_alloc_ctr),
+      .o_issue_ctr          (lq_issue_ctr),
+      .o_rsp_ctr            (),
+      .o_done_ctr           (lq_done_ctr),
+      .o_replay_ctr         (lq_replay_ctr),
+      .o_blocked_ctr        (lq_blocked_ctr),
+      .o_fwd_byte_ctr       (lq_fwd_byte_ctr),
+      .o_mem_byte_ctr       (lq_mem_byte_ctr),
+      .o_fault_ctr          (lq_fault_ctr),
+      .o_query_mismatch_ctr (lq_mismatch_ctr),
+      .o_last_fault_cause   (),
+      .o_last_fault_tval    (),
+      .o_entry_pay          ()
+  );
+
+  mosaic_store_queue u_sq (
+      .clk                  (clk),
+      .rst                  (rst),
+      // A store's operands are read for real before it is allocated (dispatch
+      // holds the macro until its base and payload are readable), so both
+      // readiness bits are set at allocation and the late-fill port is unused.
+      // That is a design choice with a price -- the front end waits instead of
+      // allocating early -- and it is why the fill path is not exercised here;
+      // the store queue's own case covers it.
+      .alloc_valid_i        (sq_alloc_valid),
+      .alloc_ready_o        (sq_alloc_ready),
+      .alloc_id_i           (disp_mem_full_id),
+      .alloc_base_i         (disp_mem_base),
+      .alloc_imm_i          (disp_mem_imm),
+      .alloc_size_i         (disp_mem_size),
+      .alloc_addr_valid_i   (1'b1),
+      .alloc_data_i         (disp_mem_data),
+      .alloc_data_valid_i   (1'b1),
+      .fill_valid_i         (1'b0),
+      .fill_id_i            ({CORE_MEM_ID_W{1'b0}}),
+      .fill_base_i          ({CORE_XLEN{1'b0}}),
+      .fill_imm_i           ({CORE_XLEN{1'b0}}),
+      .fill_addr_valid_i    (1'b0),
+      .fill_data_i          ({CORE_XLEN{1'b0}}),
+      .fill_data_valid_i    (1'b0),
+      .fill_hit_o           (),
+      .fill_stale_o         (),
+      .commit_valid_i       (sq_commit_valid),
+      .commit_id_i          (sq_commit_id),
+      .commit_ok_o          (),
+      .commit_stale_o       (),
+      .commit2_valid_i      (sq_commit2_valid),
+      .commit2_id_i         (sq_commit2_id),
+      .commit2_ok_o         (sq_commit2_ok),
+      .commit2_stale_o      (),
+      .squash_valid_i       (sq_squash_valid),
+      .squash_all_i         (sq_squash_all),
+      .squash_from_index_i  (sq_squash_from),
+      .squash_tail_index_i  (sq_squash_tail),
+      .squash_gen_i         (sq_squash_gen),
+      .drain_req_valid_o    (sq_drain_valid),
+      .drain_req_ready_i    (sq_drain_ready),
+      .drain_req_o          (sq_drain_req),
+      .drain_rsp_valid_i    (sq_rsp_valid),
+      .drain_rsp_ready_o    (sq_rsp_ready),
+      .drain_rsp_i          (ep_rsp),
+      .fwd_query_addr_i     (lq_query_addr),
+      .fwd_query_size_i     (lq_query_size),
+      .fwd_valid_o          (lq_query_valid),
+      .fwd_data_o           (lq_query_data),
+      .fwd_blocked_o        (lq_query_blocked),
+      .o_count              (sq_count),
+      .o_auth_cnt           (sq_auth_cnt),
+      .o_occ                (),
+      .o_entry_authorised   (),
+      .o_alloc_ctr          (sq_alloc_ctr),
+      .o_fill_ctr           (),
+      .o_fill_stale_ctr     (),
+      .o_commit_ctr         (sq_commit_ctr),
+      .o_commit_stale_ctr   (sq_commit_stale_ctr),
+      .o_drain_ctr          (sq_drain_ctr),
+      .o_fault_ctr          (sq_fault_ctr),
+      .o_squash_ctr         (sq_squash_ctr),
+      .o_squash_spared_ctr  (sq_spared_ctr),
+      .o_last_fault_tval    (),
+      .o_last_fault_cause   (),
+      .o_last_fault_id      (),
+      .o_entry_pay          (sq_entry_pay)
+  );
+
+  // ==========================================================================
+  // 14a. The memory path's control: allocation, completion and authorisation
+  // ==========================================================================
+  // A load needs only its queue to have room. A store needs its queue to have
+  // room *and* the completion path to be able to take its completion in the very
+  // same cycle: the store's completion is offered as it is allocated and it has
+  // no second one. A load result waiting in the writeback port takes precedence
+  // over a store insert, because the load has already reached memory and its
+  // completion is older work; the store simply waits a cycle, which costs
+  // nothing but a stall the call site counts.
+  // The insert bus carries the same identity width the cluster insert bus does
+  // (the uop id without the hart field); p0 has one hart, so the full identity
+  // is that field zero-extended -- the same rule every other producer in this
+  // file uses.
+  assign disp_mem_full_id = {1'b0, disp_mem_id};
+
+  assign disp_mem_ready = disp_mem_is_store
+      ? (sq_alloc_ready && lsu_wb_ready && !lq_result_valid)
+      : lq_alloc_ready;
+
+  assign lq_alloc_valid  = disp_mem_valid && !disp_mem_is_store && disp_mem_ready;
+  assign sq_alloc_valid  = disp_mem_valid &&  disp_mem_is_store && disp_mem_ready;
+  assign store_cmp_valid = disp_mem_valid &&  disp_mem_is_store && disp_mem_ready;
+
+  // A store is complete when both its operands are captured: no register value,
+  // no exception, just "this uop is done". Its identity is the ROB identity of
+  // the macro, which is what the ROB's completion port matches on.
+  always_comb begin
+    store_wb_ev.id          = disp_mem_full_id;
+    store_wb_ev.dst.tag     = {CORE_TAG_W{1'b0}};
+    store_wb_ev.dst.gen     = {CORE_PGEN_W{1'b0}};
+    store_wb_ev.dst.x0      = 1'b1;
+    store_wb_ev.value_valid = 1'b0;
+    store_wb_ev.value       = {CORE_XLEN{1'b0}};
+    store_wb_ev.exc.valid   = 1'b0;
+    store_wb_ev.exc.cause   = {CORE_XLEN{1'b0}};
+    store_wb_ev.exc.tval    = {CORE_XLEN{1'b0}};
+    store_wb_ev.is_store    = 1'b1;
+    store_wb_ev.is_load     = 1'b0;
+  end
+
+  // A load's completion carries the merged, sign-extended value the load queue
+  // produced and the destination the entry carried with it.
+  always_comb begin
+    lq_wb_ev.id          = lq_result_id;
+    lq_wb_ev.dst.tag     = lq_result_dst_tag;
+    lq_wb_ev.dst.gen     = {{(CORE_PGEN_W - CORE_IGEN_W){1'b0}}, lq_result_dst_gen};
+    lq_wb_ev.dst.x0      = lq_result_dst_x0;
+    lq_wb_ev.value_valid = !lq_result_dst_x0;
+    lq_wb_ev.value       = lq_result_data;
+    lq_wb_ev.exc.valid   = lq_result_fault;
+    lq_wb_ev.exc.cause   = lq_result_cause;
+    lq_wb_ev.exc.tval    = lq_result_tval;
+    lq_wb_ev.is_store    = 1'b0;
+    lq_wb_ev.is_load     = 1'b1;
+  end
+
+  assign lsu_wb_valid      = store_cmp_valid | lq_result_valid;
+  assign lsu_wb_ev         = store_cmp_valid ? store_wb_ev : lq_wb_ev;
+  assign lq_result_ready   = lsu_wb_ready && !store_cmp_valid;
+
+  // ---------------------------------------------- authorisation and squash
+  // The ROB retires at most two instructions per cycle and both lanes can be
+  // stores, so both authorisation ports are driven from the lanes that actually
+  // retired in this cycle. `uop_index` is zero because this core allocates one
+  // uop per macro (mosaic_dispatch).
+  assign sq_commit_valid  = rob_retire_ack      && desc_is_store0;
+  assign sq_commit_id     = {1'b0, rob_head_index,  rob_head_gen,  {CORE_UOP_W{1'b0}}};
+  assign sq_commit2_valid = rob_retire_ack_next && desc_is_store1 && rob_retire_ack;
+  assign sq_commit2_id    = {1'b0, rob_head1_index, rob_head1_gen, {CORE_UOP_W{1'b0}}};
+
+`ifdef MOSAIC_CORE_MUTANT_STORE_PRECOMMIT
+  // NEGATIVE CONTROL: the store is authorised as it is *allocated* instead of
+  // when it retires -- the tempting "its address and data are ready, so it can
+  // go now". A store that is the only resident entry names the first
+  // unauthorised entry, so the store queue accepts it and offers it to memory
+  // before the store has retired. The driver's "no store reaches memory before
+  // the instruction that owns it retires" check (writes seen <= stores retired)
+  // is what names it; the final memory image is unchanged, which is exactly why
+  // an end-state-only comparison would not catch it.
+  assign sq_commit_valid  = sq_alloc_valid;
+  assign sq_commit_id     = disp_mem_full_id;
+  assign sq_commit2_valid = 1'b0;
+  assign sq_commit2_id    = {CORE_MEM_ID_W{1'b0}};
+`endif
+
+  // A redirect withdraws everything the recovery decided is dead. The whole
+  // queue is the correct region here and is what the store queue is built for:
+  // an authorised store that has not drained is *spared* by the watermark rule,
+  // and with both retire lanes authorising in their own cycle there is no
+  // retired-but-unauthorised store for a whole-queue flush to lose. The region
+  // inputs are driven with the redirecting branch's own identity (it is the ROB
+  // head in the cycle the redirect is issued) rather than left dangling, so the
+  // narrower rule is a one-line change the day the conservative recovery is
+  // replaced and younger work really does sit in these queues.
+  assign sq_squash_valid = redirect_valid;
+  assign sq_squash_all   = 1'b1;
+  assign sq_squash_from  = rob_head_index;
+  assign sq_squash_tail  = rob_alloc_ptr;
+  assign sq_squash_gen   = rob_head_gen;
+  assign lq_flush        = redirect_valid;
+
+  // A memory insert that was offered and not taken. Counted, because a stall
+  // here is the only thing that can hold a memory macro in dispatch and the
+  // number is the evidence that the back-pressure path was exercised.
+  always_ff @(posedge clk) begin
+    if (rst) begin
+      mem_ins_stall_ctr <= 32'd0;
+    end else if (disp_mem_valid && !disp_mem_ready) begin
+      mem_ins_stall_ctr <= mem_ins_stall_ctr + 32'd1;
+    end
+  end
+
+  assign o_mem_lq_alloc       = lq_alloc_ctr;
+  assign o_mem_lq_issue       = lq_issue_ctr;
+  assign o_mem_lq_done        = lq_done_ctr;
+  assign o_mem_lq_replay      = lq_replay_ctr;
+  assign o_mem_lq_blocked     = lq_blocked_ctr;
+  assign o_mem_lq_fwd_bytes   = lq_fwd_byte_ctr;
+  assign o_mem_lq_mem_bytes   = lq_mem_byte_ctr;
+  assign o_mem_lq_fault       = lq_fault_ctr;
+  assign o_mem_lq_query_mismatch = lq_mismatch_ctr;
+  assign o_mem_lq_occupied    = 32'(lq_count);
+  assign o_mem_sq_alloc       = sq_alloc_ctr;
+  assign o_mem_sq_commit      = sq_commit_ctr;
+  assign o_mem_sq_commit2     = sq_commit2_ctr;
+  assign o_mem_sq_commit_stale= sq_commit_stale_ctr;
+  assign o_mem_sq_drain       = sq_drain_ctr;
+  assign o_mem_sq_squash      = sq_squash_ctr;
+  assign o_mem_sq_spared      = sq_spared_ctr;
+  assign o_mem_sq_occupied    = 32'(sq_count);
+  assign o_mem_sq_auth        = 32'(sq_auth_cnt);
+  assign o_mem_sq_fault       = sq_fault_ctr;
+  assign o_mem_lsu_txn        = lsu_txn_ctr;
+  assign o_mem_lsu_misaligned = lsu_misaligned_ctr;
+  assign o_mem_lsu_access_fault = lsu_access_fault_ctr;
+  assign o_mem_ins_stall      = mem_ins_stall_ctr;
+  assign o_mem_squash_valid   = sq_squash_valid;
+
+  // How often both retirement lanes were stores in one cycle -- the case that
+  // needs the store queue's second authorisation port.
+  always_ff @(posedge clk) begin
+    if (rst) begin
+      sq_commit2_ctr <= 32'd0;
+    end else if (sq_commit2_ok) begin
+      sq_commit2_ctr <= sq_commit2_ctr + 32'd1;
+    end
+  end
+
+  // ==========================================================================
+  // 15. Core-level evidence
+  // ==========================================================================
 
   assign o_c0_count     = c0_count;
   assign o_c1_count     = c1_count;

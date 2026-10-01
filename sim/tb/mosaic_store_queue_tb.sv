@@ -247,6 +247,14 @@ module mosaic_store_queue_tb (
       .commit_id_i          (commit_id[TB_ID_W-1:0]),
       .commit_ok_o          (commit_ok),
       .commit_stale_o       (commit_stale),
+      // The second authorisation port exists for the core, whose ROB retires two
+      // instructions per cycle. This case drives one commit at a time, so a
+      // second is held idle; the two-at-once rule is exercised through
+      // CASE=core.mem_program, which retires consecutive stores two per cycle.
+      .commit2_valid_i      (1'b0),
+      .commit2_id_i         ({TB_ID_W{1'b0}}),
+      .commit2_ok_o         (),
+      .commit2_stale_o      (),
 
       .squash_valid_i       (squash_valid),
       .squash_all_i         (squash_all),

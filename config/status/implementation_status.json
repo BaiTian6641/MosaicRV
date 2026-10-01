@@ -35,7 +35,8 @@
     "I-023",
     "I-034",
     "V-012",
-    "I-035"
+    "I-035",
+    "V-010"
   ],
   "evidence": {
     "I-001": {
@@ -424,6 +425,17 @@
       "verdict": "PASS",
       "notes": "Load queue and store-to-load forwarding. Case PASS from a clean build: 107414 checks over 3501 cycles, 402 loads, 871 stores, 244 replays, 397 forwarded bytes, 1069 memory bytes. Five mutants, each rebuilt from a deleted build directory with its -D in the build command and a distinct named first failure; independently re-verified here: MOSAIC_LQ_MUTANT_YOUNGER_FORWARDS (the card's second fail mode, a younger store forwarding into an older load) exits 1 after 6603 checks at cycle 276 with forward mask 0x000000ff where 0x00000000 is required. The other controls cover the card's other fail mode (ALIGNED_WORD_ONLY -- comparing only aligned words, which the byte-level checks catch), ignoring the unknown-address block, forwarding stale bytes after the blocking store is squashed, and taking a byte from memory that a legal older store covers. No RTL defect was found; six testbench defects were found by the checks and fixed, all recorded, including two worth naming: the younger-store test originally used an address that older stores also covered (so it proved nothing about the youngest-older rule) and the soak squashed the store queue so often that it forwarded only 3 bytes in 3000 cycles (a passing case that was barely exercising the feature). One design fact the lane reports rather than hides: the store queue's forward query cannot express program order, so per-byte youngest-older selection reads the SQ's exported entry view while the query supplies the unknown-address block only, and the two are cross-checked every cycle against o_lq_query_mismatch_ctr. NOT verified: no core integration (nothing shows dispatch allocating loads in program order, the identity being the ROB's, or a core wiring the entry view up); one load in flight only (the endpoint is one-at-a-time; I-043 would change that); no FENCE (I-037), no speculative disambiguation or violation replay (I-036), no MMIO (I-038); faults are reported, not taken; p0 geometry only; simulation only.",
       "report": "results/reports/I-035-lq.md"
+    },
+    "V-010": {
+      "cases": [
+        "harness.sampling_calibration"
+      ],
+      "commands": [
+        "python3 tools/run_unit.py --profile p0 --case harness.sampling_calibration"
+      ],
+      "verdict": "PASS",
+      "notes": "Clock and sampling-loop calibration -- the package that makes every other case's event counts exact, and the last gate on the base integer set. Case PASS from a clean build: three runs (zero latency and two item-by-item latency plans), 630 cycles, 45 instructions per run, with three independent tallies agreeing exactly -- the reference model's events, the event tap's records and the fetch accepts -- plus 110 checks. A repeated-sampling detector is built in: no record may be emitted twice for the same (retire_seq, pc) identity and the sequence numbers must be dense. Four harness mutants (each rebuilt from a wiped directory with its -D in the build command) exit 1 with their own named first check, including the double-eval one the detector exists for. The package also audited all thirty drivers' clocking discipline against the drive-low / eval-low / eval-rising / eval-falling / one-settled-sample convention and reported each deviation rather than rewriting other lanes' drivers: tb_harness.cpp evaluates twice in the high phase (idempotent, no input changes between them, both before the retire sample) and tb_wb.cpp's extra low-phase eval is an input change rather than a re-sample, so neither can double-count; the alu/decoder cases are combinational and have no timeline; nine of thirty drivers never call dut.final() and no sim/tb/*.sv contains a final block, a timescale, a delay, an initial block or $finish, so dut.final() executes no design code anywhere in the tree -- the card's 'missing final before the end' fail mode has no instance, and the case asserts Verilator's time()==0 and eventsPending()==false instead; --timing is enabled nowhere in the tree, so the 'pending events not advanced' fail mode has no instance either. Regressions re-run after the harness edit: core.bringup_vs_reference, reset.replay_determinism, loader.elf_boundaries, exit.protocol_termination and harness.bad_image all PASS, and V-009's five reset mutants still all exit 1. NOT verified: the audit is a reading of the drivers, not a proof about them; the detector is exercised only through this case's own runs; no other package's driver was rewritten even where it deviates. IMPORTANT follow-up recorded by the lane: dut.final() being a no-op tree-wide means the end-of-run assertion discipline the card asks for currently holds for this case only, and any future per-case final check must be added case by case.",
+      "report": "results/reports/V-010-sampling.md"
     }
   }
 }

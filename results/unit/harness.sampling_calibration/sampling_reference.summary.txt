@@ -1,0 +1,11 @@
+outcome tohost
+events 45
+steps 45
+cycles 155
+minstret 45
+tohost 4488cd115599de20
+uart_writes 0
+sig0 4488cd115599de20
+sig1 0000000000000000
+sig2 0000000000000000
+sig3 0000000000000000

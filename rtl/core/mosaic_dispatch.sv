@@ -22,16 +22,22 @@
 //
 // ------------------------------------------------------- unsupported macros
 //
-// This package does **not** service UOP_LOAD, UOP_STORE or UOP_SYSTEM, and not
-// fence/fence.i. The memory path is I-033..I-038 and the CSR/trap path is
-// I-019/I-020. Dispatching one of them into an execution unit that cannot
-// complete it would leave a macro in the ROB that never completes -- a hang
-// dressed up as execution. So they are refused, loudly and counted, and the
-// refusal happens **before the group is presented to rename**: nothing is
-// allocated, nothing is leaked, and the machine stops cleanly at that
-// instruction instead of executing something wrong. That ordering is the whole
-// reason the check sits here rather than at the issue queue: rename has already
-// allocated by the time the issue queue could have refused.
+// This package **does not** service UOP_SYSTEM or fence/fence.i. The CSR/trap
+// path is I-019/I-020 and FENCE/FENCE.I is I-037. Dispatching one of them into
+// an execution unit that cannot complete it would leave a macro in the ROB that
+// never completes -- a hang dressed up as execution. So they are refused,
+// loudly and counted, and the refusal happens **before the group is presented to
+// rename**: nothing is allocated, nothing is leaked, and the machine stops
+// cleanly at that instruction instead of executing something wrong. That
+// ordering is the whole reason the check sits here rather than at the issue
+// queue: rename has already allocated by the time the issue queue could have
+// refused.
+//
+// Loads and stores used to be on that list. They are not any more: the memory
+// path (I-033..I-038) is integrated, and a memory macro leaves through the
+// dedicated insert port below instead of through a cluster. It cannot hang,
+// because the LSU always completes a load and a store is complete the moment its
+// operands are -- see mosaic_core.sv.
 //
 // ---------------------------------------------------------------- operands
 //
@@ -198,6 +204,9 @@ module mosaic_dispatch (
     output logic [DSP_PGEN_W-1:0]       desc_wr_gen,
     output logic [4:0]                  desc_wr_rd,
     output logic                        desc_wr_reg_we,
+    // "This macro is a store", so the ROB's commit path can name the store it
+    // is retiring and the store queue can authorise exactly that entry.
+    output logic                        desc_wr_is_store,
 
     // ------------------------------------------- ready table query (arbiter)
     output logic [1:0]                  rq_valid,
@@ -213,6 +222,35 @@ module mosaic_dispatch (
     input  logic [DSP_BANKS-1:0]             prf_rsp_gen_mismatch,
     input  logic [DSP_BANKS-1:0]             prf_rsp_never_written,
     input  logic [DSP_BANKS*DSP_XLEN-1:0]    prf_rsp_data,
+
+    // ---------------------------------------------- memory insert (LQ / SQ)
+    // A load or store macro leaves dispatch here instead of entering a cluster:
+    // its address operands are already in this module's own operand pipeline
+    // (base in slot 1, the store payload in slot 2, the offset in the decoded
+    // immediate), the address adder lives in the LSU, and neither queue has an
+    // execution unit to issue into. So the macro is *allocated* into its queue
+    // in the same cycle its operands become readable, exactly as an ALU macro is
+    // inserted into a cluster, and the memory path's completion is what makes it
+    // ready to retire.
+    //
+    // The handshake is the same transport rule the cluster insert uses: `valid`
+    // with the payload held stable until `ready`. `mem_ins_ready_i` is the
+    // core's composition of the target queue's room and, for a store, the
+    // writeback path's willingness to take its completion in this very cycle --
+    // a store owns a cluster-style completion at allocation, and it must be
+    // taken there, because the store has no other completion to offer later.
+    output logic                        mem_ins_valid,
+    input  logic                        mem_ins_ready,
+    output logic                        mem_ins_is_store,
+    output logic [DSP_UOP_ID_W-1:0]     mem_ins_id,
+    output logic [DSP_XLEN-1:0]         mem_ins_base,
+    output logic [DSP_XLEN-1:0]         mem_ins_imm,
+    output logic [2:0]                  mem_ins_size,
+    output logic                        mem_ins_signed,
+    output logic [DSP_XLEN-1:0]         mem_ins_data,
+    output logic [DSP_TAG_W-1:0]        mem_ins_dst_tag,
+    output logic [DSP_IGEN_W-1:0]       mem_ins_dst_gen,
+    output logic                        mem_ins_dst_x0,
 
     // ------------------------------------------- cluster insert (one per cluster)
     output logic                        c0_ins_valid,
@@ -327,7 +365,10 @@ module mosaic_dispatch (
   logic                 s1_value_ok, s2_value_ok, s1_conflict, s2_conflict;
   logic                 s1_bad, s2_bad;
   logic                 ins_ready_sel;
-  logic                 ins_ok;
+  logic                 ins_ok_cluster;
+  logic                 head_is_mem;
+  logic                 head_is_store;
+  logic                 mem_ins_offer;
   logic [DSP_XLEN-1:0]  s1_val_sel, s2_val_sel;
   logic [DSP_UOP_ID_W-1:0] ins_uop_v;
   mosaic_uop_pkg::uop_meta_t ins_meta_v;
@@ -348,8 +389,13 @@ module mosaic_dispatch (
 
   always_comb begin
     l0_illegal     = dec_valid[0] && !dec_ctl0.valid;
+    // Memory macros are services now: a load or a store is executed by the LSU
+    // and allocated into its queue through the memory insert port below. What
+    // remains refused is everything the machine still has no path for: an
+    // invalid decode, a CSR/system macro (I-019/I-020) and FENCE/FENCE.I
+    // (I-037). Refusing them *before* rename is what stops a macro entering the
+    // ROB that no unit can complete.
     l0_unsupported = dec_valid[0] && (!dec_ctl0.valid ||
-                                      (dec_ctl0.mem_kind != mosaic_pkg::MEM_NONE) ||
                                       dec_ctl0.is_system || dec_ctl0.is_miscmem);
   end
 
@@ -381,6 +427,9 @@ module mosaic_dispatch (
   assign desc_wr_gen    = {{(DSP_PGEN_W - DSP_IGEN_W){1'b0}}, alloc_new_gen};
   assign desc_wr_rd     = dec_ctl0.rd;
   assign desc_wr_reg_we = alloc_ok && alloc_new_valid && dec_ctl0.reg_write && !alloc_is_x0;
+  // Recorded for *every* allocated macro (not gated on `alloc_ok`) so a stale
+  // slot cannot keep an old "is a store" bit that the retire path would read.
+  assign desc_wr_is_store = (dec_ctl0.mem_kind == mosaic_pkg::MEM_STORE);
 
   // --------------------------------------------------------------------------
   // The meta
@@ -660,9 +709,20 @@ module mosaic_dispatch (
     ins_ready_sel = head.cluster ? c1_ins_ready : c0_ins_ready;
   end
 
-  assign ins_ok    = head_valid && !recovering && s1_value_ok && s2_value_ok &&
-                     ins_ready_sel;
-  assign head_fire = ins_ok;
+  // A memory macro does not enter a cluster: it is allocated into the load or
+  // store queue. So the two insert paths have their own readiness and their own
+  // target, and `head_fire` -- the one event that pops the head, and therefore
+  // the one event that keeps allocation order equal to program order -- is
+  // either of them.
+  assign head_is_mem = (head.meta.class_ == mosaic_uop_pkg::UOP_LOAD) ||
+                       (head.meta.class_ == mosaic_uop_pkg::UOP_STORE);
+  assign head_is_store = (head.meta.class_ == mosaic_uop_pkg::UOP_STORE);
+  assign ins_ok_cluster = head_valid && !recovering && !head_is_mem &&
+                          s1_value_ok && s2_value_ok && ins_ready_sel;
+  assign mem_ins_offer  = head_valid && !recovering && head_is_mem &&
+                          s1_value_ok && s2_value_ok;
+  assign mem_ins_valid  = mem_ins_offer;
+  assign head_fire      = ins_ok_cluster || (mem_ins_offer && mem_ins_ready);
 
   // --------------------------------------------------------------------------
   // Insert bus
@@ -687,7 +747,7 @@ module mosaic_dispatch (
   end
 
   always_comb begin
-    c0_ins_valid     = ins_ok && !head.cluster;
+    c0_ins_valid     = ins_ok_cluster && !head.cluster;
     c0_ins_uop       = ins_uop_v;
     c0_ins_meta      = ins_meta_v;
     c0_ins_imm       = ins_imm_v;
@@ -704,7 +764,7 @@ module mosaic_dispatch (
     c0_ins_dst_tag   = ins_dst_tag_v;
     c0_ins_dst_gen   = ins_dst_gen_v;
 
-    c1_ins_valid     = ins_ok && head.cluster;
+    c1_ins_valid     = ins_ok_cluster && head.cluster;
     c1_ins_uop       = ins_uop_v;
     c1_ins_meta      = ins_meta_v;
     c1_ins_imm       = ins_imm_v;
@@ -720,6 +780,31 @@ module mosaic_dispatch (
                                      : (head.s2_x0 ? {DSP_XLEN{1'b0}} : s2_val_sel);
     c1_ins_dst_tag   = ins_dst_tag_v;
     c1_ins_dst_gen   = ins_dst_gen_v;
+  end
+
+  // --------------------------------------------------------------------------
+  // Memory insert bus
+  // --------------------------------------------------------------------------
+  // The address is presented as base and offset, not as a sum: the LSU owns the
+  // one adder, so the address the strobes come from, the address the misalign
+  // check tests and the address the fault reports cannot disagree. `head.imm` is
+  // the decoded immediate for both classes; a load's slot 2 is the ready
+  // constant it was folded into, a store's slot 2 is the payload.
+  always_comb begin
+    mem_ins_is_store = head_is_store;
+    mem_ins_id       = head.id;
+    mem_ins_base     = head.s1_x0 ? {DSP_XLEN{1'b0}}
+                       : (head.s1_const ? head.s1_cval : s1_val_sel);
+    mem_ins_imm      = head.imm;
+    mem_ins_size     = head.meta.mem_size;
+    mem_ins_signed   = head.meta.mem_signed;
+    mem_ins_data     = head.s2_x0 ? {DSP_XLEN{1'b0}}
+                       : (head.s2_const ? head.s2_cval : s2_val_sel);
+    // A store writes no register, so its destination is x0 by construction
+    // rather than by the decoder happening to say so.
+    mem_ins_dst_x0   = head_is_store || head.dst_x0;
+    mem_ins_dst_tag  = head_is_store ? {DSP_TAG_W{1'b0}} : head.dst_tag;
+    mem_ins_dst_gen  = head_is_store ? {DSP_IGEN_W{1'b0}} : head.dst_gen;
   end
 
   // --------------------------------------------------------------------------
@@ -775,7 +860,7 @@ module mosaic_dispatch (
         exhausted_ctr <= exhausted_ctr + 32'd1;
       if (dec_valid[0] && !l0_unsupported && !recovering && !stop_q && !barrier &&
           !rob_free_any) rob_full_ctr <= rob_full_ctr + 32'd1;
-      if (head_valid && !recovering && !ins_ok) stall_ctr <= stall_ctr + 32'd1;
+      if (head_valid && !recovering && !head_fire) stall_ctr <= stall_ctr + 32'd1;
       if (s1_needs_read || s2_needs_read) src_read_ctr <= src_read_ctr + 32'd1;
       if (s1_conflict || s2_conflict) src_conflict_ctr <= src_conflict_ctr + 32'd1;
       if (s1_bad || s2_bad) src_bad_ctr <= src_bad_ctr + 32'd1;

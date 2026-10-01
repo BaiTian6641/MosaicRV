@@ -124,6 +124,20 @@
 // no combinational path from the memory side back into the allocator -- the
 // trade mosaic_result_fifo and mosaic_store_queue both document.
 //
+// The entry also carries the load's **destination** (physical tag, allocation
+// generation, x0) and returns it on the result port with the value. The consumer
+// that turns a result into a completion needs to name the register the value
+// belongs to, and the only copy of that fact which cannot drift from the load it
+// describes is the entry the load occupies.
+//
+// `flush_valid_i` withdraws the whole queue and cancels an offer already in the
+// endpoint's hands. Unlike the store queue there is no watermark to respect: a
+// load writes nothing, so no entry is ever "already promised" and none is
+// spared. The response for an abandoned offer is still consumed (and discarded)
+// when it arrives; the endpoint holds one transaction and will not accept the
+// next request before that response is taken, so a discarded response can never
+// be attributed to a later load.
+//
 // The merged value is built in the *load's* byte order (byte `i` at bits
 // `8i..8i+7`): a byte that an older covering store owns comes from that store's
 // payload at its offset inside the store, and every other byte comes from the
@@ -187,6 +201,11 @@ module mosaic_load_queue #(
     localparam int unsigned IDX_W       = (ENTRIES <= 1) ? 1 : $clog2(ENTRIES),
     localparam int unsigned SQ_CNT_W    = $clog2(SQ_ENTRIES + 1),
     localparam int unsigned BYTES       = XLEN / 8,
+    // The destination identity a completion carries: the physical tag and the
+    // *allocation* generation rename keys its maps on, both taken from the
+    // packages rather than re-derived.
+    localparam int unsigned TAG_W       = mosaic_uop_pkg::TAG_W,
+    localparam int unsigned IGEN_W      = mosaic_cfg_pkg::MOSAIC_INT_PRF_TAG_W,
 
     // The store queue's exported entry layout (`o_entry_pay`), least significant
     // field bit first, exactly as mosaic_store_queue's header documents it. It is
@@ -224,6 +243,28 @@ module mosaic_load_queue #(
     input  logic [XLEN-1:0]               alloc_imm_i,
     input  logic [2:0]                    alloc_size_i,
     input  logic                          alloc_signed_i,
+    // The load's destination, carried *with the entry* and returned on the
+    // result port. The consumer that turns the result into a completion (the
+    // writeback arbiter) must name the physical register the value belongs to,
+    // and the only place that identity can be kept in step with the load it
+    // belongs to is the entry itself -- a second table keyed on the ROB index
+    // would be a second copy of the same fact, free to disagree after a recycle.
+    input  logic [TAG_W-1:0]              alloc_dst_tag_i,
+    input  logic [IGEN_W-1:0]             alloc_dst_gen_i,
+    input  logic                          alloc_dst_x0_i,
+
+    // ------------------------------------------------------------ squash/flush
+    // A redirect withdraws every load the recovery decided is dead, and cancels
+    // the result of a load already in flight. It is a whole-queue flush: a load
+    // has no side effect on memory (the endpoint's read is harmless and is
+    // already in the endpoint's hands by the time a redirect can arrive), so
+    // there is no "already promised" entry to spare, unlike the store queue's
+    // authorised watermark. A response for a load whose offer was in flight at
+    // the flush is consumed and discarded: the endpoint holds one transaction
+    // and will not accept the next request until that response has been taken,
+    // so a discarded response can never be mistaken for the reply to a later
+    // load.
+    input  logic                          flush_valid_i,
 
     // ------------------------------------------- the store queue's entry view
     // Every position of mosaic_store_queue, oldest first, zero beyond `o_count`.
@@ -261,6 +302,9 @@ module mosaic_load_queue #(
     output logic                          result_valid_o,
     input  logic                          result_ready_i,
     output mosaic_uop_pkg::uop_id_t       result_id_o,
+    output logic [TAG_W-1:0]              result_dst_tag_o,
+    output logic [IGEN_W-1:0]             result_dst_gen_o,
+    output logic                          result_dst_x0_o,
     output logic [XLEN-1:0]               result_data_o,
     output logic [XLEN-1:0]               result_cause_o,
     output logic [XLEN-1:0]               result_tval_o,
@@ -326,6 +370,9 @@ module mosaic_load_queue #(
     logic [XLEN-1:0]         imm;
     logic [2:0]              size;
     logic                    signed_;
+    logic [TAG_W-1:0]        dst_tag;
+    logic [IGEN_W-1:0]       dst_gen;
+    logic                    dst_x0;
   } lq_entry_t;
 
   // The store queue entry, decoded from the exported layout.
@@ -353,6 +400,9 @@ module mosaic_load_queue #(
 
   // The result being held for the consumer.
   mosaic_uop_pkg::uop_id_t result_id_q;
+  logic [TAG_W-1:0]        result_dst_tag_q;
+  logic [IGEN_W-1:0]       result_dst_gen_q;
+  logic                    result_dst_x0_q;
   logic [XLEN-1:0]         result_data_q;
   logic [XLEN-1:0]         result_cause_q;
   logic [XLEN-1:0]         result_tval_q;
@@ -596,7 +646,8 @@ module mosaic_load_queue #(
   // The head is offered while nothing is in flight and no result is pending.
   // Gating on the result register is the in-order handoff: one result at a time,
   // in program order, with no reorder buffer between them.
-  assign req_valid_o = head_present_c && !inflight_q && !result_valid_q;
+  assign req_valid_o = head_present_c && !inflight_q && !result_valid_q &&
+                       !flush_valid_i;
   assign rsp_ready_o = 1'b1;
 
   always_comb begin
@@ -647,23 +698,36 @@ module mosaic_load_queue #(
     // allocation is appended at the current occupancy. Both happen in the same
     // always_comb so a completion and an allocation in one cycle cannot disagree
     // about the occupancy.
-    if (complete_c && head_present_c) begin
-      for (int unsigned i = 0; i < ENTRIES-1; i++) begin
-        ent_next_c[i] = ent_q[i+1];
+    //
+    // A flush takes the whole queue, so it is tested first and neither a
+    // completion nor an allocation is applied in that cycle: the entries a
+    // redirect discards must not survive it, and a macro dispatched in the
+    // flush cycle is dead by construction (nothing is dispatched in a redirect
+    // cycle in any case -- the barrier holds dispatch for the whole recovery).
+    if (flush_valid_i) begin
+      next_count_c = {CNT_W{1'b0}};
+    end else begin
+      if (complete_c && head_present_c) begin
+        for (int unsigned i = 0; i < ENTRIES-1; i++) begin
+          ent_next_c[i] = ent_q[i+1];
+        end
+        next_count_c = count_q - CNT_W'(1);
       end
-      next_count_c = count_q - CNT_W'(1);
-    end
-    if (alloc_valid_i && alloc_ready_o) begin
-      ent_next_c[next_count_c[IDX_W-1:0]].id      = alloc_id_i;
-      ent_next_c[next_count_c[IDX_W-1:0]].base    = alloc_base_i;
-      ent_next_c[next_count_c[IDX_W-1:0]].imm     = alloc_imm_i;
-      ent_next_c[next_count_c[IDX_W-1:0]].size    = alloc_size_i;
-      ent_next_c[next_count_c[IDX_W-1:0]].signed_ = alloc_signed_i;
-      next_count_c = next_count_c + CNT_W'(1);
+      if (alloc_valid_i && alloc_ready_o) begin
+        ent_next_c[next_count_c[IDX_W-1:0]].id       = alloc_id_i;
+        ent_next_c[next_count_c[IDX_W-1:0]].base     = alloc_base_i;
+        ent_next_c[next_count_c[IDX_W-1:0]].imm      = alloc_imm_i;
+        ent_next_c[next_count_c[IDX_W-1:0]].size     = alloc_size_i;
+        ent_next_c[next_count_c[IDX_W-1:0]].signed_  = alloc_signed_i;
+        ent_next_c[next_count_c[IDX_W-1:0]].dst_tag  = alloc_dst_tag_i;
+        ent_next_c[next_count_c[IDX_W-1:0]].dst_gen  = alloc_dst_gen_i;
+        ent_next_c[next_count_c[IDX_W-1:0]].dst_x0   = alloc_dst_x0_i;
+        next_count_c = next_count_c + CNT_W'(1);
+      end
     end
   end
 
-  assign alloc_ready_o = (count_q < CNT_W'(ENTRIES));
+  assign alloc_ready_o = (count_q < CNT_W'(ENTRIES)) && !flush_valid_i;
 
   // ------------------------------------------------------------- the edge
   always_ff @(posedge clk) begin
@@ -672,6 +736,9 @@ module mosaic_load_queue #(
       inflight_q        <= 1'b0;
       result_valid_q    <= 1'b0;
       result_id_q       <= {ID_W{1'b0}};
+      result_dst_tag_q  <= {TAG_W{1'b0}};
+      result_dst_gen_q  <= {IGEN_W{1'b0}};
+      result_dst_x0_q   <= 1'b1;
       result_data_q     <= {XLEN{1'b0}};
       result_cause_q    <= {XLEN{1'b0}};
       result_tval_q     <= {XLEN{1'b0}};
@@ -696,37 +763,50 @@ module mosaic_load_queue #(
       end
       count_q <= next_count_c;
 
-      if (alloc_valid_i && alloc_ready_o) alloc_ctr_q <= alloc_ctr_q + 32'd1;
-      if (issue_accept_c) begin
-        issue_ctr_q <= issue_ctr_q + 32'd1;
-        inflight_q  <= 1'b1;
+      // A flush cancels the offer in flight and drops a held result. The
+      // endpoint's response for the abandoned offer still arrives and is taken
+      // (`rsp_ready_o` is tied high) with `inflight_q` clear, so it completes
+      // nothing.
+      if (flush_valid_i) begin
+        inflight_q     <= 1'b0;
+        result_valid_q <= 1'b0;
+      end else begin
+        if (issue_accept_c) begin
+          issue_ctr_q <= issue_ctr_q + 32'd1;
+          inflight_q  <= 1'b1;
 `ifdef MOSAIC_LQ_MUTANT_STALE_FORWARD
-        issued_mask_q  <= fwd_mask_c;
-        issued_bytes_q <= merged_c;
+          issued_mask_q  <= fwd_mask_c;
+          issued_bytes_q <= merged_c;
 `endif
-      end
-      if (rsp_accept_c) begin
-        rsp_ctr_q   <= rsp_ctr_q + 32'd1;
-        inflight_q  <= 1'b0;
-        if (complete_c) begin
-          result_valid_q    <= 1'b1;
-          result_id_q       <= head_c.id;
-          result_data_q     <= rsp_i.fault ? rsp_i.data : final_ext_c;
-          result_cause_q    <= rsp_i.cause;
-          result_tval_q     <= rsp_i.tval;
-          result_fault_q    <= rsp_i.fault;
-          result_fwd_mask_q <= rsp_i.fault ? {BYTES{1'b0}} : final_mask_c;
-          done_ctr_q        <= done_ctr_q + 32'd1;
         end
-        if (replay_c) replay_ctr_q <= replay_ctr_q + 32'd1;
-        if (blocked_c) blocked_ctr_q <= blocked_ctr_q + 32'd1;
-        if (rsp_i.fault) begin
-          fault_ctr_q        <= fault_ctr_q + 32'd1;
-          last_fault_cause_q <= rsp_i.cause;
-          last_fault_tval_q  <= rsp_i.tval;
+        if (rsp_accept_c) begin
+          rsp_ctr_q   <= rsp_ctr_q + 32'd1;
+          inflight_q  <= 1'b0;
+          if (complete_c) begin
+            result_valid_q    <= 1'b1;
+            result_id_q       <= head_c.id;
+            result_dst_tag_q  <= head_c.dst_tag;
+            result_dst_gen_q  <= head_c.dst_gen;
+            result_dst_x0_q   <= head_c.dst_x0;
+            result_data_q     <= rsp_i.fault ? rsp_i.data : final_ext_c;
+            result_cause_q    <= rsp_i.cause;
+            result_tval_q     <= rsp_i.tval;
+            result_fault_q    <= rsp_i.fault;
+            result_fwd_mask_q <= rsp_i.fault ? {BYTES{1'b0}} : final_mask_c;
+            done_ctr_q        <= done_ctr_q + 32'd1;
+          end
+          if (replay_c) replay_ctr_q <= replay_ctr_q + 32'd1;
+          if (blocked_c) blocked_ctr_q <= blocked_ctr_q + 32'd1;
+          if (rsp_i.fault) begin
+            fault_ctr_q        <= fault_ctr_q + 32'd1;
+            last_fault_cause_q <= rsp_i.cause;
+            last_fault_tval_q  <= rsp_i.tval;
+          end
         end
+        if (result_accept_c) result_valid_q <= 1'b0;
       end
-      if (result_accept_c) result_valid_q <= 1'b0;
+
+      if (alloc_valid_i && alloc_ready_o) alloc_ctr_q <= alloc_ctr_q + 32'd1;
     end
   end
 
@@ -808,6 +888,9 @@ module mosaic_load_queue #(
   // ------------------------------------------------------------- outputs
   assign result_valid_o    = result_valid_q;
   assign result_id_o       = result_id_q;
+  assign result_dst_tag_o  = result_dst_tag_q;
+  assign result_dst_gen_o  = result_dst_gen_q;
+  assign result_dst_x0_o   = result_dst_x0_q;
   assign result_data_o     = result_data_q;
   assign result_cause_o    = result_cause_q;
   assign result_tval_o     = result_tval_q;

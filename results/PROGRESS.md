@@ -1577,3 +1577,41 @@ Two more notes for whoever reads this next:
   ledger plus the ladder. That is why "record the package" and "advertise the capability" are
   the same act in this project, and why the records in `implementation_status.json` are written
   the way they are — with the gaps stated in the same breath as the passes.
+
+---
+
+## 2026-10-01 — the scalar base is advertisable: rv64im_zicsr_zihpm
+
+`python3 tools/gen_manifest.py --profile p0` now writes `advertised: I, M, Zicsr, Zihpm` and
+`misa reset: 0x8000000000001100`. V-010 was the gate, and it earned it: the case runs a program
+three ways (zero latency and two item-by-item latency plans) and requires **three independent
+tallies to agree exactly** — the reference model's events, the event tap's records and the fetch
+accepts — with a built-in detector for a record emitted twice for the same `(retire_seq, pc)`
+and for a gap in the sequence numbers. Four harness mutants, including the double-eval one the
+detector exists for, exit 1 with their own named first check.
+
+Two findings from its audit belong in the record because they are about the whole tree, not
+about the case:
+
+* **`dut.final()` executes no design code anywhere.** Nine of thirty drivers never call it, and
+  no `sim/tb/*.sv` contains a `final` block, a `timescale`, a delay, an `initial` block or
+  `$finish`. So the card's "missing final before the end" fail mode has no instance to catch —
+  which is a statement about this harness, not a pass: the end-of-run assertion discipline holds
+  for the cases that implement it themselves and for no others.
+* **`--timing` is enabled nowhere in the tree**, so "enabled without advancing pending events"
+  has no instance either; the case asserts Verilator's `time() == 0` and `eventsPending() ==
+  false` instead of pretending to test a mode the build never enters.
+
+The deviations it found in other drivers (`tb_harness.cpp` evaluating twice in the high phase,
+`tb_wb.cpp`'s extra low-phase eval, the combinational alu/decoder cases with no clock at all)
+were reported rather than rewritten, and each is argued to be incapable of double-counting —
+idempotent eval with no input change and no sample taken between the duplicates.
+
+**Where the project stands: 35 of 239 work packages** (25 implementation, 10 verification), the
+p0 scalar base advertised, and the next layer in flight: the memory path
+(`mosaic_lsu_endpoint`, `mosaic_store_queue`, `mosaic_load_queue`) is verified module by module
+and is now being wired into the out-of-order core so that real corpus programs — loads, stores,
+byte accesses, misaligned faults — run on the machine itself rather than on the bring-up core.
+That integration is what stands between "an out-of-order core that executes arithmetic and
+branches" and "a core that can run the corpus", and after it come FENCE (I-037), MMIO (I-038),
+CSR/trap integration, and only then the privileged and vector stages.

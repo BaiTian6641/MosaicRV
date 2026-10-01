@@ -289,6 +289,14 @@ module mosaic_load_queue_tb (
       .alloc_imm_i            (lq_alloc_imm),
       .alloc_size_i           (lq_alloc_size[TB_SIZE_W-1:0]),
       .alloc_signed_i         (lq_alloc_signed),
+      // The destination carry-through is an observation the core uses to build
+      // a completion; this case checks the value, the forwarding mask and the
+      // byte counters, so the destination is tied to x0 (no register) and the
+      // flush is held low. Both are exercised through the core.
+      .alloc_dst_tag_i        ({7{1'b0}}),
+      .alloc_dst_gen_i        ({7{1'b0}}),
+      .alloc_dst_x0_i         (1'b1),
+      .flush_valid_i          (1'b0),
 
       .sq_entry_pay_i         (o_sq_entry_pay),
       .sq_count_i             (o_sq_count),
@@ -309,6 +317,9 @@ module mosaic_load_queue_tb (
       .result_valid_o         (lq_result_valid),
       .result_ready_i         (lq_result_ready),
       .result_id_o            (lq_result_id_s),
+      .result_dst_tag_o       (),
+      .result_dst_gen_o       (),
+      .result_dst_x0_o        (),
       .result_data_o          (lq_result_data),
       .result_cause_o         (lq_result_cause),
       .result_tval_o          (lq_result_tval),
@@ -377,6 +388,14 @@ module mosaic_load_queue_tb (
       .commit_id_i          (sq_commit_id[TB_ID_W-1:0]),
       .commit_ok_o          (sq_commit_ok),
       .commit_stale_o       (sq_commit_stale),
+      // The second authorisation port is a core-integration requirement (the
+      // ROB retires two instructions per cycle); this case drives one
+      // authorisation at a time, so the second is held idle rather than
+      // duplicated.
+      .commit2_valid_i      (1'b0),
+      .commit2_id_i         ({TB_ID_W{1'b0}}),
+      .commit2_ok_o         (),
+      .commit2_stale_o      (),
 
       .squash_valid_i       (sq_squash_valid),
       .squash_all_i         (sq_squash_all),

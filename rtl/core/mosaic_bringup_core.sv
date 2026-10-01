@@ -1377,10 +1377,22 @@ module mosaic_bringup_core #(
 
     case (state_q)
       S_FETCH:  if (pc_q[1:0] == 2'b00) state_n = S_FWAIT;
+      // S_FWAIT and S_DWAIT are wait states, and this module's own memory
+      // interface contract says the ack "may be returned in any later cycle;
+      // the core holds state and ignores every port signal until it arrives".
+      // Without the `else` the state fell through to the default S_FETCH and
+      // the core re-posted the request every cycle it was waiting -- invisible
+      // for as long as every environment answered on the very next cycle, and
+      // fatal to any real backpressure.  Found by
+      // harness.sampling_calibration (V-010), whose whole point is to delay the
+      // response on purpose.  With a one-cycle ack, which is what every other
+      // driver produces, the `else` is never taken.
       S_FWAIT:  if (ifetch_ack_i && !ifetch_fault_i) state_n = S_EXEC;
+                else state_n = S_FWAIT;
       S_EXEC:   if (!trap_now && (ctl.mem_kind != mosaic_pkg::MEM_NONE)) state_n = S_DREQ;
       S_DREQ:   state_n = S_DWAIT;
       S_DWAIT:  if (dmem_ack_i && !dmem_fault_i) state_n = S_FETCH;
+                else state_n = S_DWAIT;
       default:  state_n = S_FETCH;
     endcase
 

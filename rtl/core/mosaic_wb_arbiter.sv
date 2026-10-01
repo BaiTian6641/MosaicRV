@@ -1,8 +1,10 @@
 // ============================================================================
 // mosaic_wb_arbiter -- the completion path (work package I-026).
 //
-// Three producers deliver a `mosaic_uop_pkg::wb_event_t`: the two clusters, and
-// the shared MUL/DIV unit (whose result arrives out of band with its identity).
+// Four producers deliver a `mosaic_uop_pkg::wb_event_t`: the two clusters, the
+// shared MUL/DIV unit (whose result arrives out of band with its identity), and
+// the memory path, whose producer port was added by I-023 when the LSU was
+// integrated into the core.
 // This module is the single place where a completion becomes architectural:
 // it writes the value into the physical register file, tells rename that the
 // producer for that (tag, generation) has written, tells the ROB the uop is
@@ -134,10 +136,18 @@ module mosaic_wb_arbiter (
     input  logic                     clk,
     input  logic                     rst,
 
-    // ------------------------------------------------- three completion producers
+    // ------------------------------------------------- four completion producers
     // Each is valid/ready with the payload held stable while valid. `wb_ready`
     // is the arbiter's statement that it has taken the completion; a producer
     // that is refused holds it, so nothing can be lost to a full arbiter.
+    //
+    // Producer 3 is the memory path (I-023's integration of I-033..I-038): a
+    // load's merged, extended value with its destination, and a store's
+    // destination-less completion ("this uop is done, it has no value"). Both
+    // are completions with a single identity, which is exactly what a producer
+    // port is, so the memory path needs no second completion path at the ROB.
+    // It obeys the same contract as the other three: at most one completion
+    // outstanding until `wb_ready3` is seen.
     input  mosaic_uop_pkg::wb_event_t wb_ev0,       // cluster 0
     input  logic                     wb_valid0,
     output logic                     wb_ready0,
@@ -147,6 +157,9 @@ module mosaic_wb_arbiter (
     input  mosaic_uop_pkg::wb_event_t wb_ev2,       // shared MUL/DIV
     input  logic                     wb_valid2,
     output logic                     wb_ready2,
+    input  mosaic_uop_pkg::wb_event_t wb_ev3,       // memory path (LSU)
+    input  logic                     wb_valid3,
+    output logic                     wb_ready3,
 
     // -------------------------------------------------- PRF write ports (banks)
     output logic [WBA_BANKS-1:0]             prf_wr_en,
@@ -222,10 +235,11 @@ module mosaic_wb_arbiter (
 
   // ------------------------------------------------------------- held events
   // One holding slot per producer: a producer can have at most one completion
-  // outstanding (its own contract), so three slots are exactly enough and there
+  // outstanding (its own contract), so four slots are exactly enough and there
   // is no queue whose full/empty state could lose a result.
-  mosaic_uop_pkg::wb_event_t pend_ev [0:2];
-  logic [2:0]                pend_v;
+  localparam int unsigned WBA_PRODUCERS = 4;
+  mosaic_uop_pkg::wb_event_t pend_ev [0:WBA_PRODUCERS-1];
+  logic [WBA_PRODUCERS-1:0]  pend_v;
 
   // The slot chosen to publish this cycle: lowest-numbered pending producer.
   logic [1:0]                sel;
@@ -234,7 +248,7 @@ module mosaic_wb_arbiter (
   always_comb begin
     sel_found = 1'b0;
     sel       = 2'd0;
-    for (int unsigned i = 0; i < 3; i++) begin
+    for (int unsigned i = 0; i < WBA_PRODUCERS; i++) begin
       if (!sel_found && pend_v[i]) begin
         sel_found = 1'b1;
         sel       = 2'(i);
@@ -245,19 +259,28 @@ module mosaic_wb_arbiter (
   mosaic_uop_pkg::wb_event_t pub_ev;
   always_comb begin
     pub_ev = pend_ev[0];
-    if (sel == 2'd1) pub_ev = pend_ev[1];
-    if (sel == 2'd2) pub_ev = pend_ev[2];
+    for (int unsigned i = 1; i < WBA_PRODUCERS; i++) begin
+      if (sel == 2'(i)) pub_ev = pend_ev[i];
+    end
   end
 
   logic publish;
   assign publish = sel_found;
 
+  logic [WBA_PRODUCERS-1:0] wb_ready;
+  assign wb_ready0 = wb_ready[0];
+  assign wb_ready1 = wb_ready[1];
+  assign wb_ready2 = wb_ready[2];
+  assign wb_ready3 = wb_ready[3];
+
   // A producer's slot is free unless it is occupied and not being published
   // this cycle: the publish frees its own slot, and the completion replacing it
   // can be taken in the same cycle.
-  assign wb_ready0 = !pend_v[0] || (publish && (sel == 2'd0));
-  assign wb_ready1 = !pend_v[1] || (publish && (sel == 2'd1));
-  assign wb_ready2 = !pend_v[2] || (publish && (sel == 2'd2));
+  always_comb begin
+    for (int unsigned i = 0; i < WBA_PRODUCERS; i++) begin
+      wb_ready[i] = !pend_v[i] || (publish && (sel == 2'(i)));
+    end
+  end
 
   // ------------------------------------------------------------- the decision
   // `dst_ok`  this completion owns a physical destination (not x0, has a value)
@@ -403,19 +426,19 @@ module mosaic_wb_arbiter (
   // on the pending set *before* this cycle's arrivals, so a cycle in which two
   // same-bank completions arrive is counted on the next cycle, when the second
   // is still waiting -- which is exactly the delay the case must show.
-  logic [2:0]  bank_hits [0:WBA_BANKS-1];
+  logic [3:0]  bank_hits [0:WBA_BANKS-1];
   logic [31:0] extra_on_bank;
   logic [1:0]  pend_bank;
 
   always_comb begin
-    for (int unsigned b = 0; b < WBA_BANKS; b++) bank_hits[b] = 3'd0;
-    for (int unsigned i = 0; i < 3; i++) begin
+    for (int unsigned b = 0; b < WBA_BANKS; b++) bank_hits[b] = 4'd0;
+    for (int unsigned i = 0; i < WBA_PRODUCERS; i++) begin
       pend_bank = 2'(32'(pend_ev[i].dst.tag) % 32'(WBA_BANKS));
-      if (pend_v[i]) bank_hits[pend_bank] = bank_hits[pend_bank] + 3'd1;
+      if (pend_v[i]) bank_hits[pend_bank] = bank_hits[pend_bank] + 4'd1;
     end
     extra_on_bank = 32'd0;
     for (int unsigned b = 0; b < WBA_BANKS; b++) begin
-      if (bank_hits[b] > 3'd1) extra_on_bank = extra_on_bank + (32'(bank_hits[b]) - 32'd1);
+      if (bank_hits[b] > 4'd1) extra_on_bank = extra_on_bank + (32'(bank_hits[b]) - 32'd1);
     end
   end
 
@@ -492,13 +515,13 @@ module mosaic_wb_arbiter (
   // -------------------------------------------------------------- next state
   always_ff @(posedge clk) begin
     if (rst) begin
-      pend_v        <= 3'd0;
+      pend_v        <= {WBA_PRODUCERS{1'b0}};
       rt_valid      <= {WBA_PRF_N{1'b0}};
       stash_valid_q <= {WBA_ROB_N{1'b0}};
     end else begin
       // Publish frees the selected slot; a new completion takes a slot whose
       // `wb_ready` was high.
-      for (int unsigned i = 0; i < 3; i++) begin
+      for (int unsigned i = 0; i < WBA_PRODUCERS; i++) begin
         if (publish && (sel == 2'(i))) begin
           pend_v[i] <= 1'b0;
         end
@@ -508,7 +531,7 @@ module mosaic_wb_arbiter (
       // bank is discarded instead of being held for a later cycle. The producer
       // was told `wb_ready`, so the completion is silently lost -- the card's
       // "conflicting results are lost, not delayed" stated as a defect.
-      for (int unsigned i = 0; i < 3; i++) begin
+      for (int unsigned i = 0; i < WBA_PRODUCERS; i++) begin
         if (publish && pend_v[i] && (sel != 2'(i))) begin
           if ((32'(pend_ev[i].dst.tag) % 32'(WBA_BANKS)) ==
               (32'(sel_tag) % 32'(WBA_BANKS))) begin
@@ -528,6 +551,10 @@ module mosaic_wb_arbiter (
       if (wb_valid2 && wb_ready2) begin
         pend_ev[2] <= wb_ev2;
         pend_v[2]  <= 1'b1;
+      end
+      if (wb_valid3 && wb_ready3) begin
+        pend_ev[3] <= wb_ev3;
+        pend_v[3]  <= 1'b1;
       end
 
       if (write_ok) begin

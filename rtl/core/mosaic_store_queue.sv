@@ -69,6 +69,16 @@
 // and it is what makes "a store behind an unauthorised one does not bypass it"
 // a checked property rather than an assumption about the caller.
 //
+// `commit2_valid_i` is the same rule applied to the *second* store the ROB
+// retires in one cycle (MOSAIC_RETIRE_WIDTH is 2), naming the entry after the
+// first. It exists because a store that retires must be authorised in that
+// cycle or the machine can enter the one state the squash rule cannot handle:
+// retired, resident and unauthorised. Such an entry is too old for the dead
+// window to take back (it has retired) and, being unauthorised, is not spared
+// by `SQUASH_SPARES_AUTHORISED` -- so a whole-queue flush would silently delete
+// a store that the architecture has already promised. Two stores retiring
+// together is the common case for back-to-back stores, not a corner.
+//
 // `commit_valid_i` and `squash_valid_i` are not expected in the same cycle: the
 // ROB does not retire in a flush cycle (`mosaic_rob`: `retire_ack = retire_req &&
 // head_ready && !flush_valid`), and a squash kills younger work than anything
@@ -305,6 +315,23 @@ module mosaic_store_queue #(
     input  mosaic_uop_pkg::uop_id_t       commit_id_i,
     output logic                          commit_ok_o,
     output logic                          commit_stale_o,
+
+    // The second authorisation of the same cycle. The ROB retires up to
+    // MOSAIC_RETIRE_WIDTH (2) instructions per cycle and stores are the
+    // instructions most likely to be back to back, so two consecutive stores
+    // retire together routinely; with one port the younger of the pair would
+    // retire *unauthorised*. That state is exactly the one the header says must
+    // not exist: the store is too old to be squashed (it has retired) and
+    // unauthorised, so a flush could neither spare it nor take it back --
+    // squash_all would delete it and the store would never reach memory.
+    // Authorising both retiring stores in their own retire cycle keeps
+    // "retired implies authorised" exact. `commit2_id_i` names the first
+    // unauthorised entry *after* the one `commit_valid_i` authorises, so the
+    // pair is the same prefix rule applied twice.
+    input  logic                          commit2_valid_i,
+    input  mosaic_uop_pkg::uop_id_t       commit2_id_i,
+    output logic                          commit2_ok_o,
+    output logic                          commit2_stale_o,
 
     // ------------------------------------------------------------ squash/flush
     // `squash_all_i` is a whole-queue flush (mosaic_rob's `flush_valid` today).
@@ -567,6 +594,24 @@ module mosaic_store_queue #(
     end
   end
 
+  // The second authorisation of the cycle, matched by its own identity. A
+  // `commit2_id_i` that names the entry `commit_valid_i` already names finds
+  // the same index, and the "next unauthorised" test below then refuses it, so
+  // one entry can never be authorised twice in one cycle.
+  logic             commit2_found_c;
+  logic [IDX_W-1:0] commit2_idx_c;
+  always_comb begin
+    commit2_found_c = 1'b0;
+    commit2_idx_c   = {IDX_W{1'b0}};
+    for (int unsigned i = 0; i < ENTRIES; i++) begin
+      if (!commit2_found_c && resident_c[i] &&
+          mosaic_uop_pkg::uop_id_eq(ent_q[i].id, commit2_id_i)) begin
+        commit2_found_c = 1'b1;
+        commit2_idx_c   = IDX_W'(i);
+      end
+    end
+  end
+
   // The authorisation is applied only when it names the first unauthorised
   // entry. Comparing in the count domain matters at the boundary: with every
   // entry authorised, `auth_cnt_q == ENTRIES` and no resident index can equal
@@ -578,6 +623,19 @@ module mosaic_store_queue #(
                           : 1'b1);
   assign commit_ok_o    = commit_ok_c;
   assign commit_stale_o = commit_valid_i && !commit_ok_c;
+
+  // The second authorisation must name the entry immediately after the one the
+  // first authorises this cycle: `auth_cnt_q` when the first was refused (or
+  // absent), `auth_cnt_q + 1` when it was accepted. In the count domain, so it
+  // cannot wrap onto a younger entry that happens to sit at index 0.
+  logic commit2_ok_c;
+  assign commit2_ok_c = commit2_valid_i && commit2_found_c &&
+                        (COMMIT_NAMES_NEXT
+                           ? (CNT_W'(commit2_idx_c) ==
+                              (auth_cnt_q + CNT_W'(commit_ok_c)))
+                           : 1'b1);
+  assign commit2_ok_o    = commit2_ok_c;
+  assign commit2_stale_o = commit2_valid_i && !commit2_ok_c;
 
   // The watermark after this cycle. It is *derived from the survivors* rather
   // than adjusted arithmetically: an entry counts only if it is still in the
@@ -592,7 +650,8 @@ module mosaic_store_queue #(
   logic [ENTRIES-1:0] auth_next_c;
   always_comb begin
     for (int unsigned i = 0; i < ENTRIES; i++) begin
-      auth_next_c[i] = auth_c[i] || (commit_ok_c && (IDX_W'(i) == commit_idx_c));
+      auth_next_c[i] = auth_c[i] || (commit_ok_c && (IDX_W'(i) == commit_idx_c))
+                                 || (commit2_ok_c && (IDX_W'(i) == commit2_idx_c));
     end
   end
 
@@ -825,7 +884,9 @@ module mosaic_store_queue #(
       if (fill_apply_c)       fill_ctr_q         <= fill_ctr_q + 32'd1;
       if (fill_stale_o)       fill_stale_ctr_q   <= fill_stale_ctr_q + 32'd1;
       if (commit_ok_c)        commit_ctr_q       <= commit_ctr_q + 32'd1;
+      if (commit2_ok_c)       commit_ctr_q       <= commit_ctr_q + 32'd1;
       if (commit_stale_o)     commit_stale_ctr_q <= commit_stale_ctr_q + 32'd1;
+      if (commit2_stale_o)    commit_stale_ctr_q <= commit_stale_ctr_q + 32'd1;
       if (drain_accept_c)     drain_ctr_q        <= drain_ctr_q + 32'd1;
       if (squash_drop_cnt_c != {CNT_W{1'b0}}) begin
         squash_ctr_q <= squash_ctr_q + 32'(squash_drop_cnt_c);

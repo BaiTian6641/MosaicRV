@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "case": "harness.sampling_calibration",
+  "verdict": "PASS",
+  "detail": "3 runs (zero-latency and two item-by-item latency plans), 630 cycles, 45 instructions per run, reference events == tap records == fetch accepts, 110 checks",
+  "seed": 1,
+  "max_cycles": 4000000,
+  "checks": 111,
+  "failures": 0,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-01T22:05:33Z",
+  "first_mismatch": ""
+}

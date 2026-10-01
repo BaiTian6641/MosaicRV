@@ -140,6 +140,7 @@ module mosaic_wb_arbiter_tb (
     output logic        wb_ready0_o,
     output logic        wb_ready1_o,
     output logic        wb_ready2_o,
+    output logic        wb_ready3_o,
 
     output logic        prf_wr_en0_o,
     output logic        prf_wr_en1_o,
@@ -360,6 +361,13 @@ module mosaic_wb_arbiter_tb (
       .wb_ev2           (ev2),
       .wb_valid2        (wb_valid2_i),
       .wb_ready2        (wb_ready2_o),
+      // The fourth producer is the memory path (I-023). This case is about the
+      // three register-writing producers and their same-bank contention, so the
+      // memory port is held idle: nothing about the rule under test changes, and
+      // an idle producer cannot mask a contention the three active ones create.
+      .wb_ev3           ('0),
+      .wb_valid3        (1'b0),
+      .wb_ready3        (wb_ready3_o),
 
       .prf_wr_en        (arb_wr_en),
       .prf_wr_gen_valid (arb_wr_gen_valid),
