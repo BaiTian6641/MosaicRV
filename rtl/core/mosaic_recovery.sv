@@ -254,6 +254,16 @@
 // -DMOSAIC_RECOVERY_MUTANT_<n> injects one defect used to prove the case can
 // fail. The shipping build defines none of them; the table with real output is
 // in results/reports/I-018-recovery.md.
+//
+// Eight are defined, each documented at its own site: WRONG_CHECKPOINT,
+// APPLY_STALE_RSP, DOUBLE_CREDIT, NO_FREE_RESTORE, NO_TAIL_RESTORE,
+// EPOCH_ONLY_RSP, ACCEPT_AT_BOUND and RESTORE_SELF_ONLY. The first five were
+// delivered with the module and had never been run; two of those five did not
+// elaborate at all -- one had an unsigned loop bound that is always true, and one
+// drove a count to a constant so the undo loop's own comparison folded and the
+// build stopped on the warning. Both were re-expressed so that they build and
+// still inject the defect they describe, because a mutant that does not build
+// proves nothing. The report records which, and the deltas.
 // ============================================================================
 
 `default_nettype none

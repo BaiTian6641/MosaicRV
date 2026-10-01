@@ -27,12 +27,18 @@
 //      comparison is over packed integers the DUT exports for the purpose, not
 //      over a projection of them.
 //
-//   2. **The credit is returned exactly once.** A counter that can only go up
-//      cannot distinguish a second delivery from a first, so the shadow tracks
-//      the reservation *table*, and the phase asserts the table's population
-//      count against the DUT's `credits_outstanding` on every cycle plus the
-//      exact number of returns at the end. "Rejected" is not the check; the
-//      count of returned credits is.
+//   2. **The credit is returned exactly once, and only for work the redirect
+//      owns.** A counter that can only go up cannot distinguish a second delivery
+//      from a first, so the shadow tracks the reservation *table*, and the phases
+//      assert the table's population count against the DUT's
+//      `credits_outstanding` on every cycle plus the exact number of returns at
+//      the end. "Rejected" is not the check; the count of returned credits is.
+//      Ownership is an *age* boundary, not an epoch: a redirect cancels the
+//      reservations of the instructions younger than the branch it resolves, and
+//      an older instruction's result still lands -- dropping every pre-redirect
+//      response would leave the older ROB head with a uop that never completes,
+//      which the card names as a blocking rule. Both halves are checked, and
+//      mutants 2 and 6 exist to prove those checks have teeth.
 //
 // Phases, each of which can fail on its own:
 //
@@ -50,11 +56,15 @@
 //                        exists. Then the younger redirects after the older has
 //                        been taken, and the result is a stale redirect that is
 //                        reported and not taken.
-//   4. oldest-redirect   the card's rule. Two redirects pending at once, in
-//                        both arrival orders and in the same cycle: the older is
-//                        taken every time, and the younger is reported killed.
-//   5. late-response     after a squash, a response carrying the pre-redirect
-//                        epoch is rejected and its credit returned *once*; the
+//   4. oldest-redirect   the card's rule: age orders the redirects offered in one
+//                        cycle, so the older is taken and the younger is reported
+//                        killed. An older *checkpoint* is not a pending redirect --
+//                        the younger branch's own redirect resolves first and the
+//                        older checkpoint survives it -- and the same-cycle pair
+//                        is where the order is total.
+//   5. late-response     after a squash, the *younger* instruction's response is
+//                        rejected and its credit returned *once*, while the
+//                        *older* instruction's response is still accepted; the
 //                        same slot delivered again returns nothing, and the
 //                        outstanding count is checked against the table.
 //   6. free-list-exact   a long run of allocate/commit/free/squash cycles with a
@@ -75,10 +85,27 @@
 //   9. credit-stress     the reservation table filled to capacity, requests
 //                        refused and reported, responses delivered out of order,
 //                        duplicates delivered, and the population count checked
-//                        against the DUT on every cycle.
-//  10. random-soak       random stimulus compared against the shadow on every
+//                        against the DUT on every cycle. A redirect then cancels
+//                        the younger of two reservations and leaves the older one
+//                        live -- both halves of the age rule, in the table.
+//  10. nested-branch-full-queues
+//                        the card's own case name: the checkpoint stack driven to
+//                        its depth and the free list to the point where the machine
+//                        cannot allocate, an inner checkpoint restored first and
+//                        then an outer one, mispredict plus older exception plus a
+//                        same-cycle allocation, and the card's two blocking rules
+//                        checked directly -- a squash that clobbered the whole free
+//                        list, or that dropped the older instruction's slow result
+//                        or its tag, fails here by name.
+//  11. random-soak       random stimulus compared against the shadow on every
 //                        cycle, including deliberate stale, duplicate and
-//                        out-of-range responses and out-of-order redirects.
+//                        out-of-range responses and out-of-order redirects. Its
+//                        stimulus is built to be *legal* as well as hostile: a
+//                        commit publishes a mapping no live checkpoint could
+//                        rewind, and a live release frees a tag no mapping names,
+//                        because freeing a mapped tag or committing a younger
+//                        mapping would be the double-owner corruption itself
+//                        rather than a test of the design.
 //
 // Standing invariants are checked on every cycle of every phase rather than in
 // one place: the mutual exclusion of the four response reports, the free count

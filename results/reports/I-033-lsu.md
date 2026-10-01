@@ -76,7 +76,11 @@ output.
    not change while `valid && !ready`.
 5. `o_inflight_addr`/`o_inflight_size` name the access being served.
 6. All six counters equal the driver's own tally of what it observed.
-7. `o_last_fault_cause`/`o_last_fault_tval` equal the driver's record.
+7. Conservation, on the endpoint's own outputs: an accepted request is either
+   still inside (`pending`) or has had its response composed; a composed response
+   is either being offered or has been delivered; and the driver's in-flight
+   count equals `offered + pending` — the endpoint holds at most one of each.
+8. `o_last_fault_cause`/`o_last_fault_tval` equal the driver's record.
 
 ## 4. Phases, and the check count of each
 
@@ -86,15 +90,15 @@ tally and by idling the endpoint. Counts are the harness's own check calls
 
 | Phase | Checks | Cycles | Coverage in the phase |
 |---|---|---|---|
-| `reset-state` | 71 | 6 | idle, `rsp_valid_o` low, six counters zero, no memory request |
-| `size-sign-matrix` | 4356 | 252 | 4 sizes × 2 signs × every aligned lane (15 lanes): 45 loads, 15 stores, 15 readback loads, 60 memory transactions |
-| `access-fault` | 660 | 290 | 8 faulted accesses (4 sizes × load/store) + the out-of-region case: cause 5/7, `tval` = address |
-| `misalignment` | 2338 | 440 | 17 misaligned offsets × load/store = 34 traps, **plus** the precedence pair (aligned unmapped → 5/7, unaligned unmapped → 4/6); model saw 1 transaction (the aligned unmapped access) and 0 for every misaligned one |
-| `backpressure` | 1449 | 525 | 25 cycles of consumer refusal, 20 cycles of memory refusal, a 12-cycle memory latency |
-| `ordering-identity` | 822 | 575 | two requests in acceptance order with the second offered while the first was in flight; ids differing only in the generation field; 0/all-ones/field-corner ids; a request offered while a response was held |
-| `reset-in-flight` | 224 | 592 | reset while the transaction was inside the memory system, then a first post-reset transaction |
-| `random-soak` | 61553 | 4118 | 400 random transactions: 256 loads, 144 stores, 250 memory transactions, 150 misaligned traps, 41 access faults, random latency/back-pressure on both sides |
-| **total** | **71478** | **4118** | 517 responses, 336 loads, 181 stores, 332 transactions, 185 misaligned traps, 50 access faults |
+| `reset-state` | 86 | 6 | idle, `rsp_valid_o` low, six counters zero, no memory request |
+| `size-sign-matrix` | 5091 | 252 | 4 sizes × 2 signs × every aligned lane (15 lanes): 45 loads, 15 stores, 15 readback loads, 60 memory transactions |
+| `access-fault` | 771 | 290 | 8 faulted accesses (4 sizes × load/store) + the out-of-region case: cause 5/7, `tval` = address |
+| `misalignment` | 2785 | 440 | 17 misaligned offsets × load/store = 34 traps, **plus** the precedence pair (aligned unmapped → 5/7, unaligned unmapped → 4/6); model saw 1 transaction (the aligned unmapped access) and 0 for every misaligned one |
+| `backpressure` | 1701 | 525 | 25 cycles of consumer refusal, 20 cycles of memory refusal, a 12-cycle memory latency |
+| `ordering-identity` | 969 | 575 | two requests in acceptance order with the second offered while the first was in flight; ids differing only in the generation field; 0/all-ones/field-corner ids; a request offered while a response was held |
+| `reset-in-flight` | 269 | 592 | reset while the transaction was inside the memory system, then a first post-reset transaction |
+| `random-soak` | 72128 | 4118 | 400 random transactions: 256 loads, 144 stores, 250 memory transactions, 150 misaligned traps, 41 access faults, random latency/back-pressure on both sides |
+| **total** | **83805** | **4118** | 517 responses, 336 loads, 181 stores, 332 transactions, 185 misaligned traps, 50 access faults |
 
 First mismatch: **none** — the base run is PASS, exit 0.
 
@@ -108,7 +112,7 @@ Seed robustness (the soak's stimulus comes from `--seed`; no seed was tuned):
 | seed | 1 | 2 | 3 | 7 | 99 | 12345 | 424242 |
 |---|---|---|---|---|---|---|---|
 | verdict | PASS | PASS | PASS | PASS | PASS | PASS | PASS |
-| checks | 71478 | 74087 | 74281 | 71208 | 72015 | 75019 | 73774 |
+| checks | 83805 | 86861 | 87091 | 83487 | 84402 | 87955 | 86461 |
 
 ## 5. Mutants
 
@@ -117,12 +121,12 @@ the case's own sources, run directly, and required to exit 1. The failing
 message is included because it shows the mutant's own symptom, i.e. that the
 `ifdef` body was really compiled and the shipping build was not what ran.
 
-| Mutant | Exit | Failures (base 0) | Checks before the abort (base 71478) | First mismatch |
+| Mutant | Exit | Failures (base 0) | Checks before the abort (base 83805) | First mismatch |
 |---|---|---|---|---|
-| `NO_MISALIGN_CHECK` | 1 | 1 | 5146 | `[misalignment] response-offered: no response presented while one is owed @ cycle 295` — the access went to memory instead of trapping |
-| `NO_SIGN_EXTEND` | 1 | 1 | 236 | `[size-sign-matrix] response-data: expected 0xffffffffffffff80, got 0x0000000000000080 @ cycle 17` — a signed byte load is zero-extended |
-| `NO_STORE_SHIFT` | 1 | 1 | 561 | `[size-sign-matrix] memory-wdata: expected 0x3456789abcdef000, got 0x123456789abcdef0 @ cycle 35` — the store data is not shifted to the addressed lane |
-| `FAULT_AS_ZERO` | 1 | 1 | 4521 | `[access-fault] response-fault: expected fault=1, got 0 @ cycle 259` — an access fault is reported as a successful access |
+| `NO_MISALIGN_CHECK` | 1 | 1 | 6019 | `[misalignment] response-offered: no response presented while one is owed @ cycle 295` — the access went to memory instead of trapping |
+| `NO_SIGN_EXTEND` | 1 | 1 | 281 | `[size-sign-matrix] response-data: expected 0xffffffffffffff80, got 0x0000000000000080 @ cycle 17` — a signed byte load is zero-extended |
+| `NO_STORE_SHIFT` | 1 | 1 | 660 | `[size-sign-matrix] memory-wdata: expected 0x3456789abcdef000, got 0x123456789abcdef0 @ cycle 35` — the store data is not shifted to the addressed lane |
+| `FAULT_AS_ZERO` | 1 | 1 | 5289 | `[access-fault] response-fault: expected fault=1, got 0 @ cycle 259` — an access fault is reported as a successful access |
 
 Every mutant fails in the phase that owns the behaviour, and no mutant needed a
 check that did not already exist.
@@ -137,7 +141,7 @@ to memory.
 
 `Reporter` records one check per run by project convention (as `tb_rob.cpp`
 does), so `result.json` shows `"checks": 1, "failures": 0` for the base and
-`"failures": 1` for a mutant; the harness's own 71478 comparisons are printed
+`"failures": 1` for a mutant; the harness's own 83805 comparisons are printed
 per phase in `results/unit/lsu.size_fault_boundaries/run.log`.
 
 ## 6. Defects found
