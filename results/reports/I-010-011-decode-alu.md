@@ -480,6 +480,18 @@ import forms were also measured on the way to the present one: a `$unit`-scope
 `import mosaic_pkg::*;` **inside the module body**, which is sufficient because its
 port list uses only plain vectors.
 
+All three import forms were re-measured directly against Verilator 5.052 with the
+package listed *first* on the command line, so none of those claims rests on the
+linter's file ordering. No file in this package was changed in response to an
+earlier, incorrect scoping diagnosis of this area: the import placement above is the
+one the code started with and the one that lints clean.
+
+$ verilator --lint-only -Wall -Wno-DECLFILENAME --top-module <each probe> \
+    -Irtl/core rtl/core/mosaic_pkg.sv <probe>.sv
+in-body import                 -> 0 warnings, 0 errors
+file-scope import mosaic_pkg::* -> %Warning-IMPORTSTAR: 'import::*' in $unit scope
+import mosaic_pkg::alu_op_e::*  -> %Error: syntax error, unexpected IDENTIFIER-::
+
 ### The case, seed 1
 
 ```

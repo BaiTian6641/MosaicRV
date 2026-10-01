@@ -73,12 +73,13 @@
 
 `default_nettype none
 
-// The port below is written as `mosaic_pkg::decode_ctl_t`, fully qualified, so
-// it resolves without any import -- which matters because a port list is
-// elaborated before an in-body import could take effect (IEEE 1800-2023 6.18).
-// The body does its own `import mosaic_pkg::*;` for the type names and
-// constants. A $unit-scope `import *` is deliberately not relied on: Verilator
-// warns about it (IMPORTSTAR) and does not apply it inside the module.
+// Every reference to a package name in this file is either fully qualified
+// (`mosaic_pkg::decode_ctl_t`, `mosaic_pkg::md_op_e`) or is covered by an
+// in-body `import mosaic_pkg::*;` below. That is deliberate: a qualified
+// reference resolves regardless of the order Verilator is given the files, so
+// this module lints clean whether the package is listed before or after it.
+// A $unit-scope (file-scope) `import *` was tried and is worse on both counts --
+// it raises IMPORTSTAR under -Wall, and under -Wall that warning is an error.
 
 module mosaic_decoder (
     input  wire  [31:0]             insn,
