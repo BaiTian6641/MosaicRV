@@ -34,7 +34,8 @@
     "V-009",
     "I-023",
     "I-034",
-    "V-012"
+    "V-012",
+    "I-035"
   ],
   "evidence": {
     "I-001": {
@@ -412,6 +413,17 @@
       "verdict": "PASS",
       "notes": "Fixed signature and termination decision. Case PASS from a clean build. Eight termination statuses are documented and every one is observed: PASS=0, PROGRAM_FAIL=1 (code 0x2A carried out through TOHOST), TIMEOUT=2 (a spinning program, TOHOST never written, its signature still intact), WFI_STALL=3, SIGNATURE_MISMATCH=4 (a program that self-reports PASS while word 2 disagrees with the model -- the case's own point that the self-report is not the verdict), SIGNATURE_OVERRUN=5 (an 8-byte store one word past the frozen window), UNDRAINED_STORE=6 (a store to signature word 3 five cycles after the exit pulse), IMAGE_REJECTED=7 (corrupt magic and a wrong entry point, both refused before any instruction executes). Six harness mutants each exit 1 naming its first wrong classification (TIMEOUT_IS_PASS, WFI_AS_TIMEOUT, FAIL_IS_PASS, NO_SIGNATURE_CHECK, NO_OVERRUN_CHECK, NO_DRAIN); the last one is the most instructive -- reading the signature at the exit pulse instead of after the drain fabricates a mismatch rather than reporting an undrained store. Two drain sub-rules are reported as REDUNDANCY PROBES, not evidence: this core has no store buffer, so 'the exit store retired at or after the pulse' and 'the hart is out of the data-request states' cannot fail and were never observed to. The ISA audit of all seven non-WFI programs is clean (155 instructions). A tool defect reported by this package was fixed here: tests/programs/audit/check_p0_isa.py matched forbidden symbol names as substrings of the whole objdump output, whose first line contains the image's path, so any image under a path containing 'exit' (or printf, memcpy...) was rejected for a symbol it did not contain. It now matches the symbol-name field of each symbol line (stripping -T version suffixes), and both directions were verified: an image at /tmp/exit_path_test/exit_image.elf now audits clean, while the same image with _start renamed to printf is rejected with 'symbol printf -- libgcc/libc leaked in' and exit 1; the 39-image corpus still audits clean. The package's directory workaround (tests/programs/termination/ instead of .../exit/) is left in place -- it is no longer needed but renaming it back would churn a passing case for nothing. NOT verified: the DUT here is the in-order bring-up core, so nothing in this package is evidence about the out-of-order fabric; RUN/PC_ESCAPED is a harness convention (executing from boot_rom is reported as a runaway); the signature guard band is this case's own conformance rule, not an ISA rule and not a line in config/; the six mutants are C++ harness defines, not RTL fault injection; no UART/MMIO/interrupt path exists in p0 to exercise.",
       "report": "results/reports/V-012-exit.md"
+    },
+    "I-035": {
+      "cases": [
+        "lsu.byte_forwarding"
+      ],
+      "commands": [
+        "python3 tools/run_unit.py --profile p0 --case lsu.byte_forwarding"
+      ],
+      "verdict": "PASS",
+      "notes": "Load queue and store-to-load forwarding. Case PASS from a clean build: 107414 checks over 3501 cycles, 402 loads, 871 stores, 244 replays, 397 forwarded bytes, 1069 memory bytes. Five mutants, each rebuilt from a deleted build directory with its -D in the build command and a distinct named first failure; independently re-verified here: MOSAIC_LQ_MUTANT_YOUNGER_FORWARDS (the card's second fail mode, a younger store forwarding into an older load) exits 1 after 6603 checks at cycle 276 with forward mask 0x000000ff where 0x00000000 is required. The other controls cover the card's other fail mode (ALIGNED_WORD_ONLY -- comparing only aligned words, which the byte-level checks catch), ignoring the unknown-address block, forwarding stale bytes after the blocking store is squashed, and taking a byte from memory that a legal older store covers. No RTL defect was found; six testbench defects were found by the checks and fixed, all recorded, including two worth naming: the younger-store test originally used an address that older stores also covered (so it proved nothing about the youngest-older rule) and the soak squashed the store queue so often that it forwarded only 3 bytes in 3000 cycles (a passing case that was barely exercising the feature). One design fact the lane reports rather than hides: the store queue's forward query cannot express program order, so per-byte youngest-older selection reads the SQ's exported entry view while the query supplies the unknown-address block only, and the two are cross-checked every cycle against o_lq_query_mismatch_ctr. NOT verified: no core integration (nothing shows dispatch allocating loads in program order, the identity being the ROB's, or a core wiring the entry view up); one load in flight only (the endpoint is one-at-a-time; I-043 would change that); no FENCE (I-037), no speculative disambiguation or violation replay (I-036), no MMIO (I-038); faults are reported, not taken; p0 geometry only; simulation only.",
+      "report": "results/reports/I-035-lq.md"
     }
   }
 }

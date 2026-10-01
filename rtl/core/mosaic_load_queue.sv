@@ -247,7 +247,12 @@ module mosaic_load_queue #(
     output mosaic_uop_pkg::lsu_req_t      req_o,
     input  logic                          rsp_valid_i,
     output logic                          rsp_ready_o,
+    // The response's `id` field is unused *here* by construction: the queue
+    // knows which load it offered, and the endpoint returns one response per
+    // offer. The fault, cause, `tval` and data are what it reads.
+    /* verilator lint_off UNUSEDSIGNAL */
     input  mosaic_uop_pkg::lsu_rsp_t      rsp_i,
+    /* verilator lint_on UNUSEDSIGNAL */
 
     // ---------------------------------------------------------------- result
     // The merged, extended load value and the per-byte source indication. The
@@ -441,7 +446,7 @@ module mosaic_load_queue #(
   logic [BYTES-1:0]      src_nodata_c;   // the governing store has no data yet
   logic [XLEN-1:0]       src_byte_c  [0:BYTES-1];
   logic [XLEN-1:0]       sel_x_c;        // the load byte's address, per iteration
-  logic [XLEN-1:0]       sel_off_c;      // its offset inside the matched store
+  logic [2:0]            sel_off_c;      // its offset inside the matched store
 
   always_comb begin
     for (int unsigned i = 0; i < BYTES; i++) begin
@@ -457,12 +462,12 @@ module mosaic_load_queue #(
                  FwdOlder(sq_c[j].id.rob_gen, sq_c[j].id.uop_index,
                           head_c.id.rob_gen, head_c.id.uop_index);
         covers = FwdCovers(sq_addr_c[j], sq_c[j].size, sel_x_c);
-        sel_off_c = sel_x_c - sq_addr_c[j];
+        sel_off_c = 3'(sel_x_c - sq_addr_c[j]);
         if (sq_resident_c[j] && older && sq_c[j].addr_valid && covers) begin
           if (sq_c[j].data_valid) begin
             src_store_c[i]  = 1'b1;
             src_nodata_c[i] = 1'b0;
-            src_byte_c[i]   = (sq_c[j].data >> {sel_off_c[2:0], 3'b000}) & 64'hff;
+            src_byte_c[i]   = (sq_c[j].data >> {sel_off_c, 3'b000}) & 64'hff;
           end else begin
             src_store_c[i]  = 1'b0;
             src_nodata_c[i] = 1'b1;

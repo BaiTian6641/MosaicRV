@@ -99,6 +99,18 @@ module mosaic_bringup_tb (
     input  wire  [11:0] h_dbg_csr_addr,
     input  wire         h_clear_mem,     // one-cycle pulse: zero every array
 
+    // ------------------------------------ harness-controlled response latency
+    // V-010 (harness.sampling_calibration).  Both ports answer on the cycle
+    // after the request by default, which is the contract the core was written
+    // against; `h_if_gap`/`h_d_gap` add that many extra cycles of latency so a
+    // harness can hold the core in S_FWAIT/S_DWAIT deliberately and check that
+    // the handshake is still observed exactly once.  They are zero in every
+    // driver that does not drive them (Verilator zero-initialises inputs), so
+    // the zero case is the original model statement for statement: request in
+    // cycle N, ack in cycle N+1, and the ack is high for exactly one cycle.
+    input  wire  [7:0]  h_if_gap,
+    input  wire  [7:0]  h_d_gap,
+
     // -------------------------------------------- observation (DUT + devices)
     output wire         c_evt_valid,
     output wire         c_evt_trap,
@@ -190,10 +202,15 @@ import mosaic_pkg::*;
   logic        m_if_pending;
   logic [31:0] m_if_data;
   logic        m_if_fault;
+  logic [7:0]  m_if_wait;     // V-010: extra cycles still owed on a fetch ack
+`ifdef MOSAIC_SAMPLING_MUTANT_STRETCH_ACK
+  logic        m_if_stretch;  // V-010 control: holds the fetch ack one cycle too long
+`endif
 
   logic        m_d_pending;
   logic [63:0] m_d_data;
   logic        m_d_fault;
+  logic [7:0]  m_d_wait;      // V-010: extra cycles still owed on a data ack
 
   logic [63:0] m_tohost_value;
   logic        m_tohost_written;
@@ -494,9 +511,14 @@ import mosaic_pkg::*;
       m_if_pending     <= 1'b0;
       m_if_data        <= 32'h00000000;
       m_if_fault       <= 1'b0;
+      m_if_wait        <= 8'd0;
+`ifdef MOSAIC_SAMPLING_MUTANT_STRETCH_ACK
+      m_if_stretch     <= 1'b0;
+`endif
       m_d_pending      <= 1'b0;
       m_d_data         <= 64'd0;
       m_d_fault        <= 1'b0;
+      m_d_wait         <= 8'd0;
       m_tohost_written <= 1'b0;
       m_tohost_commit  <= 1'b0;
       m_tohost_value   <= 64'd0;
@@ -517,6 +539,14 @@ import mosaic_pkg::*;
       m_d_data         <= 64'd0;
       m_d_fault        <= 1'b0;
 `endif
+      // A pending response latency is environment state, not architectural
+      // state: reset drops whatever the model still owed, exactly like an
+      // outstanding transaction.
+      m_if_wait        <= 8'd0;
+`ifdef MOSAIC_SAMPLING_MUTANT_STRETCH_ACK
+      m_if_stretch     <= 1'b0;
+`endif
+      m_d_wait         <= 8'd0;
       m_tohost_written <= 1'b0;
       // The end-of-run latch is a transaction like any other: a TOHOST store
       // that was accepted but whose report has not yet been registered must not
@@ -547,17 +577,46 @@ import mosaic_pkg::*;
       h_rb_fault  <= rb_fault_c;
 
       // ---- instruction fetch: one cycle of latency, then ack ---------------
-      if (c_ifetch_req && !m_if_pending) begin
-        m_if_data    <= if_data_c;
-        m_if_fault   <= if_fault_c;
-        m_if_pending <= 1'b1;
+      // `h_if_gap` is zero everywhere except the V-010 calibration, and with it
+      // zero this is the original two-armed statement: the request latches the
+      // answer and raises the ack, and the ack is cleared on the next edge, so
+      // it is high for exactly one cycle.  With a non-zero gap the answer is
+      // latched at the request and the ack is owed `h_if_gap` further cycles.
+      if (c_ifetch_req && !m_if_pending && (m_if_wait == 8'd0)) begin
+        m_if_data  <= if_data_c;
+        m_if_fault <= if_fault_c;
+        if (h_if_gap == 8'd0) begin
+          m_if_pending <= 1'b1;
+        end else begin
+          m_if_wait    <= h_if_gap;
+        end
+      end else if (m_if_wait != 8'd0) begin
+        m_if_wait <= m_if_wait - 8'd1;
+        if (m_if_wait == 8'd1) m_if_pending <= 1'b1;
       end else if (m_if_pending) begin
+`ifdef MOSAIC_SAMPLING_MUTANT_STRETCH_ACK
+        // MUTANT (V-010 control): the fetch ack is held high for two cycles
+        // instead of one.  The core is in S_EXEC on the second cycle and
+        // ignores it, so no architectural behaviour changes at all -- only an
+        // environment that counts "cycles the ack was high" as accepts sees
+        // two handshakes for one instruction.
+        if (!m_if_stretch) begin
+          m_if_stretch <= 1'b1;
+        end else begin
+          m_if_pending <= 1'b0;
+          m_if_stretch <= 1'b0;
+        end
+`else
         m_if_pending <= 1'b0;
+`endif
       end
 
       // ---- data port -------------------------------------------------------
-      if (c_dmem_req && !m_d_pending) begin
-        m_d_pending <= 1'b1;
+      // Same shape as the fetch port: `h_d_gap` is zero for every driver but
+      // V-010, and the zero case is statement for statement the original.
+      if (c_dmem_req && !m_d_pending && (m_d_wait == 8'd0)) begin
+        if (h_d_gap == 8'd0) m_d_pending <= 1'b1;
+        else                 m_d_wait    <= h_d_gap;
         if (c_dmem_we) begin
           if (!store_allowed) begin
             // Unmapped, straddling a region, or a read-only region such as
@@ -599,6 +658,9 @@ import mosaic_pkg::*;
           m_d_data  <= d_data_c;
           m_d_fault <= d_fault_c;
         end
+      end else if (m_d_wait != 8'd0) begin
+        m_d_wait <= m_d_wait - 8'd1;
+        if (m_d_wait == 8'd1) m_d_pending <= 1'b1;
       end else if (m_d_pending) begin
         m_d_pending <= 1'b0;
       end

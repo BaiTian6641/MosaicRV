@@ -898,7 +898,7 @@ class Bench {
       return;
     }
 
-    CheckCycle(last_, s);
+    CheckCycle(last_);
     CommitEdge(s, false);
 
     dut_->clk = 1;
@@ -1003,7 +1003,7 @@ class Bench {
   }
 
   // ------------------------------------------------------- the per-cycle check
-  void CheckCycle(const DutOut& o, const Stim& s) {
+  void CheckCycle(const DutOut& o) {
     // Program order must be readable from the generation field: keep every live
     // operation inside half the generation modulus, or the RTL's half-modulus
     // comparison would be ambiguous and the test would be checking nothing.
@@ -1052,28 +1052,7 @@ class Bench {
     Require(o.lq_result_valid == result_pending_, "lq-result-valid",
             "result_valid_o=" + Bool(o.lq_result_valid) + ", model " + Bool(result_pending_));
     if (o.lq_result_valid) {
-      dbg_results_++;
-      if (!shadow_sq_.empty()) dbg_sq_nonempty_++;
-      for (const SqEnt& q : shadow_sq_) if (q.seq < pending_load_.seq) dbg_older_++;
       const Expected& e = pending_;
-      if (std::getenv("MOSAIC_DEBUG") != nullptr) {
-        std::fprintf(stderr, "DBG result load seq=%llu addr=0x%llx/%u mask=0x%02x expect=0x%02x",
-                     static_cast<unsigned long long>(pending_load_.seq),
-                     static_cast<unsigned long long>(pending_load_.addr()), pending_load_.size,
-                     o.lq_result_fwd_mask, e.mask);
-        for (const SqEnt& s : shadow_sq_) {
-          std::fprintf(stderr, " sq[seq=%llu a0x%llx/%u av%d dv%d]",
-                       static_cast<unsigned long long>(s.seq),
-                       static_cast<unsigned long long>(s.addr()), s.size, s.addr_valid ? 1 : 0,
-                       s.data_valid ? 1 : 0);
-        }
-        for (const LqEnt& l : shadow_lq_) {
-          std::fprintf(stderr, " lq[seq=%llu a0x%llx/%u]",
-                       static_cast<unsigned long long>(l.seq),
-                       static_cast<unsigned long long>(l.addr()), l.size);
-        }
-        std::fprintf(stderr, "\n");
-      }
       Require(o.lq_result_id == e.id, "lq-result-id",
               "result id " + U32(o.lq_result_id) + ", expected " + U32(e.id));
       Require(o.lq_result_fwd_mask == e.mask, "lq-result-mask",
@@ -1323,7 +1302,6 @@ class Bench {
   uint32_t sq_lat_ = 0;
   bool sq_mem_ready_ = true;
 
-  uint64_t dbg_results_ = 0, dbg_sq_nonempty_ = 0, dbg_older_ = 0;
   uint64_t run_loads_ = 0, run_stores_ = 0, run_replays_ = 0;
   uint64_t run_fwd_bytes_ = 0, run_mem_bytes_ = 0, run_faults_ = 0;
 
@@ -1514,12 +1492,6 @@ class Bench {
     // then has to make it through the endpoint to memory.
     for (int i = 0; i < 32; i++) Cycle(DefaultStim(), false);
     Require(shadow_sq_.empty(), "drain", "the committed store never drained");
-    if (std::getenv("MOSAIC_DEBUG") != nullptr) {
-      std::fprintf(stderr, "DBG drain: sq.accepted=%llu lq.accepted=%llu peek=0x%02x want=0x%02x\n",
-                   static_cast<unsigned long long>(mem_.sq.accepted),
-                   static_cast<unsigned long long>(mem_.lq.accepted), mem_.Peek(kAddr),
-                   uint8_t(kData));
-    }
     Require(mem_.Peek(kAddr) == uint8_t(kData), "drain", "the store did not reach memory");
     CheckMemory();
 
@@ -1529,7 +1501,28 @@ class Bench {
     EndPhase();
   }
 
-  // 9. a misaligned load is the endpoint's trap, with no forwarded bytes.
+  // 9. a store withdrawn while the load is in flight must not be forwarded
+  //    from afterwards (the card's "stale forwarded bytes" case).
+  void PhaseSquash() {
+    Phase("squash");
+    Fresh();
+    const uint64_t kAddr = Memory::kBase + 0x900;
+    const uint64_t kData = 0x1122334455667788ull;
+    SqEnt s = NewStore(kAddr, kData, 3, true, true);
+    AllocStore(s);
+    lq_lat_ = 8;
+    OfferLoad(NewLoad(kAddr, 3, false));
+    RunIdle(2);      // the load is in flight and the store is resident
+    SquashAll(0);    // ... and the speculative store is withdrawn
+    Settle(1024);
+    lq_lat_ = 0;
+    Require(shadow_sq_.empty(), "squash", "the squashed store is still resident");
+    Require(last_.lq_mem_byte_ctr >= 8, "squash", "a squashed store was forwarded from");
+    Require(last_.lq_fwd_byte_ctr == 0, "squash", "a forwarded byte survived the squash");
+    EndPhase();
+  }
+
+  // 10. a misaligned load is the endpoint's trap, with no forwarded bytes.
   void PhaseFault() {
     Phase("fault");
     Fresh();
@@ -1557,24 +1550,40 @@ class Bench {
       if (rng.Chance(10)) s.lq_mem_req_ready = false;
       if (rng.Chance(10)) s.sq_mem_req_ready = false;
 
-      // Free the store queue without draining: a whole-queue squash, which the
-      // store queue spares nothing from because nothing is committed here.
-      if (!shadow_sq_.empty() && (shadow_sq_.size() >= 4 || rng.Chance(20))) {
+      // Once per epoch, drain everything: this both tests the whole-queue
+      // squash and keeps the driver's program-order sequence inside the window
+      // the generation field can order (checked below).
+      const bool epoch_end = ((i % 150) == 149);
+      if (epoch_end && !shadow_sq_.empty()) {
         s.sq_squash_valid = true;
         s.sq_squash_all = true;
         s.sq_squash_gen = 0;
         need_addr.clear();
         need_data.clear();
+      } else if (!shadow_sq_.empty() && rng.Chance(1)) {
+        s.sq_squash_valid = true;
+        s.sq_squash_all = true;
+        s.sq_squash_gen = 0;
+        need_addr.clear();
+        need_data.clear();
+      } else if (!shadow_sq_.empty() && rng.Chance(20)) {
+        const size_t pick = rng.Below(uint32_t(shadow_sq_.size()));
+        s.sq_squash_valid = true;
+        s.sq_squash_all = false;
+        s.sq_squash_from = shadow_sq_[pick].id.rob_index;
+        s.sq_squash_gen = shadow_sq_[pick].id.rob_gen;
+        s.sq_squash_tail = (shadow_sq_[pick].id.rob_index + 1u) % g_.rob_slots;
       }
 
-      if (rng.Chance(55) && !s.sq_squash_valid && shadow_sq_.size() < g_.sq_entries) {
+      if (!epoch_end && rng.Chance(60) && !s.sq_squash_valid &&
+          shadow_sq_.size() < g_.sq_entries) {
         const uint32_t size = rng.Below(4);
         const uint32_t align = SizeBytes(size);
         const uint64_t addr =
             Memory::kBase + 0x1000 + 8 * rng.Below(4) + align * rng.Below(8 / align);
         const uint64_t data = (uint64_t(rng.Next()) << 17) ^ rng.Next();
-        const bool av = !rng.Chance(12);
-        const bool dv = !rng.Chance(12);
+        const bool av = !rng.Chance(10);
+        const bool dv = !rng.Chance(10);
         SqEnt e = NewStore(addr, data, size, av, dv);
         s.sq_alloc_valid = true;
         s.sq_alloc_id = e.packed;
@@ -1589,7 +1598,7 @@ class Bench {
         if (!dv) need_data.push_back(e.packed);
       }
 
-      if (!need_addr.empty() && rng.Chance(45)) {
+      if (!need_addr.empty() && rng.Chance(60)) {
         const size_t pick = rng.Below(uint32_t(need_addr.size()));
         const uint32_t packed = need_addr[pick];
         const uint64_t addr = Memory::kBase + 0x1000 + 8 * rng.Below(4);
@@ -1599,7 +1608,7 @@ class Bench {
         s.sq_fill_addr_valid = true;
         need_addr.erase(need_addr.begin() + long(pick));
       }
-      if (!need_data.empty() && rng.Chance(45)) {
+      if (!need_data.empty() && rng.Chance(60)) {
         const size_t pick = rng.Below(uint32_t(need_data.size()));
         const uint32_t packed = need_data[pick];
         s.sq_fill_valid = true;
@@ -1609,7 +1618,10 @@ class Bench {
         need_data.erase(need_data.begin() + long(pick));
       }
 
-      if (rng.Chance(50) && shadow_lq_.size() < g_.lq_entries && !s.lq_alloc_valid) {
+      // Keep the load queue shallow: the driver's program-order sequence has to
+      // stay inside the window the generation field can order, and a deep
+      // backlog of loads is what pushes it out.
+      if (!epoch_end && rng.Chance(25) && shadow_lq_.size() < 4 && !s.lq_alloc_valid) {
         const uint32_t size = rng.Below(4);
         const uint32_t align = SizeBytes(size);
         const uint64_t addr =
@@ -1626,6 +1638,7 @@ class Bench {
       }
 
       Cycle(s, false);
+      if (shadow_lq_.empty() && shadow_sq_.empty()) next_seq_ = 0;
     }
 
     // Drain the queue: resolve every outstanding address and data, let the load
@@ -1645,11 +1658,10 @@ class Bench {
     SquashAll(0);
     RunIdle(2);
     Require(shadow_sq_.empty(), "soak", "the store queue did not empty");
-    std::fprintf(stderr, "DBG soak results=%llu with_sq=%llu older_pairs=%llu\n",
-                 (unsigned long long)dbg_results_, (unsigned long long)dbg_sq_nonempty_,
-                 (unsigned long long)dbg_older_);
     Require(last_.lq_fwd_byte_ctr > 0, "soak", "the soak never forwarded a byte");
+    Require(last_.lq_mem_byte_ctr > 0, "soak", "the soak never read a byte from memory");
     Require(last_.lq_replay_ctr > 0, "soak", "the soak never replayed a load");
+    Require(last_.lq_query_mismatch_ctr == 0, "soak", "the forwarding query diverged");
     EndPhase();
   }
 
@@ -1691,6 +1703,7 @@ int main(int argc, char** argv) {
     bench.PhaseUnknown();
     bench.PhaseSameCycle();
     bench.PhaseDrain();
+    bench.PhaseSquash();
     bench.PhaseFault();
     bench.PhaseSoak(options.seed, 3000);
 
