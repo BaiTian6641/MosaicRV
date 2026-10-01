@@ -91,11 +91,17 @@ def lint_file(path: str, profile: str, extra_sources) -> tuple:
             os.path.relpath(path, REPO_ROOT), ", ".join(packages))
 
     top = modules[0]
+    # Packages must come BEFORE the module on the command line. Verilator
+    # processes files in order, and a module that refers to a package type
+    # declared in a later file fails with "Reference to 'decode_ctl_t' before
+    # declaration" even though the import is at file scope and perfectly legal.
+    # That error reads exactly like a SystemVerilog scoping mistake in the
+    # module, which is how a correct module gets "fixed" into a worse one.
     cmd = ["verilator"] + VERILATOR_FLAGS
     cmd += ["--top-module", top]
     cmd += ["-I%s" % d for d in include_dirs(profile)]
-    cmd.append(path)
     cmd += list(extra_sources)
+    cmd.append(path)
     code, output = run(cmd)
     relative = os.path.relpath(path, REPO_ROOT)
     if code != 0:

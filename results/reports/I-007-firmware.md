@@ -270,6 +270,11 @@ inputs when an input changed.
 
 Every program takes three inputs `a`, `b`, `c` and writes 4 signature words.
 
+The card asks for 12 programs; all 12 are present. `p13_romstore` is a
+13th, split out of `p08_misaligned` so that the one case in that program
+which does *not* depend on the misalignment policy can still be
+adjudicated by an independent reference. §9 explains why.
+
 | # | Program | Covers | a / b / c (3 inputs) |
 |---|---|---|---|
 | 1 | `p01_addsub` | ADD SUB ADDI SRA SLLI SRLI XORI ANDI SLTU | `0x0123456789abcdef,fedcba9876543212,13` · `0x7fff…fff,1,1` · `0x8000…,fffffffe,63` |
@@ -284,6 +289,7 @@ Every program takes three inputs `a`, `b`, `c` and writes 4 signature words.
 | 10 | `p10_jalr_link` | JAL/JALR link value, JALR bit-0 clear, `rd == rs1`, nested call | `0x0123…,0x10,0` · `0xffff…,1,0` · `0x8000…,0xffff…,0` |
 | 11 | `p11_bigmuldiv` | dependent DIV/DIVU/REM/REMU chain | `0xfedc…,0x11,5` · `0x8000…,0xfffffffffffffffe,7` · `0xffff…,0,0xffff…` |
 | 12 | `p12_memwalk` | 16-word build + load-only walk, input-dependent trip count | `0x0123…,0x1111…,5` · `0xffff…,1,2` · `0x8000…,0xaaaa…,8` |
+| 13 | `p13_romstore` | store into read-only `boot_rom` → `mcause` 7 (**split out of `p08`**, see §9) | `0x0123…,0xfedc…,7` · `0x8000…,0,0` · `0xffff…,0xffff…,0xffff…` |
 
 Expected trap trace, `p08_misaligned` (the only trapping program), identical
 for all three inputs:
@@ -485,62 +491,98 @@ EXIT=1
 
 The comparison is not vacuous: a single differing bit fails the run.
 
-## 9. Independent Spike cross-check — 33/36, one open defect
+## 9. Independent Spike cross-check — 36/39, and one NOT_CLAIMED claim
 
 `tests/programs/audit/spike_crosscheck.py` is a **third** opinion. The oracle
 computes the expected signature from the inputs in pure Python; Spike executes
-the actual ELF and the script reads Spike's own architectural memory writes. It
-is configured with Spike's default memory only (DRAM at `0x80000000`), which
-is now possible precisely because TOHOST is in RAM; `boot_rom` at 0x0 is left
-unmapped so the store there faults as the memory map requires.
+the actual ELF and the script reads Spike's own architectural memory writes.
+Spike runs with its default memory only (DRAM at `0x80000000`), which is now
+possible precisely because TOHOST is in RAM; `boot_rom` at 0x0 is left
+unmapped so a store there faults as the memory map requires.
 
 ```
 $ python3 tests/programs/audit/spike_crosscheck.py --timeout 15
-spike cross-check: 33/39 case(s) agree between Spike's architectural memory
-writes and the host oracle
+spike cross-check: 36/42 case(s) agree between Spike's architectural memory
+writes and the host program
   p08_misaligned.i0: spike exit 255 (tohost was not 1)
   p08_misaligned.i0: spike ['0x0','0x0','0x0','0x0'], oracle ['0x00000000000000ef','0x0000000001234567','0x0000000000000123','0x000000101018181f']
   p08_misaligned.i1: spike exit 255 (tohost was not 1)
   p08_misaligned.i2: spike exit 255 (tohost was not 1)
 ```
 
-(39 = 36 cases counted once per reported defect; the 33 agreeing cases are the
-ones with no defect line. 33 of 36 programs' inputs agree.)
+42 = 39 cases counted once per reported defect line. **36 of the 39 cases
+agree**; the three that do not are all `p08_misaligned`.
 
-### Open defect: `p08_misaligned`
+### `p08_misaligned` — misalignment claim is `NOT_CLAIMED`
 
-All three inputs end with the program writing `tohost = 4`, i.e. bit 0 clear
-= FAIL with `mcause = 2` (illegal instruction), reached through the fatal
-trap path:
+The frozen policy is `config/profiles/p0.json` → `misalignment: {load: "trap",
+store: "trap"}`, and the firmware encodes and the oracle validates the trace
+`[4,4,6,6,7]`. **That claim is `NOT_CLAIMED` as evidence**: it has not been
+validated against any reference, and this reference cannot validate it.
+
+The reason is a property of the reference, not a defect in the firmware:
+
+> Spike services misaligned accesses natively rather than raising
+> address-misaligned exceptions, and exposes no command-line option to change
+> that (`spike --help` offers only `--priv=<m|mu|msu>` and `--wfi-as-nop` in
+> that neighbourhood). The RISC-V specification permits either behaviour. So
+> the frozen p0 policy and this reference disagree by construction, and the
+> disagreement cannot be configured away.
+
+Measured directly, over the full 71,163-commit run of `p08_misaligned.i0.elf`:
 
 ```
-$ spike --isa=rv64im_zicsr_zifencei --log-commits build/p08_misaligned.i1.elf
-core 0: 3 0x0000000080000150 (0x00001297) x5 0x0000000080001150
-core 0: 3 0x0000000080000154 (0xfc828293) x5 0x0000000080001118
-core 0: 3 0x0000000080000158 (0x00b2b023) mem 0x0000000080001118 0x0000000000000001
-core 0: 3 0x000000008000015c (0x00008067)
-Access exception occurred while host was accessing memory on behalf of target (tohost = 0x4):
-Memory address 0x0 is invalid
+trap_entry (0x80000160) entries : 1
+mret                             : 1
+hottest PCs: 0x80000130 (17741), 0x80000134/38/3c (17736 each)
 ```
 
-The trace shows a trap being **successfully recorded and recovered**
-(`mosaic_mexpc_arm` at `0x80001118` decremented to 1), so the armed-trap
-mechanism itself works. The failure is later, and the recorded `mcause` of 2
-means an illegal-instruction exception was taken at some point after that
-recovery. **The root cause is not yet identified.** What is ruled out: the
-`p0` ISA set (the image passes the audit), the trap log layout, and the arming
-protocol (a recovery is visible in the trace). What is suspected and not yet
-checked: the boot_rom store at address 0, which is the last armed trap and the
-only access outside RAM.
+The handler is entered **once** and returns **once**. `p08` arms five traps
+and expects five; only one was taken, and it is trap 5, the store to
+unmapped address 0. Traps 1–4, the misaligned `lh`/`lw`/`sh`/`sd`, never
+raised an exception — exactly what the behaviour above predicts.
 
-This is reported as an open defect rather than closed. Until it is fixed,
-`p08_misaligned` must not be counted as passing evidence for the misalignment
-policy; the expected trap trace `[4,4,6,6,7]` in §5 is the *specification* the
-firmware encodes, validated by the oracle, not a validated DUT result.
+### `p13_romstore` — the part this reference *can* adjudicate
+
+Split out of `p08` into its own source, corpus entry, oracle model and three
+inputs. It contains only the boot_rom store, which depends on
+`config/memory/p0.json` (`boot_rom.writable = false`,
+`error_response: "access_fault"`) and not on the misalignment policy, so Spike
+checks it. All three inputs agree. Its signature folds the **trap record
+count** as well as the cause, so a DUT that raised the fault twice, dropped
+the store, or let it succeed produces a different `sig3`:
+
+```
+sig0 = lbu[0]                    sig3 = ((record_count << 8) | first_mcause)
+sig1 = sext32(a >> 32)                          ^ (1 if the store was not trapped)
+sig2 = sext16(a >> 48)
+expected trap trace: [7]
+```
+
+### Open question, narrowed — not a cause
+
+The hot loop at `0x80000130`–`0x8000013c` is `zero_region`'s byte-at-a-time
+tail loop in `crt0.S`:
+
+```
+80000130: bgeu a0, a1, done
+80000134: sb   zero, 0(a0)
+80000138: addi a0, a0, 1
+8000013c: j    0x80000130
+```
+
+Its only caller is `_start`, so by the end of the run control has fallen back
+into the boot code: `ra`-based returns in the program are landing in `crt0`.
+
+**This may well be a consequence of the missing traps rather than an
+independent defect.** With traps 1–4 never taken, `p08` never followed the
+control flow it was designed to follow, so its `ret`-based bookkeeping never
+ran the way the author intended. That is not yet distinguished from a real
+second bug. I am not claiming a root cause.
 
 ### Bugs the cross-check actually caught
 
-The Spike cross-check was not a formality; it found eight real defects that
+The Spike cross-check was not a formality. It found **ten** real defects that
 build, audit and oracle all passed:
 
 | Found in | Defect |
@@ -551,13 +593,18 @@ build, audit and oracle all passed:
 | firmware `p10` | `ra` was never established before the first `jalr`; the callee returned into `crt0`, which reported PASS with an all-zero signature |
 | firmware `p10` | `jalr a3, a3` with `rd == ra` clobbered the return address, again not terminating |
 | oracle `p09` | `LW` sign-extends; the model zero-extended |
-| oracle `p03` | same `LW` sign-extension error in `sig0` |
+| oracle `p03` | the same `LW` sign-extension error in `sig0` |
 | oracle `p04` | `MULHSU` treats rs2 as **unsigned**; the model treated both operands as signed |
-| firmware `p07` | byte assembly extracted `a[23:16]` instead of `a[15:8]`, and placed bytes in the wrong lanes |
+| firmware `p07` | byte assembly extracted `a[23:16]` instead of `a[15:8]` |
+| build | `crt0.o` was not rebuilt when `corpus.json` changed, so every ELF silently carried zero inputs |
 
 This is direct evidence that the three-way check is doing its job: the oracle
 agrees with the declaration and the golden file, and *both* were wrong in
 several of these cases.
+
+```
+python3 tools/host_oracle.py --program p13_romstore   # the split-out case
+```
 
 ## 10. Commands a reviewer can run
 
@@ -583,7 +630,7 @@ tests/programs/linker/mosaic_p0.ld
 tests/programs/src/platform.h       frozen addresses, CSR numbers, assembly macros
 tests/programs/src/crt0.S           reset path, zero_region, tohost_finish
 tests/programs/src/trap.S           trap entry, trap_expect, trap stack
-tests/programs/src/p01..p12*.S      one .S per corpus program
+tests/programs/src/p01..p13*.S      one .S per corpus program
 tests/programs/audit/check_p0_isa.py    ISA/arch/link/helper/HTIF-symbol audit
 tests/programs/audit/spike_crosscheck.py  third-party cross-check
 tools/host_oracle.py
