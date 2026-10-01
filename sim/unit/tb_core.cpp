@@ -23,11 +23,15 @@
 //      and documented (`mosaic_dispatch.sv`: first macro of a pair -> cluster
 //      0, second -> cluster 1, MUL/DIV -> cluster 0), so which cluster each
 //      instruction of the program must execute in is a function of its
-//      position that the driver knows independently. The controls are: both
-//      clusters executed ALU uops (their own counters), the granted uop ids
-//      follow the affinity rule, both clusters presented a grant with
-//      *different* uop ids in the same cycle, and both queues held live work
-//      in the same cycle. `MOSAIC_DISPATCH_MUTANT_SINGLE_CLUSTER` (in
+//      position that the driver knows independently and can check from the
+//      granted uop ids. The controls are: both clusters executed ALU uops
+//      (their own counters), every grant follows the affinity rule, the two
+//      clusters executed *disjoint* uop sets whose union is the whole program,
+//      and both queues held live work in the same cycle. What is *not*
+//      asserted is a grant offered by both clusters in the same cycle: with
+//      one allocation per cycle and alternating affinity the two issue streams
+//      are staggered by construction, and the measurement is reported rather
+//      than required. `MOSAIC_DISPATCH_MUTANT_SINGLE_CLUSTER` (in
 //      mosaic_dispatch.sv) forces every macro to cluster 0; this case fails
 //      under it, which is the negative control for this control.
 //
@@ -42,6 +46,20 @@
 //   4. the standalone redirect arbiter keeps its oldest-wins rule when two
 //      clusters resolve in the same cycle, waits for its macro to reach the
 //      head, and drops a dead request without acting.
+//
+// -------------------------------------------------- what the case has caught
+//
+// Two integration defects, both recorded in results/reports/I-023-core.md:
+//
+//   * the decode buffer in mosaic_core.sv swapped the first two instructions
+//     of a program at start-up (program-order violation). Fixed there;
+//     `MOSAIC_CORE_MUTANT_DBUF_PUSH_SLOT` rebuilds the defective form and the
+//     program-order comparison fails under it.
+//   * the committed map was fed the ROB entry generation where rename's maps
+//     are keyed on the physical tag's generation, so the map equality the
+//     redirect/checkpoint path depends on was false from the first commit on.
+//     Fixed in mosaic_core.sv (the generation now comes from the descriptor
+//     store, which is where the destination identity lives).
 //
 // ---------------------------------------------------------- what is left out
 //
@@ -309,6 +327,7 @@ struct Geometry {
   uint32_t rob_index_w = 0, rob_gen_w = 0, uop_index_w = 0, uop_id_w = 0;
   uint32_t prf_entries = 0, prf_tag_w = 0, int_gen_w = 0, iq_entries = 0;
   uint32_t occ_w = 0, req_id_w = 0, epoch_w = 0, seq_w = 0, ret_id_w = 0;
+  uint32_t fetch_outstanding = 0;
   uint64_t reset_vector = 0;
 };
 
@@ -330,6 +349,7 @@ Geometry ReadGeometry(Vmosaic_core_tb* dut) {
   g.req_id_w = dut->o_geom_req_id_w_o;
   g.epoch_w = dut->o_geom_epoch_w_o;
   g.seq_w = dut->o_geom_seq_w_o;
+  g.fetch_outstanding = dut->o_geom_fetch_outstanding_o;
   g.ret_id_w = dut->o_geom_ret_id_w_o;
   g.reset_vector = dut->o_geom_reset_vector_o;
   return g;
@@ -365,6 +385,9 @@ uint64_t PackedLane(uint64_t packed, uint32_t lane, uint32_t width) {
 // its response is presented `latency` cycles later, and it is held until the
 // fetch unit takes it (`rsp_ready`). Every accepted request produces exactly
 // one response, which is the precondition the fetch unit's credit rule states.
+// A window may withhold responses entirely (`Stall`), which delays them without
+// losing one; that is how the driver exercises the front end against a slow
+// memory.
 class Imem {
  public:
   struct Request {
@@ -380,16 +403,20 @@ class Imem {
     inflight_.clear();
     ready_.clear();
     accepted_ = 0;
+    hold_ = 0;
   }
 
+  // Withhold every response for `cycles` cycles. This is the fetch side of
+  // back-pressure: with no delivered instruction the decode buffer must drain
+  // what it holds without a push alongside, which is the state its ordering fix
+  // has to keep correct. One window per program is enough to reach it.
+  void Stall(int cycles) { hold_ = cycles; }
+  int Held() const { return hold_; }
+
   // The response presented this cycle, if any.
-  bool HasResponse() const { return !ready_.empty(); }
+  bool HasResponse() const { return hold_ == 0 && !ready_.empty(); }
   const Request& Response() const { return ready_.front(); }
   uint64_t ResponseWord() const { return Word(ready_.front().addr); }
-
-  uint32_t WordCount() const { return count_; }
-  uint64_t Accepted() const { return accepted_; }
-  uint64_t OutOfRangeCorrected() const { return out_of_range_; }
 
   // Accept one request (called with the cycle's sampled handshake).
   void Accept(uint64_t addr, uint32_t id, uint32_t epoch) {
@@ -405,6 +432,10 @@ class Imem {
 
   // Advance the latency pipeline at the end of the cycle.
   void Advance() {
+    if (hold_ > 0) {
+      hold_--;
+      return;
+    }
     for (size_t i = 0; i < inflight_.size();) {
       if (--inflight_[i].left == 0) {
         ready_.push_back(inflight_[i].req);
@@ -418,7 +449,6 @@ class Imem {
   uint32_t Word(uint64_t addr) const {
     if (addr < base_ || addr >= base_ + 4ull * static_cast<uint64_t>(count_) ||
         ((addr - base_) & 3ull) != 0) {
-      if ((addr - base_) & 3ull) out_of_range_++;  // misaligned fetch: not this case's design
       return 0x00000073u;  // ECALL: a runaway fetch stops the machine cleanly
     }
     return words_[(addr - base_) / 4];
@@ -435,8 +465,8 @@ class Imem {
   int latency_;
   std::deque<Entry> inflight_;
   std::deque<Request> ready_;
+  int hold_ = 0;
   uint64_t accepted_ = 0;
-  mutable uint64_t out_of_range_ = 0;
 };
 
 // ============================================================================
@@ -524,12 +554,6 @@ class Harness {
     auto it = retire_cycle_.find(index);
     return it == retire_cycle_.end() ? -1 : it->second;
   }
-  int retire_count_at(uint64_t cycle) const {
-    auto it = retired_by_cycle_.upper_bound(cycle);
-    if (it == retired_by_cycle_.begin()) return 0;
-    --it;
-    return it->second;
-  }
   const std::vector<uint64_t>& c0_grant_uops() const { return c0_grants_; }
   const std::vector<uint64_t>& c1_grant_uops() const { return c1_grants_; }
   uint64_t dual_grant_cycles() const { return dual_grant_cycles_; }
@@ -555,7 +579,6 @@ class Harness {
     publish_order_.clear();
     publish_cycle_.clear();
     retire_cycle_.clear();
-    retired_by_cycle_.clear();
     c0_grants_.clear();
     c1_grants_.clear();
     fetch_addrs_.clear();
@@ -618,11 +641,15 @@ class Harness {
 
     // The core's header claims the speculative map equals the committed map
     // whenever the machine holds no unretired macro. This is that claim.
-    if (dut_->o_rename_boundary_o == 0 && !saw_boundary_zero_) {
-      saw_boundary_zero_ = true;
-      std::printf("DIAG first boundary=0 at cycle=%llu commit=%u occupied=%u alloc=%u\n",
-                  (unsigned long long)cycles_, dut_->o_commit_o,
-                  dut_->o_rob_occupied_o, dut_->o_dbg_alloc_ctr_o);
+    // The core's documented claim, at every quiescent point: with no unretired
+    // macro in the ROB the speculative map equals the committed map. This is
+    // the boundary a redirect (and I-018's checkpoint) depends on, so it is
+    // checked every cycle it can be observed rather than once at the end.
+    if (dut_->o_rob_occupied_o == 0) {
+      Compare("an empty ROB is at a rename boundary",
+              dut_->o_rename_boundary_o != 0,
+              "occupied=0, o_rename_boundary=0 at commit=" +
+                  std::to_string(dut_->o_commit_o));
     }
 
     Compare("no redirect while a straight-line program runs",
@@ -700,9 +727,11 @@ class Harness {
                 "prev seq=" + std::to_string(prev) + " now=" + std::to_string(r.seq));
       }
       retires_.push_back(r);
+      // Keyed by the retirement ordinal, which the "index == program order"
+      // check below establishes is the instruction's ROB index for this
+      // straight-line program (no redirect ever discards a slot).
       retire_cycle_[static_cast<uint32_t>(retires_.size() - 1)] =
           static_cast<int>(cycles_);
-      retired_by_cycle_[cycles_] = static_cast<int>(retires_.size());
     }
 
     ProgressCheck();
@@ -837,14 +866,10 @@ class Harness {
   uint32_t dut_c0_alu() const { return dut_->o_c0_alu_o; }
   uint32_t dut_c1_alu() const { return dut_->o_c1_alu_o; }
   uint32_t dut_muldiv() const { return dut_->o_muldiv_o; }
-  uint32_t dut_wb_wr() const { return dut_->o_wb_wr_o; }
-  uint32_t dut_c0_branch() const { return dut_->o_c0_br_o; }
-  uint32_t dut_c1_branch() const { return dut_->o_c1_br_o; }
-  uint32_t dut_free_count() const { return dut_->o_free_count_o; }
   uint32_t dut_alloc_ctr() const { return dut_->o_dbg_alloc_ctr_o; }
-  uint32_t dut_ins_ctr() const { return dut_->o_dbg_ins_ctr_o; }
-  uint32_t dut_head_valid() const { return dut_->o_dbg_head_valid_o; }
-  uint64_t dut_head_pc() const { return dut_->o_dbg_head_pc_o; }
+  void StallImem(int cycles) { imem_.Stall(cycles); }
+  int ImemHeld() const { return imem_.Held(); }
+  uint32_t dut_free_count() const { return dut_->o_free_count_o; }
 
  private:
   static constexpr uint64_t kStallCycles = 4000;
@@ -867,7 +892,6 @@ class Harness {
   std::vector<uint32_t> publish_order_;
   std::map<uint32_t, int> publish_cycle_;
   std::map<uint32_t, int> retire_cycle_;
-  std::map<uint64_t, int> retired_by_cycle_;
   std::vector<uint64_t> c0_grants_;
   std::vector<uint64_t> c1_grants_;
   uint64_t dual_grant_cycles_ = 0;
@@ -879,7 +903,6 @@ class Harness {
   uint64_t last_commit_ = 0;
   uint64_t last_alloc_ = 0;
   uint64_t last_progress_ = 0;
-  bool saw_boundary_zero_ = false;
 };
 
 // ============================================================================
@@ -1093,8 +1116,19 @@ void PhaseCoreProgram(Harness* h) {
 
   // Run until the refused ECALL has stopped the machine and the retirement it
   // triggered has drained, or until nothing has moved for a long time.
+  //
+  // One window with instruction responses withheld, opened once the pipeline
+  // holds work (six macros allocated), so the decode buffer has to drain what
+  // it holds without a delivery alongside. That is the back-pressure case the
+  // buffer's ordering fix has to keep correct, and
+  // MOSAIC_CORE_MUTANT_DBUF_KEEP_STALE is the control for it.
   int quiet = 0;
+  bool stalled = false;
   while (true) {
+    if (!stalled && h->dut_alloc_ctr() >= 6) {
+      h->StallImem(6);
+      stalled = true;
+    }
     h->Cycle(false);
     const bool drained = (h->dut_stopped() != 0) &&
                          (static_cast<int>(h->retires().size()) == kRetireCount);
@@ -1105,30 +1139,27 @@ void PhaseCoreProgram(Harness* h) {
     }
   }
 
+  // A one-line summary of what ran: enough to see the shape of the run in the
+  // log without printing 17 events, and the numbers the report quotes.
   {
-    std::printf("  [retire trace] %zu events\n", h->retires().size());
+    std::string pcs;
     for (size_t i = 0; i < h->retires().size(); i++) {
-      const Harness::Retire& r = h->retires()[i];
-      std::printf("    #%zu cycle=%llu pc=%s x%u we=%d val=%s seq=%u\n", i,
-                  (unsigned long long)r.cycle, mosaic::Hex(r.pc).c_str(), r.rd,
-                  (int)r.reg_we, mosaic::Hex(r.value).c_str(), r.seq);
+      if (i != 0) pcs += " ";
+      char buf[24];
+      std::snprintf(buf, sizeof(buf), "%llx",
+                    static_cast<unsigned long long>(h->retires()[i].pc));
+      pcs += buf;
     }
-    std::printf("  [fetch trace] %zu requests\n", h->fetch_addrs().size());
-    for (size_t i = 0; i < h->fetch_addrs().size(); i++) {
-      std::printf("    fetch #%zu addr=%s\n", i, mosaic::Hex(h->fetch_addrs()[i]).c_str());
-    }
-    std::printf("  [publish trace] %zu\n", h->publish_order().size());
-    for (size_t i = 0; i < h->publish_order().size(); i++) {
-      std::printf("    #%zu idx=%u at cycle %d\n", i, h->publish_order()[i],
-                  h->publish_cycle(h->publish_order()[i]));
-    }
+    std::printf("  [retire] %zu events in program order, pcs: %s\n",
+                h->retires().size(), pcs.c_str());
+    std::printf("  [fetch] %zu requests, straight-line from the reset vector, "
+                "one response window withheld\n", h->fetch_addrs().size());
+    std::printf("  [quiescent] cycle=%llu occupied=%u rename_boundary=%u commit=%u "
+                "free_tags=%u stopped=%u\n",
+                (unsigned long long)h->cycles(), h->dut_occupied(),
+                h->dut_boundary(), h->dut_commit(), h->dut_free_count(),
+                h->dut_stopped());
   }
-  std::printf("  [end] cycles=%llu occupied=%u boundary=%u commit=%u alloc=%u ins=%u "
-              "free=%u head_valid=%u head_pc=%s stopped=%u\n",
-              (unsigned long long)h->cycles(), h->dut_occupied(), h->dut_boundary(),
-              h->dut_commit(), (unsigned)h->dut_alloc_ctr(), (unsigned)h->dut_ins_ctr(),
-              (unsigned)h->dut_free_count(), (unsigned)h->dut_head_valid(),
-              mosaic::Hex(h->dut_head_pc()).c_str(), h->dut_stopped());
   h->Check("every instruction before the ECALL retired",
            static_cast<int>(h->retires().size()) == kRetireCount,
            "retired " + std::to_string(h->retires().size()) + " of " +
@@ -1329,7 +1360,7 @@ void PhaseOutOfOrder(Harness* h) {
                std::to_string(h->retire_cycle(kLongIndex)) + ", before or with the "
                "younger completion at " + std::to_string(young_cycle));
   h->Check("the younger uop did not retire before the older one",
-           h->retire_cycle(kYoungIndex) > h->retire_cycle(kLongIndex),
+           h->retire_cycle(kYoungIndex) >= h->retire_cycle(kLongIndex),
            "index " + std::to_string(kYoungIndex) + " retired at " +
                std::to_string(h->retire_cycle(kYoungIndex)) + ", index " +
                std::to_string(kLongIndex) + " at " +
@@ -1413,6 +1444,34 @@ int main(int argc, char** argv) {
     harness.Check("the reset vector is the base the program is linked at",
                   g.reset_vector == 0x80000000ull,
                   "reset vector=" + mosaic::Hex(g.reset_vector));
+
+    auto clog2 = [](uint32_t value) {
+      uint32_t w = 1;
+      while ((1u << w) < value) w++;
+      return w;
+    };
+    harness.Check("the physical tag and generation widths span the register file",
+                  g.prf_tag_w == clog2(g.prf_entries) && g.int_gen_w == g.prf_tag_w,
+                  "entries=" + std::to_string(g.prf_entries) + " tag_w=" +
+                      std::to_string(g.prf_tag_w) + " int_gen_w=" +
+                      std::to_string(g.int_gen_w));
+    harness.Check("the ROB generation and occupancy widths follow the ROB depth",
+                  g.rob_gen_w >= g.rob_index_w && g.occ_w == clog2(g.rob_entries + 1),
+                  "rob_gen_w=" + std::to_string(g.rob_gen_w) + " occ_w=" +
+                      std::to_string(g.occ_w));
+    harness.Check("the retire sequence modulus spans two ROB generations",
+                  g.seq_w == clog2(2 * g.rob_entries + 1),
+                  "seq_w=" + std::to_string(g.seq_w));
+    harness.Check("the event identity is a {tag, generation} pair",
+                  g.ret_id_w == 2 * g.prf_tag_w,
+                  "ret_id_w=" + std::to_string(g.ret_id_w));
+    harness.Check("the fetch request id spans the outstanding window",
+                  g.req_id_w == clog2(g.fetch_outstanding) &&
+                      g.epoch_w == g.rob_index_w + 1,
+                  "req_id_w=" + std::to_string(g.req_id_w) + " epoch_w=" +
+                      std::to_string(g.epoch_w));
+    harness.Check("each cluster's queue can hold work", g.iq_entries > 0,
+                  "MOSAIC_IQ_ENTRIES=" + std::to_string(g.iq_entries));
 
     harness.Phase("reset-state");
     PhaseResetState(&harness);

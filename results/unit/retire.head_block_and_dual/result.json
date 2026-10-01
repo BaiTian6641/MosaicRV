@@ -1,16 +1,15 @@
 {
   "schema_version": 1,
   "case": "retire.head_block_and_dual",
-  "verdict": "FAIL",
-  "detail": "contract violated: minstret: cycle 779: pay_missing: expected 2, got 0[alloc v=0 tag=0 n=1 exc=0 open=0 | close v=0 i=0 g=0x0 | cmp v=0 i=0 g=0x0 uop=0 exc=0 | robflush=0 retireflush=0 | pay v=0x1 we=0x0 rd=0x0 csrwe=0x0 csra=0x0 store=0x0 | csrrd v=0 a=0x0]",
+  "verdict": "PASS",
+  "detail": "retire contract holds: 469499 shadow comparisons over 0 cycles; 117 events (26 in two-wide cycles, 91 alone), 17 traps, 60 committed-map updates, 2 x0 retirements, 14 CSR writes, 12 store authorisations, 399 flushes, 2271 blocked cycles, seed 1",
   "seed": 1,
   "max_cycles": 200000,
   "checks": 1,
-  "failures": 1,
+  "failures": 0,
   "image": "",
   "expect": "",
   "tool": "Verilator 5.052 2026-09-05",
-  "timestamp": "2026-10-01T18:57:45Z",
-  "first_mismatch": "minstret: cycle 779: pay_missing: expected 2, got 0[alloc v=0 tag=0 n=1 exc=0 open=0 | close v=0 i=0 g=0x0 | cmp v=0 i=0 g=0x0 uop=0 exc=0 | robflush=0 retireflush=0 | pay v=0x1 we=0x0 rd=0x0 csrwe=0x0 csra=0x0 store=0x0 | csrrd v=0 a=0x0]: expected contract holds, got contract violated",
-  "failed_checks": ["no contract violation in any phase"]
+  "timestamp": "2026-10-01T20:32:34Z",
+  "first_mismatch": ""
 }

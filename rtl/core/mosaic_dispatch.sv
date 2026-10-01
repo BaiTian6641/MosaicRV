@@ -602,7 +602,20 @@ module mosaic_dispatch (
     if (rst) begin
       aff_toggle <= 1'b0;
     end else if (alloc_ok) begin
+`ifdef MOSAIC_DISPATCH_MUTANT_SINGLE_CLUSTER
+      // NEGATIVE CONTROL: the affinity never alternates, so every macro is
+      // inserted into cluster 0's queue and the second cluster is never used.
+      // CASE=fabric.fixed_two_cluster's fabric controls -- cluster 1 executed
+      // at least one ALU uop, and the two clusters executed disjoint uops
+      // covering the program -- must fail under it. It is what proves those
+      // controls measure the *second cluster* and not merely that the machine
+      // executes instructions at all. Built with
+      // -DMOSAIC_DISPATCH_MUTANT_SINGLE_CLUSTER and recorded in
+      // results/reports/I-023-core.md.
+      aff_toggle <= 1'b0;
+`else
       aff_toggle <= ~aff_toggle;
+`endif
     end
   end
 

@@ -2,14 +2,14 @@
   "schema_version": 1,
   "case": "rename.same_cycle_chain",
   "verdict": "PASS",
-  "detail": "rename contract holds: 9750 shadow comparisons over 9818 cycles, 96 entries / 4 banks, seed 1",
+  "detail": "rename contract holds: 9767 shadow comparisons over 9843 cycles, 96 entries / 4 banks, seed 1",
   "seed": 1,
   "max_cycles": 200000,
-  "checks": 16,
+  "checks": 18,
   "failures": 0,
   "image": "",
   "expect": "",
   "tool": "Verilator 5.052 2026-09-05",
-  "timestamp": "2026-10-01T19:07:23Z",
+  "timestamp": "2026-10-01T20:32:34Z",
   "first_mismatch": ""
 }

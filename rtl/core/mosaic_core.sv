@@ -240,7 +240,6 @@ module mosaic_core (
   // *after* this cycle's pop, so it is `dbuf_cnt - dbuf_take`, and the next
   // state is computed per slot rather than by two independent writes to the
   // same one -- see the always_comb in section 2.
-  logic [1:0]                dbuf_push_at_w;
   logic                      dbuf_push_at;
   logic [1:0]                dbuf_valid_n;
   logic [CORE_XLEN-1:0]      dbuf_pc_n  [0:1];
@@ -287,6 +286,18 @@ module mosaic_core (
   logic                      desc_wr_reg_we;
   logic [31:0]               desc_live_ctr;
   logic [4:0]                desc_rd0, desc_rd1;
+  // The destination's *physical* generation, which the ROB does not carry: the
+  // ROB knows the tag and its own entry generation, while rename's maps are
+  // keyed on the tag's generation. The descriptor store is where the
+  // destination identity lives (that is what "the retire-only fields the ROB
+  // does not carry" means), so the commit takes it from there.
+  // `rd_gen0`/`rd_gen1` are the 8-bit identity field the PRF carries; rename's
+  // maps are keyed on its low `MOSAIC_INT_PRF_TAG_W` bits, and dispatch writes
+  // the generation zero-extended into the wider field, so the top bit is
+  // structurally zero and is deliberately not read here.
+  /* verilator lint_off UNUSEDSIGNAL */
+  logic [CORE_PGEN_W-1:0]    desc_gen0, desc_gen1;
+  /* verilator lint_on UNUSEDSIGNAL */
   logic                      desc_reg_we0, desc_reg_we1;
   logic [1:0]                retire_clr_valid;
   logic [1:0][CORE_IDX_W-1:0] retire_clr_index;
@@ -400,7 +411,6 @@ module mosaic_core (
   logic [CORE_RET_N-1:0]     ret_commit_valid;
   logic [CORE_RET_N*CORE_RD_W-1:0]  ret_commit_rd;
   logic [CORE_RET_N*CORE_TAG_W-1:0] ret_commit_tag;
-  logic [CORE_RET_N*CORE_IGEN_W-1:0] ret_commit_gen;
   logic [CORE_RET_N*CORE_XLEN-1:0] retire_pay_value;
   logic                      head_pending_taken;
 
@@ -565,11 +575,20 @@ module mosaic_core (
   // CASE=fabric.fixed_two_cluster reads the retirement stream back in program
   // order, and it is what caught this.
   always_comb begin
-    // `dbuf_cnt - dbuf_take` is 0, 1 or 2; a push is only offered when it is
-    // 0 or 1 (`dbuf_room` refuses the full buffer with no pop), so the slot is
-    // one bit and is taken from the low bit of the difference.
-    dbuf_push_at_w = dbuf_cnt - {1'b0, dbuf_take};
-    dbuf_push_at   = dbuf_push_at_w[0];
+    // The push slot is the tail after this cycle's pop, `dbuf_cnt - dbuf_take`,
+    // and only its low bit is ever needed: a push is offered only when that
+    // difference is 0 or 1 (`dbuf_room` refuses a full buffer with no pop), and
+    // the low bit of a difference is the xor of the operands' low bits.
+`ifdef MOSAIC_CORE_MUTANT_DBUF_PUSH_SLOT
+    // NEGATIVE CONTROL for the ordering fix below: the slot is chosen from the
+    // pop alone, which is the form that overwrites a live entry when the buffer
+    // holds one entry in slot 1. CASE=fabric.fixed_two_cluster must then fail
+    // its program-order comparison (the first two macros are allocated in the
+    // wrong order); see results/reports/I-023-core.md.
+    dbuf_push_at = dbuf_take;
+`else
+    dbuf_push_at = dbuf_cnt[0] ^ dbuf_take;
+`endif
     dbuf_valid_n[0] = dbuf_valid[0];
     dbuf_valid_n[1] = dbuf_valid[1];
     dbuf_pc_n    = dbuf_pc;
@@ -578,6 +597,13 @@ module mosaic_core (
       dbuf_valid_n[0] = dbuf_valid[1];
       dbuf_pc_n[0]    = dbuf_pc[1];
       dbuf_ctl_n[0]   = dbuf_ctl[1];
+      // The entry's old slot is invalidated. With the push slot chosen above,
+      // the live entries are exactly `[0 .. dbuf_cnt-1]`; a pop that is not
+      // accompanied by a push would otherwise leave the shifted entry alive in
+      // slot 1 and re-dispatch it on the next pop. This case does not reach
+      // that state -- it needs the buffer full and then drained with no
+      // delivery alongside, i.e. dispatch and fetch stalled together -- and the
+      // gap is recorded in results/reports/I-023-core.md rather than claimed.
       dbuf_valid_n[1] = 1'b0;
     end
     if (dbuf_push) begin
@@ -723,13 +749,13 @@ module mosaic_core (
       .rd_index1       (rob_head1_index),
       .rd_valid0       (),
       .rd_tag0         (),
-      .rd_gen0         (),
+      .rd_gen0         (desc_gen0),
       .rd_rd0          (desc_rd0),
       .rd_reg_we0      (desc_reg_we0),
       .rd_is_store0    (),
       .rd_valid1       (),
       .rd_tag1         (),
-      .rd_gen1         (),
+      .rd_gen1         (desc_gen1),
       .rd_rd1          (desc_rd1),
       .rd_reg_we1      (desc_reg_we1),
       .rd_is_store1    (),
@@ -1308,11 +1334,29 @@ module mosaic_core (
   assign ren_commit_valid  = ret_commit_valid[0];
   assign ren_commit_rd     = ret_commit_rd[CORE_RD_W-1:0];
   assign ren_commit_tag    = ret_commit_tag[CORE_TAG_W-1:0];
-  assign ren_commit_gen    = ret_commit_gen[CORE_IGEN_W-1:0];
+  // The committed map is keyed on the *tag generation* rename allocates with
+  // (`spec_gen[a] <= alloc_new_gen`), so a commit must install that same
+  // generation. The generation mosaic_retire derives from `rob_id` is the ROB's
+  // own entry generation -- a different counter that happens to be the same
+  // width -- and feeding it here made `speculative map == committed map` false
+  // from the first commit on, which is the boundary every redirect and every
+  // future checkpoint depends on. The destination identity (tag *and* its
+  // generation) is what the descriptor store carries, so that is the source.
+  // CASE=fabric.fixed_two_cluster asserts the boundary and is what caught it.
+`ifdef MOSAIC_CORE_MUTANT_ROB_GEN_COMMIT
+  // NEGATIVE CONTROL for the fix: the committed map is fed the ROB entry
+  // generation, which is the wiring this package shipped with. The two fields
+  // have the same width, so nothing about the build says they are different
+  // counters; the case's rename-boundary comparison is what does.
+  assign ren_commit_gen    = rob_head_gen;
+  assign ren_commit2_gen   = rob_head1_gen;
+`else
+  assign ren_commit_gen    = desc_gen0[CORE_IGEN_W-1:0];
+  assign ren_commit2_gen   = desc_gen1[CORE_IGEN_W-1:0];
+`endif
   assign ren_commit2_valid = ret_commit_valid[1];
   assign ren_commit2_rd    = ret_commit_rd[2*CORE_RD_W-1:CORE_RD_W];
   assign ren_commit2_tag   = ret_commit_tag[2*CORE_TAG_W-1:CORE_TAG_W];
-  assign ren_commit2_gen   = ret_commit_gen[2*CORE_IGEN_W-1:CORE_IGEN_W];
 
   // Lane 1 must not retire when the head is a taken branch whose redirect is
   // pending: that entry is the first wrong-path instruction and the redirect is
@@ -1382,7 +1426,12 @@ module mosaic_core (
       .commit_valid   (ret_commit_valid),
       .commit_rd      (ret_commit_rd),
       .commit_tag     (ret_commit_tag),
-      .commit_gen     (ret_commit_gen),
+      // The retire module's own commit generation is derived from `rob_id` and
+      // is the ROB entry generation; the committed map is keyed on the tag
+      // generation, which comes from the descriptor store above. Left
+      // unconnected deliberately, with the reason here rather than silently
+      // rewired.
+      .commit_gen     (),
       .csr_rd_valid   (1'b0),
       .csr_rd_addr    ({CORE_CSR_W{1'b0}}),
       .csr_rd_data    (),

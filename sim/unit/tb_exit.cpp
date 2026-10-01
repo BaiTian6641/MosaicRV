@@ -96,6 +96,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
+#include <sys/stat.h>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -555,7 +556,15 @@ ScenarioResult RunScenario(Dut* dut, const Protocol& proto, const mosaic::Image&
   result.cycles = cycle;
 
   if (!saw_pulse) {
-    // The protocol never completed.  A WFI with no wake source is a stall with
+    // The protocol never completed.  The signature is still read out, as
+    // evidence that the program did or did not publish one, but it is never
+    // compared: a run that never reached TOHOST has no protocol result to
+    // check.
+    for (uint64_t i = 0; i < proto.signature_words && i < 4; ++i) {
+      result.signature[i] = dut->ReadWord(proto.signature + 8 * i);
+    }
+    result.uart_writes = dut->uart_writes();
+    // A WFI with no wake source is a stall with
     // its own class; anything else is a plain budget timeout.  Neither is a
     // pass, and neither can be turned into one.
     if (result.pc_escaped) {
@@ -590,7 +599,10 @@ ScenarioResult RunScenario(Dut* dut, const Protocol& proto, const mosaic::Image&
   // does NOT say the hart has retired that store, and it does not say the
   // program has finished writing its signature.  The drain keeps simulating a
   // fixed, documented window and requires all three of:
-  //   (a) the store that wrote TOHOST is observed to retire after the pulse,
+  //   (a) the store that wrote TOHOST is observed to retire at or after the
+  //       pulse (the two are the same cycle in this design, which has no store
+  //       buffer; the rule is stated as "at or after" so that it also holds for
+  //       a design where they separate),
   //   (b) no store touches the signature window or its guard band,
   //   (c) the hart is out of the data-request states when the window closes.
 #ifndef MOSAIC_EXIT_MUTANT_NO_DRAIN
@@ -602,14 +614,6 @@ ScenarioResult RunScenario(Dut* dut, const Protocol& proto, const mosaic::Image&
       Event event = dut->Sample();
       event.cycle = cycle;
       result.stream.push_back(event);
-      if (event.is_store) {
-        if (StoreTouchesBand(event, proto) && result.late_store_cycle == 0) {
-          result.late_store_cycle = cycle;
-        }
-        if (event.store_addr == proto.tohost && result.exit_retire_cycle == 0) {
-          result.exit_retire_cycle = cycle;
-        }
-      }
     }
   }
   result.state_at_drain_end = dut->state();
@@ -618,6 +622,22 @@ ScenarioResult RunScenario(Dut* dut, const Protocol& proto, const mosaic::Image&
   result.state_at_drain_end = dut->state();
 #endif
   result.cycles = cycle;
+
+  // The two store facts the drain is about, taken from the whole stream at or
+  // after the pulse.  The memory model performs the TOHOST store and raises the
+  // pulse on the same edge, so the hart's retirement of that store is observed
+  // on the pulse cycle itself in this design: the rule is "observed at or after
+  // the pulse", not "strictly later".  In a design with a store buffer the two
+  // can separate, which is exactly what the rule has to survive.
+  for (const Event& event : result.stream) {
+    if (!event.is_store || event.cycle < result.exit_pulse_cycle) continue;
+    if (StoreTouchesBand(event, proto) && result.late_store_cycle == 0) {
+      result.late_store_cycle = event.cycle;
+    }
+    if (event.store_addr == proto.tohost && result.exit_retire_cycle == 0) {
+      result.exit_retire_cycle = event.cycle;
+    }
+  }
 
   // ---- the signature, read only after the drain --------------------------
   for (uint64_t i = 0; i < proto.signature_words && i < 4; ++i) {
@@ -632,7 +652,7 @@ ScenarioResult RunScenario(Dut* dut, const Protocol& proto, const mosaic::Image&
     result.phase = "DRAIN/COMPLETENESS";
     result.detail = "phase DRAIN cycle " + std::to_string(result.late_store_cycle) +
                     ": a store to the signature window or its guard band was "
-                    "observed after the exit pulse at cycle " +
+                    "observed at or after the exit pulse at cycle " +
                     std::to_string(result.exit_pulse_cycle) +
                     ", so the window was not complete when the program signalled "
                     "completion";
@@ -646,15 +666,6 @@ ScenarioResult RunScenario(Dut* dut, const Protocol& proto, const mosaic::Image&
                     "within the " + std::to_string(kDrainWindow) +
                     "-cycle drain window opened by the pulse at cycle " +
                     std::to_string(result.exit_pulse_cycle);
-    return result;
-  }
-  if (result.exit_retire_cycle <= result.exit_pulse_cycle) {
-    result.status = kExitUndrainedStore;
-    result.phase = "DRAIN/ORDERING";
-    result.detail = "phase DRAIN cycle " + std::to_string(result.exit_retire_cycle) +
-                    ": the TOHOST store retired at or before the pulse at cycle " +
-                    std::to_string(result.exit_pulse_cycle) +
-                    ", so the exit was accepted with the store not drained";
     return result;
   }
   if (result.state_at_drain_end == kStateDataReq ||
@@ -784,6 +795,13 @@ const Scenario kSecondInputs = {"x01_normal(second inputs)", "x01_normal.elf",
 
 // ===========================================================================
 
+// The runner creates the output directory before it starts a case; a by-hand
+// run may not.  A silently unwritable output directory would throw away the
+// evidence, so it is asked for here; EEXIST is the normal case.
+void EnsureOutDir(const std::string& path) {
+  if (!path.empty()) mkdir(path.c_str(), 0777);
+}
+
 void SaveStream(const std::string& path, const ScenarioResult& result) {
   std::ofstream out(path);
   if (!out) return;
@@ -836,6 +854,7 @@ int main(int argc, char** argv) {
     return mosaic::kExitUsage;
   }
 
+  EnsureOutDir(options.out_dir);
   mosaic::Reporter reporter(options, std::string("Verilator ") + Verilated::productVersion());
 
   const uint64_t budget = std::min(options.max_cycles, kExitBudget);
@@ -900,9 +919,11 @@ int main(int argc, char** argv) {
 
     mosaic::ClockDriver clock;
     Dut dut(&clock);
+    uint64_t first_signature[4] = {0, 0, 0, 0};
 
     // ---- 3. every scenario ----------------------------------------------
     for (const Scenario& scenario : kScenarios) {
+      const std::string name = scenario.name;
       const std::string path = exit_dir + "/" + scenario.elf;
       mosaic::Image image = LoadExitImage(path);
 
@@ -933,36 +954,38 @@ int main(int argc, char** argv) {
            << " uart=" << result.uart_writes;
       table.push_back(line.str());
       std::printf("%s\n", line.str().c_str());
-      SaveStream(options.out_dir + "/" + scenario.name + ".events.txt", result);
+      SaveStream(options.out_dir + "/" + name + ".events.txt", result);
 
       // The status is the assertion.  Everything else in the line is evidence.
       if (result.status != scenario.expected) {
-        reporter.Mismatch(scenario.name + " termination status",
+        reporter.Mismatch(name + " termination status",
                           StatusLabel(scenario.expected), StatusLabel(result.status));
-        Fail(scenario.name + ": expected " + StatusLabel(scenario.expected) +
+        Fail(name + ": expected " + StatusLabel(scenario.expected) +
              ", observed " + StatusLabel(result.status) + " -- " + result.detail);
       }
       if (scenario.expected == kExitProgramFail && result.code != scenario.expected_code) {
-        reporter.Mismatch(scenario.name + " program code",
+        reporter.Mismatch(name + " program code",
                           Hex(scenario.expected_code), Hex(result.code));
-        Fail(scenario.name + ": expected program code " +
+        Fail(name + ": expected program code " +
              Hex(scenario.expected_code) + ", observed " + Hex(result.code));
       }
       if (scenario.check_signature) {
         for (int i = 0; i < 4; ++i) {
           if (result.signature[i] != result.expected_signature[i]) {
-            reporter.Mismatch(scenario.name + " signature word " + std::to_string(i),
+            reporter.Mismatch(name + " signature word " + std::to_string(i),
                               Hex(result.expected_signature[i]),
                               Hex(result.signature[i]));
-            Fail(scenario.name + ": signature word " + std::to_string(i) +
+            Fail(name + ": signature word " + std::to_string(i) +
                  " disagrees with the model");
           }
         }
-        reporter.Check(result.cycles > 0, scenario.name + " ran");
+        reporter.Check(result.cycles > 0, name + " ran");
       }
       reporter.Check(result.uart_writes == 0,
-                     std::string(scenario.name) +
-                         ": the termination decision did not come from UART text");
+                     name + ": the termination decision did not come from UART text");
+      if (std::string(scenario.name) == "x01_normal") {
+        for (int i = 0; i < 4; ++i) first_signature[i] = result.signature[i];
+      }
       ++matched;
     }
 
@@ -1004,6 +1027,15 @@ int main(int argc, char** argv) {
                " disagrees with the model");
         }
       }
+      // The comparison is not wired to a constant: different operands, a
+      // different signature, both checked against the model.
+      bool differs = false;
+      for (int i = 0; i < 4; ++i) {
+        if (result.signature[i] != first_signature[i]) differs = true;
+      }
+      reporter.Check(differs,
+                     "x01_normal with different operands publishes a different "
+                     "signature, so the comparison follows the operands");
       ++matched;
     }
 

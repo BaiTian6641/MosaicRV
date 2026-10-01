@@ -30,7 +30,9 @@
     "V-008",
     "I-026",
     "I-013",
-    "V-011"
+    "V-011",
+    "V-009",
+    "I-023"
   ],
   "evidence": {
     "I-001": {
@@ -359,6 +361,28 @@
       "verdict": "PASS",
       "notes": "ELF loader and memory-boundary verification. Case PASS from a clean build: 490 checks, 312 DUT cycles, 13 malformed images rejected and 1 accepted. The rejection contract is exit code 2 with dut_cycles=0 -- a bad image must be refused before the machine is allowed to run, which is the card's fail mode ('a wrong image keeps running') made impossible rather than merely checked. Three real loader defects were found by the new checks and fixed, none by weakening a check: e_type was never read so a dynamic ET_DYN image was accepted at its link-time address; a PT_LOAD whose vaddr+memsz or offset+filesz wrapped uint64 made a wild entry look mapped (both sums are now checked before addition and the segment containment test is overflow-safe); and p_flags was never read, so an entry inside a segment declaring itself non-executable was accepted. Six compile-time mutants each rebuild from an empty directory, differ from the shipping binary, and exit 1 naming the check they break; tools/check_elf_load.py independently re-parses the image and agrees byte for byte, and exits 1 on a corrupted manifest. Regression-checked here: harness.bad_image (I-004) and core.bringup_vs_reference (I-008) still pass and the golden signature check still agrees. Recorded judgement call: the p_flags==0 carve-out that keeps the I-004 image loadable. NOT verified: p_align is read but only the 8-byte rule is enforced; ET_NONE/ET_REL refused but not exercised against real images; the DUT checks prove image delivery and the first retire, not retire semantics or a run to TOHOST. All numbers were produced after the V-009 lane restored sim/tb/mosaic_bringup_tb.sv (wrapper sha256 78c27dfe..., HEAD 29bb23d).",
       "report": "results/reports/V-011-loader.md"
+    },
+    "V-009": {
+      "cases": [
+        "reset.replay_determinism"
+      ],
+      "commands": [
+        "python3 tools/run_unit.py --profile p0 --case reset.replay_determinism"
+      ],
+      "verdict": "PASS",
+      "notes": "Reset and initial-state replayability. Case PASS from a clean build: 440 checks over reset lengths of 1, 2, 5 and 17 valid clock edges crossed with four release instants (high after the last edge, on the falling edge, low before the first edge, in a late low phase), plus abort/restart at S_FWAIT, at S_DWAIT, at the accepted TOHOST store and at a seed-chosen edge count, plus a same-seed replay of every configuration with bit-identical post-release state. The card's fail modes are the ones tested: no architectural event is reported while reset is asserted, no device write occurs during reset, and an old transaction cannot cross reset into the new run. Five negative controls all fail as required -- two in the core (an event reported in reset; mscratch surviving reset) and three in the environment model (the clear pass leaving RAM alone; an outstanding fetch/data transaction surviving reset; the end-of-run latch surviving reset). The package found and fixed a real defect in sim/tb/mosaic_bringup_tb.sv: the reset branch cleared the TOHOST-written flag but not its one-cycle commit latch, so a reset landing in that window made the restarted run report end-of-run on its first live edge with an empty event stream -- precisely the pollution the card forbids -- and the fix is guarded by a mutant that now fails, proving the line is load-bearing. It also found and fixed a vacuous abort in its own case (the TOHOST abort fired one cycle before the memory model accepted the store, so it never actually reset an outstanding transaction). Independently re-verified here: the case passes and core.bringup_vs_reference still passes. NOT verified: reset polarity as a waveform (only synchronous active-high exists in this RTL, so edge-sampled deassertion is proven but neither an asynchronous nor an active-low path); zero reset edges (undefined, the smallest tested length is 1); mcycle is excluded from the state comparison because it counts clocks, minstret is compared; privilege is carried by mstatus only because p0 is M-mode; 'queue ownership' is checked in its bring-up analogue (the memory model's outstanding-transaction state) because the bring-up core has no queue -- the package itself says this must be re-pointed at the integrated core's ROB/rename allocation state when that lands, and that re-pointing is not claimed here.",
+      "report": "results/reports/V-009-reset.md"
+    },
+    "I-023": {
+      "cases": [
+        "fabric.fixed_two_cluster"
+      ],
+      "commands": [
+        "python3 tools/run_unit.py --profile p0 --case fabric.fixed_two_cluster"
+      ],
+      "verdict": "PASS",
+      "notes": "The integrated core runs end to end for the first time: fetch, decode, rename, dispatch, two clusters, WB/PRF, ROB, retire and recovery are one machine and the registered case passes from a clean build -- checks=59, comparisons=678, cycles=129, retires=17, c0_alu=8, c1_alu=8, muldiv=1, max_occupied=6. The card's two fail modes are covered by controls rather than argued: MOSAIC_DISPATCH_MUTANT_SINGLE_CLUSTER (the second cluster never used) exits 1 at cycle 129 with o_c1_alu_ctr=0, and the out-of-order claim is visible in the numbers rather than asserted -- uop index 13 completed at cycle 49 while index 12 completed at 114, with retirement still in program order. Two real integration defects were found by this driver and fixed in mosaic_core.sv, both left with a negative control: the 2-entry decode buffer wrote slot 0 whenever nothing was popped, overwriting a live entry left in slot 1 by a pop, so the machine retired two instructions out of program order (observed allocation order 0,2,1); and rename's committed map was fed the ROB entry generation instead of the physical tag's generation -- same width, different counter -- so 'speculative map == committed map' was false from the first commit onward, which is the boundary every redirect and the I-018 checkpoint path rests on. After both fixes retirement order is exact and o_rename_boundary is 1 at every quiescent point. Independently re-verified here: base PASS with the reported numbers, SINGLE_CLUSTER exiting 1 at cycle 129. NOT covered, and this is a first-integration case rather than a core-complete one: no branches in the program, so the branch barrier, the redirect arbiter inside the core, cluster purge and fetch redirect are unexercised; no load/store/CSR/trap/interrupt/fence/MMIO/cache/multi-hart (dispatch refuses them and the data port is never asserted); one MUL/DIV encoding; one seed; p0 only. Two gaps stated rather than claimed: a same-cycle grant offered by both clusters never occurs (dispatch allocates one macro per cycle and alternates affinity, so the streams are staggered by construction) and the decode buffer's vacated-slot invalidation is not reached by any stimulus the lane could build -- its mutant passed and was removed rather than left in the tree as a false control.",
+      "report": "results/reports/I-023-core.md"
     }
   }
 }

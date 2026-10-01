@@ -183,6 +183,7 @@ module mosaic_core_tb (
     output logic [31:0] o_geom_occ_w_o,
     output logic [31:0] o_geom_req_id_w_o,
     output logic [31:0] o_geom_epoch_w_o,
+    output logic [31:0] o_geom_fetch_outstanding_o,
     output logic [31:0] o_geom_seq_w_o,
     output logic [31:0] o_geom_ret_id_w_o,
     output logic [TB_XLEN-1:0] o_geom_reset_vector_o
@@ -349,6 +350,7 @@ module mosaic_core_tb (
   assign o_geom_occ_w_o        = 32'(TB_OCC_W);
   assign o_geom_req_id_w_o     = 32'(TB_REQ_ID_W);
   assign o_geom_epoch_w_o      = 32'(TB_EPOCH_W);
+  assign o_geom_fetch_outstanding_o = 32'(mosaic_cfg_pkg::MOSAIC_FETCH_OUTSTANDING);
   assign o_geom_seq_w_o        = 32'(TB_SEQ_W);
   assign o_geom_ret_id_w_o     = 32'(TB_RET_ID_W);
   assign o_geom_reset_vector_o = mosaic_cfg_pkg::MOSAIC_RESET_VECTOR;

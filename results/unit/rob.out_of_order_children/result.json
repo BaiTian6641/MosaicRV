@@ -2,7 +2,7 @@
   "schema_version": 1,
   "case": "rob.out_of_order_children",
   "verdict": "PASS",
-  "detail": "rob contract holds: 1235977 shadow comparisons, 78309 of them across every slot of the buffer, over 14885 cycles and 4882 accepted allocations; soak: 3248 accepted, 563 duplicate, 3017 stale, 2876 out-of-range, 1468 refused-at-capacity, 373 exceptional, 90 flushes, seed 1",
+  "detail": "rob contract holds: 1235977 shadow comparisons, 78309 of them across every slot of the buffer, over 14885 cycles and 4882 accepted allocations; soak: 3249 accepted, 563 duplicate, 3014 stale, 2878 out-of-range, 1468 refused-at-capacity, 373 exceptional, 90 flushes, seed 1",
   "seed": 1,
   "max_cycles": 200000,
   "checks": 1,
@@ -10,6 +10,6 @@
   "image": "",
   "expect": "",
   "tool": "Verilator 5.052 2026-09-05",
-  "timestamp": "2026-10-01T18:47:20Z",
+  "timestamp": "2026-10-01T20:32:35Z",
   "first_mismatch": ""
 }

@@ -26,7 +26,7 @@ _start:
 
     add     t0, a0, a1
     sub     t1, a0, a1
-    xor     t2, a0, a2
+    xor     t2, a0, a1
     slli    t3, a0, 3
     xor     t3, t3, a2
 
