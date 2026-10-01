@@ -731,6 +731,29 @@
    ],
    "max_cycles": 4000000,
    "seed": 1
+  },
+  "harness.sampling_calibration": {
+   "task": "V-010",
+   "top": "mosaic_bringup_tb",
+   "rtl": [
+    "rtl/core/mosaic_bringup_core.sv",
+    "rtl/core/mosaic_pkg.sv",
+    "rtl/core/mosaic_decoder.sv",
+    "rtl/core/mosaic_alu.sv",
+    "rtl/core/mosaic_branch_cmp.sv",
+    "rtl/core/mosaic_branch_target.sv"
+   ],
+   "sv": [
+    "sim/tb/mosaic_bringup_tb.sv"
+   ],
+   "cpp": [
+    "sim/unit/tb_sampling.cpp",
+    "sim/common/event_tap.cpp",
+    "sim/common/memory_model.cpp",
+    "sim/common/elf_loader.cpp"
+   ],
+   "max_cycles": 4000000,
+   "seed": 1
   }
  }
 }

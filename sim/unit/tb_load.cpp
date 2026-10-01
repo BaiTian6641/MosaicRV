@@ -1052,6 +1052,9 @@ class Bench {
     Require(o.lq_result_valid == result_pending_, "lq-result-valid",
             "result_valid_o=" + Bool(o.lq_result_valid) + ", model " + Bool(result_pending_));
     if (o.lq_result_valid) {
+      dbg_results_++;
+      if (!shadow_sq_.empty()) dbg_sq_nonempty_++;
+      for (const SqEnt& q : shadow_sq_) if (q.seq < pending_load_.seq) dbg_older_++;
       const Expected& e = pending_;
       if (std::getenv("MOSAIC_DEBUG") != nullptr) {
         std::fprintf(stderr, "DBG result load seq=%llu addr=0x%llx/%u mask=0x%02x expect=0x%02x",
@@ -1320,6 +1323,7 @@ class Bench {
   uint32_t sq_lat_ = 0;
   bool sq_mem_ready_ = true;
 
+  uint64_t dbg_results_ = 0, dbg_sq_nonempty_ = 0, dbg_older_ = 0;
   uint64_t run_loads_ = 0, run_stores_ = 0, run_replays_ = 0;
   uint64_t run_fwd_bytes_ = 0, run_mem_bytes_ = 0, run_faults_ = 0;
 
@@ -1555,8 +1559,7 @@ class Bench {
 
       // Free the store queue without draining: a whole-queue squash, which the
       // store queue spares nothing from because nothing is committed here.
-      if (!shadow_sq_.empty() &&
-          (shadow_sq_.size() >= g_.sq_entries - 1 || rng.Chance(12))) {
+      if (!shadow_sq_.empty() && (shadow_sq_.size() >= 4 || rng.Chance(20))) {
         s.sq_squash_valid = true;
         s.sq_squash_all = true;
         s.sq_squash_gen = 0;
@@ -1567,10 +1570,11 @@ class Bench {
       if (rng.Chance(55) && !s.sq_squash_valid && shadow_sq_.size() < g_.sq_entries) {
         const uint32_t size = rng.Below(4);
         const uint32_t align = SizeBytes(size);
-        const uint64_t addr = Memory::kBase + 0x1000 + 8 * rng.Below(16) + align * rng.Below(8 / align);
+        const uint64_t addr =
+            Memory::kBase + 0x1000 + 8 * rng.Below(4) + align * rng.Below(8 / align);
         const uint64_t data = (uint64_t(rng.Next()) << 17) ^ rng.Next();
-        const bool av = !rng.Chance(25);
-        const bool dv = !rng.Chance(25);
+        const bool av = !rng.Chance(12);
+        const bool dv = !rng.Chance(12);
         SqEnt e = NewStore(addr, data, size, av, dv);
         s.sq_alloc_valid = true;
         s.sq_alloc_id = e.packed;
@@ -1588,7 +1592,7 @@ class Bench {
       if (!need_addr.empty() && rng.Chance(45)) {
         const size_t pick = rng.Below(uint32_t(need_addr.size()));
         const uint32_t packed = need_addr[pick];
-        const uint64_t addr = Memory::kBase + 0x1000 + 8 * rng.Below(16);
+        const uint64_t addr = Memory::kBase + 0x1000 + 8 * rng.Below(4);
         s.sq_fill_valid = true;
         s.sq_fill_id = packed;
         s.sq_fill_base = addr;
@@ -1609,7 +1613,7 @@ class Bench {
         const uint32_t size = rng.Below(4);
         const uint32_t align = SizeBytes(size);
         const uint64_t addr =
-            Memory::kBase + 0x1000 + 8 * rng.Below(16) + align * rng.Below(8 / align);
+            Memory::kBase + 0x1000 + 8 * rng.Below(4) + align * rng.Below(8 / align);
         const bool sign = rng.Chance(50);
         LqEnt e = NewLoad(addr, size, sign);
         s.lq_alloc_valid = true;
@@ -1641,6 +1645,11 @@ class Bench {
     SquashAll(0);
     RunIdle(2);
     Require(shadow_sq_.empty(), "soak", "the store queue did not empty");
+    std::fprintf(stderr, "DBG soak results=%llu with_sq=%llu older_pairs=%llu\n",
+                 (unsigned long long)dbg_results_, (unsigned long long)dbg_sq_nonempty_,
+                 (unsigned long long)dbg_older_);
+    Require(last_.lq_fwd_byte_ctr > 0, "soak", "the soak never forwarded a byte");
+    Require(last_.lq_replay_ctr > 0, "soak", "the soak never replayed a load");
     EndPhase();
   }
 

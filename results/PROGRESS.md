@@ -1543,3 +1543,37 @@ fail before the fix and a mutant that reintroduces it afterwards.
 V-008, V-009, V-011), with V-012 and I-035 running and the readiness fix dispatched. Nothing is
 advertisable yet: `M` waits on V-011's sibling V-010, `I` on I-013-adjacent verification, and the
 ladder is deliberately the last thing to move.
+
+---
+
+## 2026-10-01 — the first advertisable capabilities, and what is still withheld
+
+`python3 tools/gen_manifest.py --profile p0` now writes `isa_string: rv64m_zicsr_zihpm` with
+`advertised: M, Zicsr, Zihpm`. Until today the ladder reported `advertisable now: (none yet)`
+for the whole project, so this is the first time a capability has been allowed into misa, the
+compiler's `-march` and the reference model — and it happened the way the plan intended: not
+because someone decided the machine was good enough, but because every implementation task and
+every verification task the ladder names for those three capabilities appears in
+`config/status/implementation_status.json` with evidence behind it.
+
+The withholding that remains is the interesting part. The base integer set `I` — the capability
+without which the other three are meaningless — is still **not** advertised, because V-010 has
+not been delivered. Everything else for `I` is done. That is the ladder working exactly as
+designed: an ISA string that reads `rv64m_zicsr_zihpm` without an `i` looks wrong, and it is
+right to look wrong, because the harness's one-handshake-one-record discipline has not been
+demonstrated at the time of writing. A claim about `I` is a claim that the machine's event
+counts are exact, and that claim belongs to the sampling loop, not to the RTL. V-010 was
+dispatched with that sentence in its brief.
+
+Two more notes for whoever reads this next:
+
+* **`I` waits only on V-010; `Zifencei` waits on I-037 and V-014; `Zicntr` on I-076; the A/S/C
+  families on tasks that have not started.** So the p0 scalar base is one package away from being
+  fully advertisable, and the next layer (the ordered memory path — I-035 running, I-037,
+  I-038) is what stands between this machine and running the corpus end to end on the
+  out-of-order core rather than on the bring-up core.
+* **The manifest is generated, not authored.** `build/p0/manifest.json` is the single file the
+  DUT build, the compiler flags and the reference model all quote, and it is derived from the
+  ledger plus the ladder. That is why "record the package" and "advertise the capability" are
+  the same act in this project, and why the records in `implementation_status.json` are written
+  the way they are — with the gaps stated in the same breath as the passes.
