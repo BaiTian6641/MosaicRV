@@ -15,14 +15,13 @@
 //     a same-input/different-op pair for a cycle-accurate observation) without
 //     touching the unit under test.
 //
-// It carries two groups of pins:
+// It carries three groups of pins:
 //
 //   * the ALU group (`a`, `b`, `op` -> `result`, `zero`);
-//   * the branch group (`bt_*` -> `bt_link`, `bt_target`, `bt_is_taken`), which
-//     includes the comparator's operands. The comparator lives in RTL next to
-//     `mosaic_branch_target` and feeds the `branch_taken` input, so the C++ side
-//     checks the comparison and the target arithmetic in the same vector and can
-//     tell a wrong condition apart from a wrong address.
+//   * the branch-target group (`bt_pc`, `bt_imm`, `bt_is_branch`, `bt_is_jal`,
+//     `bt_is_jalr`, `bt_branch_taken` -> `bt_link`, `bt_target`, `bt_is_taken`);
+//   * the comparator group (`bt_rs1_value`, `bt_rs2_value`, `bt_branch_funct` ->
+//     `bt_cmp_taken`), which the core wires into `bt_branch_taken`.
 //
 // Because there is no clock, the driver settles each vector with one Verilator
 // eval() and samples the outputs directly; there is no reset to schedule and no
@@ -43,16 +42,18 @@ module mosaic_alu_tb (
     // ---- branch target -----------------------------------------------------
     input  wire  [63:0] bt_pc,
     input  wire  [63:0] bt_imm,       // already sign-extended by the decoder
+    input  wire         bt_is_branch,
+    input  wire         bt_is_jal,
     input  wire         bt_is_jalr,
-    input  wire  [2:0]  bt_branch_funct,
     input  wire         bt_branch_taken,
     output wire  [63:0] bt_link,
     output wire  [63:0] bt_target,
     output wire         bt_is_taken,
 
     // ---- branch comparator -------------------------------------------------
-    input  wire  [63:0] bt_rs1_value, // architectural value; x0 presents 0
+    input  wire  [63:0] bt_rs1_value,  // architectural value; x0 presents 0
     input  wire  [63:0] bt_rs2_value,
+    input  wire  [2:0]  bt_branch_funct,
     output wire         bt_cmp_taken
 );
 
@@ -71,8 +72,9 @@ module mosaic_alu_tb (
   ) u_branch_target (
       .pc           (bt_pc),
       .imm          (bt_imm),
+      .is_branch    (bt_is_branch),
+      .is_jal       (bt_is_jal),
       .is_jalr      (bt_is_jalr),
-      .branch_funct (bt_branch_funct),
       .branch_taken (bt_branch_taken),
       .link         (bt_link),
       .target       (bt_target),

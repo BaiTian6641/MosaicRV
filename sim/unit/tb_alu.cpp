@@ -1,21 +1,21 @@
 // CASE=alu.boundaries -- work package I-011.
 //
-// Two units under test, both purely combinational, both checked against
-// reference models written independently of the RTL:
+// Three units under test, all purely combinational, all checked against reference
+// models written independently of the RTL:
 //
-//   * rtl/core/mosaic_alu.sv          -- all sixteen `mosaic_pkg::alu_op_e`
-//                                        encodings: add/sub/shift/compare/logic,
-//                                        the five RV64 word forms and ALU_PASSB;
+//   * rtl/core/mosaic_alu.sv           -- all sixteen `mosaic_pkg::alu_op_e`
+//                                         encodings: add/sub/shift/compare/logic,
+//                                         the five RV64 word forms and ALU_PASSB;
 //   * rtl/core/mosaic_branch_target.sv -- link value, taken/not-taken target,
-//                                        and "does control transfer";
+//                                         and "does control transfer";
 //   * rtl/core/mosaic_branch_cmp.sv    -- the BEQ/BNE/BLT/BGE/BLTU/BGEU
-//                                        comparison that feeds `branch_taken`.
+//                                         comparison that feeds `branch_taken`.
 //
 // The ALU is swept over the full 2x2 matrix of a 20-value boundary operand set,
 // a dedicated shift-amount sweep, and a seeded random campaign. The branch half
-// is swept over a pc set, an immediate set, all eight funct3 values, both
-// `branch_taken` values and both `is_jalr` values, plus the closed chain in which
-// the DUT comparator drives the DUT target unit.
+// is swept over a pc set, an immediate set, all four combinations of the control
+// flags and both `branch_taken` values, plus the closed chain in which the DUT
+// comparator drives the DUT target unit.
 //
 // Independence of the reference models
 // -----------------------------------
@@ -93,10 +93,11 @@ const char* const kOpName[kOpCount] = {
 const uint8_t kShiftOps[] = {kSll, kSrl, kSra, kSllw, kSrlw, kSraw};
 constexpr size_t kShiftOpCount = sizeof(kShiftOps) / sizeof(kShiftOps[0]);
 
-// RV64I branch funct3. funct3 = 010 and 011 name no condition and the decoder
-// reports them illegal; they are carried through the sweep anyway, because a
-// unit that answers something specific for them is testable and one that does
-// not is not.
+// RV64I branch funct3, as seen by the comparator. funct3 = 010 and 011 name no
+// condition and the decoder reports them illegal; they are carried through the
+// sweep anyway, because a unit that answers something specific for them is
+// testable and one that does not is not. The *target* unit never sees these: it
+// takes is_branch / is_jal / is_jalr and does no encoding sniffing at all.
 enum BranchFunct : uint8_t {
   kBeq = 0,
   kBne = 1,
@@ -156,7 +157,7 @@ constexpr size_t kShiftCount = sizeof(kShiftAmounts) / sizeof(kShiftAmounts[0]);
 
 // Branch program counters. `0xFFFFFFFFFFFFFFFC` makes `pc + 4` wrap to zero,
 // which is the only way a broken link rule can still look right, and the odd
-// values make an odd pc explicit rather than implied.
+// value makes an odd pc explicit.
 const uint64_t kBranchPcs[] = {
     0x0000000000000000ull, 0x0000000000000002ull, 0x0000000000000004ull,
     0x0000000000000008ull, 0x0000000000001000ull, 0x00000000FFFFFFFCull,
@@ -293,17 +294,18 @@ struct BranchResult {
   bool is_taken;
 };
 
-BranchResult ReferenceBranchTarget(uint64_t pc, uint64_t imm, bool is_jalr,
-                                   uint8_t funct, bool branch_taken) {
+BranchResult ReferenceBranchTarget(uint64_t pc, uint64_t imm, bool is_branch,
+                                   bool is_jal, bool is_jalr,
+                                   bool branch_taken) {
   BranchResult out;
   out.link = pc + 4;  // wraps, like every other XLEN arithmetic in this model
   const uint64_t sum = pc + imm;
   // JALR clears bit 0 and nothing else. Bit 1 survives on purpose: the
   // misaligned-target report belongs to the core, not to this unit.
   const uint64_t aligned = is_jalr ? (sum & ~1ull) : sum;
-  const bool names_condition = (funct != kFunctNoneA) && (funct != kFunctNoneB);
-  out.is_taken = is_jalr || !names_condition || branch_taken;
-  // A not-taken branch falls through to pc + 4, which is exactly the link value.
+  // The decoder states what the instruction is; nothing here sniffs an encoding.
+  out.is_taken = is_jal || is_jalr || (is_branch && branch_taken);
+  // A not-taken instruction falls through to pc + 4, which is exactly the link.
   out.target = out.is_taken ? aligned : out.link;
   return out;
 }
@@ -395,34 +397,36 @@ class Bench {
     rep_->Check(consistent, "reference model cross-checks against itself");
   }
 
-  // -------------------------------------------------------------- branch ------
+  // ------------------------------------------------------- branch target -----
 
-  // One branch vector. The comparator and the target unit are each checked
-  // against their own model in the same vector, with `branch_taken` driven from
-  // the stimulus rather than from the DUT, so a wrong condition cannot hide
-  // behind a wrong address or the other way round. The closed chain -- DUT
-  // comparator into DUT target unit -- is checked separately, in `ApplyChain`.
-  void ApplyBranch(uint64_t pc, uint64_t imm, bool is_jalr, uint8_t funct,
-                   bool branch_taken, uint64_t rs1, uint64_t rs2,
-                   const char* phase) {
+  // One branch-target vector. The comparator is driven but not checked here, so
+  // a wrong condition cannot hide behind a wrong address; `ApplyCompare` and
+  // `ApplyChain` cover the comparator.
+  void ApplyTarget(uint64_t pc, uint64_t imm, bool is_branch, bool is_jal,
+                   bool is_jalr, bool branch_taken, const char* phase) {
     if (halted_) return;
-    Drive(pc, imm, is_jalr, funct, branch_taken, rs1, rs2);
+    Drive(pc, imm, is_branch, is_jal, is_jalr, branch_taken, 0, 0, kBeq);
 
-    const BranchResult want =
-        ReferenceBranchTarget(pc, imm, is_jalr, funct, branch_taken);
-    const bool want_cmp = ReferenceBranchCmp(funct, rs1, rs2);
+    const BranchResult want = ReferenceBranchTarget(
+        pc, imm, is_branch, is_jal, is_jalr, branch_taken);
 
     ++branch_vectors_;
-    ++per_funct_[funct];
+    if (is_jal) ++jal_vectors_;
+    if (is_jalr) ++jalr_vectors_;
+    if (is_branch) ++branch_vectors_named_;
     if (want.is_taken) {
       ++taken_vectors_;
     } else {
       ++not_taken_vectors_;
       if (top_->bt_target == top_->bt_link) ++not_taken_link_vectors_;
     }
+    if (branch_taken && !is_branch && !is_jal && !is_jalr) {
+      // A comparator answer arriving for an instruction that named no branch
+      // must not redirect control anywhere.
+      ++ignored_spurious_taken_vectors_;
+    }
     const uint64_t sum = pc + imm;
     if (is_jalr) {
-      ++jalr_vectors_;
       if ((sum & 1ull) != 0 && (top_->bt_target & 1ull) == 0) {
         ++jalr_clears_bit0_vectors_;
       }
@@ -431,21 +435,13 @@ class Bench {
       if ((sum & 3ull) == 2 && (top_->bt_target & 3ull) == 2) {
         ++jalr_keeps_bit1_vectors_;
       }
-    } else {
-      ++jal_vectors_;
     }
-    if (want_cmp) {
-      ++cmp_true_vectors_;
-    } else {
-      ++cmp_false_vectors_;
-    }
-    if (rs1 == 0 || rs2 == 0) ++cmp_x0_vectors_;
 
     char where[224];
     std::snprintf(where, sizeof(where),
-                  "%s %s pc=%s imm=%s jalr=%d taken=%d", phase,
-                  kFunctName[funct], mosaic::Hex(pc).c_str(),
-                  mosaic::Hex(imm).c_str(), is_jalr ? 1 : 0,
+                  "%s pc=%s imm=%s br=%d jal=%d jalr=%d cmp=%d", phase,
+                  mosaic::Hex(pc).c_str(), mosaic::Hex(imm).c_str(),
+                  is_branch ? 1 : 0, is_jal ? 1 : 0, is_jalr ? 1 : 0,
                   branch_taken ? 1 : 0);
 
     CheckField(std::string(where) + ": link", mosaic::Hex(want.link),
@@ -454,24 +450,45 @@ class Bench {
                mosaic::Hex(top_->bt_target));
     CheckFlag(std::string(where) + ": is_taken", want.is_taken,
               top_->bt_is_taken != 0);
-    CheckFlag(std::string(where) + ": compare", want_cmp,
-              top_->bt_cmp_taken != 0);
   }
 
-  // The closed chain: the comparator's own answer drives the target unit, and the
-  // pair is compared against the model chain. This is how the two units are
-  // checked in the configuration the core will actually wire them in.
+  // One comparator vector, checked against the comparison model.
+  void ApplyCompare(uint8_t funct, uint64_t rs1, uint64_t rs2,
+                    const char* phase) {
+    if (halted_) return;
+    Drive(0, 0, false, false, false, false, rs1, rs2, funct);
+
+    const bool want = ReferenceBranchCmp(funct, rs1, rs2);
+    ++compare_vectors_;
+    ++per_funct_[funct];
+    if (want) {
+      ++cmp_true_vectors_;
+    } else {
+      ++cmp_false_vectors_;
+    }
+    if (rs1 == 0 || rs2 == 0) ++cmp_x0_vectors_;
+
+    char where[160];
+    std::snprintf(where, sizeof(where), "%s %s(rs1=%s, rs2=%s)", phase,
+                  kFunctName[funct], mosaic::Hex(rs1).c_str(),
+                  mosaic::Hex(rs2).c_str());
+    CheckFlag(where, want, top_->bt_cmp_taken != 0);
+  }
+
+  // The closed chain: the comparator's own answer drives the target unit, in the
+  // configuration the core will actually wire -- is_branch high, is_jal and
+  // is_jalr low, because this is the one case where the two units meet.
   void ApplyChain(uint64_t pc, uint64_t imm, bool is_jalr, uint8_t funct,
                   uint64_t rs1, uint64_t rs2, const char* phase) {
     if (halted_) return;
-    Drive(pc, imm, is_jalr, funct, false, rs1, rs2);
+    Drive(pc, imm, true, false, is_jalr, false, rs1, rs2, funct);
     const bool dut_taken = top_->bt_cmp_taken != 0;
     top_->bt_branch_taken = dut_taken ? 1 : 0;
     top_->eval();
 
     const bool model_taken = ReferenceBranchCmp(funct, rs1, rs2);
     const BranchResult want =
-        ReferenceBranchTarget(pc, imm, is_jalr, funct, model_taken);
+        ReferenceBranchTarget(pc, imm, true, false, is_jalr, model_taken);
     ++chain_vectors_;
 
     char where[224];
@@ -484,11 +501,12 @@ class Bench {
               top_->bt_is_taken != 0);
   }
 
-  // A hand-computed branch expectation, checked against the RTL directly.
-  void ExpectBranch(uint64_t pc, uint64_t imm, bool is_jalr, uint8_t funct,
-                    bool branch_taken, uint64_t want_link, uint64_t want_target,
-                    bool want_is_taken, const char* what) {
-    Drive(pc, imm, is_jalr, funct, branch_taken, 0, 0);
+  // A hand-computed branch-target expectation, checked against the RTL directly.
+  void ExpectTarget(uint64_t pc, uint64_t imm, bool is_branch, bool is_jal,
+                    bool is_jalr, bool branch_taken, uint64_t want_link,
+                    uint64_t want_target, bool want_is_taken,
+                    const char* what) {
+    Drive(pc, imm, is_branch, is_jal, is_jalr, branch_taken, 0, 0, kBeq);
     CheckField(std::string(what) + ": link", mosaic::Hex(want_link),
                mosaic::Hex(top_->bt_link));
     CheckField(std::string(what) + ": target", mosaic::Hex(want_target),
@@ -501,20 +519,22 @@ class Bench {
   // A hand-computed comparison expectation, checked against the DUT comparator.
   void ExpectCompare(uint8_t funct, uint64_t rs1, uint64_t rs2, bool want,
                      const char* what) {
-    Drive(0, 0, false, funct, false, rs1, rs2);
+    Drive(0, 0, false, false, false, false, rs1, rs2, funct);
     CheckFlag(what, want, top_->bt_cmp_taken != 0);
     ++handwritten_;
   }
 
-  void Drive(uint64_t pc, uint64_t imm, bool is_jalr, uint8_t funct,
-             bool branch_taken, uint64_t rs1, uint64_t rs2) {
+  void Drive(uint64_t pc, uint64_t imm, bool is_branch, bool is_jal, bool is_jalr,
+             bool branch_taken, uint64_t rs1, uint64_t rs2, uint8_t funct) {
     top_->bt_pc = pc;
     top_->bt_imm = imm;
+    top_->bt_is_branch = is_branch ? 1 : 0;
+    top_->bt_is_jal = is_jal ? 1 : 0;
     top_->bt_is_jalr = is_jalr ? 1 : 0;
-    top_->bt_branch_funct = funct;
     top_->bt_branch_taken = branch_taken ? 1 : 0;
     top_->bt_rs1_value = rs1;
     top_->bt_rs2_value = rs2;
+    top_->bt_branch_funct = funct;
     top_->eval();
   }
 
@@ -562,26 +582,27 @@ class Bench {
                 "coverage: some op produced zero from a non-zero a");
     rep_->Check(vectors_ > 0, "coverage: ALU stimulus was applied");
 
-    // The same for the branch half: every funct3, both directions of every
-    // condition, both is_jalr values, a not-taken branch whose target fell back
-    // to pc + 4, a JALR that cleared bit 0, and a JALR whose target stayed
-    // misaligned in bit 1.
-    for (uint8_t funct = 0; funct < 8; ++funct) {
-      rep_->Check(per_funct_[funct] > 0,
-                  std::string("coverage: funct3 ") + kFunctName[funct] +
-                      " was exercised");
-    }
+    // The same for the branch half.
+    rep_->Check(jal_vectors_ > 0, "coverage: JAL was exercised");
+    rep_->Check(jalr_vectors_ > 0, "coverage: JALR was exercised");
+    rep_->Check(branch_vectors_named_ > 0,
+                "coverage: a conditional branch was exercised");
     rep_->Check(taken_vectors_ > 0, "coverage: a taken transfer was exercised");
     rep_->Check(not_taken_vectors_ > 0,
-                "coverage: a not-taken branch was exercised");
+                "coverage: a not-taken instruction was exercised");
     rep_->Check(not_taken_link_vectors_ == not_taken_vectors_,
-                "coverage: every not-taken branch fell back to pc + 4");
-    rep_->Check(jalr_vectors_ > 0, "coverage: JALR was exercised");
-    rep_->Check(jal_vectors_ > 0, "coverage: the non-JALR path was exercised");
+                "coverage: every not-taken instruction fell back to pc + 4");
+    rep_->Check(ignored_spurious_taken_vectors_ > 0,
+                "coverage: branch_taken was seen high with no branch named");
     rep_->Check(jalr_clears_bit0_vectors_ > 0,
                 "coverage: JALR cleared a bit 0 that was set");
     rep_->Check(jalr_keeps_bit1_vectors_ > 0,
                 "coverage: JALR left a misaligned bit 1 in the target");
+    for (uint8_t funct = 0; funct < 8; ++funct) {
+      rep_->Check(per_funct_[funct] > 0,
+                  std::string("coverage: funct3 ") + kFunctName[funct] +
+                      " was compared");
+    }
     rep_->Check(cmp_true_vectors_ > 0 && cmp_false_vectors_ > 0,
                 "coverage: both outcomes of every condition were seen");
     rep_->Check(cmp_x0_vectors_ > 0,
@@ -591,12 +612,15 @@ class Bench {
   }
 
   uint64_t vectors() const { return vectors_; }
-  uint64_t branch_vectors() const { return branch_vectors_ + chain_vectors_; }
+  uint64_t branch_vectors() const {
+    return branch_vectors_ + compare_vectors_ + chain_vectors_;
+  }
   uint64_t handwritten() const { return handwritten_; }
   uint32_t failures() const { return failures_; }
   bool halted() const { return halted_; }
-  bool out_of_budget() const { return branch_vectors() + vectors_ >=
-                              options_.max_cycles; }
+  bool out_of_budget() const {
+    return branch_vectors() + vectors() >= options_.max_cycles;
+  }
 
   std::string CoverageSummary() const {
     std::string text = "alu_ops=";
@@ -604,7 +628,8 @@ class Bench {
       if (op != 0) text += " ";
       text += std::string(kOpName[op]) + "=" + std::to_string(per_op_[op]);
     }
-    text += "; branch=" + std::to_string(branch_vectors_) + " vectors, chain=" +
+    text += "; branch_target=" + std::to_string(branch_vectors_) +
+            " compare=" + std::to_string(compare_vectors_) + " chain=" +
             std::to_string(chain_vectors_);
     return text;
   }
@@ -661,6 +686,7 @@ class Bench {
 
   uint64_t vectors_ = 0;
   uint64_t branch_vectors_ = 0;
+  uint64_t compare_vectors_ = 0;
   uint64_t chain_vectors_ = 0;
   uint64_t handwritten_ = 0;
   uint32_t failures_ = 0;
@@ -675,8 +701,10 @@ class Bench {
   uint64_t taken_vectors_ = 0;
   uint64_t not_taken_vectors_ = 0;
   uint64_t not_taken_link_vectors_ = 0;
-  uint64_t jalr_vectors_ = 0;
   uint64_t jal_vectors_ = 0;
+  uint64_t jalr_vectors_ = 0;
+  uint64_t branch_vectors_named_ = 0;
+  uint64_t ignored_spurious_taken_vectors_ = 0;
   uint64_t jalr_clears_bit0_vectors_ = 0;
   uint64_t jalr_keeps_bit1_vectors_ = 0;
   uint64_t cmp_true_vectors_ = 0;
@@ -773,57 +801,58 @@ int main(int argc, char** argv) {
     const uint64_t kMinusFour = 0xFFFFFFFFFFFFFFFCull;
 
     // link is always pc + 4, including when that wraps and when the pc is odd.
-    bench.ExpectBranch(0, 0, false, kBeq, true, 4, 0, true,
-                       "link at pc=0 is pc+4 and the target is pc+imm");
-    bench.ExpectBranch(0xFFFFFFFFFFFFFFFCull, 0, true, kBne, false, 0,
-                       0xFFFFFFFFFFFFFFFCull, true,
-                       "link wraps to zero at the top of the address space");
-    bench.ExpectBranch(0xFFFFFFFFFFFFFFFCull, 4, true, kBne, true, 0,
-                       0x0000000000000000ull, true,
-                       "a JALR at the top of the address space links to zero");
-    bench.ExpectBranch(2, 0, false, kBeq, true, 6, 2, true,
+    bench.ExpectTarget(0, 0, false, true, false, false, 4, 0, true,
+                       "JAL at pc=0 links to pc+4 and targets pc+imm");
+    bench.ExpectTarget(kMinusFour, 0, false, true, false, false, 0, kMinusFour,
+                       true, "link wraps to zero at the top of the address space");
+    bench.ExpectTarget(kMinusFour, 4, false, false, true, false, 0, 0, true,
+                       "a JALR at the top of the address space targets zero");
+    bench.ExpectTarget(2, 0, false, true, false, false, 6, 2, true,
                        "an odd pc links to pc+4, unaligned");
 
     // JALR clears bit 0 and nothing else.
-    bench.ExpectBranch(0, 1, true, kBne, true, 4, 0, true,
+    bench.ExpectTarget(0, 1, false, false, true, false, 4, 0, true,
                        "JALR clears bit 0 of the target");
-    bench.ExpectBranch(0, 2, true, kBne, true, 4, 2, true,
+    bench.ExpectTarget(0, 2, false, false, true, false, 4, 2, true,
                        "JALR keeps bit 1: a target 2 bytes past pc");
-    bench.ExpectBranch(0, 6, true, kBne, true, 4, 6, true,
+    bench.ExpectTarget(0, 6, false, false, true, false, 4, 6, true,
                        "JALR keeps bit 1 with a 6-byte offset");
-    bench.ExpectBranch(4, 2, true, kBne, true, 8, 6, true,
+    bench.ExpectTarget(4, 2, false, false, true, false, 8, 6, true,
                        "JALR clears bit 0 of pc+imm, not of imm");
-    bench.ExpectBranch(0, 0x000000007FFFFFFCull, true, kBne, true, 4,
+    bench.ExpectTarget(0, 0x000000007FFFFFFCull, false, false, true, false, 4,
                        0x000000007FFFFFFCull, true,
                        "JALR keeps bit 1 of a large misaligned target");
+    bench.ExpectTarget(0, 3, false, true, true, false, 4, 2, true,
+                       "is_jalr wins over is_jal, and still clears bit 0");
 
-    // A JAL does not clear anything: bit 1 of the target must survive so the
-    // core can raise the misaligned-target trap.
-    bench.ExpectBranch(0, 2, false, kBne, true, 4, 2, true,
+    // JAL clears nothing: bit 1 of the target must survive so the core can raise
+    // the misaligned-target trap.
+    bench.ExpectTarget(0, 2, false, true, false, false, 4, 2, true,
                        "JAL leaves a 2-byte-aligned target for the trap logic");
-    bench.ExpectBranch(0, 2, false, kBne, false, 4, 4, false,
-                       "a branch with bit 1 set in imm falls through to pc+4");
 
-    // A not-taken branch still produces pc + 4, so the sequential next PC never
-    // needs a second path.
-    bench.ExpectBranch(0x1000, 0x7F8, false, kBne, false, 0x1004, 0x1004, false,
-                       "an untaken forward branch yields pc+4");
-    bench.ExpectBranch(0x1000, kMinusFour, false, kBne, false, 0x1004, 0x1004,
-                       false, "an untaken backward branch yields pc+4");
-    bench.ExpectBranch(0x1000, 0x7F8, false, kBne, true, 0x1004, 0x17F8, true,
-                       "a taken forward branch yields pc+imm");
+    // A branch: taken and not taken.
+    bench.ExpectTarget(0x1000, 0x7F8, true, false, false, true, 0x1004, 0x17F8,
+                       true, "a taken forward branch yields pc+imm");
+    bench.ExpectTarget(0x1000, 0x7F8, true, false, false, false, 0x1004, 0x1004,
+                       false, "an untaken forward branch yields pc+4");
+    bench.ExpectTarget(0x1000, kMinusFour, true, false, false, false, 0x1004,
+                       0x1004, false, "an untaken backward branch yields pc+4");
+    bench.ExpectTarget(0, 2, true, false, false, false, 4, 4, false,
+                       "an untaken branch with bit 1 set in imm yields pc+4");
 
-    // funct3 010 and 011 name no condition; the unit still has to answer, and
-    // an answer of "transfers" is what lets a JAL reach a port list that has
-    // is_jalr but no is_jal.
-    bench.ExpectBranch(0x1000, 4, false, kFunctNoneA, false, 0x1004, 0x1004, true,
-                       "funct3 010 names no condition and still transfers");
-    bench.ExpectBranch(0x1000, 4, false, kFunctNoneB, false, 0x1004, 0x1004, true,
-                       "funct3 011 names no condition and still transfers");
+    // An instruction that names no branch must not be redirected by a stray
+    // comparator answer, and an ordinary ALU instruction simply falls through.
+    bench.ExpectTarget(0x1000, 4, false, false, false, true, 0x1004, 0x1004,
+                       false,
+                       "branch_taken high with no branch named transfers nothing");
+    bench.ExpectTarget(0x2000, 0x7F8, false, false, false, false, 0x2004, 0x2004,
+                       false, "an ordinary ALU instruction falls through to pc+4");
+    bench.ExpectTarget(0x2000, 0x7F8, false, false, true, true, 0x2004, 0x27F8,
+                       true, "an unconditional jump ignores branch_taken");
 
-    // The six conditions. blt and bltu on (-1, 1) are the pair that separates
-    // the signed reading from the unsigned one in both directions, and the x0
-    // cases show the comparator reading a zero register as zero.
+    // The six conditions. blt and bltu on (-1, 1) are the pair that separates the
+    // signed reading from the unsigned one in both directions, and the x0 cases
+    // show the comparator reading a zero register as zero.
     bench.ExpectCompare(kBeq, 7, 7, true, "beq(7,7) is true");
     bench.ExpectCompare(kBeq, 7, 8, false, "beq(7,8) is false");
     bench.ExpectCompare(kBne, 7, 7, false, "bne(7,7) is false");
@@ -879,30 +908,27 @@ int main(int argc, char** argv) {
     }
   }
 
-  // ---- the branch sweep ----------------------------------------------------
-  // pc x imm x all eight funct3 x both is_jalr x both branch_taken, with a
-  // sign-crossing comparator operand pair so that blt and bltu disagree on some
-  // of them.
-  const uint64_t kCmpPairA[] = {0, 1, 0xFFFFFFFFFFFFFFFFull,
-                                0x8000000000000000ull, 0x7FFFFFFFFFFFFFFFull};
-  const uint64_t kCmpPairB[] = {0, 1, 0xFFFFFFFFFFFFFFFFull,
-                                0x8000000000000000ull, 0x7FFFFFFFFFFFFFFFull};
-  constexpr size_t kCmpPairCount = sizeof(kCmpPairA) / sizeof(kCmpPairA[0]);
-
-  for (size_t f = 0; f < 8 && !bench.halted() && !bench.out_of_budget(); ++f) {
-    const uint8_t funct = static_cast<uint8_t>(f);
-    for (size_t p = 0;
-         p < kBranchPcCount && !bench.halted() && !bench.out_of_budget(); ++p) {
-      for (size_t m = 0;
-           m < kBranchImmCount && !bench.halted() && !bench.out_of_budget(); ++m) {
-        for (int jalr = 0; jalr < 2 && !bench.halted() && !bench.out_of_budget();
-             ++jalr) {
-          for (int taken = 0; taken < 2 && !bench.halted() &&
-                                !bench.out_of_budget();
-               ++taken) {
-            bench.ApplyBranch(kBranchPcs[p], kBranchImms[m], jalr != 0, funct,
-                              taken != 0, kCmpPairA[p % kCmpPairCount],
-                              kCmpPairB[m % kCmpPairCount], "branch-sweep");
+  // ---- the branch-target sweep ---------------------------------------------
+  // pc x imm x every combination of the three control flags and both
+  // branch_taken values. The combinations a real decoder never produces (all
+  // flags low, is_jal and is_jalr both high) are included on purpose: they are
+  // what proves the unit fails loudly rather than silently on a mis-wired input.
+  for (size_t p = 0;
+       p < kBranchPcCount && !bench.halted() && !bench.out_of_budget(); ++p) {
+    for (size_t m = 0;
+         m < kBranchImmCount && !bench.halted() && !bench.out_of_budget(); ++m) {
+      for (int br = 0; br < 2 && !bench.halted() && !bench.out_of_budget();
+           ++br) {
+        for (int jal = 0; jal < 2 && !bench.halted() && !bench.out_of_budget();
+             ++jal) {
+          for (int jalr = 0; jalr < 2 && !bench.halted() && !bench.out_of_budget();
+               ++jalr) {
+            for (int taken = 0; taken < 2 && !bench.halted() &&
+                                  !bench.out_of_budget();
+                 ++taken) {
+              bench.ApplyTarget(kBranchPcs[p], kBranchImms[m], br != 0, jal != 0,
+                                jalr != 0, taken != 0, "branch-sweep");
+            }
           }
         }
       }
@@ -912,12 +938,11 @@ int main(int argc, char** argv) {
   // ---- the comparator over the full boundary operand set -------------------
   for (uint8_t funct = 0; funct < 8 && !bench.halted() && !bench.out_of_budget();
        ++funct) {
-    for (size_t i = 0; i < kValueCount && !bench.halted() && !bench.out_of_budget();
-         ++i) {
+    for (size_t i = 0;
+         i < kValueCount && !bench.halted() && !bench.out_of_budget(); ++i) {
       for (size_t j = 0;
            j < kValueCount && !bench.halted() && !bench.out_of_budget(); ++j) {
-        bench.ApplyBranch(0x1000, 0x7F8, false, funct, false, kValues[i],
-                          kValues[j], "cmp-sweep");
+        bench.ApplyCompare(funct, kValues[i], kValues[j], "cmp-sweep");
       }
     }
   }
@@ -925,15 +950,15 @@ int main(int argc, char** argv) {
   // ---- the closed chain: DUT comparator into DUT target unit ---------------
   for (uint8_t funct = 0; funct < 8 && !bench.halted() && !bench.out_of_budget();
        ++funct) {
-    for (size_t i = 0; i < kValueCount && !bench.halted() && !bench.out_of_budget();
-         ++i) {
+    for (size_t i = 0;
+         i < kValueCount && !bench.halted() && !bench.out_of_budget(); ++i) {
       for (size_t p = 0;
            p < kBranchPcCount && !bench.halted() && !bench.out_of_budget(); ++p) {
         for (int jalr = 0; jalr < 2 && !bench.halted() && !bench.out_of_budget();
              ++jalr) {
           bench.ApplyChain(kBranchPcs[p], kBranchImms[i % kBranchImmCount],
-                           jalr != 0, funct, kValues[i], kValues[(i + 1) % kValueCount],
-                           "chain");
+                           jalr != 0, funct, kValues[i],
+                           kValues[(i + 1) % kValueCount], "chain");
         }
       }
     }
@@ -996,11 +1021,25 @@ int main(int argc, char** argv) {
     if (rng.Chance(70)) imm = static_cast<uint64_t>(rng.Below(8192));
     if (rng.Chance(70)) pc &= ~3ull;
     const uint8_t funct = static_cast<uint8_t>(rng.Below(8));
-    const bool jalr = rng.Chance(25);
+
+    // A real decoder produces exactly one of these three shapes; the sweep also
+    // carries the impossible ones, so the random campaign does too.
+    uint32_t kind = rng.Below(100);
+    bool is_branch = false;
+    bool is_jal = false;
+    bool is_jalr = false;
+    if (kind < 45) {
+      is_branch = true;
+    } else if (kind < 70) {
+      is_jal = true;
+    } else if (kind < 95) {
+      is_jalr = true;
+    }
     const bool taken = rng.Chance(50);
-    const uint32_t shape = rng.Below(100);
+
     uint64_t rs1 = rng.Next();
     uint64_t rs2 = rng.Next();
+    const uint32_t shape = rng.Below(100);
     if (shape < 30) {
       rs1 = kValues[rng.Below(static_cast<uint32_t>(kValueCount))];
       rs2 = kValues[rng.Below(static_cast<uint32_t>(kValueCount))];
@@ -1017,7 +1056,8 @@ int main(int argc, char** argv) {
         rs2 = 0;
       }
     }
-    bench.ApplyBranch(pc, imm, jalr, funct, taken, rs1, rs2, "branch-random");
+    bench.ApplyTarget(pc, imm, is_branch, is_jal, is_jalr, taken, "branch-random");
+    bench.ApplyCompare(funct, rs1, rs2, "cmp-random");
   }
 
   bench.ReportCoverage();

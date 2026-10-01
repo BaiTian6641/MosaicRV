@@ -728,7 +728,7 @@ what must happen.
 | `0xC23`–`0xC7F` | 3107–3199 | unallocated in the vector chapter | `csrr x1, 0xC23` → illegal instruction |
 | **every vector CSR, conditionally** | all seven | `v-spec.adoc` L124-L126: "Attempts to execute any vector instruction, or to access the vector CSRs, raise an illegal-instruction exception when `mstatus.VS` is set to Off" | with `mstatus.VS` = Off, `csrr x1, 0xC21` → illegal instruction even though the row exists |
 
-### 6.3 Hypervisor and VS (`p3`) — the table that could not be written
+### 6.3 Hypervisor and VS (`p3`) — the whole extension is the omission
 
 `p3` claims neither the `H` extension nor a second translation stage, so every
 address in the hypervisor and VS ranges must raise an illegal instruction.
@@ -753,38 +753,59 @@ and VS CSR addresses", L282):
 
 Negative case: `csrr x1, 0x600` (`hstatus`) in any mode ≤ S → illegal
 instruction, and the same for the whole of `0x200-0x2FF`, `0x600-0x67F`,
-`0x680-0x6BF`, `0xA00-0xA7F`, `0xA80-0xABF`, `0xAC0-0xAFF`, `0xE00-0xE7F`,
-`0xE80-0xEBF` and `0xEC0-0xEFF` — the ranges Table `csrrwpriv` (L80-L91)
-allocates to `csr[9:8] = 0b10`, a privilege level `p3` does not have. This is
-the list the eventual `absent_csr_ranges` (or an equivalent) must carry, and
-until the schema can carry it the only machine-readable statement that `p3` has
-no hypervisor is `p3`'s own `isa_target.extensions`, which is checked by the
-"claims capability X one rung too early" negative control, not by a CSR rule.
+`0x680-0x6BF`, `0x6C0-0x6FF`, `0xA00-0xA7F`, `0xA80-0xABF`, `0xAC0-0xAFF`,
+`0xE00-0xE7F`, `0xE80-0xEBF` and `0xEC0-0xEFF` — the ten bands Table `csrrwpriv`
+(L80-L91) allocates to `csr[9:8] = 0b10`, a privilege level `p3` does not have.
+`config/csr/hypervisor.json` declares exactly those ten bands, merged into four
+ranges (§3.4), so the illegal-instruction surface is now machine-readable, and
+`config_check.py` fails the configuration if any table defines a CSR inside one
+of them. That is the check that turns "advertise ahead of implementation" from
+a review comment into a build error.
 
 ---
 
-## 7. Gaps found outside this delivery's file ownership
+## 7. Gaps outside this delivery's file ownership
 
-Reported, not patched, because these files belong to other owners.
+Reported, not patched, because these files belong to other owners. Items 1 and
+5 were raised by this delivery and have since been fixed by the integrator; they
+are kept here so the reasoning stays on record.
 
-1. **`config/csr/mode_m.json` `mstatus.FS`/`VS` are read-only zero for `p2`/`p3`**,
-   which claim `F` and `V`. `machine.tex` L925-L926 and L941-L942 make that
-   illegal, and `supervisor.tex` L187-L191 makes them the same storage as the
-   `sstatus` fields this delivery declares writable. See §2.2 and §5.3.
-2. **`config/csr/mode_m.json` `mcounteren` is read-only zero for `p1`–`p3`**, so
-   no U-mode counter access is possible and `scounteren` is inert. Legal per
-   `machine.tex` L1820-L1823, but it contradicts the platform obligations in the
-   profiles' own `derived_notes`. See §5.2.
-3. **`config/csr/mode_m.json` omits `mcountinhibit` (0x320 = 800)**, which the
-   ratified v1.12 tag does allocate (`priv-csrs.tex` L378, `src/machine.tex`
-   L1826-L1864). The checker does not require it.
-4. **`p2` and `p3` claim `F` and `D` but no CSR table defines `fflags`, `frm` or
-   `fcsr`.** They cannot go in `mode_su.json`, which `p1` also loads and which
-   must not define a CSR belonging to an extension `p1` does not claim. They
-   need a `config/csr/fpu.json` listed by `p2`/`p3`, or the F/D claim is
-   unbacked at the CSR layer. The checker does not catch this today: nothing
-   cross-references `isa_target.extensions` against the CSRs a table defines.
-5. **`tools/check_profile.py` negative controls are only sound for `p0`.** See
-   §5.10.
-6. **`config/schema/csr.schema.json` cannot express an absent extension**, which
-   is what `config/csr/hypervisor.json` needs. See §3.
+1. **RESOLVED — `mstatus.FS`/`VS` were read-only zero for `p2`/`p3`**, which
+   claim `F` and `V`. `machine.tex` L925-L926 and L941-L942 make that illegal,
+   and `supervisor.tex` L187-L191 makes them the same storage as the `sstatus`
+   fields this delivery declares writable. `mode_m.json` now declares both
+   writable and `config_check.py` enforces it with two negative controls. See
+   §2.2 and §5.3.
+2. **OPEN — `mcounteren` is still read-only zero for `p1`–`p3`**, so no U-mode
+   counter access is possible and the `scounteren` gates this delivery declares
+   writable are inert. Legal per `machine.tex` L1820-L1823, but it contradicts
+   the platform obligations in the profiles' own `derived_notes`, and an
+   implementation task must not treat `scounteren` alone as enabling a counter.
+   See §5.2.
+3. **OPEN — `config/csr/mode_m.json` omits `mcountinhibit` (0x320 = 800)**, which
+   the ratified v1.12 tag does allocate (`priv-csrs.tex` L378, `src/machine.tex`
+   L1826-L1864). The checker does not require it, so it is an omission rather
+   than a failure.
+4. **OPEN — `p2` and `p3` claim `F` and `D` but no CSR table defines `fflags`,
+   `frm` or `fcsr` (0x001-0x003).** They cannot go in `mode_su.json`, which
+   `p1` also loads and which must not define a CSR belonging to an extension
+   `p1` does not claim. They need a `config/csr/fpu.json` listed by `p2`/`p3`,
+   or the F/D claim is unbacked at the CSR layer. The checker does not catch
+   this: nothing cross-references `isa_target.extensions` against the CSRs a
+   table defines.
+5. **RESOLVED — the negative controls were only sound for `p0`.** The `future`
+   set and the VLEN control are fixed and two `mstatus.FS`/`VS` controls were
+   added; all four profiles now reject every control. See §5.10.
+6. **OPEN — the `absent_csr_ranges` rule has no negative control.** The three new
+   checks it enables were each verified by hand in a throwaway copy of `config/`
+   (§3.3), but none of them is in `NegativeControls`, so a future refactor could
+   silently drop the "no defined CSR inside a declared absent range" rule — the
+   one that matters most — and the suite would stay green. A control that
+   inserts an `hstatus` row at 0x600 into a sandboxed copy of `config/csr/`
+   would close it.
+7. **OPEN — `csr.schema.json` still has no notion of a CSR's lowest accessible
+   privilege**, which is the concept the architectural CSR address encoding
+   actually uses (`priv-csrs.tex` L36-L37). The `U` block in
+   `config/csr/mode_su.json` has to re-declare the three URO counters that the
+   M-mode table already owns (§2.5). A per-row `min_privilege` field would let
+   the counters live in one place.
