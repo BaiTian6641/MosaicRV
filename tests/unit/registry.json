@@ -170,6 +170,51 @@
       ],
       "max_cycles": 200000,
       "seed": 1
+    },
+    "rename.single_width_ownership": {
+      "task": "I-013",
+      "top": "mosaic_rename_tb",
+      "rtl": [
+        "rtl/core/mosaic_rename.sv"
+      ],
+      "sv": [
+        "sim/tb/mosaic_rename_tb.sv"
+      ],
+      "cpp": [
+        "sim/unit/tb_rename.cpp"
+      ],
+      "max_cycles": 200000,
+      "seed": 1
+    },
+    "rob.out_of_order_children": {
+      "task": "I-016",
+      "top": "mosaic_rob_tb",
+      "rtl": [
+        "rtl/core/mosaic_rob.sv"
+      ],
+      "sv": [
+        "sim/tb/mosaic_rob_tb.sv"
+      ],
+      "cpp": [
+        "sim/unit/tb_rob.cpp"
+      ],
+      "max_cycles": 200000,
+      "seed": 1
+    },
+    "iq.wakeup_insert_select": {
+      "task": "I-022",
+      "top": "mosaic_iq_tb",
+      "rtl": [
+        "rtl/core/mosaic_iq.sv"
+      ],
+      "sv": [
+        "sim/tb/mosaic_iq_tb.sv"
+      ],
+      "cpp": [
+        "sim/unit/tb_iq.cpp"
+      ],
+      "max_cycles": 200000,
+      "seed": 1
     }
   }
 }
