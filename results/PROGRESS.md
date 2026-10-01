@@ -853,3 +853,38 @@ machine that squashes correctly.
 
 **Still not done:** I-022's last directed assertion, its randomised phase, and all
 six mutants.
+
+---
+
+## 2026-10-01 — slang became a second opinion, and immediately earned it
+
+Adding the new Stage 1 RTL broke `make test` — not through the Verilator lint,
+which stayed clean, but through `lint-slang`, which had not been run against these
+files until now. Two defects, **both mine**:
+
+1. **The generated `mosaic_cfg_pkg.svh` had no include guard.** Four RTL files
+   include it, so the package was defined four times. Verilator dedupes packages and
+   tolerates this silently; slang reports a duplicate definition, which is the
+   correct answer. The generator now emits an `` `ifndef MOSAIC_CFG_PKG_SV_ `` guard.
+2. **`make lint-slang` ran `slang-tidy` without `--single-unit`.** slang compiles
+   each input file in its own unit, so a macro defined by one file's include was not
+   visible to the next — the two tools disagreed about the same source for no real
+   reason. Verilator is invoked as one unit.
+
+**Why this matters more than the two one-line fixes.** A second reader of the same
+source only earns its place if it is *read differently*, and both of these slipped
+through precisely because Verilator is tolerant: it dedupes packages, and it accepts
+a chained part-select that slang rejects. Neither is a Verilator bug. A project that
+reads its RTL with one tool has no idea how much of it is accidental.
+
+**And I then made the same class of mistake I was pointing at.** My first fix for the
+chained select used `assign` inside a `function automatic` body, which is
+non-procedural and does not compile. I caught it because slang reported the
+follow-on errors, retracted it to the agent, and verified the replacement against
+both tools on a standalone reproduction *before* sending it — which took three
+attempts, because the obvious version trips `WIDTHEXPAND` under Verilator and the
+next one trips `WIDTHTRUNC`. The form that works compares a flat slice against a
+value built by plain concatenation.
+
+That sequence is the argument for keeping both tools: the wrong advice was caught by
+the tool I had just finished fixing, rather than by whoever applied it.

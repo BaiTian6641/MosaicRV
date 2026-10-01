@@ -436,8 +436,20 @@ module mosaic_iq #(
   function automatic logic UopIsMacro(input logic [UOP_ID_W-1:0] id,
                                       input logic [ROB_INDEX_W-1:0] index,
                                       input logic [ROB_GEN_W-1:0] gen);
-    UopIsMacro = (id[UOP_ID_W-1 -: ROB_INDEX_W] == index) &&
-                 (id[UOP_ID_W-1 -: (ROB_INDEX_W + ROB_GEN_W)][ROB_GEN_W-1:0] == gen);
+    // Two independent slices, each exactly as wide as the value it is compared
+    // against. The obvious one-expression form -- a range select followed by a
+    // part-select inside it -- is legal SystemVerilog that Verilator accepts and
+    // slang rejects, so it is not portable across the tools that read this
+    // source. Slicing at a computed base rather than through a wider slice also
+    // keeps both comparisons width-exact, instead of leaving a truncation implicit
+    // in the assignment.
+    // No part-selects at all. A select of a function argument is legal
+    // SystemVerilog that Verilator accepts and slang rejects -- and the
+    // index+width form is flagged by Verilator as maybe-deprecated -- so the
+    // fields are reached by shifting instead. `id >> UOP_W` is exactly the
+    // {rob_index, rob_gen} prefix, and the right-hand side rebuilds the same
+    // prefix from the two values a kill names, at the same width.
+    UopIsMacro = (id >> UOP_W) == ((UOP_ID_W'(index) << ROB_GEN_W) | UOP_ID_W'(gen));
   endfunction
   /* verilator lint_on UNUSEDSIGNAL */
 
