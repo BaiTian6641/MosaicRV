@@ -88,11 +88,26 @@ TOOLS = [
 # References and second DUTs blocked on the documented Linux x86-64 environment.
 ABSENT = [
     {"name": "XiangShan", "role": "second DUT and Difftest host", "gate": "V-005",
-     "unblocked_by": ("checkout pinned XiangShan e7bab53e66dfb3c4a1d11cf9519b0396f8576cae with all recursive gitlinks and build on Linux x86-64; "
-                      "current host is Darwin arm64 with no container runtime or configured remote host")},
+     "unblocked_by": ("CLONE NOT ATTEMPTED. It is a large sbt/Chisel build. The stated "
+                      "revisions and environment in earlier revisions of this ledger were "
+                      "not verified here and have been removed rather than left standing. "
+                      "What is actually true: this host is Darwin arm64 with no container "
+                      "runtime (docker, podman, colima and lima were each probed and are "
+                      "all absent) and no configured remote Linux host. Establishing "
+                      "whether XiangShan builds natively on this host is an untried "
+                      "question, not a proven impossibility.")},
     {"name": "NEMU", "role": "Difftest reference with a pinned commit trace", "gate": "V-004",
-     "unblocked_by": ("build NEMU f39e3077d7bac3cd9a3a853a9300a5f8f0293a2c in the isolated Linux x86-64 environment; "
-                      "current host is Darwin arm64")},
+     "unblocked_by": ("CLONED at ~/mosaic-ref/NEMU, commit 274a9eaeb2c2e090c7eeb26a77e5a623c890289b, "
+                      "and BUILD ATTEMPTED SEVEN TIMES ON THIS HOST. Configuration succeeds; "
+                      "compilation does not. Six distinct blockers in the order hit: "
+                      "(1) NEMU_HOME unset, the Makefile refuses; (2) -lstdc++fs, removed from "
+                      "the libc++ this build links against; (3) -falign-labels=32:9:64:15 and "
+                      "(4) --param max-inline-insns-single=256, both GCC-only tuning flags that "
+                      "clang rejects outright under -Werror; (5) SDL2/SDL.h not installed; "
+                      "(6) printf format-width errors in upstream headers, %lu used for 64-bit "
+                      "types, fatal under -Werror=format. Items 5 and 6 are upstream source "
+                      "defects, not environment setup, so fixing them means patching NEMU "
+                      "itself. No NEMU binary was produced and the checkout has been restored.")},
 ]
 
 

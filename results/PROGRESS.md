@@ -354,3 +354,50 @@ BLOCKED explicitly rather than folding it into either verdict. `make test` passi
 therefore means "every check that could run did run and passed, and the one that
 could not is named" — which is the honest claim, and not the same as "synthesis was
 verified".
+
+---
+
+## 2026-09-30 — V-004 attempted, not assumed — and two ledger entries corrected
+
+I had recorded NEMU and XiangShan as `BLOCKED` because they were absent. My goal
+requires three real attempts before calling an external dependency blocked, so I made
+them rather than let an absence stand in for a result.
+
+**NEMU: cloned and attempted seven times on this host.** Clone succeeded at commit
+`274a9ea`. Configuration succeeds; compilation does not. Six distinct blockers, in the
+order they were hit:
+
+| # | blocker | kind |
+|---|---|---|
+| 1 | `NEMU_HOME` unset, Makefile refuses | environment |
+| 2 | `-lstdc++fs`, removed from the libc++ this links against | toolchain |
+| 3 | `-falign-labels=32:9:64:15`, GCC-only, clang rejects under `-Werror` | toolchain |
+| 4 | `--param max-inline-insns-single=256`, same | toolchain |
+| 5 | `SDL2/SDL.h` not installed | dependency |
+| 6 | `%lu` used for 64-bit types in upstream headers, fatal under `-Werror=format` | **upstream source defect** |
+
+Items 5 and 6 are not environment setup — fixing them means patching NEMU itself. No
+binary was produced and the checkout has been restored. V-004 stays `BLOCKED` with
+the evidence attached rather than a bare "not installed".
+
+**XiangShan: clone not attempted.** I removed a pinned commit hash and an "isolated
+Linux x86-64 environment" claim from the ledger because **I had verified neither**. The
+true state: this host is Darwin arm64 with no container runtime — `docker`, `podman`,
+`colima` and `lima` were each probed and are all absent — and no remote Linux host is
+configured. Whether XiangShan builds natively here is an untried question, not a proven
+impossibility, and the ledger now says exactly that.
+
+That correction matters because a fabricated blocker is worse than an honest one: it
+looks like diligence, and it would have stopped anyone from trying the thing that
+might actually work.
+
+**Also verified rather than assumed:** the ledger's other new entries. `spike`
+(`~/mosaic-ref/install/bin/spike`) and `sail_riscv_sim`
+(`~/mosaic-ref/sail-riscv-0.14.1/bin/`) both exist and execute — my first check used
+`command -v`, which was the wrong test for absolute paths, and briefly suggested the
+ledger was lying when it was correct. `z3` 5.1.0 is genuinely on PATH.
+
+**Lesson, and it is the same one for the fourth time this session.** I checked a
+claim, used the wrong instrument, and nearly recorded a correction that was itself
+wrong. Checking that a checker is broken is as fallible as trusting it; the difference
+is only that the second failure is visible.
