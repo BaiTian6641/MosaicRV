@@ -215,6 +215,36 @@
       ],
       "max_cycles": 200000,
       "seed": 1
+    },
+    "retire.head_block_and_dual": {
+      "task": "I-017",
+      "top": "mosaic_retire_tb",
+      "rtl": [
+        "rtl/core/mosaic_retire.sv"
+      ],
+      "sv": [
+        "sim/tb/mosaic_retire_tb.sv"
+      ],
+      "cpp": [
+        "sim/unit/tb_retire.cpp"
+      ],
+      "max_cycles": 200000,
+      "seed": 1
+    },
+    "recovery.checkpoint_exact_restore": {
+      "task": "I-018",
+      "top": "mosaic_recovery_tb",
+      "rtl": [
+        "rtl/core/mosaic_recovery.sv"
+      ],
+      "sv": [
+        "sim/tb/mosaic_recovery_tb.sv"
+      ],
+      "cpp": [
+        "sim/unit/tb_recovery.cpp"
+      ],
+      "max_cycles": 200000,
+      "seed": 1
     }
   }
 }

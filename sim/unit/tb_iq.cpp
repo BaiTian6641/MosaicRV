@@ -527,7 +527,7 @@ class Shadow {
       }
       if (g.valid && !g.accepted && g.from_ins) e.granted = true;
       slots_[p] = e;
-      alloc_ptr_ = (p + 1) % kEntries;
+      alloc_ptr_ = (p + 1) % kEntries;  // already inside `ins_fire && !ins_taken`
     }
 
     // 5. A resident that was presented and not accepted becomes the
