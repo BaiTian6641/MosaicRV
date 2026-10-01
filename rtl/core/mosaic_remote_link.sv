@@ -296,12 +296,13 @@ module mosaic_remote_link #(
     localparam int unsigned LINK_ID_W = (ENTRIES <= 1) ? 1 : $clog2(ENTRIES),
     localparam int unsigned OCC_W     = $clog2(ENTRIES + 1),
 
-    // ------------------------------------------------- request payload layout
+    // ---------------------------------------------- request payload layout
     // Low bits first: identity, destination, opcode, immediate, source 1,
-    // source 2, and the link id at the top. The link id is written by the link
-    // itself, so its position is above everything the home side drives and the
-    // home side's value for those bits is ignored -- which is also how the
-    // testbench proves the link assigns them rather than passing them through.
+    // source 2. The link id sits above all of it and is written by the link
+    // itself, which is why the home port does not have the bits at all: a field
+    // the home side drove and the link overwrote would be a wire with no
+    // reader, and the first thing it would hide is a link that passed the
+    // remote side's name through instead of allocating one.
     localparam int unsigned REQ_ID_LO  = 0,
     localparam int unsigned REQ_DST_LO = REQ_ID_LO + ID_W,
     localparam int unsigned REQ_OP_LO  = REQ_DST_LO + DST_W,
@@ -309,6 +310,9 @@ module mosaic_remote_link #(
     localparam int unsigned REQ_S1_LO  = REQ_IMM_LO + WORD_W,
     localparam int unsigned REQ_S2_LO  = REQ_S1_LO + WORD_W,
     localparam int unsigned REQ_LID_LO = REQ_S2_LO + WORD_W,
+
+    // What the home side hands over, and what travels between the clusters.
+    localparam int unsigned REQ_BODY_W = REQ_LID_LO,
     localparam int unsigned REQ_W      = REQ_LID_LO + LINK_ID_W,
 
     // ------------------------------------------------- response payload layout
@@ -330,10 +334,13 @@ module mosaic_remote_link #(
 
     // ------------------------------------------------- home request port
     // A request is accepted on exactly those edges where `req_valid` and
-    // `req_ready` are both high; the payload must be stable while it waits.
+    // `req_ready` are both high; the payload must be stable while it waits. It
+    // carries everything the remote unit needs -- identity, destination,
+    // opcode, immediate and both operands -- so the far side never looks
+    // anything up in the home cluster's state.
     input  logic                        req_valid,
     output logic                        req_ready,
-    input  logic [REQ_W-1:0]            req_payload,
+    input  logic [REQ_BODY_W-1:0]       req_payload,
 
     // ----------------------------------------------- remote request port
     // Registered in both directions of the handshake: `rem_req_valid` and
@@ -390,7 +397,6 @@ module mosaic_remote_link #(
     output logic [ENTRIES-1:0]          o_entry_valid,
     output logic [ENTRIES*ID_W-1:0]     o_entry_id,
     output logic [ENTRIES*DST_W-1:0]    o_entry_dst,
-    output logic [LINK_ID_W-1:0]        o_alloc_ptr,
     output logic [PIPE_DEPTH-1:0]       o_req_pipe_valid,
     output logic [PIPE_DEPTH*REQ_W-1:0] o_req_pipe,
     output logic [PIPE_DEPTH-1:0]       o_rsp_pipe_valid,
@@ -409,6 +415,7 @@ module mosaic_remote_link #(
     output logic [31:0]                 o_op_w,
     output logic [31:0]                 o_word_w,
     output logic [31:0]                 o_link_id_w,
+    output logic [31:0]                 o_req_body_w,
     output logic [31:0]                 o_req_w,
     output logic [31:0]                 o_rsp_w,
     output logic [31:0]                 o_cnt_w,
@@ -458,15 +465,17 @@ module mosaic_remote_link #(
   // for its tags and mosaic_ram's header requires: reset cost is control state,
   // not ENTRIES x WIDTH of storage. The identity and destination arrays are not
   // reset and are read only where `entry_valid` holds.
+  //
+  // Allocation is **lowest free index**, with no rotation. A round-robin
+  // pointer would spread allocations over the table and make a recycled slot a
+  // rare event; the hazard this module exists to close -- a late response
+  // naming a slot that has since been handed to another request -- is exactly
+  // the *common* case when a freed slot is the first one taken again. The
+  // design takes the adversarial policy on purpose: what the test exercises
+  // every kill is what a rotation would exercise once in ENTRIES kills.
   logic                entry_valid [0:ENTRIES-1];
   logic [ID_W-1:0]     entry_id    [0:ENTRIES-1];
   logic [DST_W-1:0]    entry_dst   [0:ENTRIES-1];
-
-  // Where the next allocation starts looking. A rotating pointer rather than
-  // "first free", so that a slot freed and immediately re-taken does not always
-  // land on the same index -- which is what makes the recycled-slot case
-  // reachable in a short test instead of only after ENTRIES allocations.
-  logic [LINK_ID_W-1:0] alloc_ptr;
 
   // --------------------------------------------------------- the two hops
   // Stage 0 is the end nearest the port that receives; the highest stage is the
@@ -493,6 +502,7 @@ module mosaic_remote_link #(
   logic [OCC_W-1:0]        entry_count;
   logic [OCC_W-1:0]        freed_count;
   logic                    resp_matched;
+  logic                    rsp_pipe_busy;
   logic                    req_shift;
   logic                    req_accept;
   logic                    rsp_shift;
@@ -514,29 +524,38 @@ module mosaic_remote_link #(
   // the module on the other side.
   assign rem_rsp_ready = rsp_shift;
   assign req_ready     = alloc_free && req_shift
-                         && !(MOSAIC_LINK_MUT_SHARED_CHANNEL && (|rsp_pipe_valid));
+                         && !(MOSAIC_LINK_MUT_SHARED_CHANNEL && rsp_pipe_busy);
 
   assign req_accept = req_valid && req_ready;
   assign rsp_xfer   = rem_rsp_valid && rem_rsp_ready;
 
-  // ---------------------------------------------------------- allocation
-  // The first invalid entry at or after the rotation point, wrapping once. The
-  // scan reads the table as it stands before this cycle's edge, so an entry
-  // freed in this cycle is *not* offered here: the request waits one cycle.
-  // That is one cycle of extra back-pressure bought in exchange for an
-  // allocation never racing the release that makes the slot available.
+  // A reduction operator does not apply to an unpacked array, and that is a
+  // language rule rather than a tool's opinion (slang and Verilator agree on
+  // it). The two "is anything in there" questions this module asks are spelled
+  // out as loops instead.
   always_comb begin
-    int unsigned k;
+    int unsigned s;
+    rsp_pipe_busy = 1'b0;
+    for (s = 0; s < PIPE_DEPTH; s = s + 1) begin
+      if (rsp_pipe_valid[s]) rsp_pipe_busy = 1'b1;
+    end
+  end
+
+  // ---------------------------------------------------------- allocation
+  // The lowest invalid entry. The scan reads the table as it stands before this
+  // cycle's edge, so an entry freed in this cycle is *not* offered here: the
+  // request waits one cycle. That is one cycle of extra back-pressure bought in
+  // exchange for an allocation never racing the release that makes the slot
+  // available.
+  always_comb begin
     int unsigned idx;
     alloc_free = 1'b0;
-    alloc_slot = alloc_ptr;
-    idx        = alloc_ptr;
-    for (k = 0; k < ENTRIES; k = k + 1) begin
+    alloc_slot = {LINK_ID_W{1'b0}};
+    for (idx = 0; idx < ENTRIES; idx = idx + 1) begin
       if (!alloc_free && !entry_valid[idx]) begin
         alloc_free = 1'b1;
         alloc_slot = LINK_ID_W'(idx);
       end
-      idx = (idx + 1 == ENTRIES) ? 0 : (idx + 1);
     end
   end
 
@@ -581,6 +600,7 @@ module mosaic_remote_link #(
   always_comb begin
     int unsigned idx;
     freed_count  = {OCC_W{1'b0}};
+    resp_matched = 1'b0;
     for (idx = 0; idx < ENTRIES; idx = idx + 1) begin
       // A flush takes every live entry; a kill takes the one it named, unless a
       // flush is taking them all anyway.
@@ -591,7 +611,9 @@ module mosaic_remote_link #(
       // The response is accepted only when the link id names a live entry that
       // holds *this* identity and destination. Both halves are needed: the
       // index alone aliases when a slot is recycled, and the identity alone
-      // would need a search.
+      // would need a search. This is the check the card's fail criterion is
+      // about -- a late response must not be delivered into a recycled slot --
+      // and it is decided here, from the link's own state, not at a consumer.
       rsp_win[idx] = rsp_xfer && !flush_win[idx] && !kill_win[idx]
                      && (rsp_lid == LINK_ID_W'(idx))
                      && (MOSAIC_LINK_MUT_STALE_ACCEPT
@@ -603,10 +625,9 @@ module mosaic_remote_link #(
       if (flush_win[idx] || kill_win[idx] || rsp_win[idx]) begin
         freed_count = freed_count + OCC_W'(1);
       end
+      if (rsp_win[idx]) resp_matched = 1'b1;
     end
   end
-
-  assign resp_matched = |rsp_win;
 
   // Recomputing the population rather than reading `o_outstanding`: the test
   // checks the two against each other, and a counter derived from the same
@@ -620,10 +641,10 @@ module mosaic_remote_link #(
   end
 
   // ---------------------------------------------------- the request payload
-  // The home side's bits in the link-id field are discarded and the allocated
-  // slot is written in their place, so the remote side always receives the name
-  // the table knows the request by.
-  assign req_item = {alloc_slot, req_payload[REQ_LID_LO-1:0]};
+  // The allocated slot is what names the request for the rest of its life, and
+  // it is written above everything the home side supplied, so the remote side
+  // always receives the name the table knows the request by.
+  assign req_item = {alloc_slot, req_payload};
 
   // --------------------------------------------------- the response payload
   always_comb begin
@@ -636,7 +657,6 @@ module mosaic_remote_link #(
   // ------------------------------------------------------------ sequential
   always_ff @(posedge clk) begin
     if (rst) begin
-      alloc_ptr <= {LINK_ID_W{1'b0}};
       for (int unsigned k = 0; k < ENTRIES; k = k + 1) begin
         entry_valid[k] <= 1'b0;
       end
@@ -660,8 +680,6 @@ module mosaic_remote_link #(
         entry_valid[alloc_slot] <= 1'b1;
         entry_id[alloc_slot]    <= req_payload[REQ_ID_LO  +: ID_W];
         entry_dst[alloc_slot]   <= req_payload[REQ_DST_LO +: DST_W];
-        alloc_ptr <= (alloc_slot + 1 == ENTRIES) ? {LINK_ID_W{1'b0}}
-                                                 : (alloc_slot + LINK_ID_W'(1));
       end
 
       // ---- the request hop. The whole pipe moves together or not at all: the
@@ -774,8 +792,6 @@ module mosaic_remote_link #(
     end
   end
 
-  assign o_alloc_ptr = alloc_ptr;
-
   assign o_entries   = 32'(ENTRIES);
   assign o_latency   = 32'(LATENCY);
   assign o_pipe_depth= 32'(PIPE_DEPTH);
@@ -784,6 +800,7 @@ module mosaic_remote_link #(
   assign o_op_w      = 32'(OP_W);
   assign o_word_w    = 32'(WORD_W);
   assign o_link_id_w = 32'(LINK_ID_W);
+  assign o_req_body_w= 32'(REQ_BODY_W);
   assign o_req_w     = 32'(REQ_W);
   assign o_rsp_w     = 32'(RSP_W);
   assign o_cnt_w     = 32'(CNT_W);

@@ -131,7 +131,9 @@
 // The spurious-wake monitor re-derives the architectural wake rule rather than
 // reading the halt-clear path's own condition, so a change to the clear path
 // that is not the architectural rule is *counted* instead of being silently
-// consistent with itself.
+// consistent with itself. A wake reported while the halt was never entered is
+// impossible in the first place -- the wake counter is gated by the halt being
+// asserted -- which is the property that keeps `o_wake_ctr` meaningful.
 //
 // ------------------------------------------------------------------- mutants
 //
@@ -430,10 +432,14 @@ module mosaic_interrupt (
 `endif
 
   // --------------------------------------------------------------------------
-  // WFI. `wake_legal` is the architectural rule and is computed once, from
-  // mie & mip only; the halt-clear path is a *separate* expression so that the
-  // spurious-wake monitor below is a monitor rather than a restatement of the
-  // path it watches.
+  // WFI. `wake_legal` is the architectural wake rule. The halt-clear path is a
+  // separate signal, `halt_clear_now`, rather than an alias used in both places:
+  // `spurious_wake` below is computed from `wake_legal`, never from
+  // `halt_clear_now`, so a halt that ends for a reason other than the
+  // architectural rule is *counted* instead of being consistent with itself by
+  // construction. A "wake" reported while the halt was never entered is
+  // impossible for the same reason it is a bug: the wake counter is gated by
+  // `halted_q`.
   // --------------------------------------------------------------------------
   logic wake_legal;
   logic halt_clear_now;

@@ -446,10 +446,10 @@ module mosaic_csr (
           mosaic_csr_pkg::MOSAIC_CSR_ADDR_CYCLE:    mcycle_d = csr_op_result;
           mosaic_csr_pkg::MOSAIC_CSR_ADDR_INSTRET:  minstret_d = csr_op_result;
         `endif
-        // medeleg, mideleg and mip are written here by falling through: the
-        // first two canonicalise every bit to 0 (their generated write mask is
-        // zero), and mip has no state in this module, its write having been
-        // forwarded on mip_we_o.
+        // medeleg and mideleg need no arm here: the generator gives them a write
+        // mask of 0, because p0 has no S or U mode for a delegation target to be,
+        // so an accepted write canonicalises to zero by construction. mip has no
+        // state in this module either -- its write is forwarded on mip_we_o.
         default: ;
       endcase
     end
@@ -474,6 +474,22 @@ module mosaic_csr (
       if (trap_valid_i) begin
         // MUTANT: MPP is cleared instead of becoming the current privilege.
         mstatus_d = mstatus_d & ~MSTATUS_MPP;
+      end
+    `endif
+
+    `ifdef MOSAIC_CSR_MUTANT_CYCLE_WRITE_LANDS
+      // MUTANT: a write to a read-only cycle/instret shadow is still refused at
+      // the port (csr_wr_illegal_o rises, so that report stays correct) but the
+      // value lands in the counter anyway. This is the state half of "the
+      // counters are writable when they should be a read-only shadow", separated
+      // from the report half so the test has to catch the state change itself.
+      if (csr_we_i && !trap_valid_i && !mret_valid_i) begin
+        if (csr_addr_i == mosaic_csr_pkg::MOSAIC_CSR_ADDR_CYCLE) begin
+          mcycle_d = csr_op_result;
+        end
+        if (csr_addr_i == mosaic_csr_pkg::MOSAIC_CSR_ADDR_INSTRET) begin
+          minstret_d = csr_op_result;
+        end
       end
     `endif
   end

@@ -7,7 +7,10 @@
     "I-003",
     "I-004",
     "I-005",
-    "I-006"
+    "I-006",
+    "I-015",
+    "I-019",
+    "I-020"
   ],
   "evidence": {
     "I-001": {
@@ -49,24 +52,67 @@
         "harness.timeout",
         "harness.injected_mismatch"
       ],
-      "commands": ["python3 tools/run_unit.py --case harness.reset_load_exit"],
+      "commands": [
+        "python3 tools/run_unit.py --case harness.reset_load_exit"
+      ],
       "verdict": "PASS",
       "notes": "All four registered cases pass. The DUT is an explicitly labelled test double so the harness is proven before any real core exists; nothing it observes is evidence about the core.",
       "report": "results/PROGRESS.md"
     },
     "I-005": {
-      "cases": ["fifo.backpressure"],
-      "commands": ["python3 tools/run_unit.py --case fifo.backpressure"],
+      "cases": [
+        "fifo.backpressure"
+      ],
+      "commands": [
+        "python3 tools/run_unit.py --case fifo.backpressure"
+      ],
       "verdict": "PASS",
       "notes": "97069 checks over 3189 cycles. Mutants MOSAIC_FIFO_MUTANT_DROP_ON_FULL, _PHANTOM_POP, _UNSTABLE_OUT and _STALE_RESET were each rebuilt here and each makes the case FAIL with exit 1.",
       "report": "results/reports/I-005-fifo.md"
     },
     "I-006": {
-      "cases": ["ram.collision_matrix"],
-      "commands": ["python3 tools/run_unit.py --case ram.collision_matrix"],
+      "cases": [
+        "ram.collision_matrix"
+      ],
+      "commands": [
+        "python3 tools/run_unit.py --case ram.collision_matrix"
+      ],
       "verdict": "PASS",
       "notes": "Mutants MOSAIC_RAM_MUTANT_COMB_READ, _NO_BYTE_ENABLE, _EARLY_VALID and _ARRAY_RESET were each rebuilt here and each makes the case FAIL with exit 1. Collision contract is READ-FIRST byte by byte.",
       "report": "results/reports/I-006-ram.md"
+    },
+    "I-015": {
+      "cases": [
+        "prf.read_bank_collision"
+      ],
+      "commands": [
+        "python3 tools/run_unit.py --profile p0 --case prf.read_bank_collision"
+      ],
+      "verdict": "PASS",
+      "notes": "Case PASS from a clean build (build/p0/unit/<case> removed first) with the official runner: 5263 per-cycle shadow comparisons over 5311 cycles. Six mutants in rtl/core/mosaic_prf.sv each exit 1 with a failure-count delta against the base, per the report; the integration lead verified the case, not the mutants. Same-cycle write-through, bank-conflict serialization, never-written and generation-mismatch reporting are all checkable from rtl/core/mosaic_prf.sv.",
+      "report": "results/reports/I-015-prf.md"
+    },
+    "I-019": {
+      "cases": [
+        "csr.precise_trap_mret"
+      ],
+      "commands": [
+        "python3 tools/run_unit.py --profile p0 --case csr.precise_trap_mret"
+      ],
+      "verdict": "PASS",
+      "notes": "Case PASS from a clean build with the official runner, seeds 1/2/3/12345. The CSR table (addresses, resets, write masks, write-legality) is generated from config/csr/mode_m.json into build/p0/rtl/mosaic_csr_pkg.svh and build/p0/sim/mosaic_csr_table.h, so the RTL and the independent C++ model read one table. Seven mutants each exit 1 with a 0->1 failure delta. NOT verified here: the retire unit's half of the trap contract, mip application, interrupts and privilege violations (all named in the report).",
+      "report": "results/reports/I-019-csr.md"
+    },
+    "I-020": {
+      "cases": [
+        "interrupt.boundary_replay"
+      ],
+      "commands": [
+        "python3 tools/run_unit.py --profile p0 --case interrupt.boundary_replay"
+      ],
+      "verdict": "PASS",
+      "notes": "Case PASS from a clean build with the official runner: 17238 per-cycle shadow comparisons over 5784 cycles, 1471 offered traps (MEI/MSI/MTI), seeds 1/2/7/12345/999983. Seven mutants each exit 1 with a distinct named first failure and a comparison-count delta, and the elaborated model hash differs from the clean build for every mutant, which is the non-vacuity property this project requires. NOT verified: the integrator's half of the boundary contract, the CSR wiring, mideleg beyond bits 3/7/11, analog metastability.",
+      "report": "results/reports/I-020-interrupt.md"
     }
   }
 }

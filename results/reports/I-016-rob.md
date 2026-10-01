@@ -750,3 +750,200 @@ done
   range ternary. No profile configures a ROB that way.
 * **The observation port is a verification surface.** It is total and gated, but
   nothing functional should read it; the head view is the interface.
+
+---
+
+## identity width correction (integration follow-up)
+
+### The defect
+
+`config/contracts/interfaces.json` (the frozen I-002 contract, the authority)
+declares, for the dispatch/ROB identity:
+
+- `rob_index` = `clog2(rob_entries)` = 6
+- `rob_gen` = `clog2(rob_entries)+1` = 7
+
+and `build/p0/rtl/mosaic_id_pkg.svh` carries exactly `MOSAIC_ID_W_ROB_INDEX = 6`
+and `MOSAIC_ID_W_ROB_GEN = 7`. `mosaic_iq.sv` builds its uop identity as
+`{rob_index(6), rob_gen(7), uop_index(3)}`; `mosaic_retire.sv` reads `rob_id` as
+`{RET_GEN_W=7, RET_TAG_W=7}`; `mosaic_uop_pkg` aliases
+`mosaic_id_pkg::macro_id_t`.
+
+`rtl/core/mosaic_rob.sv` was the outlier. It re-derived its own widths instead of
+reading the contract:
+
+```
+localparam int unsigned TAG_W = 2 * ROB_INDEX_W,   // 12
+localparam int unsigned GEN_W = 2 * ROB_INDEX_W    // 12
+```
+
+A completion that round-trips through the IQ therefore carries a 7-bit
+`rob_gen`, while the ROB stored and compared a 12-bit one. Zero-extending the
+7-bit value is not a fix: the contract's 7-bit counter puts generation 128 into
+slot 0 (and 128 aliases 0), so the ROB's 12-bit compare and the producers'
+7-bit value disagree after 128 allocations, for the life of the program. The
+symptom would be a stale completion rejected when it should be accepted, or
+accepted when it should be rejected -- precisely the ABA failure the generation
+exists to prevent. The real defect is the disagreement itself: a width two
+documents disagree about is what I-002 exists to prevent.
+
+### The contract line violated
+
+`config/contracts/interfaces.json`, the dispatch interface's `identity_fields`:
+`rob_index` has `expr: "clog2(rob_entries)"` / `min_bits: 6`, and `rob_gen` has
+`expr: "clog2(rob_entries)+1"` / `min_bits: 7`. The generated
+`build/p0/rtl/mosaic_id_pkg.svh` is that line materialised, and the ROB now reads
+it rather than writing the same width down a second time in a different
+expression.
+
+### The fix
+
+`rtl/core/mosaic_rob.sv`:
+
+- includes `mosaic_id_pkg.svh` at file scope (the header carries its own include
+  guard and lint pragmas now);
+- `TAG_W = mosaic_id_pkg::MOSAIC_ID_W_PRF_TAG` (7) and
+  `GEN_W = mosaic_id_pkg::MOSAIC_ID_W_ROB_GEN` (7);
+- the header and parameter rationale for `2 * ROB_INDEX_W` is replaced by the
+  correct argument: 7 bits gives 128 generations against the 64-entry ROB, and
+  `2**GEN_W > ROB_ENTRIES` is the *proof*, not a margin chosen by taste -- a slot
+  is not handed out again until its previous owner has retired or been squashed,
+  so a completion can only be outstanding for a slot recycled at most
+  `ROB_ENTRIES` allocations ago;
+- one new negative control, `MOSAIC_ROB_MUTANT_GEN_LOW_BITS_ONLY` (below).
+
+Every other behaviour is unchanged: this is a width correction, not a redesign.
+
+`sim/tb/mosaic_rob_tb.sv`:
+
+- `ID_W = 2 * INDEX_W` is gone. `TAG_W` and `GEN_W` each name their own contract
+  constant, and every port is narrowed with its own width -- `alloc_tag`,
+  `head_tag`, `obs_tag`, `head1_tag` are tags; `close_gen`, `cmp_gen`,
+  `alloc_gen`, `head_gen`, `obs_gen`, `head1_gen` are generations.
+- `o_id_w_o` is replaced by `o_tag_w_o` and `o_gen_w_o`.
+- the header comment records that the wrapper must derive from the contract and
+  never from a formula it invented. The old `ID_W = 2 * INDEX_W` repeated the
+  RTL's mistake exactly, which is why the wrapper could not catch it.
+
+`sim/unit/tb_rob.cpp`:
+
+- `ShadowRob` takes `tag_w` and `gen_w` instead of one `id_w`; a tag is masked
+  with `tag_w_` and a generation with `gen_w_` (no literal mask anywhere).
+- the start-up geometry check replaces the invented `id_w == 2 * index_w` with
+  the contract relation `gen_w == index_w + 1` (rob_gen = clog2(rob_entries)+1,
+  rob_index = clog2(rob_entries)) plus `tag_w >= index_w`.
+- the wrap probe now names the **previous** occupant's generation (tracked per
+  slot), not the first-ever one. With the 7-bit modulus, a run of 274 allocations
+  reaches 128 allocations past a slot's first occupant and the first-ever
+  generation legally comes round again; the immediately previous occupation is
+  always inside the `2**GEN_W > ROB_ENTRIES` window and is stale by
+  construction. `Alloc` records the tag the slot actually stores (masked), and
+  the full-depth retirement-order queue stores masked tags.
+
+### Evidence
+
+Registration (`python3 tools/run_unit.py --profile p0 --case
+rob.out_of_order_children`): `PASS rob.out_of_order_children task=I-016`, exit 0.
+Verilator lint on `rtl/core/mosaic_rob.sv` and slang-tidy on the same file:
+`exit=0`, with only the three pre-existing WARN classes (`NoLegacyGenerate`,
+`AlwaysCombBlockNamed`, `EnforcePortSuffix`) the module already carried. Scoped
+`clang++ -std=c++17 -fsyntax-only -Wall -Wextra -Wshadow` on `tb_rob.cpp`:
+`exit=0`.
+
+The full mutant sweep, re-run against the corrected widths, reproducing the
+report's §10 harness with the new control added:
+
+```
+=== shipping build ===
+shipping run exit=0
+  RESULT PASS rob.out_of_order_children rob contract holds: 1235977 shadow comparisons, 78309 of them across every slot of the buffer, over 14885 cycles and 4882 accepted allocations; soak: 3249 accepted, 563 duplicate, 3014 stale, 2878 out-of-range, 1468 refused-at-capacity, 373 exceptional, 90 flushes, seed 1
+
+MUTANT: -DMOSAIC_ROB_MUTANT_COMPLETE_ON_ANY_BIT
+  ifdef block: present (1 occurrence); build: ok; binary differs: YES; run exit=1
+  MISMATCH out-of-order-children: a 3-child macro was called complete after its last-numbered child alone arrived -- exactly the 'last-uop-arrives-is-complete' failure
+MUTANT: -DMOSAIC_ROB_MUTANT_NO_GEN_CHECK
+  ifdef block: present (1 occurrence); build: ok; binary differs: YES; run exit=1
+  MISMATCH wrap-generation: cycle 109: cmp_accepted: expected 0, got 1
+MUTANT: -DMOSAIC_ROB_MUTANT_NO_FULL_CHECK
+  ifdef block: present (1 occurrence); build: ok; binary differs: YES; run exit=1
+  MISMATCH full: cycle 1205: alloc_ok: expected 0, got 1
+MUTANT: -DMOSAIC_ROB_MUTANT_FLUSH_CLEARS_COMMITTED
+  ifdef block: present (1 occurrence); build: ok; binary differs: YES; run exit=1
+  MISMATCH flush: the flush disturbed committed history: retired_total went from 6 to 0
+MUTANT: -DMOSAIC_ROB_MUTANT_NO_DUP_REPORT
+  ifdef block: present (1 occurrence); build: ok; binary differs: YES; run exit=1
+  MISMATCH duplicate: cycle 33: cmp_duplicate: expected 1, got 0
+MUTANT: -DMOSAIC_ROB_MUTANT_RETIRE_OVER_EXCEPTION
+  ifdef block: present (1 occurrence); build: ok; binary differs: YES; run exit=1
+  MISMATCH exception: an exceptional macro is reported ready to retire
+MUTANT: -DMOSAIC_ROB_MUTANT_GEN_LOW_BITS_ONLY
+  ifdef block: present (1 occurrence); build: ok; binary differs: YES; run exit=1
+  MISMATCH wrap-generation: cycle 109: cmp_accepted: expected 0, got 1
+```
+
+Each mutant is rebuilt, differs from the shipping binary, and exits 1; the
+base build exits 0 with zero failing checks, so every mutant's failure count
+delta is **+1 failing check against the base**. The six existing mutants fail in
+exactly the phase recorded in §10.
+
+**The new control, and why the width needs one.** The wrap scenario's victim
+carries generation 0 and the occupant that recycles its slot carries 64, so it
+is bit 6 of the corrected 7-bit value that separates them.
+`MOSAIC_ROB_MUTANT_GEN_LOW_BITS_ONLY` compares `slot_gen[GEN_W-2:0]` against
+`cmp_gen[GEN_W-2:0]`, dropping that bit, and the stale completion is accepted at
+cycle 109 -- the same failure the missing-generation-check control produces. A
+12-bit generation would have separated the pair in a lower bit and this mutant
+would not have been caught, so the control fails exactly when the generation
+width is wrong. (Stated as design intent: the mutant is verified to fail under
+the 7-bit contract; it is not claimed to fail under a 12-bit build, which would
+require re-editing the width.)
+
+### The two retire cases, and whose they are
+
+`commit.head_block_and_dual` and `retire.head_block_and_dual` instantiate this
+ROB through `mosaic_retire`. After the width correction both fail at cycle 393,
+deterministically:
+
+```
+MISMATCH in-order: cycle 393: slot 0: generation disagrees: shadow 128, buffer 0
+```
+
+The failure is in `sim/unit/tb_retire.cpp`, not in the ROB. That file's shadow
+passes a mask *value* where a width is expected: `gen_mask_ = Mask(~0u, gen_w)`
+is `0x7f`, and `e.gen = Mask(next_alloc_gen_++, gen_mask_)` (and the
+reconciliation `Mask(e->gen, shadow_->gen_mask())`) treat `0x7f` as a bit count
+that is `>= 32`, so `Mask()` returns its argument unchanged and the shadow's
+generation never wraps. With the old 12-bit ROB generation the shadow never
+reached 128; with the contract's 7-bit generation the DUT wraps at 128 while the
+shadow keeps counting. `sim/tb/mosaic_retire_tb.sv` already names the contract
+widths (`TB_ROB_TAG_W`/`TB_ROB_GEN_W` from `mosaic_id_pkg`), so that lane is
+mid-migration. The retile lane was told; `sim/unit/tb_retire.cpp` was **not**
+edited here, per the "do not touch another lane's file" rule. This is the only
+acceptance item not green, and it is red because of another lane's in-flight
+edits.
+
+### Files changed by this follow-up
+
+| File | Change |
+|---|---|
+| `rtl/core/mosaic_rob.sv` | derive `TAG_W`/`GEN_W` from `mosaic_id_pkg`; include `mosaic_id_pkg.svh`; corrected rationale; new mutant |
+| `sim/tb/mosaic_rob_tb.sv` | split `ID_W` into contract-derived `TAG_W`/`GEN_W`; geometry readback `o_tag_w_o`/`o_gen_w_o`; corrected comment |
+| `sim/unit/tb_rob.cpp` | shadow takes `tag_w`/`gen_w`; contract geometry check; previous-generation wrap probe; masked tags |
+| `results/reports/I-016-rob.md` | this section (appended; the report above is unchanged) |
+
+### Commands run
+
+```
+python3 tools/run_unit.py --profile p0 --case rob.out_of_order_children      # PASS
+python3 tools/run_unit.py --profile p0 --case commit.head_block_and_dual     # FAIL (retire lane)
+python3 tools/run_unit.py --profile p0 --case retire.head_block_and_dual     # FAIL (retire lane)
+verilator --lint-only -Wall -Wno-DECLFILENAME --top-module mosaic_rob \
+    -Ibuild/p0/rtl -Irtl/core -Irtl/common rtl/core/mosaic_rob.sv            # exit=0
+slang-tidy --std 1800-2017 -I build/p0/rtl rtl/core/mosaic_rob.sv            # exit=0
+clang++ -std=c++17 -fsyntax-only -Wall -Wextra -Wshadow -isystem $VERILATOR_ROOT/include \
+    -I build/p0/sim -I sim/common -I build/p0/unit/rob.out_of_order_children/obj_dir \
+    sim/unit/tb_rob.cpp                                                      # exit=0
+make lint-cpp    # fails on sim/unit/tb_fifo.cpp: 'Vmosaic_fifo_tb.h' not found --
+                 # its obj_dir was never built in this workspace, unrelated to this change
+bash /tmp/robmut.sh   # shipping PASS, seven mutants each exit=1
+```

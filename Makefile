@@ -131,6 +131,12 @@ lint-slang: check-valid-profile manifest
 # is compiled with the same CFLAGS and is not -Wextra clean.
 CPP_SRCS := $(filter %.cpp,$(shell find sim -name '*.cpp' 2>/dev/null | sort))
 
+# A driver includes the Verilator-generated header for its own testbench
+# (`Vmosaic_x_tb.h`), and that header exists only after the corresponding unit
+# case has been built. Compiling such a file on a partially-built tree fails with
+# "file not found", which reads like a defect in the C++ and is not one. So the
+# file is *skipped and named* instead: the count is printed, and `make test` runs
+# `unit` before this target, so in the gate nothing is skipped.
 lint-cpp: manifest
 	@if [ -z "$(CPP_SRCS)" ]; then \
 	  echo "lint-cpp: no C++ sources yet" >&2; exit 1; \
@@ -139,10 +145,23 @@ lint-cpp: manifest
 	for d in build/$(PROFILE)/unit/*/obj_dir; do \
 	  [ -d "$$d" ] && incs="$$incs -I$$d"; \
 	done; \
+	clean=0; skipped=""; \
 	for f in $(CPP_SRCS); do \
+	  hdr=`grep -m1 -o 'V[A-Za-z0-9_]*\.h' "$$f" 2>/dev/null | head -1`; \
+	  if [ -n "$$hdr" ]; then \
+	    found=0; \
+	    for d in build/$(PROFILE)/unit/*/obj_dir; do \
+	      [ -f "$$d/$$hdr" ] && found=1; \
+	    done; \
+	    if [ $$found -eq 0 ]; then skipped="$$skipped $$f"; continue; fi; \
+	  fi; \
 	  $(CXX) -std=c++17 -fsyntax-only -Wall -Wextra -Wshadow $$incs "$$f" || exit 1; \
-	done
-	@echo "lint-cpp: $(words $(CPP_SRCS)) file(s) clean"
+	  clean=$$((clean + 1)); \
+	done; \
+	echo "lint-cpp: $$clean file(s) clean"; \
+	if [ -n "$$skipped" ]; then \
+	  echo "lint-cpp: SKIPPED (run 'make unit' first):$$skipped" >&2; \
+	fi
 
 # --------------------------------------------------------------------- tests
 
@@ -169,7 +188,13 @@ synth-generic: check-valid-profile manifest
 	fi; \
 	exit $$rc
 
-test: check check-contracts check-docs lint lint-slang lint-cpp unit sim synth-generic
+# Order matters here, and it was wrong: `lint-cpp` compiles every C++ source with
+# the Verilator-generated headers on the include path (`-Ibuild/<profile>/unit/*/obj_dir`),
+# and those headers only exist once the corresponding case has been built. With
+# lint-cpp before unit, a clean tree failed the gate with "cannot find
+# Vmosaic_muldiv_tb.h" -- a failure that says nothing about the code and
+# everything about the order. unit first, then lint-cpp.
+test: check check-contracts check-docs lint lint-slang unit lint-cpp sim synth-generic
 	@echo "profile $(PROFILE): all configured checks passed"
 
 # The plan's own embedded checker, with one declared deviation applied by the

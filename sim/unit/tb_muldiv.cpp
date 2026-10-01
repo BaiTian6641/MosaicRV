@@ -34,18 +34,23 @@
 //                       set: 0, +1, -1, MAX, MIN, div-by-zero, MIN/-1 signed
 //                       overflow, mulhsu sign mixes, and W vectors with garbage
 //                       in the upper 32 bits that must be ignored.
-//   3. cancel-sweep     cancel at EVERY iteration position, for a 64-bit and a
+//   3. latency-equal    every operation at both widths runs with operand
+//                       vectors chosen to tempt a value-dependent early-out and
+//                       must take the same number of cycles each time -- the
+//                       card's "equal latency for equal control" as a check
+//                       rather than as an implementation hope.
+//   4. cancel-sweep     cancel at EVERY iteration position, for a 64-bit and a
 //                       W operation, using o_iter/o_busy to find each position
 //                       rather than guessing the latency; after each cancel a
 //                       new operation with a different identity must complete
 //                       correctly, and the cancelled identity must never appear.
-//   4. backpressure     hold res_ready_i low for many cycles while reloading the
+//   5. backpressure     hold res_ready_i low for many cycles while reloading the
 //                       request inputs, require the identical value and identity
 //                       to stay offered, then accept it and prove a following
 //                       operation still completes (no lost operation, no leak).
-//   5. reset-cancel     an operation in flight when rst_i arrives: the unit must
+//   6. reset-cancel     an operation in flight when rst_i arrives: the unit must
 //                       come back idle and ready with its counters cleared.
-//   6. random           a seeded soak: random operations, random flush timing,
+//   7. random           a seeded soak: random operations, random flush timing,
 //                       random back-pressure, shadow-compared every cycle.
 //
 // Failure counting is deliberate: per-cycle comparisons record a failure and
@@ -711,6 +716,86 @@ void PhaseDirected(Harness* h, mosaic::Reporter* reporter, uint64_t* ops_done) {
   reporter->Check(!o.busy, "directed: the unit is idle at the end of the phase");
 }
 
+void PhaseLatency(Harness* h, mosaic::Reporter* reporter, uint64_t* lat64,
+                  uint64_t* lat32) {
+  // The card's "equal latency for equal control, independent of operand
+  // values" is a property, not a consequence to be hoped for: the same
+  // operation at the same width is run with vectors that would tempt a
+  // value-dependent early-out (zero, one, all-ones, MIN/-1, a power of two, an
+  // alternating pattern) and every one of them must take the same number of
+  // cycles. The cycle a result appears in is counted explicitly, so an early
+  // exit would show up here and not as a wrong answer.
+  static const uint64_t kVectors[6][2] = {
+      {0ull, 0ull},
+      {1ull, 1ull},
+      {0xFFFFFFFFFFFFFFFFull, 1ull},
+      {0x8000000000000000ull, 0xFFFFFFFFFFFFFFFFull},
+      {2ull, 0x7FFFFFFFFFFFFFFFull},
+      {0x5555555555555555ull, 0xAAAAAAAAAAAAAAAAull},
+  };
+  for (uint8_t op = 0; op < 8; ++op) {
+    for (int wi = 0; wi <= 1; ++wi) {
+      const bool w = wi != 0;
+      const uint64_t max_iter = w ? 32u : 64u;
+      uint64_t latency = 0;
+      bool have = false;
+      for (int vi = 0; vi < 6; ++vi) {
+        const uint64_t a =
+            w ? (kVectors[vi][0] & 0xFFFFFFFFull) : kVectors[vi][0];
+        const uint64_t b =
+            w ? (kVectors[vi][1] & 0xFFFFFFFFull) : kVectors[vi][1];
+        const std::string name = std::string("latency ") + OpName(op) +
+                                 (w ? "w" : "") + " " + HexU(a) + " " + HexU(b);
+        h->SetContext(name);
+        Stim s;
+        s.req_valid = true;
+        s.op = op;
+        s.w = w;
+        s.a = a;
+        s.b = b;
+        s.id = Ident{3, 5, 1};
+        s.res_ready = true;
+        Obs o = h->Cycle(s);
+        reporter->Check(o.req_ready, name + ": request refused in idle");
+        if (!o.req_ready) Stop("latency", name + ": request refused");
+        uint64_t spent = 0;
+        Stim take;
+        take.res_ready = true;
+        while (!o.res_valid) {
+          o = h->Cycle(take);
+          ++spent;
+          if (spent > 200) Stop("latency", name + ": no result appeared");
+        }
+        reporter->Check(o.res_data == RefCalc(op, w, a, b),
+                        name + ": result " + HexU(o.res_data) + " expected " +
+                            HexU(RefCalc(op, w, a, b)));
+        if (!have) {
+          latency = spent;
+          have = true;
+        } else {
+          reporter->Check(spent == latency,
+                          name + ": took " + Dec(spent) + " cycles, expected " +
+                              Dec(latency) +
+                              " -- latency may depend on control, never on "
+                              "operand values");
+        }
+      }
+      reporter->Check(latency == max_iter + 1,
+                      std::string("latency: ") + OpName(op) + (w ? "w" : "") +
+                          " takes " + Dec(latency) +
+                          " cycles from acceptance to res_valid_o, the "
+                          "documented width + 1");
+      if (op == MD_MUL) {
+        if (w) {
+          *lat32 = latency;
+        } else {
+          *lat64 = latency;
+        }
+      }
+    }
+  }
+}
+
 void PhaseCancelSweep(Harness* h, mosaic::Reporter* reporter, uint64_t* cancels,
                       uint64_t* kills) {
   uint64_t ident_counter = 0x400;
@@ -997,6 +1082,31 @@ void PhaseResetCancel(Harness* h, mosaic::Reporter* reporter) {
                   "reset-cancel: the follow-up result was wrong");
   reporter->Check(res.res_id == h->MaskId(id),
                   "reset-cancel: the follow-up identity was wrong");
+
+  // A *completed* result waiting to be taken, destroyed by a reset: the same
+  // corner as a flush, through the other control path.
+  h->SetContext("reset while a result waits");
+  const Ident id2 = Ident{7, 11, 2};
+  Stim hold;
+  hold.req_valid = true;
+  hold.op = MD_DIVU;
+  hold.w = false;
+  hold.a = 0xFFFFFFFFFFFFFFFFull;
+  hold.b = 3ull;
+  hold.id = id2;
+  hold.res_ready = false;
+  Obs cur2 = h->Cycle(hold);
+  if (!cur2.req_ready) Stop("reset-cancel", "request refused in idle (hold)");
+  while (!cur2.res_valid) cur2 = h->Cycle(Stim{});
+  reporter->Check(cur2.res_data == RefCalc(MD_DIVU, false, hold.a, hold.b),
+                  "reset-cancel: the held result was wrong before the reset");
+  h->Reset(2);
+  const Obs after2 = h->Cycle(Stim{});
+  reporter->Check(!after2.busy && !after2.res_valid,
+                  "reset-cancel: a completed result survived the reset");
+  reporter->Check(after2.accepted == 0 && after2.completed == 0 &&
+                      after2.cancelled == 0 && after2.killed == 0,
+                  "reset-cancel: the counters survived the reset (held result)");
 }
 
 void PhaseRandom(Harness* h, uint32_t seed, uint32_t cycles, uint64_t* flushes) {
@@ -1085,6 +1195,11 @@ int main(int argc, char** argv) {
     PhaseDirected(&harness, &reporter, &ops_done);
 
     fresh();
+    harness.Phase("latency-equal");
+    uint64_t lat64 = 0, lat32 = 0;
+    PhaseLatency(&harness, &reporter, &lat64, &lat32);
+
+    fresh();
     harness.Phase("cancel-sweep");
     uint64_t cancels = 0, kills = 0;
     PhaseCancelSweep(&harness, &reporter, &cancels, &kills);
@@ -1121,7 +1236,8 @@ int main(int argc, char** argv) {
              " shadow comparisons over " + Dec(harness.cycles()) + " cycles, " +
              Dec(ops_done) + " directed operations, " + Dec(cancels) +
              " cancellations (" + Dec(kills) +
-             " with a computed result), seed " + Dec(options.seed);
+             " with a computed result), latency " + Dec(lat64) + "/" +
+             Dec(lat32) + " cycles (64/W), seed " + Dec(options.seed);
   } catch (const Abort& a) {
     reporter.Mismatch(a.what, "the campaign to finish", "it stopped");
     detail = "aborted: " + a.what;

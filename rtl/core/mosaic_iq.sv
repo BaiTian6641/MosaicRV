@@ -21,7 +21,14 @@
 //               wrapping pointer and cannot name an in-flight uop; the
 //               generation is what makes a kill aimed at a recycled slot
 //               rejectable instead of destructive.
-//   * `alu_op`  mosaic_pkg::alu_op_e, the operation the local FU runs.
+//   * `meta`    mosaic_uop_pkg::uop_meta_t, everything execution needs that is
+//               not an operand or a destination: the uop class, the operation
+//               and the PC. The PC lives here rather than being read back from
+//               the ROB because a branch needs it for its target, its link
+//               value and its fall-through; a second ROB read port would make
+//               the branch unit's correctness depend on ROB arbitration. It is
+//               the same value, written once at dispatch, and the ROB remains
+//               the authority for what retires.
 //   * `imm`     its immediate, so the FU needs no second lookup.
 //   * two sources, each {tag, generation, ready, value}. An operand is named by
 //               **(tag, generation)** and never by tag alone; see below.
@@ -215,7 +222,12 @@
 // The generated header declares one localparam per configuration knob for the
 // whole project. This module names five of them; the rest belong to other
 // modules and are unused *here* by construction, not by omission.
-`include "mosaic_cfg_pkg.svh"
+// `mosaic_uop_pkg` carries the frozen identity, operand and metadata packets
+// and includes the generated packages itself, so this file needs no second
+// include of its own -- and `mosaic_cfg_pkg.svh` is generated without an include
+// guard, so a second include in one compilation unit would be a duplicate
+// package definition.
+`include "mosaic_uop_pkg.sv"
 /* verilator lint_on UNUSEDPARAM */
 // The age width, chosen by a macro rather than by `ifdef inside the parameter
 // port list, which Verilator 5.052 does not parse. Both branches read the same
@@ -260,7 +272,7 @@ module mosaic_iq #(
   input  logic                     ins_valid,
   output logic                     ins_ready,
   input  logic [UOP_ID_W-1:0]      ins_uop,
-  input  logic [3:0]               ins_alu_op,      // mosaic_pkg::alu_op_e
+  input  mosaic_uop_pkg::uop_meta_t ins_meta,      // class, op, PC (see header)
   input  logic [XLEN-1:0]          ins_imm,
   input  logic [TAG_W-1:0]         ins_src1_tag,
   input  logic [TAG_GEN_W-1:0]     ins_src1_gen,
@@ -286,7 +298,7 @@ module mosaic_iq #(
   output logic                     grant_valid,
   input  logic                     grant_ready,
   output logic [UOP_ID_W-1:0]      grant_uop,
-  output logic [3:0]               grant_alu_op,
+  output mosaic_uop_pkg::uop_meta_t grant_meta,
   output logic [XLEN-1:0]          grant_imm,
   output logic [XLEN-1:0]          grant_a,
   output logic [XLEN-1:0]          grant_b,
@@ -325,7 +337,7 @@ module mosaic_iq #(
   output logic [TAG_W-1:0]         obs_src2_tag,
   output logic [TAG_GEN_W-1:0]     obs_src2_gen,
   output logic [UOP_ID_W-1:0]      obs_uop,
-  output logic [3:0]               obs_alu_op,
+  output mosaic_uop_pkg::uop_meta_t obs_meta,
   output logic [XLEN-1:0]          obs_imm,
   output logic [TAG_W-1:0]         obs_dst_tag,
   output logic [TAG_GEN_W-1:0]     obs_dst_gen,
@@ -459,7 +471,7 @@ module mosaic_iq #(
   // resetting it would be a second copy of information the valid vector already
   // carries.
   logic [UOP_ID_W-1:0] ent_uop     [0:DEPTH-1];
-  logic [3:0]           ent_alu_op  [0:DEPTH-1];
+  mosaic_uop_pkg::uop_meta_t ent_meta [0:DEPTH-1];
   logic [XLEN-1:0]      ent_imm     [0:DEPTH-1];
   logic [TAG_W-1:0]     ent_s1_tag  [0:DEPTH-1];
   logic [TAG_W-1:0]     ent_s2_tag  [0:DEPTH-1];
@@ -911,11 +923,26 @@ module mosaic_iq #(
   assign ins_age      = age_ctr - AGE_W'(rm_count) + AGE_W'(base_removed);
   assign age_ctr_next = ins_age + AGE_W'(ins_adv ? 1 : 0);
 
+  // The slot whose metadata is presented. Shipping: the selected slot itself.
+  // The mutant swaps in the adjacent slot's packet, so the metadata that leaves
+  // with a grant -- and the metadata the observation port shows -- belongs to a
+  // different uop. That is the defect `MOSAIC_IQ_MUTANT_META_SWAP` injects; the
+  // width stays the type's, only the index moves.
+  logic [IDX_W-1:0] grant_meta_idx;
+  logic [IDX_W-1:0] obs_meta_idx;
+`ifdef MOSAIC_IQ_MUTANT_META_SWAP
+  assign grant_meta_idx = grant_idx ^ IDX_W'(1);
+  assign obs_meta_idx   = obs_index_s ^ IDX_W'(1);
+`else
+  assign grant_meta_idx = grant_idx;
+  assign obs_meta_idx   = obs_index_s;
+`endif
+
   // ---------------------------------------------------------- grant payload
   always_comb begin
     if (grant_from_ins) begin
       grant_uop     = ins_uop;
-      grant_alu_op  = ins_alu_op;
+      grant_meta    = ins_meta;
       grant_imm     = ins_imm;
       grant_a       = ins_hit1 ? wu_val : ins_src1_val;
       grant_b       = ins_hit2 ? wu_val : ins_src2_val;
@@ -923,7 +950,7 @@ module mosaic_iq #(
       grant_dst_gen = ins_dst_gen;
     end else begin
       grant_uop     = ent_uop[grant_idx];
-      grant_alu_op  = ent_alu_op[grant_idx];
+      grant_meta    = ent_meta[grant_meta_idx];
       grant_imm     = ent_imm[grant_idx];
       grant_a       = wu_hit1[grant_idx] ? wu_val : ent_s1_val[grant_idx];
       grant_b       = wu_hit2[grant_idx] ? wu_val : ent_s2_val[grant_idx];
@@ -985,7 +1012,7 @@ module mosaic_iq #(
   assign obs_src2_tag   = ent_s2_tag[obs_index_s];
   assign obs_src2_gen   = ent_s2_gen[obs_index_s];
   assign obs_uop        = ent_uop[obs_index_s];
-  assign obs_alu_op     = ent_alu_op[obs_index_s];
+  assign obs_meta       = ent_meta[obs_meta_idx];
   assign obs_imm        = ent_imm[obs_index_s];
   assign obs_dst_tag    = ent_dst_tag[obs_index_s];
   assign obs_dst_gen    = ent_dst_gen[obs_index_s];
@@ -1017,7 +1044,7 @@ module mosaic_iq #(
         // slot is never free, so the two never both target slot i.
         if (ins_fire && !ins_taken && (alloc_slot == IDX_W'(i))) begin
           ent_uop[i]     <= ins_uop;
-          ent_alu_op[i]  <= ins_alu_op;
+          ent_meta[i]    <= ins_meta;
           ent_imm[i]     <= ins_imm;
           ent_s1_tag[i]  <= ins_src1_tag;
           ent_s1_gen[i]  <= ins_src1_gen;

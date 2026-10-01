@@ -395,15 +395,15 @@ class ShadowPipeline {
   };
 
   ShadowPipeline(uint32_t width, uint32_t rob_entries, uint32_t index_w,
-                 uint32_t id_w, uint32_t tag_w, uint32_t arch_regs,
-                 uint32_t max_uops, uint32_t seq_w, uint32_t ret_tag_w,
-                 uint32_t ret_gen_w)
+                 uint32_t id_w, uint32_t tag_w, uint32_t gen_w,
+                 uint32_t arch_regs, uint32_t max_uops, uint32_t seq_w,
+                 uint32_t ret_tag_w, uint32_t ret_gen_w)
       : width_(width),
         rob_entries_(rob_entries),
         index_w_(index_w),
         id_w_(id_w),
         tag_w_(tag_w),
-        gen_w_(id_w - tag_w),
+        gen_w_(gen_w),
         arch_regs_(arch_regs),
         max_uops_(max_uops),
         seq_w_(seq_w),
@@ -411,7 +411,7 @@ class ShadowPipeline {
         ret_gen_w_(ret_gen_w),
         id_mask_(Mask(~0u, id_w)),
         tag_mask_(Mask(~0u, tag_w)),
-        gen_mask_(Mask(~0u, id_w - tag_w)),
+        gen_mask_(Mask(~0u, gen_w)),
         num_uops_w_(Clog2(max_uops)),
         cmt_tag_(arch_regs, 0),
         cmt_gen_(arch_regs, 0),
@@ -439,6 +439,11 @@ class ShadowPipeline {
   uint64_t mscratch() const { return mscratch_; }
   bool took_last_alloc() const { return alloc_took_last_; }
   uint32_t gen_mask() const { return gen_mask_; }
+  // `Mask(value, width)` takes a bit *width*, not a mask: passing `gen_mask()`
+  // (127, i.e. >= 32) as the width returns the value unmasked, so a generation
+  // never wrapped and slot 0 read 128 against the buffer's 0 once the ROB's
+  // generation was 7 bits. The window is a width, so it is named as one.
+  uint32_t gen_width() const { return gen_w_; }
   uint32_t index_w() const { return index_w_; }
   uint32_t max_uops() const { return max_uops_; }
   uint32_t done_mask() const {
@@ -549,7 +554,7 @@ class ShadowPipeline {
         const Entry& e = queue_[i];
         if (i == 0) v.ev_pc_lo = e.pc; else v.ev_pc_hi = e.pc;
         const uint32_t tag = Mask(Mask(e.tag, tag_w_), ret_tag_w_);
-        const uint32_t gen = Mask(Mask(e.gen, gen_mask_), ret_gen_w_);
+        const uint32_t gen = Mask(Mask(e.gen, gen_w_), ret_gen_w_);
         v.ev_id |= (static_cast<uint64_t>((gen << ret_tag_w_) | tag)) << (i * 32);
       }
     }
@@ -651,7 +656,7 @@ class ShadowPipeline {
       e.done_mask = 0;
       e.exc = s.alloc_exc;
       e.closed = !s.alloc_open;
-      e.gen = Mask(next_alloc_gen_++, gen_mask_);
+      e.gen = Mask(next_alloc_gen_++, gen_w_);
       e.slot = next_alloc_slot_;
       next_alloc_slot_ = (next_alloc_slot_ + 1) % rob_entries_;
       queue_.push_back(e);
@@ -665,7 +670,7 @@ class ShadowPipeline {
     if (s.cmp_valid) {
       const uint32_t slot = Mask(s.cmp_index, index_w_);
       Entry* e = by_slot(slot);
-      if (e != nullptr && Mask(e->gen, gen_mask_) == Mask(s.cmp_gen, gen_mask_)) {
+      if (e != nullptr && Mask(e->gen, gen_w_) == Mask(s.cmp_gen, gen_w_)) {
         // The child index is the ROB's own UOP_W slice of the driver's word
         // (sim/tb/mosaic_retire_tb.sv narrows `cmp_uop_i` to UOP_W bits), so
         // the shadow masks to the same width the hardware decodes: UOP_W is
@@ -684,7 +689,7 @@ class ShadowPipeline {
     if (s.close_valid) {
       const uint32_t slot = Mask(s.close_index, index_w_);
       Entry* e = by_slot(slot);
-      if (e != nullptr && Mask(e->gen, gen_mask_) == Mask(s.close_gen, gen_mask_)) {
+      if (e != nullptr && Mask(e->gen, gen_w_) == Mask(s.close_gen, gen_w_)) {
         e->closed = true;
       }
     }
@@ -790,7 +795,7 @@ class ShadowPipeline {
           v->commit_valid |= 1u << i;
           v->commit_rd |= static_cast<uint64_t>(rd) << (i * 32);
           const uint32_t tag = Mask(queue_[i].tag, tag_w_);
-          const uint32_t gen = Mask(queue_[i].gen, gen_mask_);
+          const uint32_t gen = Mask(queue_[i].gen, gen_w_);
           v->commit_tag |= static_cast<uint64_t>(Mask(tag, ret_tag_w_)) << (i * 32);
           v->commit_gen |= static_cast<uint64_t>(Mask(gen, ret_gen_w_)) << (i * 32);
         }
@@ -1429,6 +1434,12 @@ class Harness {
                         Describe(s));
       }
     }
+    // The request the unit presents to the buffer, every lane, every cycle.
+    // Without this the request gate is unobservable: the buffer acknowledges
+    // from its own `head_ready`, so a unit that requested a pop it should not
+    // (a still-executing head, a lane ahead of an unrequested one) would emit
+    // no wrong event and the defect would be invisible.
+    CMP_U32(Lanes32(dut_->retire_req_o, width_), retire_req);
     CMP_U32(Lanes32(dut_->ev_reg_we_o, width_), ev_reg_we);
     CMP_U64_LANES((LaneField(dut_->ev_rd_o, 0, width_) & 0x1Fu) |
              (static_cast<uint64_t>(LaneField(dut_->ev_rd_o, 1, width_)) << 32), ev_rd);
@@ -1579,18 +1590,32 @@ class Harness {
     // the pop, which is why the events follow the acknowledgement. Requiring
     // `retire_req == 0` on `rob_flush` would assert a rule the module does not
     // have and cannot see.
+    // The trap path is the one documented exception to the flush rule: "a
+    // trapping instruction at the head is architecturally final, so it takes
+    // priority over a recovery flush" (mosaic_retire.sv header). So the only
+    // event a flush cycle may emit is lane 0's trap -- never an ordinary retire
+    // -- and a trap commits nothing.
+    const uint32_t flush_ev = Lanes32(dut_->ev_valid_o, width_);
+    const uint32_t flush_tr = Lanes32(dut_->ev_trap_o, width_);
+    const uint32_t trap_slot = ((flush_ev & 1u) && (flush_tr & 1u)) ? 1u : 0u;
     if (s.flush_valid) {
-      Require(dut_->ev_valid_o == 0, where,
-              "a recovery flush cycle emitted " + std::to_string(dut_->ev_valid_o) +
-                  " retire events; a recovery flush retires nothing");
+      Require((flush_ev & ~trap_slot) == 0, where,
+              "a recovery flush cycle emitted retire events beyond lane 0's trap: "
+              "mask " + std::to_string(flush_ev));
+      Require((flush_tr & ~trap_slot) == 0, where,
+              "a recovery flush cycle emitted a trap outside lane 0: mask " +
+                  std::to_string(flush_tr));
       Require(dut_->commit_valid_o == 0, where,
               "a recovery flush cycle updated the committed map");
       Require(dut_->retire_req_o == 0, where,
               "a recovery flush cycle requested a retirement");
     } else if (s.rob_flush) {
-      Require(dut_->ev_valid_o == 0, where,
-              "a buffer flush cycle emitted " + std::to_string(dut_->ev_valid_o) +
-                  " retire events; the buffer refused every pop");
+      Require((flush_ev & ~trap_slot) == 0, where,
+              "a buffer flush cycle emitted retire events beyond lane 0's trap: "
+              "mask " + std::to_string(flush_ev));
+      Require((flush_tr & ~trap_slot) == 0, where,
+              "a buffer flush cycle emitted a trap outside lane 0: mask " +
+                  std::to_string(flush_tr));
       Require(dut_->commit_valid_o == 0, where,
               "a buffer flush cycle updated the committed map");
     }
@@ -1784,7 +1809,7 @@ class Harness {
                          "entry but the buffer reports the slot empty");
       }
       ++comparisons_;
-      if (Mask(ObsGen(slot), shadow_->gen_mask()) != Mask(e->gen, shadow_->gen_mask())) {
+      if (Mask(ObsGen(slot), shadow_->gen_width()) != Mask(e->gen, shadow_->gen_width())) {
         Fail(where, "slot " + std::to_string(slot) + ": generation disagrees: " +
                          "shadow " + std::to_string(e->gen) + ", buffer " +
                          std::to_string(ObsGen(slot)));
@@ -2487,9 +2512,15 @@ void PhaseSoak(Harness* h, int steps) {
       if (e->done_mask == want) continue;
       const uint32_t missing = want & ~e->done_mask;
       const uint32_t uop = static_cast<uint32_t>(__builtin_ctz(missing));
+      // The identity is the entry's own ROB slot and generation, not its queue
+      // position. After the first retire the head advances and a position stops
+      // naming the slot that `cmp_index` addresses, so a completion built from
+      // the position (with `GenOf(position)`, which looks a slot up by number)
+      // targets some other entry and is filed stale -- which is why the soak
+      // retired almost nothing.
       Harness::Identity id;
-      id.index = idx;
-      id.gen = h->shadow().GenOf(idx);
+      id.index = e->slot;
+      id.gen = e->gen;
       h->Complete(id, uop, rng.Chance(3));
     } else if (action < 68) {
       // Close a random open entry.
@@ -2498,9 +2529,11 @@ void PhaseSoak(Harness* h, int steps) {
       const uint32_t idx = rng.Below(occ);
       const Entry* e = h->shadow().at(idx);
       if (e == nullptr || e->closed) continue;
+      // The entry's own slot and generation, for the same reason as the
+      // completion above: a queue position is not a ROB slot once the head moves.
       Harness::Identity id;
-      id.index = idx;
-      id.gen = h->shadow().GenOf(idx);
+      id.index = e->slot;
+      id.gen = e->gen;
       h->Close(id);
     } else if (action < 78) {
       // A recovery flush.
@@ -2573,7 +2606,8 @@ int main(int argc, char** argv) {
     const uint32_t width = dut.o_retire_width_o;
     const uint32_t rob_entries = dut.o_rob_entries_o;
     const uint32_t rob_index_w = dut.o_rob_index_w_o;
-    const uint32_t rob_id_w = dut.o_rob_id_w_o;
+    const uint32_t rob_tag_w = dut.o_rob_tag_w_o;
+    const uint32_t rob_gen_w = dut.o_rob_gen_w_o;
     const uint32_t max_uops = dut.o_max_uops_o;
     const uint32_t prf_entries = dut.o_prf_entries_o;
     const uint32_t tag_w = dut.o_tag_w_o;
@@ -2586,19 +2620,21 @@ int main(int argc, char** argv) {
             "the shadow models the never-truncates elaboration only: the DUT "
             "reports " + std::to_string(rob_entries) + " entries in a " +
                 std::to_string(rob_index_w) + "-bit index space");
-    Require(rob_id_w == 2 * rob_index_w, "geometry",
-            "the ROB's identity width is not twice its slot index width");
-    // The two identity widths are deliberately different and the driver checks
-    // the relationship rather than the equality. The queue's `tag` is the
-    // producer's own name for a macro and is sized as `2 * ROB_INDEX_W`; the
-    // retire unit carries a *destination* identity, whose tag is a physical
-    // register tag and whose generation is that tag's allocation generation.
-    // The retire unit must be able to hold a queue tag without truncation,
-    // because the commit it emits names that tag.
-    Require(tag_w <= rob_id_w, "geometry",
+    // The queue's two identity fields are the generated contract widths: TAG_W
+    // names the physical register a destination occupies, GEN_W is the per-slot
+    // generation. The generation must be wide enough that a slot cannot be
+    // recycled within one generation wrap -- 2**GEN_W > ROB_ENTRIES -- and the
+    // retire unit's destination tag must fit the queue's tag, or a commit would
+    // name a truncated identity.
+    Require(rob_gen_w > rob_index_w, "geometry",
+            "the ROB's generation width " + std::to_string(rob_gen_w) +
+                " does not exceed its slot index width " +
+                std::to_string(rob_index_w) +
+                ", so a recycled slot could alias its previous owner");
+    Require(tag_w <= rob_tag_w, "geometry",
             "the retire unit's destination tag is " + std::to_string(tag_w) +
-                " bits but the queue names macros with a " +
-                std::to_string(rob_id_w) + "-bit tag: a commit would name a "
+                " bits but the queue names destinations with a " +
+                std::to_string(rob_tag_w) + "-bit tag: a commit would name a "
                 "truncated identity");
     Require(arch_regs == 32, "geometry",
             "the architectural register file is not 32 entries, and the driver "
@@ -2606,9 +2642,9 @@ int main(int argc, char** argv) {
     Require(prf_entries >= arch_regs, "geometry",
             "the physical register file is smaller than the architectural one");
 
-    ShadowPipeline shadow(width, rob_entries, rob_index_w, rob_id_w, tag_w,
-                          arch_regs, max_uops, Clog2(2 * rob_entries + 1),
-                          tag_w, tag_w);
+    ShadowPipeline shadow(width, rob_entries, rob_index_w, rob_tag_w, rob_tag_w,
+                          rob_gen_w, arch_regs, max_uops,
+                          Clog2(2 * rob_entries + 1), tag_w, tag_w);
     Harness harness(&dut, &clk, options.max_cycles, &shadow);
     harness.set_geometry(prf_entries, arch_regs);
 

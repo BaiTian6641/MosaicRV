@@ -18,6 +18,7 @@ import argparse
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 
@@ -101,6 +102,29 @@ def build_case(profile: str, case_id: str, entry: dict) -> str:
     cmd += ["-CFLAGS", "-I%s" % os.path.join(REPO_ROOT, "build", profile, "sim")]
     cmd += ["-o", binary]
     cmd += sources
+
+    # A stale build directory is a verification hazard, not a speed feature.
+    # Verilator generates its own makefile for the C++ half, and when only a
+    # `-D` changes -- which is exactly what a mutant run does -- the generated
+    # sources can look up to date and the *previous* binary is kept. One lane
+    # saw a mutant's behaviour survive what looked like a clean rebuild, and a
+    # mutant table built that way is not evidence. So: record the command that
+    # produced the directory and wipe the directory when the command differs.
+    # Cheap to compute, and it makes it impossible for a mutant run to be
+    # confused with the shipping build.
+    stamp_path = os.path.join(build_dir, "build_command.txt")
+    stamp = " ".join(cmd)
+    previous = None
+    if os.path.exists(stamp_path):
+        with open(stamp_path) as handle:
+            previous = handle.read().strip()
+    if previous != stamp:
+        if os.path.isdir(os.path.join(build_dir, "obj_dir")):
+            shutil.rmtree(os.path.join(build_dir, "obj_dir"), ignore_errors=True)
+        if os.path.exists(binary):
+            os.remove(binary)
+        with open(stamp_path, "w") as handle:
+            handle.write(stamp)
 
     result = run(cmd)
     log = result.stdout.decode("utf-8", "replace")

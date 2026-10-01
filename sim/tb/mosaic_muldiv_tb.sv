@@ -27,6 +27,10 @@
 /* verilator lint_off UNUSEDPARAM */
 /* verilator lint_off UNUSEDSIGNAL */
 /* verilator lint_off MODDUP */
+// `mosaic_pkg` is included explicitly for the same reason the RTL does: without
+// it the package would have to be listed on the runner's command line, which is
+// not this case's to change. It carries its own include guard.
+`include "mosaic_pkg.sv"
 // The generated identity header declares one width per identity field for the
 // whole project, and it is included here as well as in the RTL because this
 // wrapper's port list needs the same widths. It carries no include guard, so the

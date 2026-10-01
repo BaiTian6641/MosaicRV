@@ -22,7 +22,14 @@
 //
 // That also makes the unit a fixed-latency unit whose latency depends only on a
 // control bit, which is what lets the testbench cancel at a chosen iteration
-// using `o_iter` instead of guessing a cycle count.
+// using `o_iter` instead of guessing a cycle count. `o_iter` is the number of
+// iterations the operation in flight has completed -- 0 in IDLE, `width` once
+// the result has been computed and is waiting to be taken.
+//
+// The documented latency from the accepting edge to `res_valid_o` is
+// `width + 1` cycles: one per iteration, plus the cycle in which the completed
+// result is presented. It is the same for every operation at a width and for
+// every operand value at a width.
 //
 // -------------------------------------------------------- the width rule
 //
@@ -108,6 +115,13 @@
 
 /* verilator lint_off UNUSEDPARAM */
 /* verilator lint_off UNUSEDSIGNAL */
+// `mosaic_pkg` is included rather than imported-and-assumed-present, for the
+// reason rtl/core/mosaic_fetch.sv states: Verilator does not search the include
+// path for a package on its own, so a file that only names `mosaic_pkg::` is
+// resolved against whatever the command line happened to list first. The
+// package carries its own include guard, so including it here (and again in the
+// testbench wrapper) is idempotent.
+`include "mosaic_pkg.sv"
 // The generated identity package declares one width per identity field for the
 // whole project. This unit names three of them; the rest belong to other
 // structures and are unused *here* by construction, not by omission.
@@ -509,10 +523,14 @@ module mosaic_muldiv (
           end
 
           // --------------------------------------------------------- hold
+          // `o_iter` returns to 0 when the operation leaves: "current
+          // iteration index" means the index of the operation in flight, and
+          // there is none once the result has been taken.
           ST_DONE: begin
             if (res_ready_i || MutDropUnready) begin
               if (!MutResStuck) begin
                 state_r <= ST_IDLE;
+                iter_r  <= 7'd0;
               end
             end
           end

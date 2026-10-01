@@ -10,10 +10,10 @@
 // the implementation.
 //
 // Geometry is read from the elaborated DUT (`o_rob_entries`, `o_index_w`,
-// `o_max_uops`, `o_id_w`, `o_pc_w`, `o_num_uops_w`), which are constants
-// derived from the instance parameters, so this file contains no depth of its
-// own: a profile with a different ROB sizes the shadow on the next run, and
-// there is no number here to forget to update.
+// `o_max_uops`, `o_tag_w`, `o_gen_w`, `o_pc_w`, `o_num_uops_w`), which are
+// constants derived from the instance parameters, so this file contains no depth
+// of its own: a profile with a different ROB sizes the shadow on the next run,
+// and there is no number here to forget to update.
 //
 // Phases, each of which can fail on its own:
 //
@@ -225,23 +225,27 @@ class ShadowRob {
     uint32_t gen_counter = 0;
   };
 
-  ShadowRob(uint32_t entries, uint32_t max_uops, uint32_t index_w, uint32_t id_w,
-            uint32_t pc_w, uint32_t num_uops_w)
+  ShadowRob(uint32_t entries, uint32_t max_uops, uint32_t index_w, uint32_t tag_w,
+            uint32_t gen_w, uint32_t pc_w, uint32_t num_uops_w)
       : entries_(entries),
         max_uops_(max_uops),
         index_w_(index_w),
-        id_w_(id_w),
+        tag_w_(tag_w),
+        gen_w_(gen_w),
         pc_w_(pc_w),
         num_uops_w_(num_uops_w),
         uop_w_(Clog2(max_uops)),
-        gen_mask_(Mask(~0u, id_w)),
+        gen_mask_(Mask(~0u, gen_w)),
         slots_(entries),
         slot_allocs_(entries, 0),
-        slot_first_gen_(entries, 0) {}
+        slot_prev_gen_(entries, 0) {}
 
   // --------------------------------------------------------------- accessors
   uint32_t entries() const { return entries_; }
   uint32_t max_uops() const { return max_uops_; }
+  // The contract tag width, so a caller that wants to name the tag a slot will
+  // actually store narrows it the same way the shadow does.
+  uint32_t tag_width() const { return tag_w_; }
   uint32_t occupied() const { return occupied_; }
   uint32_t alloc_ptr() const { return alloc_; }
   uint32_t retired_total() const { return retired_; }
@@ -251,10 +255,16 @@ class ShadowRob {
   // How many times this slot has been allocated to since reset.
   uint32_t SlotAllocations(uint32_t index) const { return slot_allocs_[index]; }
 
-  // The generation the *first* allocation to this slot carried. A completion
-  // naming it, for a slot that is live again, is exactly the stale arrival the
-  // card names.
-  uint32_t SlotFirstGen(uint32_t index) const { return slot_first_gen_[index]; }
+  // The generation the *immediately previous* occupant of this slot carried,
+  // captured when a new occupant overwrote it. A completion naming it, for a
+  // slot that is live again, is exactly the stale arrival the card names, and it
+  // is guaranteed to differ from the current generation whenever the slot has
+  // been reallocated: a slot turns over once per ROB_ENTRIES allocations, and
+  // 2**GEN_W > ROB_ENTRIES, so the previous generation cannot equal the current
+  // one. (Probing with the *first* generation ever would not have that property
+  // more than 2**GEN_W allocations into the run -- the same alias the width is
+  // sized to bound -- which is why the probe uses this one.)
+  uint32_t SlotPrevGen(uint32_t index) const { return slot_prev_gen_[index]; }
 
   // Every live slot, oldest first.
   std::vector<uint32_t> LiveIndices() const {
@@ -270,7 +280,7 @@ class ShadowRob {
   void Reset() {
     for (Slot& slot : slots_) slot = Slot();
     std::fill(slot_allocs_.begin(), slot_allocs_.end(), 0);
-    std::fill(slot_first_gen_.begin(), slot_first_gen_.end(), 0);
+    std::fill(slot_prev_gen_.begin(), slot_prev_gen_.end(), 0);
     head_ = 0;
     alloc_ = 0;
     occupied_ = 0;
@@ -350,15 +360,19 @@ class ShadowRob {
 
     if (v.alloc_ok) {
       Slot& slot = slots_[alloc_];
+      // The occupant being overwritten, captured before the write: its
+      // generation is the one an in-flight completion for the old macro would
+      // carry, and it is what the wrap probe names.
+      const uint32_t prev_gen = slot.gen;
       slot.valid = true;
       slot.gen = gen_counter_ & gen_mask_;
-      slot.tag = Mask(s.alloc_tag, id_w_);
+      slot.tag = Mask(s.alloc_tag, tag_w_);
       slot.pc = Mask64(s.alloc_pc, pc_w_);
       slot.num_uops = Mask(s.alloc_num_uops, num_uops_w_);
       slot.done_mask = 0;
       slot.exc = s.alloc_exc;
       slot.closed = !s.alloc_open;
-      if (slot_allocs_[alloc_] == 0) slot_first_gen_[alloc_] = slot.gen;
+      if (slot_allocs_[alloc_] > 0) slot_prev_gen_[alloc_] = prev_gen;
       slot_allocs_[alloc_]++;
       alloc_ = Next(alloc_);
       occupied_++;
@@ -397,14 +411,14 @@ class ShadowRob {
 
     const uint32_t ci = Mask(s.close_index, index_w_);
     const bool close_ident =
-        slots_[ci].valid && slots_[ci].gen == Mask(s.close_gen, id_w_);
+        slots_[ci].valid && slots_[ci].gen == Mask(s.close_gen, gen_w_);
     v->close_ok = s.close_valid && !s.flush && close_ident;
     v->close_stale = s.close_valid && !s.flush && !close_ident;
 
     const uint32_t xi = Mask(s.cmp_index, index_w_);
     const Slot& slot = slots_[xi];
     const bool live = slot.valid;
-    const bool ident = live && slot.gen == Mask(s.cmp_gen, id_w_);
+    const bool ident = live && slot.gen == Mask(s.cmp_gen, gen_w_);
     const uint32_t uop = Mask(s.cmp_uop, uop_w_);
     const bool in_range = (uop < slot.num_uops);
     const bool already = ((slot.done_mask >> uop) & 1u) != 0;
@@ -431,14 +445,18 @@ class ShadowRob {
   uint32_t entries_;
   uint32_t max_uops_;
   uint32_t index_w_;
-  uint32_t id_w_;
+  // TAG_W and GEN_W are contract constants, not a formula: a tag port and a
+  // generation port are narrowed with their own width, so the shadow cannot
+  // agree with a ROB whose generation width has drifted from the contract.
+  uint32_t tag_w_;
+  uint32_t gen_w_;
   uint32_t pc_w_;
   uint32_t num_uops_w_;
   uint32_t uop_w_;
   uint32_t gen_mask_;
   std::vector<Slot> slots_;
   std::vector<uint32_t> slot_allocs_;
-  std::vector<uint32_t> slot_first_gen_;
+  std::vector<uint32_t> slot_prev_gen_;
   uint32_t head_ = 0;
   uint32_t alloc_ = 0;
   uint32_t occupied_ = 0;
@@ -617,7 +635,10 @@ class Harness {
     Identity id;
     id.index = index;
     id.gen = gen;
-    id.tag = tag;
+    // The tag the slot actually stores is the contract width; recording the raw
+    // value would make a later comparison against a slot's tag compare a wide
+    // number with a narrowed one.
+    id.tag = Mask(tag, shadow_->tag_width());
     return id;
   }
 
@@ -1268,25 +1289,33 @@ void PhaseWrapGeneration(Harness* h) {
               std::to_string(least_recycled) +
               " times, so this phase did not wrap the buffer");
 
-  // Every live slot now has an older generation to probe with, and every one of
-  // them must still be rejected: the aliasing property stated over the whole
-  // phase rather than over one hand-built case.
+  // Every live slot now has a previous occupant whose generation can be named,
+  // and every one of them must still be rejected: the aliasing property stated
+  // over the whole buffer rather than over one hand-built case. The probe uses
+  // the immediately previous generation, which a slot turns over once per
+  // ROB_ENTRIES allocations -- well inside the 2**GEN_W > ROB_ENTRIES window --
+  // so it is stale by construction, unlike the first generation ever, which a
+  // run longer than the modulus can legally bring round again.
   const std::vector<uint32_t> live = h->LiveIndices();
   Require(!live.empty(), "wrap-generation", "nothing is live to probe with");
   for (uint32_t idx : live) {
-    const uint32_t first_gen = h->shadow().SlotFirstGen(idx);
-    Require(first_gen != h->S(idx).gen, "wrap-generation",
+    Require(h->shadow().SlotAllocations(idx) >= 2, "wrap-generation",
             "slot " + std::to_string(idx) +
-                " has no older generation, so it was never recycled");
+                " was allocated only once, so it has no previous occupant to "
+                "name and this phase did not recycle it");
+    const uint32_t prev_gen = h->shadow().SlotPrevGen(idx);
+    Require(prev_gen != h->S(idx).gen, "wrap-generation",
+            "slot " + std::to_string(idx) + " was recycled with the same generation "
+            "as its previous occupant, so the generations are not doing any work");
     Stim probe;
     probe.cmp_valid = true;
     probe.cmp_index = idx;
-    probe.cmp_gen = first_gen;
+    probe.cmp_gen = prev_gen;
     probe.cmp_uop = 0;
     const uint32_t mask = h->S(idx).done_mask;
     h->Cycle(probe);
     Require(h->CmpStale() == 1, "wrap-generation",
-            "a completion naming generation " + mosaic::Hex(first_gen) + " for slot " +
+            "a completion naming generation " + mosaic::Hex(prev_gen) + " for slot " +
                 std::to_string(idx) + " was not rejected; the slot now holds " +
                 mosaic::Hex(h->S(idx).gen));
     Require(h->S(idx).done_mask == mask, "wrap-generation",
@@ -1630,9 +1659,10 @@ void PhaseFullDepth(Harness* h, uint32_t retire_target) {
   const uint32_t entries = h->Entries();
 
   std::deque<uint32_t> order;
+  const uint32_t tag_w = h->shadow().tag_width();
   for (uint32_t i = 0; i < entries; i++) {
     h->Alloc(/*tag=*/1000 + i, /*num_uops=*/1 + (i % h->MaxUops()));
-    order.push_back(1000 + i);
+    order.push_back(Mask(1000 + i, tag_w));
   }
   Require(h->ObservedOccupied() == entries, "full-depth",
           "the ROB is not full: " + std::to_string(h->ObservedOccupied()) + " of " +
@@ -1692,7 +1722,7 @@ void PhaseFullDepth(Harness* h, uint32_t retire_target) {
       // Refill, so the ROB stays at full occupancy and the allocation pointer
       // keeps wrapping while the phase runs.
       if (h->ObservedOccupied() < entries) {
-        const uint32_t tag = 2000 + retired;
+        const uint32_t tag = Mask(2000 + retired, tag_w);
         h->Alloc(tag, /*num_uops=*/1 + (retired % h->MaxUops()));
         order.push_back(tag);
       }
@@ -1829,7 +1859,8 @@ int main(int argc, char** argv) {
     const uint32_t entries = dut.o_rob_entries_o;
     const uint32_t index_w = dut.o_index_w_o;
     const uint32_t max_uops = dut.o_max_uops_o;
-    const uint32_t id_w = dut.o_id_w_o;
+    const uint32_t tag_w = dut.o_tag_w_o;
+    const uint32_t gen_w = dut.o_gen_w_o;
     const uint32_t pc_w = dut.o_pc_w_o;
     const uint32_t num_uops_w = dut.o_num_uops_w_o;
 
@@ -1841,13 +1872,25 @@ int main(int argc, char** argv) {
             "the shadow models the never-truncates elaboration only: the DUT "
             "reports " + std::to_string(entries) + " entries in a " +
                 std::to_string(index_w) + "-bit index space");
-    Require(id_w == 2 * index_w, "geometry",
-            "the identity width is not twice the slot index width: id_w = " +
-                std::to_string(id_w) + ", index_w = " + std::to_string(index_w));
-    Require(id_w <= 32 && num_uops_w <= 32 && pc_w <= 64, "geometry",
+    // The generation is the frozen contract's clog2(rob_entries)+1, i.e. exactly
+    // one bit wider than the slot index. Asserting the *relationship* rather
+    // than the number 7 keeps this honest under a geometry change while still
+    // failing loudly if the ROB ever stores a generation of a width the contract
+    // does not name -- which is the defect this case missed.
+    Require(gen_w == index_w + 1, "geometry",
+            "the ROB generation must be the contract's clog2(rob_entries)+1, one "
+            "bit wider than the slot index: gen_w = " + std::to_string(gen_w) +
+                ", index_w = " + std::to_string(index_w));
+    // The tag names at most ROB_ENTRIES live macros, so it needs at least the
+    // slot index's width; it is the PRF tag and may be wider.
+    Require(tag_w >= index_w, "geometry",
+            "the tag must be able to name every live macro, but tag_w = " +
+                std::to_string(tag_w) + " is narrower than index_w = " +
+                std::to_string(index_w));
+    Require(tag_w <= 32 && gen_w <= 32 && num_uops_w <= 32 && pc_w <= 64, "geometry",
             "a driver-facing field is wider than the testbench interface");
 
-    ShadowRob shadow(entries, max_uops, index_w, id_w, pc_w, num_uops_w);
+    ShadowRob shadow(entries, max_uops, index_w, tag_w, gen_w, pc_w, num_uops_w);
     Harness harness(&dut, &clk, options.max_cycles, &shadow);
 
     // Phase order is a deliberate choice. Each phase resets first and owns one

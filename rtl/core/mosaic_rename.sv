@@ -799,8 +799,18 @@ module mosaic_rename (
   // `alloc_new_valid` already implies a non-zero alloc_rd, so a source address of
   // x0 can never match: the bypass cannot fire for a register with no physical
   // mapping.
+`ifdef MOSAIC_RENAME_MUTANT_NO_BYPASS
+  // NEGATIVE CONTROL 11 (I-014): no same-cycle bypass. Lane 1 reads the map as of
+  // the start of the cycle, so a source naming lane 0's destination resolves to
+  // the mapping lane 0 is superseding -- a tag whose producer has been renamed
+  // away and which nobody will ever write. The consumer then waits forever on a
+  // result that cannot arrive.
+  assign rs3_hits_lane0 = 1'b0;
+  assign rs4_hits_lane0 = 1'b0;
+`else
   assign rs3_hits_lane0 = alloc_new_valid && (rs3_addr == alloc_rd);
   assign rs4_hits_lane0 = alloc_new_valid && (rs4_addr == alloc_rd);
+`endif
 
   always_comb begin
     // Lane 0's sources, and readiness = "the producer has written its value
@@ -938,24 +948,60 @@ module mosaic_rename (
 
   logic commit2_supersedes;
 
-  // Compared against `cmt_map_q`, not `cmt_map`: lane 1 must see the map as
-  // lane 0 left it. Against the pre-edge map the "supersedes" test would miss
-  // the release of lane 0's tag whenever lane 0 and lane 1 write the same rd,
-  // leaking one tag per such cycle -- an exhaustion that surfaces dozens of
-  // instructions later with nothing pointing back here.
+  // The committed map **as lane 0 leaves it**: the map lane 1 must compare
+  // against, and the map its release of the superseded tag is read from.
+  //
+  // It is a separate signal rather than a read of `cmt_map_q`, and that is not
+  // style. `cmt_map_q` is written by lane 1 *later in the same combinational
+  // block*, and a continuous assign reading a variable assigned in an
+  // always_comb sees the settled (post-block) value -- measured, not assumed:
+  // a minimal always_comb that sets a bit and a continuous assign that reads it
+  // observes the bit set. So `cmt_map_q[commit2_rd]` is, whenever lane 1 is
+  // accepted, exactly `commit2_tag`: the "supersedes" test would compare
+  // commit2_tag with itself, be false on every cycle, and lane 1 would release
+  // *nothing* -- one physical tag leaked per two-wide retirement, visible only
+  // dozens of instructions later as spurious exhaustion. Reading the
+  // intermediate map explicitly is what makes "lane 1 sees the map as lane 0
+  // left it" true instead of merely intended.
+  logic [REN_TAG_W-1:0] cmt_map_l0 [REN_ARCH_REGS];
+  logic [REN_GEN_W-1:0] cmt_gen_l0 [REN_ARCH_REGS];
+
+  always_comb begin
+    for (int unsigned a = 0; a < REN_ARCH_REGS; a++) begin
+      cmt_map_l0[a] = cmt_map[a];
+      cmt_gen_l0[a] = cmt_gen[a];
+    end
+    if (commit_accepted) begin
+      cmt_map_l0[commit_rd] = commit_tag;
+      cmt_gen_l0[commit_rd] = commit_gen;
+    end
+  end
+
+  // Against the map as lane 0 left it, not against the pre-edge map: the mapping
+  // lane 1 supersedes is the one lane 0 just installed whenever both lanes write
+  // the same rd. Against the pre-edge map both lanes would name one superseded
+  // tag and lane 0's tag would never come back -- the leak the mutant below
+  // injects on purpose.
 `ifdef MOSAIC_RENAME_MUTANT_WAW_COMMIT2_PRE_MAP
-  // NEGATIVE CONTROL 10 (I-014): the second commit lane compares against the
-  // pre-lane-0 committed map. For a WAW pair both lanes then release the *same*
-  // superseded mapping -- lane 0's old tag, twice, which a set absorbs -- and the
-  // mapping lane 1 actually superseded (lane 0's new tag) is never released at
-  // all: the tag leaks and the free list disagrees with the ROB.
+  // NEGATIVE CONTROL 10 (I-014): the second commit lane works from the
+  // *pre-lane-0* committed map -- both the comparison and the tag it releases.
+  // For a WAW pair both lanes then release the same superseded mapping (lane 0's
+  // old tag, twice, which a set absorbs) and the mapping lane 1 actually
+  // superseded (lane 0's new tag) is never released at all: the tag leaks and the
+  // free list disagrees with the ROB.
+  //
+  // Both halves are needed for the control to be a control. Changing only the
+  // comparison leaves the release still aimed at `cmt_map_l0`, which for a WAW
+  // pair is exactly the right tag, so the mutant would be *behaviourally
+  // identical* to the shipping build and would prove nothing -- the trap this
+  // project has hit before.
   assign commit2_supersedes = commit2_accepted &&
                               ((cmt_map[commit2_rd] != commit2_tag) ||
                                (cmt_gen[commit2_rd] != commit2_gen));
 `else
   assign commit2_supersedes = commit2_accepted &&
-                              ((cmt_map_q[commit2_rd] != commit2_tag) ||
-                               (cmt_gen_q[commit2_rd] != commit2_gen));
+                              ((cmt_map_l0[commit2_rd] != commit2_tag) ||
+                               (cmt_gen_l0[commit2_rd] != commit2_gen));
 `endif
 
   // --------------------------------------------------------------- recovery
@@ -1036,9 +1082,14 @@ module mosaic_rename (
       free_q[cmt_map[commit_rd]] = 1'b1;
     end
     // Lane 1 releases what *lane 1* superseded, which in the same-rd case is
-    // lane 0's tag -- hence `cmt_map_q`, not `cmt_map`.
+    // lane 0's tag -- hence `cmt_map_l0`, the map as lane 0 left it, and not
+    // `cmt_map_q`, which by then also carries lane 1's own install.
     if (commit2_supersedes) begin
-      free_q[cmt_map_q[commit2_rd]] = 1'b1;
+`ifdef MOSAIC_RENAME_MUTANT_WAW_COMMIT2_PRE_MAP
+      free_q[cmt_map[commit2_rd]] = 1'b1;
+`else
+      free_q[cmt_map_l0[commit2_rd]] = 1'b1;
+`endif
     end
 
     // 3. The squash undoes every allocation made after the checkpoint, oldest

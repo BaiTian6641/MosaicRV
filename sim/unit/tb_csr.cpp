@@ -1024,11 +1024,6 @@ void WriteReg(Harness* h, int role, uint64_t value) {
   h->Cycle(s);
 }
 
-// The mstatus fields the trap/MRET rules move, read through the port.
-uint64_t MstatusFields(Harness* h) {
-  return h->Read(kTable.Addr(kMstatus)) & (kMstatusMie | kMstatusMpie | kMstatusMpp);
-}
-
 void RequireMstatus(Harness* h, const std::string& what, bool mie, bool mpie) {
   const uint64_t value = h->Read(kTable.Addr(kMstatus));
   Require(Bit(value, 3) == (mie ? 1u : 0u), "trap-mret",

@@ -160,10 +160,12 @@
 // the kill inputs only. It does **not** consult the consumer's `c_ready`, so there
 // is no combinational path from the writeback arbiter back into the execution
 // units -- the same trade mosaic_fifo documents, and the reason a same-cycle pop
-// does not free a slot for a same-cycle push. A refused push is offered again next
-// cycle; nothing is lost by waiting one cycle. `c_valid` and `c_pay` are likewise
-// functions of registers (plus the kill inputs), so the queue is not a
-// combinational path from its producers to its consumer either.
+// does not free a slot for a same-cycle push. A kill is the same case for the
+// same reason: it frees space at the edge, not for the cycle that drops it. A
+// refused push is offered again next cycle; nothing is lost by waiting one cycle.
+// `c_valid` and `c_pay` are likewise functions of registers (plus the kill
+// inputs), so the queue is not a combinational path from its producers to its
+// consumer either.
 //
 // ---------------------------------------------------------- conservation
 //
@@ -375,7 +377,14 @@ module mosaic_result_fifo #(
   logic head_hit;     // the oldest entry is killed this cycle
   logic pop_now;      // a delivery actually happens this cycle
 
+`ifdef MOSAIC_RESULT_FIFO_MUTANT_KILL_DELIVERS
+  // NEGATIVE CONTROL: the read side ignores the kill entirely, so a killed entry
+  // is presented to the consumer -- and consumed, if it is ready -- instead of
+  // being dropped.
+  assign head_hit = 1'b0;
+`else
   assign head_hit = (n != {CNT_W{1'b0}}) && KillHits(ent[0]);
+`endif
 
   // A killed head is masked combinationally, so it can never be delivered even if
   // the consumer is ready: the kill wins over the pop, and the two can therefore

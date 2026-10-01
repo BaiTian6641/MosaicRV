@@ -1019,3 +1019,136 @@ Stage 0 remains 11 of 239 work packages. Stage 1 has eight packages in flight or
 repair; Stage 2's leaf modules (lease allocator, per-cluster result FIFO, remote link) are
 being built in parallel because none of them has a consumer yet, and their interfaces are
 frozen by the integrator rather than discovered during integration.
+
+---
+
+## 2026-10-01 — integration pass: the packet contract, three generated-file defects, and two tool defects
+
+Everything below was found by *running* things, and each item names what it broke.
+
+### The core's internal packets now exist and are frozen
+
+`rtl/core/mosaic_uop_pkg.sv` — `uop_id_t` (an alias of I-002's `macro_id_t`, not a
+second struct), `uop_meta_t` (class, PC, branch/memory/muldiv fields), `src_operand_t`,
+`dst_operand_t`, `exc_payload_t`, `wb_event_t`, `lsu_req_t`/`lsu_rsp_t`, and the core's
+memory port `mem_req_t`/`mem_rsp_t` with `size_bytes`/`expected_wstrb`/`uop_id_eq`.
+Frozen because eight modules must agree about the same instruction, and a field two
+modules each define for themselves is a field that will disagree silently. The issue
+queue is being extended to carry `uop_meta_t` in place of its 4-bit `alu_op`; the
+identity of that change is the integrator's, its implementation belongs to the lane that
+owns the file.
+
+### The identity width was written down twice; the second copy was in a delivered package
+
+`config/contracts/interfaces.json` (I-002, frozen) says `rob_gen = clog2(rob_entries)+1
+= 7`, and `build/p0/rtl/mosaic_id_pkg.svh` carries exactly that. `mosaic_rob.sv` declared
+`GEN_W = 2 * ROB_INDEX_W = 12`. `mosaic_iq.sv`, `mosaic_retire.sv` and `mosaic_uop_pkg`
+all use 7. So a completion that round-trips through the issue queue would carry a 7-bit
+generation into a 12-bit comparison: it would start mismatching after 128 allocations,
+and the symptom would be a *late completion accepted into a live slot* — the ABA failure
+the generation exists to prevent.
+
+**The reason the case could not catch it is worth more than the fix**: the testbench
+wrapper re-derived the same wrong expression (`ID_W = 2 * INDEX_W  // both TAG_W and
+GEN_W`). A testbench that reproduces the RTL's assumption instead of the contract's
+cannot see the disagreement; it converts the contract into a comment. The wrapper now
+takes both widths from the identity package.
+
+### Three generated-file defects, all of which broke other lanes
+
+1. **A comment beginning with `Verilator` is a metacomment.** The generated identity
+   package carried `// Verilator dedupes packages and tolerates it, ...`, and Verilator
+   parsed it as a pragma: `%Error-BADVLTPRAGMA` in **every** file that included the
+   header — four lanes at once. Fixed in the generator, with the rule written next to the
+   emission so the next edit cannot reintroduce it.
+2. **The identity package had no include guard** (the config package got one earlier;
+   this one did not). Verilator dedupes packages silently; slang reports a duplicate
+   definition, so `make lint-slang` failed repo-wide. Fixed by the generator's owner
+   after the escalation, with the evidence.
+3. **A generated file that is not warning-clean is a defect in every consumer.** The
+   config package had no `lint_off UNUSEDPARAM`, so each module that included it saw ~40
+   "parameter not used" warnings against itself, and five modules had grown a local
+   wrapper to compensate. The pragma now lives in the generated file where it belongs.
+
+The rule recorded for the next generated file: after every regeneration, run **both**
+linters over the **whole tree** and look at whether the *set of failures changed*. "My
+module is clean" is not the claim that needs checking when the artifact is compiled into
+everything.
+
+### Two tool defects found while verifying
+
+- **The generated `filelist.f` was empty.** `_collect_filelist()` joined each group's
+  repo-relative path onto `RTL_ROOT`, producing `rtl/rtl/core/filelist.f` for every
+  group; every group was skipped, and the manifest reported "rtl sources: 0" while the
+  design had twenty files and the per-directory lists looked populated. A manifest that
+  reports zero sources is worse than none, because tools trust it. The list is now
+  derived from the tree (packages first, then modules), and the hand-maintained
+  per-directory lists — stale by four modules, and a second copy of a fact the tree
+  already states — are deleted. The manifest now reports 25 sources.
+- **A mutant build could reuse the shipping binary.** When only a `-D` changes, the
+  source timestamps do not, and Verilator's generated makefile can decide the old objects
+  are up to date. One lane observed a "clean" rebuild still exhibiting the mutant.
+  `tools/run_unit.py` now fingerprints the full build command into the case build
+  directory and wipes that directory whenever the command differs, which makes a mutant
+  run impossible to confuse with the shipping build. Verified with a controlled
+  three-build experiment: same command 0.1 s (incremental, correct), changed define 2.1 s
+  (full rebuild, correct).
+- **`make test` ran `lint-cpp` before `unit`**, and `lint-cpp` needs the generated
+  headers that only the unit builds produce, so a clean tree failed the gate with "cannot
+  find Vmosaic_muldiv_tb.h" — a failure about ordering that reads like a failure about
+  code. Reordered.
+
+### Decisions recorded, with the reason that decides them
+
+- **One owner for speculative state: `mosaic_rename`.** `mosaic_recovery.sv` currently
+  carries its own spec/committed maps, free list, generation table and journal — a second
+  copy of the same architectural state, which is a defect in itself: a commit or a squash
+  that updates one and not the other has no single place where the invariant is true.
+  Recovery keeps the checkpoint controller, the oldest-redirect-wins arbiter, the epoch
+  and the credit reservation table, and drives rename's `ckpt_valid`/`squash` ports. The
+  lane has been told, and the refactor is sequenced so its current repair work (the same
+  undo/checkpoint arithmetic) is not wasted.
+- **`mosaic_retire` must stop holding its own CSRs.** It keeps `mcycle`, `minstret`,
+  `mscratch` and second copies of addresses `0xB00`/`0xB02`/`0x340`, which `mosaic_csr`
+  now owns for the whole machine. Reported by the CSR lane from its own acceptance list;
+  the cutover is the I-017/I-019 boundary and is sequenced after the retire repair.
+- **p0 ties `irq_ext_i` to zero.** `config/csr/mode_m.json` declares `mip`/`mie` bits 7
+  and 3 writable and bit 11 (MEIP/MEIE) WPRI, i.e. read-only zero. That is legal
+  precisely because no external interrupt source exists in the p0 memory map — a bit must
+  be writable only if its interrupt can become pending — so the config is left alone and
+  the top drives the external line low. When a PLIC arrives (p1) the CSR table must
+  widen, and that is a config change with its own evidence, not an RTL edit.
+- **The first integrated core services ALU, branch and MUL/DIV only.** Load/store and
+  system instructions are refused **before** rename allocates (so a refused group leaks
+  nothing) and counted, rather than being dispatched into units that cannot complete
+  them. The memory path is I-033..I-038 and the CSR/trap wiring is I-019/I-020; both keep
+  their own cases. This is a staged integration, not a stub: the refusal is observable
+  and tested.
+- **Redirect arbitration starts in the top.** A conservative oldest-wins arbiter drives
+  the fetch redirect, the ROB flush, the issue-queue kills and rename's checkpoint,
+  because recovery cannot be used as the controller until its duplicated state is
+  removed. The arbiter is a real tested component, and I-018's controller replaces it.
+
+### Verified in this pass (clean build, official runner)
+
+| case | task | evidence |
+|---|---|---|
+| `csr.precise_trap_mret` | I-019 | 7 mutants, each exit 1 with a 0-to-1 delta; the CSR table is generated from `config/csr/mode_m.json` into both the RTL and the testbench's C header |
+| `interrupt.boundary_replay` | I-020 | 17 238 per-cycle shadow comparisons over 5 784 cycles; 7 mutants, each exit 1 with a distinct named first failure, and **the elaborated model hash differs from the clean build for every mutant** — non-vacuity proven rather than asserted |
+| `prf.read_bank_collision` | I-015 | 5 263 shadow comparisons; 6 mutants, each exit 1 with a delta; gaps stated plainly (4 banks is a power of two, so modulo-versus-bit-slice is indistinguishable at p0) |
+| `muldiv.kill_and_edges` | I-012 | case PASS; report pending |
+| `iq.wakeup_insert_select` | I-022 | budget confirmed real, refused-insert directed phase added, live-port reads zeroed |
+
+### A mistake of my own, recorded because the file it damaged is this one
+
+I appended the entry above with a tool that **writes** rather than appends, and truncated
+this log from 59 539 bytes to 8 639. Recovered from the git index (the entry that was
+lost was the one I had just written, and the text was still in hand), then re-appended
+with an append. The lesson is the project's own: a tool used for the wrong operation
+destroys data without failing, so the recovery path — and the fact that the log is
+version-controlled — is what limits the damage. Nothing else was lost.
+
+Stage 0 remains 11 of 239 work packages. In flight at the time of writing: the retire and
+recovery repairs, two-wide rename, the MUL/DIV report, the issue-queue meta extension and
+its permanent mutant, the lease allocator, the result FIFO, the remote link, the ROB
+identity-width correction, the LSU testbench, and the first integrated core.

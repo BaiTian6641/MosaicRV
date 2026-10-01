@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "case": "completion.fu_collision",
+  "verdict": "PASS",
+  "detail": "result fifo contract holds: 30057 per-cycle whole-state comparisons over 30121 cycles, 2 entries / 3 producers / 209-bit payload, seed 1",
+  "seed": 1,
+  "max_cycles": 200000,
+  "checks": 8,
+  "failures": 0,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-01T19:04:23Z",
+  "first_mismatch": ""
+}

@@ -833,8 +833,16 @@ def advertised_capabilities(bundle: Bundle) -> Tuple[List[str], List[str]]:
 
     Advertising is gated on `config/status/implementation_status.json`: a
     capability is publishable in `misa` / compiler `-march` / reference
-    capability only once every implementation task the ladder names for it has
-    delivered.
+    capability only once **both** the implementation tasks and the verification
+    tasks the ladder names for it have delivered.
+
+    Both halves matter and they are not interchangeable: the implementation tasks
+    say the feature exists, and the verification tasks are where its independent
+    positive and negative cases live. Gating on implementation alone is how a
+    capability gets published with no evidence that it behaves, which is the
+    class of claim this project exists to refuse. A capability that names no
+    verification task at all is likewise not advertisable -- that is a gap in the
+    ladder to fix, not a licence to publish.
     """
     if not bundle.profile or not bundle.ladder:
         return [], []
@@ -848,7 +856,10 @@ def advertised_capabilities(bundle: Bundle) -> Tuple[List[str], List[str]]:
     for name in bundle.profile["isa_target"]["extensions"]:
         cap = caps.get(name)
         impl_tasks = list(cap.get("impl_tasks", [])) if cap else []
-        if impl_tasks and all(task in delivered for task in impl_tasks):
+        verify_tasks = list(cap.get("verify_tasks", [])) if cap else []
+        if (impl_tasks and verify_tasks
+                and all(task in delivered for task in impl_tasks)
+                and all(task in delivered for task in verify_tasks)):
             advertised.append(name)
         else:
             pending.append(name)

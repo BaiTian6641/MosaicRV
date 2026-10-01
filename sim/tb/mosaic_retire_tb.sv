@@ -92,7 +92,13 @@ localparam int unsigned TB_RET_SIZE_W = 3;
 // a $clog2 of one is zero bits, and a zero-bit part select is not a thing.
 localparam int unsigned TB_ROB_CNT_W  = $clog2(TB_RET_MAXU + 1);
 localparam int unsigned TB_ROB_UOP_W  = (TB_RET_MAXU <= 1) ? 1 : $clog2(TB_RET_MAXU);
-localparam int unsigned TB_ROB_ID_W   = 2 * TB_RET_RB_W;   // both TAG_W and GEN_W
+// The ROB's two identity fields are the generated *contract* widths, not a
+// re-derivation: TAG_W is the physical-register tag a destination occupies,
+// GEN_W is the per-slot generation (its modulus must exceed the entry count).
+// mosaic_rob.sv takes both from mosaic_id_pkg, so this wrapper names the same
+// package rather than assuming they are each `2 * ROB_INDEX_W`.
+localparam int unsigned TB_ROB_TAG_W  = mosaic_id_pkg::MOSAIC_ID_W_PRF_TAG;
+localparam int unsigned TB_ROB_GEN_W  = mosaic_id_pkg::MOSAIC_ID_W_ROB_GEN;
 localparam int unsigned TB_ROB_OCC_W  = $clog2(TB_RET_ROB + 1);
 
 // ----------------------------------------------- widths of the flat vectors
@@ -245,7 +251,8 @@ module mosaic_retire_tb (
     output logic [31:0] o_retire_width_o,
     output logic [31:0] o_rob_entries_o,
     output logic [31:0] o_rob_index_w_o,
-    output logic [31:0] o_rob_id_w_o,
+    output logic [31:0] o_rob_tag_w_o,
+    output logic [31:0] o_rob_gen_w_o,
     output logic [31:0] o_max_uops_o,
     output logic [31:0] o_prf_entries_o,
     output logic [31:0] o_tag_w_o,
@@ -256,22 +263,22 @@ module mosaic_retire_tb (
   // the two against each other.
   // ------------------------------------------------------------------ the ROB
   logic [TB_ROB_CNT_W-1:0]  rob_alloc_num_uops;
-  logic [TB_ROB_ID_W-1:0]   rob_alloc_tag;
+  logic [TB_ROB_TAG_W-1:0]  rob_alloc_tag;
   logic [TB_RET_RB_W-1:0]   rob_close_index;
-  logic [TB_ROB_ID_W-1:0]   rob_close_gen;
+  logic [TB_ROB_GEN_W-1:0]  rob_close_gen;
   logic [TB_RET_RB_W-1:0]   rob_cmp_index;
-  logic [TB_ROB_ID_W-1:0]   rob_cmp_gen;
+  logic [TB_ROB_GEN_W-1:0]  rob_cmp_gen;
   logic [TB_ROB_UOP_W-1:0]  rob_cmp_uop;
   logic [TB_RET_RB_W-1:0]   rob_obs_index;
   logic [TB_RET_MAXU-1:0]   rob_head_done_mask;
   logic [TB_RET_MAXU-1:0]   rob_obs_done_mask;
   logic [TB_RET_MAXU-1:0]   rob_head1_done_mask;
   assign rob_alloc_num_uops = alloc_num_uops_i[TB_ROB_CNT_W-1:0];
-  assign rob_alloc_tag      = alloc_tag_i[TB_ROB_ID_W-1:0];
+  assign rob_alloc_tag      = alloc_tag_i[TB_ROB_TAG_W-1:0];
   assign rob_close_index    = close_index_i[TB_RET_RB_W-1:0];
-  assign rob_close_gen      = close_gen_i[TB_ROB_ID_W-1:0];
+  assign rob_close_gen      = close_gen_i[TB_ROB_GEN_W-1:0];
   assign rob_cmp_index      = cmp_index_i[TB_RET_RB_W-1:0];
-  assign rob_cmp_gen        = cmp_gen_i[TB_ROB_ID_W-1:0];
+  assign rob_cmp_gen        = cmp_gen_i[TB_ROB_GEN_W-1:0];
   assign rob_cmp_uop        = cmp_uop_i[TB_ROB_UOP_W-1:0];
   assign rob_obs_index      = obs_index_i[TB_RET_RB_W-1:0];
   // The ROB's flush is the OR of the two driver recovery flushes
@@ -625,7 +632,7 @@ module mosaic_retire_tb (
   // Every ROB output the driver does not compare is still connected, to a
   // declared net. A dangling output is a `PINMISSING` warning, and this build
   // treats warnings as errors.
-  logic [TB_ROB_ID_W-1:0]  rob_alloc_gen_n;
+  logic [TB_ROB_GEN_W-1:0]  rob_alloc_gen_n;
   logic [TB_RET_RB_W-1:0]  rob_alloc_index_n;
   logic                 rob_alloc_refused;
   logic                 rob_close_ok;
@@ -640,8 +647,8 @@ module mosaic_retire_tb (
   logic                 rob_head1_complete;
   logic                 rob_head1_closed;
   logic                 rob_obs_valid;
-  logic [TB_ROB_ID_W-1:0]  rob_obs_gen_n;
-  logic [TB_ROB_ID_W-1:0]  rob_obs_tag_n;
+  logic [TB_ROB_GEN_W-1:0]  rob_obs_gen_n;
+  logic [TB_ROB_TAG_W-1:0]  rob_obs_tag_n;
   logic [TB_RET_XLEN-1:0]  rob_obs_pc;
   logic                 rob_obs_exc;
   logic                 rob_obs_closed;
@@ -657,11 +664,11 @@ module mosaic_retire_tb (
   // and a silent truncation lets a driver compare a field against a value
   // that was never produced.
   logic [TB_RET_RB_W-1:0]  rob_head_index_n;
-  logic [TB_ROB_ID_W-1:0]   rob_head_gen_n;
-  logic [TB_ROB_ID_W-1:0]   rob_head_tag_n;
+  logic [TB_ROB_GEN_W-1:0]  rob_head_gen_n;
+  logic [TB_ROB_TAG_W-1:0]  rob_head_tag_n;
   logic [TB_RET_RB_W-1:0]  rob_head1_index_n;
-  logic [TB_ROB_ID_W-1:0]   rob_head1_gen_n;
-  logic [TB_ROB_ID_W-1:0]   rob_head1_tag_n;
+  logic [TB_ROB_GEN_W-1:0]  rob_head1_gen_n;
+  logic [TB_ROB_TAG_W-1:0]  rob_head1_tag_n;
   logic [TB_ROB_OCC_W-1:0]  rob_occupied_n;
   logic [TB_ROB_CNT_W-1:0]  rob_head_numuops_n;
   logic [TB_ROB_CNT_W-1:0]  rob_head_donecnt_n;
@@ -672,7 +679,7 @@ module mosaic_retire_tb (
 
   assign rob_head_index_o  = {{(32-TB_RET_RB_W) {1'b0}}, rob_head_index_n};
   assign rob_alloc_index_o = {{(32-TB_RET_RB_W) {1'b0}}, rob_alloc_index_n};
-  assign rob_alloc_gen_o   = {{(32-TB_ROB_ID_W) {1'b0}}, rob_alloc_gen_n};
+  assign rob_alloc_gen_o   = {{(32-TB_ROB_GEN_W) {1'b0}}, rob_alloc_gen_n};
   // The completion and head-state reports the driver cross-checks: whether the
   // buffer accepted this cycle's completion (and why not), and whether each
   // head is complete and closed. Without them a completion the buffer files
@@ -683,17 +690,17 @@ module mosaic_retire_tb (
   assign rob_head_complete_o = rob_head_complete;
   assign rob_head1_complete_o = rob_head1_complete;
   assign rob_head1_closed_o  = rob_head1_closed;
-  assign rob_head_tag_o    = {{(32-TB_ROB_ID_W) {1'b0}}, rob_head_tag_n};
-  assign rob_head_gen_o    = {{(32-TB_ROB_ID_W) {1'b0}}, rob_head_gen_n};
-  assign rob_head1_gen_o   = {{(32-TB_ROB_ID_W) {1'b0}}, rob_head1_gen_n};
-  assign rob_head1_tag_o   = {{(32-TB_ROB_ID_W) {1'b0}}, rob_head1_tag_n};
+  assign rob_head_tag_o    = {{(32-TB_ROB_TAG_W) {1'b0}}, rob_head_tag_n};
+  assign rob_head_gen_o    = {{(32-TB_ROB_GEN_W) {1'b0}}, rob_head_gen_n};
+  assign rob_head1_gen_o   = {{(32-TB_ROB_GEN_W) {1'b0}}, rob_head1_gen_n};
+  assign rob_head1_tag_o   = {{(32-TB_ROB_TAG_W) {1'b0}}, rob_head1_tag_n};
   assign rob_occupied_o    = {{(32-TB_ROB_OCC_W) {1'b0}}, rob_occupied_n};
   // The slot observation the driver reconciles against: valid, generation,
   // tag, child count, done mask, exception, and closed -- everything the
   // shadow tracks per entry, read straight from the buffer's own arrays.
   assign rob_obs_valid_o     = rob_obs_valid;
-  assign rob_obs_gen_o       = {{(32-TB_ROB_ID_W) {1'b0}}, rob_obs_gen_n};
-  assign rob_obs_tag_o       = {{(32-TB_ROB_ID_W) {1'b0}}, rob_obs_tag_n};
+  assign rob_obs_gen_o       = {{(32-TB_ROB_GEN_W) {1'b0}}, rob_obs_gen_n};
+  assign rob_obs_tag_o       = {{(32-TB_ROB_TAG_W) {1'b0}}, rob_obs_tag_n};
   assign rob_obs_num_uops_o  = {{(32-TB_ROB_CNT_W) {1'b0}}, rob_obs_numuops_n};
   assign rob_obs_done_mask_o = {{(32-TB_RET_MAXU) {1'b0}}, rob_obs_done_mask};
   assign rob_obs_exc_o       = rob_obs_exc;
@@ -1030,7 +1037,8 @@ module mosaic_retire_tb (
   // do come out in one cycle, which a wrong width cannot fake.
   assign o_rob_entries_o  = 32'(u_rob.ROB_ENTRIES);
   assign o_rob_index_w_o  = 32'(u_rob.ROB_INDEX_W);
-  assign o_rob_id_w_o     = 32'(u_rob.GEN_W);
+  assign o_rob_tag_w_o    = 32'(u_rob.TAG_W);
+  assign o_rob_gen_w_o    = 32'(u_rob.GEN_W);
   assign o_max_uops_o     = 32'(u_rob.MAX_UOPS);
   assign o_retire_width_o = 32'(TB_RET_WIDTH);
   assign o_prf_entries_o  = 32'(TB_RET_PRF);

@@ -33,11 +33,14 @@
 //                   offering producer whose result matches is absorbed and
 //                   counted, a non-matching producer is refused normally and
 //                   taken once there is room, and no killed result is delivered.
-//   5. valid-pulse  the card's Fail criterion, first half: a result is presented
+//   5. pop-push     a full queue's pop does not admit a same-cycle push, and the
+//                   refused result is taken the cycle after: the documented
+//                   consequence of `*_ready` never consulting `c_ready`.
+//   6. valid-pulse  the card's Fail criterion, first half: a result is presented
 //                   and *held* across a full queue for several cycles and is
 //                   accepted, unchanged, once there is room. The second half --
 //                   multiply and load returning together -- is phase 2.
-//   6. random       random producer timing, random consumer back-pressure and
+//   7. random       random producer timing, random consumer back-pressure and
 //                   random kills, shadow-compared every cycle, with the coverage
 //                   counters asserted at the end so a campaign that did nothing
 //                   cannot pass.
@@ -1016,6 +1019,67 @@ void PhaseKill(Harness* h, mosaic::Reporter* rep, const Geom& g) {
                    "killed result delivered");
 }
 
+// The other half of the back-pressure contract: a same-cycle pop does not free a
+// slot for a same-cycle push, because `*_ready` never consults `c_ready`. The
+// shadow encodes that rule, so this phase makes it a named, directed assertion
+// rather than something only the soak would catch.
+void PhaseSameCyclePopPush(Harness* h, mosaic::Reporter* rep, const Geom& g) {
+  h->Reset(4);
+  h->Phase("pop-push-same-cycle");
+  Entries ent(g);
+
+  std::vector<Entry> expected;
+  std::vector<Entry> delivered;
+  for (uint32_t j = 0; j < g.entries; j++) {
+    Stim s = Idle(g);
+    s.p_valid[0] = true;
+    s.p_pay[0] = ent.Make(j % 2 == 1);
+    h->Cycle(s);
+    Require(h->prev().p_ready[0], "pop-push-same-cycle", "a fill push was refused");
+    expected.push_back(s.p_pay[0]);
+  }
+
+  const Entry next = ent.Make(true);
+  Stim s = Idle(g);
+  s.c_ready = true;
+  s.p_valid[0] = true;
+  s.p_pay[0] = next;
+  h->Cycle(s);
+  Require(h->prev().c_valid, "pop-push-same-cycle", "the consumer was ready but nothing was "
+                                                    "presented by a non-empty queue");
+  Require(!h->prev().p_ready[0], "pop-push-same-cycle",
+          "a push was accepted in the same cycle the consumer emptied a slot: *_ready depends "
+          "on the consumer, which the contract forbids (the same rule that keeps the writeback "
+          "arbiter off the execution units' critical path)");
+  Require(h->count() == g.entries - 1, "pop-push-same-cycle",
+          "expected the pop only, count " + Dec(h->count()));
+  delivered.push_back(h->prev().c_pay);
+  expected.push_back(next);
+
+  // The same stimulus one cycle later is accepted (and, because the consumer is
+  // still ready, the entry behind the first is delivered in the same cycle the
+  // push now finds the pre-existing free slot).
+  h->Cycle(s);
+  Require(h->prev().p_ready[0], "pop-push-same-cycle",
+          "the push refused while the pop happened was not accepted the cycle after; the "
+          "producer would be stuck holding a result the queue has room for");
+  if (h->prev().c_valid && s.c_ready) delivered.push_back(h->prev().c_pay);
+
+  while (h->count() != 0) {
+    Stim d = Idle(g);
+    d.c_ready = true;
+    h->Cycle(d);
+    Require(h->prev().c_valid, "pop-push-same-cycle", "a drain presented nothing");
+    delivered.push_back(h->prev().c_pay);
+  }
+  Require(delivered == expected, "pop-push-same-cycle",
+          "delivery order wrong: expected " + DescribeSeq(expected) + ", got " +
+              DescribeSeq(delivered));
+
+  rep->Check(true, "pop-push-same-cycle: a full queue's pop did not admit a same-cycle push, "
+                   "and the refused result was taken the next cycle");
+}
+
 // The card's Fail criterion, first half: a producer may have to hold its result.
 void PhaseValidPulse(Harness* h, mosaic::Reporter* rep, const Geom& g) {
   h->Reset(4);
@@ -1271,10 +1335,13 @@ int main(int argc, char** argv) {
     PhaseKill(&harness, &reporter, g);
 
     fresh();
+    PhaseSameCyclePopPush(&harness, &reporter, g);
+
+    fresh();
     PhaseValidPulse(&harness, &reporter, g);
 
     fresh();
-    PhaseRandom(&harness, &reporter, g, options.seed, 6000);
+    PhaseRandom(&harness, &reporter, g, options.seed, 30000);
 
     detail = "result fifo contract holds: " + std::to_string(harness.comparisons()) +
              " per-cycle whole-state comparisons over " + std::to_string(harness.cycles()) +

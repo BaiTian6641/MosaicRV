@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 
@@ -37,15 +38,26 @@ from mosaic import config_check  # noqa: E402
 BUILD_ROOT = os.path.join(config_check.REPO_ROOT, "build")
 RTL_ROOT = os.path.join(config_check.REPO_ROOT, "rtl")
 
-# Ordered source lists. Order matters: packages and typedefs must be elaborated
-# before the modules that use them, and Verilator/Yosys both honour file order.
-FILELIST_GROUPS = [
-    ("rtl/common/filelist.f", "common"),
-    ("rtl/core/filelist.f", "core"),
-    ("rtl/fabric/filelist.f", "fabric"),
-    ("rtl/vector/filelist.f", "vector"),
-    ("rtl/soc/filelist.f", "soc"),
-]
+# The ordered source list is derived from the tree, not from a hand-maintained
+# list per directory. The hand-written lists were a second copy of a fact the
+# tree already states, and they had gone stale: `rtl/core/filelist.f` named 9 of
+# the 20 modules in that directory, and the generator's own path join made the
+# generated file empty, so the manifest reported "rtl sources: 0" while the
+# per-directory lists looked populated. One source of truth is the directory.
+#
+# Order matters: a package must precede every module that refers to its types,
+# and a package that `` `include ``s another must follow it. Packages are
+# therefore emitted first, in name order (which satisfies the inclusion order for
+# this tree), then the modules.
+def _is_package_source(path: str) -> bool:
+    try:
+        with open(path, errors="replace") as handle:
+            text = handle.read()
+    except OSError:
+        return False
+    has_package = re.search(r"^\s*package\s+[A-Za-z_]", text, re.MULTILINE) is not None
+    has_module = re.search(r"^\s*module\s+[A-Za-z_]", text, re.MULTILINE) is not None
+    return has_package and not has_module
 
 
 def _tool_version(command) -> str:
@@ -558,17 +570,25 @@ def render_platform_header(bundle: config_check.Bundle) -> str:
 
 
 def _collect_filelist() -> list:
-    sources = []
-    for rel, _label in FILELIST_GROUPS:
-        path = os.path.join(RTL_ROOT, rel)
-        if not os.path.exists(path):
-            continue
-        with open(path) as handle:
-            for raw in handle:
-                line = raw.split("#", 1)[0].strip()
-                if line:
-                    sources.append(os.path.join(RTL_ROOT, os.path.dirname(rel), line))
-    return sources
+    """Every RTL source under rtl/, packages first, then modules.
+
+    Derived from the tree rather than from a hand-maintained list: see the note
+    above `_is_package_source`. The old implementation joined each group's
+    repo-relative path onto RTL_ROOT, so `rtl/core/filelist.f` became
+    `rtl/rtl/core/filelist.f`, every group was skipped, and the generated list
+    was silently empty -- a manifest that reports zero sources while the design
+    has twenty is worse than no manifest, because downstream tools trust it.
+    """
+    found = []
+    for base, dirs, files in os.walk(RTL_ROOT):
+        dirs[:] = [d for d in dirs if d != "build"]
+        for name in files:
+            if name.endswith((".sv", ".v")):
+                found.append(os.path.join(base, name))
+    found.sort()
+    packages = [path for path in found if _is_package_source(path)]
+    modules = [path for path in found if path not in packages]
+    return packages + modules
 
 
 def main() -> int:

@@ -52,11 +52,14 @@
 //
 // The counter is GEN_W bits wide, so the guarantee holds for 2**GEN_W
 // allocations; a completion that has been in flight longer than that, to the
-// same slot, could alias. That window is a deliberate, documented bound rather
-// than an accident -- 4096 allocations of ageing is far beyond anything a real
-// recovery path leaves outstanding -- and it is the same trade every tag-based
-// structure makes. It is derived from the entry count by the rule above, so a
-// larger profile widens it without anyone editing a number.
+// same slot, could alias. GEN_W is fixed by the frozen I-002 contract as
+// clog2(rob_entries) + 1 -- 7 bits for p0, so 128 generations against the
+// 64-entry ROB -- and that is provably enough rather than a margin chosen by
+// taste: a slot is not reallocated until its previous owner has retired or been
+// squashed, so a completion can only be outstanding for a slot recycled at most
+// ROB_ENTRIES allocations ago, and 2**GEN_W > ROB_ENTRIES. It is the same trade
+// every tag-based structure makes, and the generated identity package is its
+// single source.
 //
 // ------------------------------------------------------ the ports, in order
 //
@@ -142,10 +145,19 @@
 `resetall
 
 /* verilator lint_off UNUSEDPARAM */
-// The generated header declares one localparam per configuration knob for the
-// whole project. This module names four of them; the rest belong to other
-// modules and are unused *here* by construction, not by omission.
+/* verilator lint_off UNUSEDSIGNAL */
+// The generated headers declare one localparam per knob for the whole project.
+// This module names the geometry subset and the two identity widths; the rest
+// belong to other modules and are unused *here* by construction, not omission.
+//
+// `mosaic_id_pkg.svh` is the frozen I-002 identity contract -- the same file
+// `mosaic_iq`, `mosaic_retire` and `mosaic_uop_pkg` take their widths from -- so
+// the generation this ROB stores is exactly the generation a completion carries
+// out of the issue queue. It carries its own include guard now, so no wrapper is
+// needed around it.
 `include "mosaic_cfg_pkg.svh"
+`include "mosaic_id_pkg.svh"
+/* verilator lint_on UNUSEDSIGNAL */
 /* verilator lint_on UNUSEDPARAM */
 
 module mosaic_rob #(
@@ -161,23 +173,31 @@ module mosaic_rob #(
     localparam int unsigned UOP_W = (MAX_UOPS <= 1) ? 1 : $clog2(MAX_UOPS),
     localparam int unsigned OCC_W = $clog2(ROB_ENTRIES + 1), // occupancy says "full" too
 
-    // The two identity fields are sized by rule rather than by a number written
-    // here, so the testbench wrapper can reproduce the same widths from the same
-    // generated package instead of carrying a second copy of them:
+    // The two identity fields are the **contract** widths, taken from the
+    // generated identity package rather than re-derived here by a rule this file
+    // invented. I-002 froze them as
     //
-    //   TAG_W  the producer's name for an instruction. It only has to be unique
-    //          among the <= ROB_ENTRIES macros in flight, so twice the slot
-    //          index width is a 64x margin over the live population -- 12 bits
-    //          for the 64-entry p0 ROB.
-    //   GEN_W  the per-slot generation. Twice the slot index width gives
-    //          2**GEN_W = 4096 allocations of aliasing margin for p0: a
-    //          completion aimed at a slot cannot name a generation that macro's
-    //          current occupant carries until 4096 further allocations have
-    //          happened, which is far beyond anything a recovery path leaves
-    //          outstanding. It is a deliberate, documented bound rather than an
-    //          accident.
-    localparam int unsigned TAG_W = 2 * ROB_INDEX_W,
-    localparam int unsigned GEN_W = 2 * ROB_INDEX_W
+    //     rob_index = clog2(rob_entries)      = 6
+    //     rob_gen   = clog2(rob_entries) + 1  = 7
+    //
+    // A width this file chose independently is a width two documents could
+    // disagree about -- and did: while this module stored a 12-bit generation,
+    // the 7-bit generation a completion carries through the issue queue
+    // zero-extended to it, so after 128 allocations a stale completion aliased
+    // the live occupant again. The comparison must be between values of the
+    // same width, so it must be the contract's width.
+    //
+    //   TAG_W  the producer's name for an instruction: the physical-register
+    //          tag its destination occupies, MOSAIC_ID_W_PRF_TAG.
+    //   GEN_W  the per-slot generation, MOSAIC_ID_W_ROB_GEN. The proof it is
+    //          wide enough is 2**GEN_W > ROB_ENTRIES, not a margin chosen by
+    //          taste: a slot is not handed out again until its previous owner
+    //          has retired or been squashed, and there are only ROB_ENTRIES
+    //          slots, so a completion can only be outstanding for a slot that
+    //          has been recycled at most ROB_ENTRIES allocations ago. p0's 7
+    //          bits give 128 generations against a 64-entry ROB.
+    localparam int unsigned TAG_W = mosaic_id_pkg::MOSAIC_ID_W_PRF_TAG,
+    localparam int unsigned GEN_W = mosaic_id_pkg::MOSAIC_ID_W_ROB_GEN
 ) (
     input  logic                     clk,
     input  logic                     rst,
@@ -422,7 +442,22 @@ module mosaic_rob #(
   logic cmp_identifies;
 
   assign cmp_slot_live = slot_valid[cmp_idx];
+
+`ifdef MOSAIC_ROB_MUTANT_GEN_LOW_BITS_ONLY
+  // NEGATIVE CONTROL 7: the generation comparison keeps only the low GEN_W-1
+  // bits, so the top bit is ignored. Two generations 2**(GEN_W-1) apart then
+  // compare equal and a completion from a previous occupant is accepted into
+  // the live one. This is the control for the *width* of the generation: the
+  // wrap scenario's victim carries generation 0 and the occupant that recycles
+  // its slot carries 64, so it is exactly bit 6 of the corrected 7-bit value
+  // that distinguishes them. Under the old 12-bit generation the pair would
+  // have differed in a lower bit and this mutant would not be caught -- which is
+  // the point: a width that is too wide hides the aliasing, and a comparison
+  // that drops the top bit reintroduces it.
+  assign cmp_gen_match = (slot_gen[cmp_idx][GEN_W-2:0] == cmp_gen[GEN_W-2:0]);
+`else
   assign cmp_gen_match = (slot_gen[cmp_idx] == cmp_gen);
+`endif
 
 `ifdef MOSAIC_ROB_MUTANT_NO_GEN_CHECK
   // NEGATIVE CONTROL 2: identity is decided by liveness alone. A completion

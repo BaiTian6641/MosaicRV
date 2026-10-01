@@ -1,5 +1,6 @@
 // ============================================================================
-// tb_rename.cpp -- CASE=rename.single_width_ownership, work package I-013.
+// tb_rename.cpp -- CASE=rename.single_width_ownership (I-013) and
+// CASE=rename.same_cycle_chain (I-014).
 //
 // The DUT is never its own oracle. Every output and every piece of internal
 // state is compared against an independent C++ shadow written from the
@@ -10,6 +11,15 @@
 // the checkpoint restore from that prose. It shares no code with the RTL and
 // never looks at Verilator internals, so agreeing with it is evidence about the
 // contract rather than a restatement of the implementation.
+//
+// The shadow models the *group*: two allocation lanes, the two scans with lane 1
+// steered past lane 0's tag, the same-cycle bypass and its not-ready marking, the
+// atomic acceptance test, the two undo entries a group pushes, and both commit
+// lanes. The case id picks the phase set (an unknown id is refused rather than
+// silently running a subset): `rename.single_width_ownership` runs the
+// single-width phases only, and `rename.same_cycle_chain` runs those *and* the
+// two-wide phases, so a two-wide change that broke the single-width path fails
+// in the same run that exercises the group.
 //
 // Geometry is read from the elaborated DUT (`o_entries` and friends), so this
 // file contains no register-file depth, no tag width and no bank count: a
@@ -49,6 +59,28 @@
 //                       against the shadow on every cycle, with the ownership
 //                       and conservation invariants re-checked as it goes.
 //
+// Two-wide phases, run only for CASE=rename.same_cycle_chain:
+//
+//   9. twowide-raw      the same-cycle chain: lane 1's source naming lane 0's
+//                       destination resolves to lane 0's new (tag, generation)
+//                       and is reported not-ready, while the other sources come
+//                       from the map with writeback-derived readiness.
+//   9b. twowide-war     lane 0 reads a register lane 1 writes in the same group:
+//                       the macro ahead stays on the start-of-cycle mapping.
+//  10. twowide-waw      two macros writing one rd get distinct tags, each commit
+//                       releases exactly its own predecessor, and a same-cycle
+//                       pair retirement releases exactly two mappings.
+//  11. twowide-x0       the group's tag requirement is 0, 1 or 2 according to
+//                       which lanes write a real destination.
+//  12. twowide-stall    a group needing two tags with one free stalls whole,
+//                       changes nothing, and leaves the tag for a single-width
+//                       allocation -- the card's Fail criterion.
+//  13. twowide-ckpt     a two-wide group pushes two undo entries, and a squash
+//                       returns both tags, steps both generations back and
+//                       restores the maps exactly.
+//  14. twowide-random   a randomized soak of two-wide groups, retires and
+//                       recovery windows, shadow-compared every cycle.
+//
 // Standing invariants, checked on every cycle of every phase rather than in one
 // place:
 //
@@ -58,6 +90,8 @@
 //   * No tag is both in the free set and named by a live speculative mapping.
 //   * A reported allocation never returns a tag that is currently owned, and a
 //     reported writeback is never accepted for a tag that is free.
+//   * The two lanes of one group are accepted or refused together, and never
+//     take the same tag.
 //   * The journal never overflows, and a squash never restores a partial window.
 //
 // The last one is a guard on the DUT's own escape hatch: `journal_overflow` is a
@@ -2208,7 +2242,7 @@ void PhaseRandom(Harness* h, mosaic::Reporter* reporter, uint32_t entries, uint3
 // ============================================================================
 
 // Phase 9: the same-cycle RAW chain, and the WAR direction, in one group.
-void PhaseTwoWideRaw(Harness* h, mosaic::Reporter* reporter, uint32_t arch_regs) {
+void PhaseTwoWideRaw(Harness* h, mosaic::Reporter* reporter) {
   // Establish a source whose producer has written back. Without this, every source
   // in the phase would be uniformly not-ready and the readiness assertions would
   // only ever test one direction.
@@ -2341,7 +2375,7 @@ void PhaseTwoWideWar(Harness* h, mosaic::Reporter* reporter) {
 
 // Phase 10: WAW inside one group, and the release of the two old mappings through
 // the two commit lanes -- sequenced, and in one cycle.
-void PhaseTwoWideWaw(Harness* h, mosaic::Reporter* reporter, uint32_t arch_regs) {
+void PhaseTwoWideWaw(Harness* h, mosaic::Reporter* reporter) {
   const uint32_t rd = 7;
   const Dest old7 = h->DutSpecMap()[rd];
   const uint32_t free_before = h->free_count();
@@ -2481,7 +2515,7 @@ void PhaseTwoWideWaw(Harness* h, mosaic::Reporter* reporter, uint32_t arch_regs)
 }
 
 // Phase 11: x0 on either lane.
-void PhaseTwoWideX0(Harness* h, mosaic::Reporter* reporter, uint32_t arch_regs) {
+void PhaseTwoWideX0(Harness* h, mosaic::Reporter* reporter) {
   const uint32_t free_before = h->free_count();
 
   // {x0, x5}: the group needs one tag, not two and not zero.
@@ -2663,7 +2697,7 @@ void PhaseTwoWideStall(Harness* h, mosaic::Reporter* reporter, uint32_t entries,
 }
 
 // Phase 13: checkpoint and squash across a two-wide group.
-void PhaseTwoWideCkpt(Harness* h, mosaic::Reporter* reporter, uint32_t arch_regs) {
+void PhaseTwoWideCkpt(Harness* h, mosaic::Reporter* reporter) {
   // Committed state, so the restore has something to restore to.
   for (uint32_t rd : {5u, 6u, 7u}) {
     Stim a;
@@ -2775,8 +2809,8 @@ void PhaseTwoWideCkpt(Harness* h, mosaic::Reporter* reporter, uint32_t arch_regs
 }
 
 // Phase 14: a randomized two-wide soak, shadow-compared on every cycle.
-void PhaseTwoWideRandom(Harness* h, mosaic::Reporter* reporter, uint32_t entries,
-                        uint32_t arch_regs, uint32_t seed, uint32_t cycles) {
+void PhaseTwoWideRandom(Harness* h, mosaic::Reporter* reporter, uint32_t arch_regs,
+                        uint32_t seed, uint32_t cycles) {
   mosaic::Rng rng(seed * 2654435761u + 12345u);
 
   uint32_t two_tag_groups = 0;
@@ -2785,25 +2819,107 @@ void PhaseTwoWideRandom(Harness* h, mosaic::Reporter* reporter, uint32_t entries
   uint32_t dual_commits = 0;
   uint32_t x0_lanes = 0;
   uint32_t accepted_groups = 0;
+  uint32_t squashes = 0;
+  uint32_t windows = 0;
+
+  // Per-register FIFO of allocated-but-uncommitted destinations. A retire installs
+  // the *oldest* uncommitted mapping of the register it writes -- not the current
+  // speculative mapping, which may belong to a younger instruction -- and a squash
+  // drops everything allocated after the checkpoint, exactly as the ROB kills the
+  // instructions that own them.
+  //
+  // This is not decoration. Committing the speculative map instead made a stimulus
+  // the module's contract forbids (an instruction younger than the checkpoint
+  // committing before its squash), and the module then behaved as documented --
+  // which is how the ownership invariant came to reject the state: the module's
+  // squash restores the speculative map from the *committed* map, so the checkpoint
+  // has to be taken where the two agree.
+  std::vector<std::vector<Dest>> pend(arch_regs);
+  bool in_window = false;
+  uint32_t window_left = 0;
+  uint32_t since_window = 0;
 
   for (uint32_t i = 0; i < cycles; i++) {
     Stim s;
-    // A checkpoint most cycles would keep the window trivially short; a checkpoint
-    // every so often is what a real machine does at branches, and it is what makes
-    // a squash meaningful.
-    if (rng.Chance(6)) s.ckpt_valid = true;
-    if (rng.Chance(4)) s.squash = true;
+    bool drained = true;
+    for (uint32_t a = 1; a < arch_regs; a++) {
+      if (!pend[a].empty()) {
+        drained = false;
+        break;
+      }
+    }
 
-    // A group of one or two macros. Both lanes get a real destination most of the
-    // time, because a group of two is what this phase exists to exercise; x0 lanes
-    // are drawn often enough to keep the 0/1/2 tag counts all reachable.
-    if (rng.Chance(80) && !s.squash) {
+    if (!in_window) {
+      since_window++;
+      // The checkpoint is taken only when the machine is drained, which is this
+      // module's documented precondition: its squash restores the speculative map
+      // from the committed one, so a checkpoint taken with older instructions still
+      // in flight would lose their mappings (their tags stay allocated, because
+      // they were allocated before the checkpoint and are not journalled). That is
+      // a property of the contract, and driving a checkpoint anywhere else tests a
+      // machine the module does not claim to be.
+      if (drained && since_window > 4 && rng.Chance(25)) {
+        s.ckpt_valid = true;
+        in_window = true;
+        // Long enough to drain the free set: a drained checkpoint starts with
+        // MOSAIC_INT_PRF_ENTRIES - ARCH_REGS free tags, and at roughly 1.5 tags per
+        // cycle a window shorter than ~45 cycles never reaches the point where a
+        // group is refused for tags -- which is the state the atomicity of a
+        // refusal needs to be tested in. It stays below the 64 that would fill the
+        // undo journal, because the group stall happens first: the last free tag is
+        // journalled as entry 64, and the next request is refused before it can
+        // allocate a 65th.
+        window_left = 30 + rng.Below(90);
+        since_window = 0;
+        windows++;
+      } else {
+        // Committed-boundary operation: retire heads aggressively, which is what
+        // keeps the free set from draining and two-tag groups reachable, and
+        // allocate lightly.
+        std::vector<uint32_t> ready;
+        for (uint32_t a = 1; a < arch_regs; a++) {
+          if (!pend[a].empty()) ready.push_back(a);
+        }
+        if (!ready.empty()) {
+          const uint32_t idx0 = rng.Below(static_cast<uint32_t>(ready.size()));
+          s.commit_valid = true;
+          s.commit_rd = ready[idx0];
+          s.commit = pend[s.commit_rd].front();
+          if (ready.size() > 1 && rng.Chance(60)) {
+            uint32_t idx1 = rng.Below(static_cast<uint32_t>(ready.size()));
+            if (idx1 == idx0) idx1 = (idx1 + 1) % ready.size();
+            s.commit2_valid = true;
+            s.commit2_rd = ready[idx1];
+            s.commit2 = pend[s.commit2_rd].front();
+          }
+        }
+        if (rng.Chance(45)) {
+          s.alloc_req = true;
+          s.alloc_rd = rng.Chance(10) ? 0u : rng.Below(arch_regs);
+          if (rng.Chance(70)) {
+            s.alloc2_req = true;
+            s.alloc2_rd = rng.Chance(25) ? s.alloc_rd
+                                         : (rng.Chance(10) ? 0u : rng.Below(arch_regs));
+          }
+        }
+      }
+    } else {
+      // Speculative window: allocation only, no retirement -- these are the
+      // instructions a squash will kill. The free set drains here, which is where
+      // the group stalls come from.
       s.alloc_req = true;
       s.alloc_rd = rng.Chance(10) ? 0u : rng.Below(arch_regs);
-      if (rng.Chance(65)) {
+      if (rng.Chance(70)) {
         s.alloc2_req = true;
         // One time in four the two lanes write the same register: the WAW case.
-        s.alloc2_rd = rng.Chance(25) ? s.alloc_rd : (rng.Chance(10) ? 0u : rng.Below(arch_regs));
+        s.alloc2_rd = rng.Chance(25) ? s.alloc_rd
+                                     : (rng.Chance(10) ? 0u : rng.Below(arch_regs));
+      }
+      if (window_left > 0) window_left--;
+      if (window_left == 0) {
+        s.alloc_req = false;
+        s.alloc2_req = false;
+        s.squash = true;
       }
     }
 
@@ -2832,20 +2948,6 @@ void PhaseTwoWideRandom(Harness* h, mosaic::Reporter* reporter, uint32_t entries
       if (rng.Chance(35)) s.wb.gen = (s.wb.gen + 1 + rng.Below(3)) & h->shadow_gen_mask();
     }
 
-    // Retire: install the speculative mapping of a register, as a real retire unit
-    // would, and sometimes retire two macros in one cycle through both lanes.
-    if (rng.Chance(30)) {
-      const std::vector<Dest>& spec = h->shadow_spec_map();
-      s.commit_valid = true;
-      s.commit_rd = rng.Below(arch_regs);
-      s.commit = spec[s.commit_rd];
-      if (rng.Chance(40)) {
-        s.commit2_valid = true;
-        s.commit2_rd = rng.Below(arch_regs);
-        s.commit2 = spec[s.commit2_rd];
-      }
-    }
-
     // A release aimed at a superseded identity. Releasing a *current* identity is a
     // caller bug -- it would put a live register on the free list -- and the
     // standing ownership invariant rejects it, so the campaign never drives one.
@@ -2864,6 +2966,27 @@ void PhaseTwoWideRandom(Harness* h, mosaic::Reporter* reporter, uint32_t entries
     if (s.alloc2_req && !o.alloc_accepted && !o.alloc_squashed) group_stalls++;
     if (o.commit_accepted && o.commit2_accepted) dual_commits++;
     if (o.alloc_is_x0 || o.alloc2_is_x0) x0_lanes++;
+    if (o.squash_accepted) squashes++;
+
+    // Track the uncommitted work the campaign has created and retired. The order
+    // within the cycle follows the hardware's: allocations are younger than
+    // retirements, so the retire pops what was already in the queue and the pushes
+    // land behind it.
+    if (o.alloc_new_valid) pend[s.alloc_rd].push_back(o.alloc_new);
+    if (o.alloc2_new_valid) pend[s.alloc2_rd].push_back(o.alloc2_new);
+    if (o.commit_accepted && !pend[s.commit_rd].empty()) {
+      pend[s.commit_rd].erase(pend[s.commit_rd].begin());
+    }
+    if (o.commit2_accepted && !pend[s.commit2_rd].empty()) {
+      pend[s.commit2_rd].erase(pend[s.commit2_rd].begin());
+    }
+    if (o.squash_accepted) {
+      // Everything allocated after the checkpoint dies with its ROB entries. The
+      // checkpoint was taken drained, so this empties every queue: the machine is
+      // back at the committed boundary.
+      for (uint32_t a = 0; a < arch_regs; a++) pend[a].clear();
+      in_window = false;
+    }
   }
 
   // Anti-vacuity. These are demands on the campaign, not floors that happen to
@@ -2883,13 +3006,16 @@ void PhaseTwoWideRandom(Harness* h, mosaic::Reporter* reporter, uint32_t entries
           "the campaign never retired two macros in one cycle, so the two commit "
           "lanes were never driven together");
   Require(x0_lanes > 0, "twowide-random", "no group lane ever wrote x0");
+  Require(squashes > 0, "twowide-random",
+          "no checkpoint window was ever squashed, so the undo was never exercised");
 
   reporter->Check(true,
                   "twowide-random: " + Dec(accepted_groups) + " accepted groups (" +
                       Dec(two_tag_groups) + " of them two-tag), " + Dec(bypasses) +
                       " bypasses, " + Dec(group_stalls) + " group tag stalls, " +
                       Dec(dual_commits) + " same-cycle pair retirements, " +
-                      Dec(x0_lanes) + " x0 lanes, over " + Dec(cycles) +
+                      Dec(x0_lanes) + " x0 lanes, " + Dec(windows) + " recovery windows/" +
+                      Dec(squashes) + " squashes, over " + Dec(cycles) +
                       " shadow-compared cycles");
 }
 
@@ -3005,7 +3131,7 @@ int main(int argc, char** argv) {
     if (two_wide) {
       fresh();
       harness.Phase("twowide-raw");
-      PhaseTwoWideRaw(&harness, &reporter, arch_regs);
+      PhaseTwoWideRaw(&harness, &reporter);
 
       fresh();
       harness.Phase("twowide-war");
@@ -3013,11 +3139,11 @@ int main(int argc, char** argv) {
 
       fresh();
       harness.Phase("twowide-waw");
-      PhaseTwoWideWaw(&harness, &reporter, arch_regs);
+      PhaseTwoWideWaw(&harness, &reporter);
 
       fresh();
       harness.Phase("twowide-x0");
-      PhaseTwoWideX0(&harness, &reporter, arch_regs);
+      PhaseTwoWideX0(&harness, &reporter);
 
       fresh();
       harness.Phase("twowide-stall");
@@ -3025,11 +3151,11 @@ int main(int argc, char** argv) {
 
       fresh();
       harness.Phase("twowide-ckpt");
-      PhaseTwoWideCkpt(&harness, &reporter, arch_regs);
+      PhaseTwoWideCkpt(&harness, &reporter);
 
       fresh();
       harness.Phase("twowide-random");
-      PhaseTwoWideRandom(&harness, &reporter, entries, arch_regs,
+      PhaseTwoWideRandom(&harness, &reporter, arch_regs,
                          static_cast<uint32_t>(options.seed), 4000);
     }
 

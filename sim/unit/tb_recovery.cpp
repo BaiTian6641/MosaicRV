@@ -471,8 +471,12 @@ class ShadowRecovery {
   }
 
   // The committed map's tag for an architectural register, so a phase can check
-  // the conservation identity against the DUT's own reported free count.
+  // the conservation identity against the DUT's own reported free count, and the
+  // speculative mapping, so a phase can commit the mapping that is actually live
+  // for a register instead of inventing one the machine never held.
   uint32_t CmtTag(uint32_t rd) const { return cmt_tag_[rd]; }
+  uint32_t SpecTag(uint32_t rd) const { return spec_tag_[rd]; }
+  uint32_t SpecGen(uint32_t rd) const { return spec_gen_[rd]; }
 
   // The checkpoint bundle as the shadow sees it, one wide value per field, packed
   // the way the RTL packs it. These exist so the driver can compare the checkpoint
@@ -761,7 +765,13 @@ class ShadowRecovery {
     const View v = Peek(s);
     const Pick p = Choose(s);
     const uint32_t scan = ScanTag();
+    // Two different destinations, and conflating them is a defect that hides
+    // until a commit and an allocation share a cycle: `rd` is the destination
+    // this cycle's *allocation* is renaming, `cmt_rd` the one the commit is
+    // publishing. The commit path below used `rd`, so a commit was applied to the
+    // register some unrelated allocation happened to be renaming.
     const uint32_t rd = Mask(s.alloc_rd, 5);
+    const uint32_t cmt_rd = Mask(s.commit_rd, 5);
     const bool ckpt_push = v.ckpt_accepted;
     const bool restore = p.found && ck_valid_[p.ck];
 
@@ -831,11 +841,11 @@ class ShadowRecovery {
 
     // 2. An explicit release, and the mapping a commit supersedes.
     if (v.free_accepted) free_.Set(Mask(s.free_tag, tag_w_), true);
-    if (s.commit_valid && (rd != 0)) {
+    if (v.commit_accepted) {
       const uint32_t tag = Mask(s.commit_tag, tag_w_);
       const uint32_t gen = Mask(s.commit_gen, gen_w_);
-      if (cmt_tag_[rd] != tag || cmt_gen_[rd] != gen) {
-        if (cmt_tag_[rd] < entries_) free_.Set(cmt_tag_[rd], true);
+      if (cmt_tag_[cmt_rd] != tag || cmt_gen_[cmt_rd] != gen) {
+        if (cmt_tag_[cmt_rd] < entries_) free_.Set(cmt_tag_[cmt_rd], true);
       }
     }
 
@@ -895,9 +905,9 @@ class ShadowRecovery {
     if (restore) j_len_ = ck_jmark_[p.ck];
 
     // ---- the maps, the tail and the rotation point
-    if (s.commit_valid && (rd != 0)) {
-      cmt_tag_[rd] = Mask(s.commit_tag, tag_w_);
-      cmt_gen_[rd] = Mask(s.commit_gen, gen_w_);
+    if (v.commit_accepted) {
+      cmt_tag_[cmt_rd] = Mask(s.commit_tag, tag_w_);
+      cmt_gen_[cmt_rd] = Mask(s.commit_gen, gen_w_);
     }
     if (restore) {
       const Wide& copy = ck_spec_[p.ck];
@@ -997,7 +1007,13 @@ class ShadowRecovery {
     // branch's covers both "reserved earlier and squashed" and "reserved in the
     // squash cycle itself". Reservations owned by older instructions are
     // untouched, which is the whole point of an age boundary over an epoch.
-    if (p.found && ck_valid_[p.ck]) {
+    // `restore` was captured from the pre-edge stack at the top of this
+    // function; `ck_valid_[p.ck]` is not still true here, because the
+    // checkpoint-stack block above has already consumed the restored checkpoint.
+    // Reading validity after that block is the same two-snapshot mistake in
+    // miniature: it asks a question about the state the cycle started from and
+    // gets the state it is producing.
+    if (restore) {
       for (uint32_t c = 0; c < cred_entries_; c++) {
         if (cred_busy_[c] && (cred_gen_[c] >= p.gen)) cred_cancel_[c] = true;
       }
@@ -1588,6 +1604,11 @@ class Harness {
   uint32_t LastAllocTag() const { return report_.alloc_new_tag; }
   uint32_t ObservedTail() const { return settled_.tail; }
   uint32_t ObservedAllocPtr() const { return settled_.alloc_ptr; }
+  uint64_t ObservedCkptBundle() const { return dut_->dbg_ckpt_alloc_ptr_o; }
+  uint64_t ObservedCkptValid() const { return dut_->dbg_ckpt_valid_o; }
+  uint64_t ObservedCkptEpoch() const { return dut_->dbg_ckpt_epoch_o; }
+  uint64_t settled_ckpt_valid() const { return settled_.ckpt_valid.words.empty() ? 0 : settled_.ckpt_valid.words[0]; }
+
 
   // -------------------------------------------------------------- the shadow
   ShadowRecovery& shadow() const { return *shadow_; }
@@ -1871,11 +1892,16 @@ class Harness {
                     shadow_->CkptEpochWide(), shadow_->epoch_w());
     comparisons_ += 1;
 
-    Invariants(where, stim);
+    Invariants(where, stim, s);
   }
 
   // Standing invariants, on every cycle of every phase rather than in one place.
-  void Invariants(const std::string& where, const std::string& stim) {
+  // The stimulus is passed in rather than remembered: `retire_block` is a
+  // combinational function of *this* cycle's redirect and *this* cycle's
+  // `rob_retire`, so checking it against a retire remembered from the previous
+  // redirect cycle compares two different cycles -- and it did, which is how this
+  // parameter came to exist.
+  void Invariants(const std::string& where, const std::string& stim, const Stim& s) {
     const ShadowRecovery::View e = shadow_->Peek(Stim{});
 
     // The four response reports are mutually exclusive and exhaustive over a
@@ -1907,8 +1933,9 @@ class Harness {
 
     // A retire is blocked exactly when a recovery and a retire coincide, and
     // never otherwise -- blocking unconditionally would stall retirement for as
-    // long as any branch were in flight.
-    Require(dut_->retire_block_o == (dut_->redirect_taken_o && last_retire_), where,
+    // long as any branch were in flight. Both terms are this cycle's: the
+    // redirect the arbiter just decided and the retire the ROB is presenting now.
+    Require(dut_->retire_block_o == (dut_->redirect_taken_o && s.rob_retire), where,
             "retire_block is not exactly 'a recovery and a retire in one cycle' " +
                 stim);
 
@@ -1966,10 +1993,7 @@ class Harness {
 
   void Tally(const Stim& s) {
     const ShadowRecovery::View e = shadow_->Peek(s);
-    if (e.redirect_taken) {
-      last_retire_ = s.rob_retire;
-      counters_.restores++;
-    }
+    if (e.redirect_taken) counters_.restores++;
     if (e.ckpt_accepted) counters_.checkpoints++;
     if (e.redirect_stale) counters_.stale_redirects++;
     counters_.killed_redirects += e.redirect_killed;
@@ -2039,7 +2063,6 @@ class Harness {
   Snapshot settled_;
   uint64_t cycles_ = 0;
   uint64_t comparisons_ = 0;
-  bool last_retire_ = false;
   Counters counters_;
   uint32_t settled_epoch_ = 0;
   uint32_t settled_free_count_ = 0;
@@ -2048,23 +2071,6 @@ class Harness {
   uint32_t settled_rdq_depth_ = 0;
   bool settled_inexact_ = false;
 };
-
-// Every field of a restore must match its checkpoint except the committed map,
-// which a commit after the checkpoint moved *permanently*. A commit is not undone
-// by a squash -- that would resurrect a mapping the ISA has already published --
-// so expecting the committed map to match would be expecting a defect.
-//
-// Everything else must match exactly, and this function is the whole of that
-// requirement. It is an explicit list rather than "the whole bundle minus one
-// field" because a field added to `Snapshot` later would otherwise default to
-// matching and the check would silently weaken without anybody editing it.
-bool SameExceptCmtMap(const Snapshot& a, const Snapshot& b) {
-  return a.free_mask == b.free_mask && a.gen_valid == b.gen_valid &&
-         a.wb_done == b.wb_done && a.tag_gen == b.tag_gen &&
-         a.spec_map == b.spec_map && a.tail == b.tail &&
-         a.alloc_ptr == b.alloc_ptr && a.j_len == b.j_len &&
-         a.free_count == b.free_count;
-}
 
 // ------------------------------------------------------------------- phases
 //
@@ -2321,55 +2327,68 @@ void PhaseNestedCheckpoint(Harness& h) {
 }
 
 
-// 4. The card's rule: the oldest redirect wins.
+// 4. The card's rule: the oldest redirect wins. Age orders *redirects*; an older
+//    branch that has not resolved yet is a checkpoint, not a pending redirect.
 void PhaseOldestRedirect(Harness& h) {
   ShadowRecovery& s = h.shadow();
   const std::string where = "oldest-redirect";
 
-  // Three checkpoints, so a redirect pair can be genuinely out of order and a
-  // third still be live behind them.
-  const uint32_t g0 = h.Alloc(1, /*checkpoint=*/true);
-  h.Alloc(6, /*checkpoint=*/false);
-  const uint32_t g1 = h.Alloc(1, /*checkpoint=*/true);
-  h.Alloc(7, /*checkpoint=*/false);
-  const uint32_t g2 = h.Alloc(1, /*checkpoint=*/true);
-  h.Alloc(8, /*checkpoint=*/false);
+  // Two nested checkpoints. The inner one can be taken while the outer branch is
+  // still live, and that is the rule rather than an oversight: the only event
+  // that resolves the outer branch is the redirect this unit would otherwise be
+  // refusing to take, so "hold the younger redirect until the older branch
+  // resolves" holds it forever. What is ordered by age is the set of redirects
+  // offered in one cycle, and the same-cycle case below is where that order is
+  // total.
+  h.Alloc(3, /*checkpoint=*/false);
+  const uint32_t outer = h.Alloc(1, /*checkpoint=*/true);
+  h.Alloc(4, /*checkpoint=*/false);
+  const uint32_t inner = h.Alloc(1, /*checkpoint=*/true);
+  h.Alloc(5, /*checkpoint=*/false);
   h.Idle();
-  Require(s.CkptDepth() == 3, where,
-          "expected three live checkpoints, the shadow has " +
+  Require(s.CkptDepth() == 2, where,
+          "expected two live checkpoints, the shadow has " +
               std::to_string(s.CkptDepth()));
+  Require(s.CkptGen(0) == outer, where, "the older checkpoint is not at index 0");
+  Require(s.CkptGen(1) == inner, where, "the younger checkpoint is not at index 1");
+  Require(outer < inner, where, "the nested generations are not in age order");
 
-  // --- the younger arrives first and must be *held*, not taken.
+  // --- the inner branch resolves first, with the outer checkpoint still live.
   Stim young;
   young.redirect0_valid = true;
-  young.redirect0_rob_gen = g1;
+  young.redirect0_rob_gen = inner;
   young.redirect0_pc = 0x80004000ull;
   h.Cycle(young);
-  Require(!h.RedirectTaken(), where,
-          "a lone younger redirect was taken with an older branch still pending; "
-          "taking the younger fetches from a path the older is about to discard " +
-              Describe(young));
-  Require(h.ObservedRdqDepth() == 1, where,
-          "the younger redirect was not queued: queue depth is " +
-              std::to_string(h.ObservedRdqDepth()));
+  Require(h.RedirectTaken(), where,
+          "the inner redirect was not taken while the outer branch was still "
+          "unresolved, so it would be deferred forever " + Describe(young));
+  Require(h.RedirectTakenGen() == inner, where,
+          "the wrong redirect was taken: expected " + std::to_string(inner) +
+              ", got " + std::to_string(h.RedirectTakenGen()));
 
-  // --- the oldest arrives on the second port, in the same cycle as nothing
-  // else, and must win over the queued younger one.
+  // The outer checkpoint survives: it belongs to a branch older than the one
+  // squashed, so the same squash must not consume it.
+  Require(s.CkptDepth() == 1, where,
+          "the inner squash consumed a checkpoint it does not own: depth is " +
+              std::to_string(s.CkptDepth()));
+  Require(s.CkptValid(0) && s.CkptGen(0) == outer, where,
+          "the older checkpoint did not survive the younger branch's squash");
+
+  // --- and then the outer one, which rewinds further back than the inner did.
   Stim old;
   old.redirect0_valid = true;
-  old.redirect0_rob_gen = g0;
+  old.redirect0_rob_gen = outer;
   old.redirect0_pc = 0x80005000ull;
   h.Cycle(old);
-
   Require(h.RedirectTaken(), where, "the oldest redirect was not taken " + Describe(old));
-  Require(h.RedirectTakenGen() == g0, where,
-          "the younger redirect was taken instead of the older: expected " +
-              std::to_string(g0) + ", got " + std::to_string(h.RedirectTakenGen()));
+  Require(h.RedirectTakenGen() == outer, where,
+          "the wrong redirect was taken: expected " + std::to_string(outer) +
+              ", got " + std::to_string(h.RedirectTakenGen()));
   Require(h.RedirectTakenPc() == 0x80005000ull, where,
-          "the taken redirect published the younger's target " + Describe(old));
-  Require(h.shadow().CkptDepth() == 0, where,
+          "the taken redirect published the wrong target " + Describe(old));
+  Require(s.CkptDepth() == 0, where,
           "checkpoints survived a squash of the oldest branch: depth is " +
-              std::to_string(h.shadow().CkptDepth()));
+              std::to_string(s.CkptDepth()));
 
   // --- both in the *same* cycle, older on the younger's port. The rule is a
   // minimum over every candidate including this cycle's ports, so it must hold
@@ -2396,28 +2415,56 @@ void PhaseOldestRedirect(Harness& h) {
               ", got " + std::to_string(h.RedirectTakenGen()));
   Require(h.RedirectTakenPc() == 0x80007000ull, where,
           "the same-cycle rule took the younger's target " + Describe(both));
+  Require(h.RedirectKilled() == 1, where,
+          "the losing redirect of the same cycle was not reported killed: " +
+              std::to_string(h.RedirectKilled()));
   Require(!h.CkptRefused(), where, "a checkpoint was refused unexpectedly");
+
+  // --- and a redirect naming a generation with no live checkpoint is *stale*:
+  // its branch was squashed already, so it describes a path that no longer
+  // exists. It is not taken even though it is the only candidate, and it is
+  // reported rather than silently dropped.
+  Stim dead;
+  dead.redirect0_valid = true;
+  dead.redirect0_rob_gen = h0;      // consumed by the squash above
+  dead.redirect0_pc = 0x80008000ull;
+  h.Cycle(dead);
+  Require(!h.RedirectTaken(), where,
+          "a redirect for a squashed branch was taken " + Describe(dead));
+  Require(h.RedirectStale(), where,
+          "the redirect for a squashed branch was not reported stale " +
+              Describe(dead));
 }
 
-// 5. A late response is dropped and its credit returned exactly once.
+// 5. A squashed instruction's result is dropped and its credit returned exactly
+//    once; an *older* instruction's result, which the same squash does not own,
+//    is still accepted. Both halves are the rule -- dropping every pre-redirect
+//    response is the failure the card names, not a conservative choice.
 void PhaseLateResponse(Harness& h) {
   ShadowRecovery& s = h.shadow();
   const std::string where = "late-response";
 
-  h.Alloc(1, /*checkpoint=*/true);
+  // An instruction older than the branch, with a result in flight, and one
+  // younger than it. Both hold a credit. The older reservation is granted with
+  // its own generation -- not `NextGen()`, which is a *new* instruction's and
+  // would make every reservation younger than the branch, leaving the rule's
+  // other half untestable.
+  const uint32_t older_gen = h.Alloc(6, /*checkpoint=*/false);
+  const uint32_t older_slot = h.ReserveCreditFor(older_gen);
   h.Alloc(10, /*checkpoint=*/false);
+  const uint32_t branch_gen = h.Alloc(1, /*checkpoint=*/true);
+  const uint32_t younger_gen = h.Alloc(11, /*checkpoint=*/false);
+  const uint32_t younger_slot = h.ReserveCreditFor(younger_gen);
   h.Idle();
 
-  // Reserve two credits, on two different cycles so the table is genuinely
-  // holding more than one.
-  Stim r0;
-  r0.cred_req_valid = true;
-  r0.cred_req_id = 0;
-  h.Cycle(r0);
-  Stim r1;
-  r1.cred_req_valid = true;
-  r1.cred_req_id = 1;
-  h.Cycle(r1);
+  Require(older_slot < s.cred_entries() && younger_slot < s.cred_entries() &&
+              older_slot != younger_slot,
+          where,
+          "the two reservations did not both land in the table: " +
+              std::to_string(older_slot) + " and " +
+              std::to_string(younger_slot));
+  Require(older_gen < branch_gen && branch_gen < younger_gen, where,
+          "the phase's generations are not in the age order it needs");
   Require(h.ObservedCredits() == 2, where,
           "expected two reserved credits, the DUT reports " +
               std::to_string(h.ObservedCredits()));
@@ -2427,7 +2474,7 @@ void PhaseLateResponse(Harness& h) {
   // A redirect raises the epoch.
   Stim r;
   r.redirect0_valid = true;
-  r.redirect0_rob_gen = s.CkptGen(0);
+  r.redirect0_rob_gen = branch_gen;
   r.redirect0_pc = 0x80008000ull;
   h.Cycle(r);
   Require(h.RedirectTaken(), where, "the redirect was not taken " + Describe(r));
@@ -2439,66 +2486,344 @@ void PhaseLateResponse(Harness& h) {
 
   // The credits are *not* returned by the redirect: the contract returns a credit
   // when the cancel is acknowledged, and the acknowledgement is the arrival of
-  // the response that is now stale. Returning it at both ends would over-issue.
+  // the response. Returning it at both ends would over-issue.
   Require(h.ObservedCredits() == 2, where,
           "the redirect returned the credits it cancels, before the cancelled "
           "responses arrived: the DUT reports " +
               std::to_string(h.ObservedCredits()) + " outstanding");
 
-  // The first late response: pre-redirect epoch, so it is dropped, and its credit
-  // comes back -- once.
-  const uint32_t returns_before = h.shadow().CreditReturns();
-  h.Respond(0, epoch_before);
-  Require(h.RspDroppedStale(), where,
-          "a pre-redirect response was not classified stale");
-  Require(!h.RspAccepted(), where,
-          "a pre-redirect response was accepted: a squashed instruction's result "
-          "would be written into the restored machine");
-  Require(h.CreditReturn(), where,
-          "a stale response did not return its credit");
+  // The kill is an age boundary, and it is visible in the table: the younger
+  // instruction's reservation is cancelled, the older instruction's is not.
+  Require(s.CreditCancelled(younger_slot), where,
+          "the redirect did not cancel a reservation owned by an instruction it "
+          "squashed");
+  Require(!s.CreditCancelled(older_slot), where,
+          "the redirect cancelled a reservation owned by an *older* instruction, "
+          "which the squash does not own");
+
+  // The older instruction's result arrives, carrying the epoch it was reserved
+  // in -- which is now the previous epoch. It is live, because the redirect does
+  // not own it. This is the case's directed check for the card's "an older slow
+  // result must still complete", and for its blocking rule against killing all
+  // old-epoch work: a design that drops pre-redirect responses wholesale fails
+  // here, and the older ROB head then has a uop that never completes.
+  h.Respond(older_slot, s.CreditEpoch(older_slot));
+  Require(h.RspAccepted(), where,
+          "an older instruction's result was dropped by a squash that does not "
+          "own it");
+  Require(!h.CreditReturn(), where,
+          "an accepted older result returned a credit it had consumed");
   Require(h.ObservedCredits() == 1, where,
+          "an accepted older result changed the outstanding count to " +
+              std::to_string(h.ObservedCredits()));
+
+  // The younger instruction's result: dropped, and its credit returned once.
+  const uint32_t returns_before = s.CreditReturns();
+  h.Respond(younger_slot, s.CreditEpoch(younger_slot));
+  Require(h.RspDroppedStale(), where,
+          "a squashed instruction's result was not classified stale");
+  Require(!h.RspAccepted(), where,
+          "a squashed instruction's result was accepted: it would be written into "
+          "the restored machine");
+  Require(h.CreditReturn(), where, "a stale response did not return its credit");
+  Require(h.ObservedCredits() == 0, where,
           "the stale response did not return exactly one credit: outstanding is " +
               std::to_string(h.ObservedCredits()));
-  Require(h.shadow().CreditReturns() == returns_before + 1, where,
+  Require(s.CreditReturns() == returns_before + 1, where,
           "the cumulative credit-return count did not advance by exactly one");
 
   // The *same slot again*. This is the clause that makes "exactly once" a
-  // property rather than a hope: a table finds nothing reserved, so it returns
+  // property rather than a hope: the table finds nothing reserved, so it returns
   // nothing. A counter could not tell this from a first delivery.
-  h.Respond(0, epoch_before);
+  h.Respond(younger_slot, epoch_before);
   Require(h.RspDroppedDup(), where,
           "a repeated delivery of a returned credit was not reported as a duplicate");
   Require(!h.CreditReturn(), where,
           "a repeated delivery of an already-returned credit returned it again");
-  Require(h.ObservedCredits() == 1, where,
+  Require(h.ObservedCredits() == 0, where,
           "a duplicate delivery changed the outstanding count to " +
               std::to_string(h.ObservedCredits()));
 
-  // The second credit's response, in the *current* epoch: live, accepted, and it
-  // consumes its reservation rather than returning it.
-  h.Respond(1, epoch_after);
-  Require(h.RspAccepted(), where,
-          "a current-epoch response for a reserved slot was not accepted");
-  Require(!h.CreditReturn(), where,
-          "an accepted response returned a credit it had already consumed");
-  Require(h.ObservedCredits() == 0, where,
-          "the table did not drain: " + std::to_string(h.ObservedCredits()) +
-              " credits still outstanding");
-
-  // A response for a slot that was never reserved, and one naming a slot outside
-  // the table. Both are reported and neither returns a credit.
-  h.Respond(7, epoch_after);
+  // A response for a slot that was never reserved: reported, and no credit.
+  // (A response *outside* the table would be an orphan, but at p0 the credit id
+  // is four bits and the table is 16 slots, so the wrapper's narrowing makes
+  // that case unreachable in this profile; the report records it as such rather
+  // than dressing an unreachable branch up as a check.)
+  h.Respond(7, h.ObservedEpoch());
   Require(h.RspDroppedDup(), where,
           "a response for a never-reserved in-range slot was not a duplicate");
   Require(!h.CreditReturn(), where, "a never-reserved slot returned a credit");
-  h.Respond(0x3f, epoch_after);
-  Require(h.RspDroppedOrphan(), where,
-          "a response naming a slot outside the table was not an orphan");
-  Require(!h.CreditReturn(), where, "an orphan response returned a credit");
-  Require(h.ObservedCredits() == 0, where, "an orphan response changed the table");
+  Require(h.ObservedCredits() == 0, where, "a never-reserved slot changed the table");
 }
 
-// 6. Population and content after a squash equal the checkpoint, over a long run.
+// 6. The card's own case: nested branches with the structures *full*, an inner
+//    checkpoint restored first and then an outer one, with the conservation and
+//    older-work rules checked at each step.
+//
+// "Full" is stated rather than implied, and it is two facts: the checkpoint stack
+// is driven to its depth so the next request is *refused and reported*, and the
+// free list is driven to the point where the machine cannot allocate at all. The
+// undo window's own bound is the subject of the next phase and cannot coincide
+// with a deep stack at p0 -- a checkpoint whose branch allocates its own
+// destination consumes a tag the journal does not count, while the profile makes
+// the bound equal to the number of allocatable tags. The report records that,
+// because it is the reason "full" here is the stack and the free list.
+void PhaseNestedBranchFullQueues(Harness& h) {
+  ShadowRecovery& s = h.shadow();
+  const std::string where = "nested-branch-full-queues";
+  const uint32_t depth = s.ckpt_depth();
+  const uint32_t entries = h.Entries();
+
+  // The instruction whose slow result must survive every squash below. It is
+  // allocated before the first checkpoint, so no redirect taken here owns it.
+  const uint32_t older_gen = h.Alloc(6, /*checkpoint=*/false);
+  const uint32_t older_tag = h.LastAllocTag();
+  const uint32_t older_slot = h.ReserveCreditFor(older_gen);
+  Require(older_slot < s.cred_entries(), where,
+          "the older instruction's reservation was refused");
+
+  // `depth` nested branches, each a call writing a link register, with work
+  // between them. The state before each branch's own allocation is captured,
+  // because that is what its checkpoint records: a checkpoint precedes the
+  // instruction that takes it.
+  std::vector<Snapshot> before(depth);
+  std::vector<uint32_t> gens(depth, 0);
+  std::vector<uint32_t> tags(depth, 0);
+  std::vector<uint64_t> pcs(depth, 0);
+  uint32_t older_work[2] = {0, 0};
+  for (uint32_t i = 0; i < depth; i++) {
+    h.Alloc(20 + (i % 8), /*checkpoint=*/false);
+    if (i < 2) older_work[i] = h.LastAllocTag();
+    before[i] = h.Now();
+    gens[i] = h.Alloc(1, /*checkpoint=*/true);
+    tags[i] = h.LastAllocTag();
+    pcs[i] = 0x80010000ull + 0x100ull * i;
+  }
+  h.Idle();
+  Require(s.CkptDepth() == depth, where,
+          "expected the checkpoint stack at its depth of " + std::to_string(depth) +
+              ", the shadow has " + std::to_string(s.CkptDepth()));
+  Require(tags[depth - 1] != older_tag, where,
+          "the branch re-used the older instruction's tag, so the phase cannot "
+          "tell them apart");
+
+  // The stack is full: the next checkpoint is *refused and reported*, while the
+  // instruction's own allocation in the same cycle still succeeds. The two
+  // refusals are independent -- a checkpoint is not an allocation -- and a
+  // design that refused both would be a different rule.
+  Stim full;
+  full.alloc_valid = true;
+  full.alloc_rd = 2;
+  full.alloc_rob_gen = h.NextGen();
+  full.ckpt_valid = true;
+  full.ckpt_rob_gen = full.alloc_rob_gen;
+  h.Cycle(full);
+  Require(h.CkptRefused(), where,
+          "a checkpoint on a full stack was accepted " + Describe(full));
+  Require(!h.CkptAccepted(), where,
+          "a checkpoint on a full stack reported accepted " + Describe(full));
+  Require(h.AllocAccepted(), where,
+          "the allocation in the cycle the checkpoint was refused was refused "
+          "too; a refused checkpoint is not a refused allocation " + Describe(full));
+  Require(s.CkptDepth() == depth, where,
+          "a refused checkpoint changed the depth to " +
+              std::to_string(s.CkptDepth()));
+
+  // The free list to its limit: no tag is left, so the machine cannot allocate.
+  // The allocation after it is refused for *exhaustion* and not for the undo
+  // bound, because the branches' own destinations consumed tags the journal
+  // never counted -- the reason the two fulls are distinguishable at all.
+  const uint32_t free_now = s.FreeCount();
+  Require(free_now > 0, where, "the free list was already empty");
+  for (uint32_t i = 0; i < free_now; i++) {
+    h.Alloc(2 + (i % 29), /*checkpoint=*/false);
+  }
+  Require(s.FreeCount() == 0, where,
+          "the free list did not reach its limit: " +
+              std::to_string(s.FreeCount()) + " tags still free");
+  Stim dry;
+  dry.alloc_valid = true;
+  dry.alloc_rd = 9;
+  dry.alloc_rob_gen = h.NextGen();
+  h.Cycle(dry);
+  Require(h.AllocExhausted(), where,
+          "an allocation with an empty free list was not refused as exhausted "
+          + Describe(dry));
+  Require(!h.AllocJournalFull(), where,
+          "the undo bound was reported on an allocation that had not reached it "
+          + Describe(dry));
+  Require(!h.AllocAccepted(), where,
+          "an allocation with no free tag was accepted " + Describe(dry));
+  Require(!h.ObservedInexact(), where,
+          "an allocation refused for exhaustion latched the undo-bound flag");
+
+  // ---- the innermost branch resolves first. Its checkpoint is the youngest, so
+  // every outer checkpoint must survive: a squash consumes its own checkpoint and
+  // the younger ones, never an older one.
+  const uint32_t inner = depth - 1;
+  Stim ri;
+  ri.redirect0_valid = true;
+  ri.redirect0_rob_gen = gens[inner];
+  ri.redirect0_pc = pcs[inner];
+  h.Cycle(ri);
+  Require(h.RedirectTaken(), where,
+          "the inner redirect was not taken " + Describe(ri));
+  Require(h.RedirectTakenGen() == gens[inner], where,
+          "the wrong generation was taken: expected " +
+              std::to_string(gens[inner]) + ", got " +
+              std::to_string(h.RedirectTakenGen()));
+  Require(s.CkptDepth() == inner, where,
+          "the inner squash did not leave exactly the older checkpoints: depth is " +
+              std::to_string(s.CkptDepth()));
+  Require(s.CkptValid(inner - 1) && s.CkptGen(inner - 1) == gens[inner - 1], where,
+          "the next-older checkpoint did not survive the inner squash");
+  Require(s.JournalLen() == s.CkptJMark(inner), where,
+          "the journal is not back at the inner checkpoint's mark: " +
+              std::to_string(s.JournalLen()) + " vs " +
+              std::to_string(s.CkptJMark(inner)));
+
+  // The restore is exact, wholesale, against the checkpoint's own instant.
+  const Snapshot after_inner = h.Now();
+  Require(after_inner.free_mask == before[inner].free_mask, where,
+          "the inner restore is not free-mask exact: " +
+              after_inner.free_mask.Describe(before[inner].free_mask));
+  Require(after_inner.gen_valid == before[inner].gen_valid, where,
+          "the inner restore is not generation-valid exact: " +
+              after_inner.gen_valid.Describe(before[inner].gen_valid));
+  Require(after_inner.spec_map == before[inner].spec_map, where,
+          "the inner restore is not speculative-map exact: " +
+              after_inner.spec_map.Describe(before[inner].spec_map));
+  Require(after_inner.tail == before[inner].tail &&
+              after_inner.alloc_ptr == before[inner].alloc_ptr, where,
+          "the inner restore did not put the tail and the rotation point back");
+  Require(after_inner.free_count == before[inner].free_count, where,
+          "the inner restore's free count is " +
+              std::to_string(after_inner.free_count) + ", the checkpoint's is " +
+              std::to_string(before[inner].free_count));
+
+  // The directed check for the card's first blocking rule: a recovery that
+  // cleared the whole PRF/free list to avoid the ownership bookkeeping would
+  // pass a "the restore is exact" test only if the checkpoint were also empty.
+  // Here the machine must still own everything older than the restored branch.
+  Require(after_inner.free_count < entries - s.arch(), where,
+          "the inner restore left every allocatable tag free (" +
+              std::to_string(after_inner.free_count) + " of " +
+              std::to_string(entries - s.arch()) +
+              "): that is a whole-PRF clear, not a restore");
+  Require(!s.IsFree(older_tag) && s.GenValid(older_tag), where,
+          "a tag owned by an instruction older than the restored branch was freed "
+          "or lost its validity");
+  for (uint32_t i = 0; i < inner; i++) {
+    Require(!s.IsFree(tags[i]), where,
+            "the destination of the surviving branch " + std::to_string(i) +
+                " was freed by a squash that does not own it");
+  }
+  Require(!s.IsFree(older_work[0]) && !s.IsFree(older_work[1]), where,
+          "a tag allocated before the restored branch was freed");
+
+  // The older instruction's slow result still completes after the squash, and
+  // its writeback still lands: the tag it owns is still its own, generation
+  // included, so the result is not rejected as stale and a replay of it is a
+  // duplicate rather than a second write.
+  h.Respond(older_slot, s.CreditEpoch(older_slot));
+  Require(h.RspAccepted(), where,
+          "an older instruction's slow result was dropped by the inner squash");
+  Require(!h.CreditReturn(), where,
+          "an older instruction's accepted result returned its credit");
+
+  // Its writeback lands too: the tag it owns is still its own, generation
+  // included, so the result is not rejected as stale and a replay is a duplicate
+  // rather than a second write.
+  h.Writeback(older_tag, s.Gen(older_tag));
+  Require(h.WbAccepted(), where,
+          "the older instruction's writeback was not accepted after the squash");
+  Require(!h.WbStale() && !h.WbDuplicate(), where,
+          "the older instruction's writeback was misreported as stale or duplicate");
+  h.Writeback(older_tag, s.Gen(older_tag));
+  Require(h.WbDuplicate(), where,
+          "a replay of an accepted writeback was not reported as a duplicate");
+  Require(!h.WbAccepted(), where,
+          "a replay of an accepted writeback was accepted a second time");
+
+  // ---- the outermost branch resolves last, in a cycle that also allocates and
+  // retires, with the older *exception* on port 0 and a younger mispredict on
+  // port 1. Age decides, not the port and not the fault bit.
+  Stim outer;
+  outer.redirect0_valid = true;
+  outer.redirect0_rob_gen = gens[0];
+  outer.redirect0_pc = 0x80020000ull;
+  outer.redirect0_is_fault = true;
+  outer.redirect1_valid = true;
+  outer.redirect1_rob_gen = gens[1];
+  outer.redirect1_pc = 0x80030000ull;
+  outer.redirect1_is_fault = false;
+  outer.alloc_valid = true;
+  outer.alloc_rd = 7;
+  outer.alloc_rob_gen = h.NextGen();
+  outer.rob_retire = true;
+  h.Cycle(outer);
+  Require(h.RedirectTaken(), where,
+          "the older exception was not taken " + Describe(outer));
+  Require(h.RedirectTakenGen() == gens[0], where,
+          "the arbiter took the younger mispredict over the older exception: "
+          "expected " + std::to_string(gens[0]) + ", got " +
+              std::to_string(h.RedirectTakenGen()));
+  Require(h.RedirectTakenIsFault(), where,
+          "the older exception was taken without its fault flag " + Describe(outer));
+  Require(h.RedirectKilled() == 1, where,
+          "the younger redirect of the same cycle was not reported killed: " +
+              std::to_string(h.RedirectKilled()));
+  Require(h.Squash() && h.RetireBlock(), where,
+          "a recovery in a retire cycle did not block the retire " + Describe(outer));
+  Require(!h.AllocAccepted() && h.AllocSquashed(), where,
+          "an allocation in a squash cycle was not refused as squashed "
+          + Describe(outer));
+  Require(s.CkptDepth() == 0, where,
+          "a checkpoint survived the squash of the oldest branch: depth is " +
+              std::to_string(s.CkptDepth()));
+  Require(!h.ObservedInexact(), where,
+          "the undo bound was exceeded in a phase that never exceeded it");
+
+  // The outermost restore is exact against *its* checkpoint, and every tag and
+  // credit is accounted for as a number as well as through the masks.
+  const Snapshot after_outer = h.Now();
+  Require(after_outer.free_mask == before[0].free_mask, where,
+          "the outermost restore is not free-mask exact: " +
+              after_outer.free_mask.Describe(before[0].free_mask));
+  Require(after_outer.gen_valid == before[0].gen_valid, where,
+          "the outermost restore is not generation-valid exact: " +
+              after_outer.gen_valid.Describe(before[0].gen_valid));
+  Require(after_outer.spec_map == before[0].spec_map, where,
+          "the outermost restore is not speculative-map exact: " +
+              after_outer.spec_map.Describe(before[0].spec_map));
+  Require(after_outer.tail == before[0].tail &&
+              after_outer.alloc_ptr == before[0].alloc_ptr, where,
+          "the outermost restore did not put the tail and the rotation point back");
+  Require(after_outer.j_len == before[0].j_len, where,
+          "the journal after the outermost restore is " +
+              std::to_string(after_outer.j_len) + ", the checkpoint's is " +
+              std::to_string(before[0].j_len));
+  Require(after_outer.free_count == before[0].free_count, where,
+          "the outermost restore leaked or double-freed tags: " +
+              std::to_string(after_outer.free_count) + " free against " +
+              std::to_string(before[0].free_count));
+  Require(s.FreeCount() + s.CommittedOwned() <= entries, where,
+          "the conservation identity is violated: " + std::to_string(s.FreeCount()) +
+              " free + " + std::to_string(s.CommittedOwned()) + " owned exceeds " +
+              std::to_string(entries));
+  Require(!s.IsFree(older_tag), where,
+          "the oldest instruction's tag was freed by a squash older than it");
+  // One reservation was made and its result was accepted, so no credit was ever
+  // returned and none is outstanding: credits are conserved in both directions.
+  Require(h.ObservedCredits() == 0, where,
+          "credits outstanding after the phase is " +
+              std::to_string(h.ObservedCredits()));
+  Require(s.CreditReturns() == 0, where,
+          "the phase returned " + std::to_string(s.CreditReturns()) +
+              " credits, but every reservation it made was accepted");
+}
+
+// 7. Population and content after a squash equal the checkpoint, over a long run.
 void PhaseFreeListExact(Harness& h) {
   ShadowRecovery& s = h.shadow();
   const std::string where = "free-list-exact";
@@ -2508,16 +2833,52 @@ void PhaseFreeListExact(Harness& h) {
     Require(before_free > 0, where,
             "the free list is empty before round " + std::to_string(round));
 
-    // A body of work, then a checkpoint, then more work.
+    // A body of work, then a checkpoint, then more work. The capture is taken
+    // *before* the branch allocates: a checkpoint records the instant before the
+    // instruction that takes it, so the restore frees the branch's own
+    // destination -- the snapshot after that allocation is one instant too late
+    // and would demand the restore re-materialise the branch it exists to erase.
     for (uint32_t i = 0; i < 3; i++) h.Alloc(10 + (i % 10), /*checkpoint=*/false);
-    const uint32_t gen = h.Alloc(1, /*checkpoint=*/true);
+    // The mapping this round will commit: x10's *speculative* mapping as it stands
+    // before the checkpoint. It has to be a mapping created before the branch, or
+    // the commit would publish a younger instruction's mapping -- a machine
+    // cannot reach that state, since retire is in order and the branch is younger
+    // than anything it can commit over.
+    const uint32_t cmt_rd = 10;
+    const uint32_t cmt_old_tag = s.CmtTag(cmt_rd);
+    const uint32_t cmt_new_tag = s.SpecTag(cmt_rd);
+    const uint32_t cmt_new_gen = s.SpecGen(cmt_rd);
     const Snapshot at_ckpt = h.Now();
+    const uint32_t gen = h.Alloc(1, /*checkpoint=*/true);
+    Require(h.Now().free_mask != at_ckpt.free_mask, where,
+            "round " + std::to_string(round) +
+                ": the branch's own allocation changed nothing, so its destination "
+                "is not exercised");
     for (uint32_t i = 0; i < 5; i++) h.Alloc(12 + (i % 16), /*checkpoint=*/false);
 
-    // Commit something older, so the committed map moves and the free set has to
-    // be restored to a checkpoint whose committed map has since changed. A commit
-    // is permanent: it is *not* undone, and the restore must not try.
-    h.Commit(10, 10, 0);
+    // Commit x10's pre-checkpoint mapping, so the committed map moves and the free
+    // set has to be restored to a checkpoint whose committed map has since
+    // changed. A commit is permanent: it is *not* undone, and the tag it
+    // supersedes stays free. The free-mask expectation below is therefore the
+    // checkpoint's *plus* that tag, and not the checkpoint's alone: a restore that
+    // undid the commit would resurrect a mapping the ISA has already published.
+    {
+      std::fprintf(stderr, "DBGR round=%u alloc_ptr=%u epoch_sh=%u epoch_dut=%u valid=%02x ckepoch_dut=%u ckepoch_sh=%u\n",
+                   round, s.AllocPtr(), s.Epoch(), h.ObservedEpoch(),
+                   (unsigned)(h.ObservedCkptValid() & 0xffu),
+                   (unsigned)(h.ObservedCkptEpoch() & 0x7fu),
+                   (unsigned)(s.CkptEpochWide().words[0] & 0x7fu));
+      for (unsigned i = 0; i < 8; i++) {
+        std::fprintf(stderr, "  slot%u dut=%u sh=%u\n", i,
+                     (unsigned)((h.ObservedCkptBundle() >> (7 * i)) & 0x7fu),
+                     (unsigned)((s.CkptAllocPtrWide().words[0] >> (7 * i)) & 0x7fu));
+      }
+    }
+    h.Commit(cmt_rd, cmt_new_tag, cmt_new_gen);
+    Require(s.CmtTag(cmt_rd) == cmt_new_tag, where,
+            "round " + std::to_string(round) +
+                ": the commit did not move the committed map, so this round would "
+                "test nothing");
     h.Idle();
 
     Stim r;
@@ -2528,29 +2889,41 @@ void PhaseFreeListExact(Harness& h) {
     Require(h.RedirectTaken(), where,
             "the redirect in round " + std::to_string(round) + " was not taken");
 
-    // The free mask is bit-identical to the checkpoint's...
+    // The free mask is the checkpoint's, plus exactly what the commit freed
+    // permanently...
     const Snapshot after = h.Now();
-    Require(after.free_mask == at_ckpt.free_mask, where,
+    Wide expected_free = at_ckpt.free_mask;
+    expected_free.Set(cmt_old_tag, true);
+    Require(after.free_mask == expected_free, where,
             "round " + std::to_string(round) + ": the free mask after the squash is "
-            "not the checkpoint's -- " +
-                after.free_mask.Describe(at_ckpt.free_mask));
-    // ...and so are the generations, the written flags and the maps.
-    Require(after.Key() == at_ckpt.Key() ||
-                // The committed map is *permitted* to differ: a commit after the
-                // checkpoint is permanent and is not undone. Every other field
-                // must match.
-                SameExceptCmtMap(at_ckpt, after),
+            "not the checkpoint's plus the tag the commit superseded -- " +
+                after.free_mask.Describe(expected_free));
+    // ...its population count agrees, checked as a number as well as through the
+    // mask, so a defect in the count's derivation cannot hide behind a correct
+    // mask...
+    Require(after.free_count == static_cast<uint32_t>(expected_free.PopCount()), where,
+            "round " + std::to_string(round) + ": the free count after the squash is " +
+                std::to_string(after.free_count) + ", the expected mask has " +
+                std::to_string(expected_free.PopCount()) + " bits set");
+    // ...and everything a commit cannot move is the checkpoint's, bit for bit:
+    // the generations, the written flags, the tag generations, the speculative
+    // map, the tail, the rotation point and the journal. The committed map is
+    // deliberately absent from this list *and* checked separately below, so a
+    // restore that rewound it fails on its own name rather than on a field
+    // nobody thought to list.
+    Require(after.gen_valid == at_ckpt.gen_valid && after.wb_done == at_ckpt.wb_done &&
+                after.tag_gen == at_ckpt.tag_gen &&
+                after.spec_map == at_ckpt.spec_map &&
+                after.tail == at_ckpt.tail && after.alloc_ptr == at_ckpt.alloc_ptr &&
+                after.j_len == at_ckpt.j_len,
             where,
             "round " + std::to_string(round) +
                 ": the state after the squash is not the checkpoint's -- " +
                 Snapshot::FirstDifference(at_ckpt, after));
-
-    // And the population count, checked as a number as well as through the mask,
-    // so a defect in the count's derivation cannot hide behind a correct mask.
-    Require(after.free_count == at_ckpt.free_count, where,
-            "round " + std::to_string(round) + ": the free count after the squash is " +
-                std::to_string(after.free_count) + ", the checkpoint's is " +
-                std::to_string(at_ckpt.free_count));
+    Require(s.CmtTag(cmt_rd) == cmt_new_tag, where,
+            "round " + std::to_string(round) +
+                ": the squash undid a commit -- the committed map is back at the "
+                "mapping the commit replaced");
   }
 
   // The conservation identity: free + owned == entries, on every cycle, has been
@@ -2568,9 +2941,19 @@ void PhaseJournalBound(Harness& h) {
   const std::string where = "journal-bound";
   const uint32_t bound = h.Rob();
 
-  h.Alloc(1, /*checkpoint=*/true);
-  const uint32_t gen = s.CkptGen(0);
-  const uint32_t mark = s.JournalLen();
+  // The checkpointing branch writes x0, so it allocates nothing: the window has
+  // to reach its bound, and a branch that took a tag would make the free list
+  // run out first -- at p0 `entries - arch == rob`, so the bound and the
+  // allocatable tags are the same number and *every* tag has to be a journalled
+  // allocation for the bound to be reachable at all.
+  const Snapshot at_ckpt = h.Now();
+  const uint32_t gen = h.Alloc(0, /*checkpoint=*/true);
+  Require(s.CkptGen(0) == gen, where,
+          "the checkpoint did not record the branch's generation");
+  const uint32_t mark = s.CkptJMark(0);
+  Require(mark == 0, where,
+          "the checkpoint's journal mark is " + std::to_string(mark) +
+              ", expected zero: nothing had been allocated when it was taken");
   h.Idle();
 
   // Drive the window to exactly its bound. Every allocation needs a journal
@@ -2589,14 +2972,18 @@ void PhaseJournalBound(Harness& h) {
     Require(!h.JournalOverflow(), where,
             "reaching the bound reported an overflow at position " +
                 std::to_string(i));
+    Require(h.AllocAccepted(), where,
+            "the allocation at bound position " + std::to_string(i) +
+                " was not accepted " + Describe(a));
   }
   Require(s.JournalLen() == bound, where,
           "the window reached " + std::to_string(s.JournalLen()) + ", expected the "
           "full bound of " + std::to_string(bound));
+  Require(s.FreeCount() == 0, where,
+          "reaching the undo bound did not leave the free list empty: " +
+              std::to_string(s.FreeCount()) + " tags still free");
   Require(!h.ObservedInexact(), where,
           "reaching the bound latched the inexact flag");
-
-  const Snapshot at_bound = h.Now();
 
   // One allocation beyond the bound. It must be *refused* and reported, and the
   // journal must not be wrapped -- which is shown by the restore below still
@@ -2617,10 +3004,16 @@ void PhaseJournalBound(Harness& h) {
   Require(h.ObservedJournalLen() == bound, where,
           "the DUT's journal is " + std::to_string(h.ObservedJournalLen()) +
               ", beyond the bound");
+  Require(h.ObservedInexact(), where,
+          "an allocation refused at the undo bound did not latch the inexact flag");
 
   // The window did not change, so the restore from the full bound is still
-  // exact. A wrapped journal would have overwritten a live entry with the
-  // refused allocation's tag and this would not match.
+  // exact: it undoes the whole window, back to the checkpoint's instant -- which
+  // here is the state before the first allocation, since the checkpoint's mark is
+  // zero. A wrapped journal would have overwritten a live entry with the refused
+  // allocation's tag and this would not match. `at_ckpt` is the instant the
+  // checkpoint records, so it is what the restore must reproduce; `at_bound` is
+  // 64 allocations later and is *not*.
   h.Idle();
   Stim r;
   r.redirect0_valid = true;
@@ -2630,9 +3023,9 @@ void PhaseJournalBound(Harness& h) {
   Require(h.RedirectTaken(), where, "the redirect at the bound was not taken");
 
   const Snapshot after = h.Now();
-  Require(after.Key() == at_bound.Key(), where,
+  Require(after.Key() == at_ckpt.Key(), where,
           "the restore from a full undo window is not exact -- " +
-              Snapshot::FirstDifference(at_bound, after));
+              Snapshot::FirstDifference(at_ckpt, after));
   Require(after.j_len == mark, where,
           "the journal is not back at the checkpoint's mark after a restore from "
           "the full bound: " + std::to_string(after.j_len) + " vs " +
@@ -2982,6 +3375,14 @@ int main(int argc, char** argv) {
     harness.Phase("late-response");
     harness.Fresh();
     PhaseLateResponse(harness);
+
+    // The card's own case name. It runs after the directed phases because it is
+    // the one that depends on all of them -- nesting, the undo window, the age
+    // boundary and the credit table at once -- and a failure here should name the
+    // mechanism the earlier phases already isolated.
+    harness.Phase("nested-branch-full-queues");
+    harness.Fresh();
+    PhaseNestedBranchFullQueues(harness);
 
     harness.Phase("free-list-exact");
     harness.Fresh();

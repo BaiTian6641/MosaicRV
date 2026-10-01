@@ -171,31 +171,15 @@
 `resetall
 
 /* verilator lint_off UNUSEDPARAM */
-/* verilator lint_off MODDUP */
-/* verilator lint_off UNUSEDSIGNAL */
 // The generated headers declare one localparam per configuration knob for the
 // whole project. This module names the register-file subset; the rest belong to
 // other modules and are unused *here* by construction, not by omission.
 //
-// MODDUP: mosaic_id_pkg.svh is generated without an include guard, and the
-// testbench wrapper includes it too, so the same package body is seen twice in
-// one compilation unit. The two copies are byte-identical (same generator, same
-// profile), so there is nothing for a duplicate to disagree about, and the
-// simulator dedupes identical packages. A locally-defined guard cannot fix this
-// from the outside -- the guard would have to live in the generated file -- and
-// patching the generated file is not an option.
-//
-// UNUSEDSIGNAL: mosaic_id_pkg.svh defines composite-identity helpers for the
-// whole project, and at least one of them (`macro_id_live`) deliberately ignores
-// the `uop_index` field of its argument. That is a property of the generated
-// header, not of this module, and this module uses exactly one localparam from
-// it (`MOSAIC_ID_W_PRF_GEN`). Silenced around the include rather than left
-// un-silenced -- a project-wide lint gate that fails on a generated file nobody
-// may edit is a gate that would be removed rather than fixed.
+// Both headers carry their own include guards, and `mosaic_id_pkg.svh` silences
+// the unused-signal warnings its own project-wide helpers raise, so neither an
+// include guard nor a duplicate-package waiver is needed here.
 `include "mosaic_cfg_pkg.svh"
 `include "mosaic_id_pkg.svh"
-/* verilator lint_on UNUSEDSIGNAL */
-/* verilator lint_on MODDUP */
 /* verilator lint_on UNUSEDPARAM */
 
 // Widths are declared at file scope because a module's port list cannot see
@@ -313,11 +297,12 @@ module mosaic_prf (
       t = int'(tag);
 `ifdef MOSAIC_PRF_MUTANT_SLICE_ROW
       // MUTANT: the row taken from the low bits of the tag, which is the
-      // field-split decode the header rejects. Invisible for tags below
-      // ROWS == BANKS*BANKS; wrong for every tag at or above it. The mask into
-      // range keeps the mutant a *behavioural* defect -- a wrong entry -- rather
-      // than an out-of-bounds array read, which would be undefined behaviour in
-      // the simulator and would prove nothing about the decode.
+      // field-split decode the header rejects: the row stops being the tag's
+      // quotient and becomes its low bits, so the entry a tag names is wrong.
+      // The mask into range keeps the mutant a *behavioural* defect -- a wrong
+      // entry -- rather than an out-of-bounds array read, which would be
+      // undefined behaviour in the simulator and would prove nothing about the
+      // decode.
       row_of = PRF_ROW_W'((t & ((1 << PRF_ROW_W) - 1)) % PRF_ROWS);
 `else
       row_of = PRF_ROW_W'(t / PRF_BANKS);
@@ -416,17 +401,19 @@ module mosaic_prf (
                    rd_gen_i[s*PRF_GEN_W +: PRF_GEN_W]);
 `endif
             end else begin
+              rsp_data_o[s*PRF_XLEN +: PRF_XLEN] =
+                  data_q[arb_bank][arb_row];
 `ifdef MOSAIC_PRF_MUTANT_IGNORE_STORED_GEN
               // MUTANT: the response echoes the requested generation and never
-              // reports a mismatch, so a stale read looks like a live one.
+              // reports a mismatch, so a stale read looks like a live one. The
+              // data is still the stored data, so the defect is exactly "the
+              // generation is not checked", not "the value is lost".
               rsp_gen_o[s*PRF_GEN_W +: PRF_GEN_W] =
                   rd_gen_i[s*PRF_GEN_W +: PRF_GEN_W];
               rsp_gen_mismatch_o[s] = 1'b0;
 `else
               rsp_gen_o[s*PRF_GEN_W +: PRF_GEN_W] =
                   gen_q[arb_bank][arb_row];
-              rsp_data_o[s*PRF_XLEN +: PRF_XLEN] =
-                  data_q[arb_bank][arb_row];
               rsp_gen_mismatch_o[s] =
                   (gen_q[arb_bank][arb_row] != rd_gen_i[s*PRF_GEN_W +: PRF_GEN_W]);
 `endif

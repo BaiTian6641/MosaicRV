@@ -38,27 +38,15 @@
 `resetall
 
 /* verilator lint_off UNUSEDPARAM */
-/* verilator lint_off UNUSEDSIGNAL */
-/* verilator lint_off MODDUP */
 // The generated headers declare one localparam per configuration knob for the
 // whole project. This wrapper needs the register-file subset; the rest belong to
 // other modules and are unused *here* by construction, not by omission.
 //
-// UNUSEDSIGNAL: `mosaic_id_pkg.svh` defines composite-identity helpers whose
-// arguments are not all read (`macro_id_live` ignores `uop_index` by design).
-// Silenced around the include because the warning is about a generated file
-// nobody here may edit.
-//
-// MODDUP: `mosaic_prf.sv` includes the same generated headers and
-// `mosaic_id_pkg.svh` carries no include guard, so the package body is seen
-// twice in one compilation unit. The bodies are byte-identical -- same
-// generator, same profile -- so a duplicate has nothing to disagree about, and
-// the simulator dedupes identical packages. The guard cannot be added from the
-// outside, because it would have to live in the generated file.
+// Both headers carry their own include guards, and `mosaic_id_pkg.svh` silences
+// the unused-signal warnings its own project-wide helpers raise, so neither an
+// include guard nor a duplicate-package waiver is needed here.
 `include "mosaic_cfg_pkg.svh"
 `include "mosaic_id_pkg.svh"
-/* verilator lint_on MODDUP */
-/* verilator lint_on UNUSEDSIGNAL */
 /* verilator lint_on UNUSEDPARAM */
 
 localparam int unsigned TB_ENTRIES = mosaic_cfg_pkg::MOSAIC_INT_PRF_ENTRIES;

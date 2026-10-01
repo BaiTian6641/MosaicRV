@@ -83,6 +83,8 @@ def main() -> int:
     parser.add_argument("--profile", default=None,
                         help="also report the delivery status of one profile")
     parser.add_argument("--json", action="store_true")
+    parser.add_argument("--verbose", action="store_true",
+                        help="list what each non-advertisable capability waits on")
     args = parser.parse_args()
 
     defined = collect_tasks()
@@ -111,7 +113,20 @@ def main() -> int:
             "impl_tasks": impl,
             "verify_tasks": verify,
             "impl_delivered": [task for task in impl if task in delivered],
-            "advertisable": bool(impl) and all(task in delivered for task in impl),
+            "verify_delivered": [task for task in verify if task in delivered],
+            # Advertising requires BOTH halves. The implementation tasks say the
+            # feature exists; the verification tasks are where its independent
+            # positive and negative cases live. The first version of this checker
+            # collected `verify_tasks` and then never consulted them, so a
+            # capability became advertisable the moment its RTL landed -- which
+            # is precisely the "capability claim without evidence" the plan's
+            # section 3.2 forbids. A capability with no verification task at all
+            # is also not advertisable: that is a hole in the ladder, not a
+            # licence to publish.
+            "advertisable": bool(impl) and bool(verify)
+                            and all(task in delivered for task in impl)
+                            and all(task in delivered for task in verify),
+            "missing_for_advertisement": [t for t in impl + verify if t not in delivered],
         })
 
     report = {
@@ -133,6 +148,11 @@ def main() -> int:
     advertisable = [row for row in rows if row["advertisable"]]
     print("advertisable now           : %s"
           % (", ".join(row["capability"] for row in advertisable) or "(none yet)"))
+    blocked = [row for row in rows if not row["advertisable"] and row["missing_for_advertisement"]]
+    if blocked and args.verbose:
+        for row in blocked:
+            print("  not advertisable: %-12s waiting on %s"
+                  % (row["capability"], ", ".join(row["missing_for_advertisement"])))
 
     if args.profile:
         bundle = config_check.load(args.profile)

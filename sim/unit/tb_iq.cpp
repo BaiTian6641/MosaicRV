@@ -118,6 +118,49 @@ bool IsMacro(uint32_t uop, uint32_t rob_index, uint32_t rob_gen) {
   return UopRobIndex(uop) == rob_index && UopRobGen(uop) == rob_gen;
 }
 
+// The `mosaic_uop_pkg::uop_meta_t` packet, field by field. The shadow stores it
+// as named fields and the DUT's flattened pins are read back into one of these,
+// so a field the DUT swaps or truncates is named in the failure message rather
+// than showing up only as "the packet differs".
+struct Meta {
+  uint32_t class_ = 0;       // uop_class_e, 3 bits
+  uint64_t pc = 0;
+  uint32_t alu_op = 0;       // mosaic_pkg::alu_op_e, 4 bits
+  uint32_t md_op = 0;        // mosaic_pkg::md_op_e, 3 bits
+  bool md_w = false;
+  uint32_t br_funct = 0;     // 3 bits
+  bool is_jal = false;
+  bool is_jalr = false;
+  bool writes_link = false;
+  uint32_t mem_size = 0;     // 3 bits
+  bool mem_signed = false;
+  bool is_fence = false;
+  bool is_fence_i = false;
+};
+
+// A metadata packet whose every field is a function of the uop identity, so no
+// two uops the driver inserts carry the same packet and a field that is never
+// varied cannot hide: a swapped or truncated field shows. It is deliberately
+// not constant: a constant packet would test that the entry stores *a* packet,
+// not that it stores *this uop's* packet.
+inline Meta MakeMeta(uint32_t uop) {
+  Meta m;
+  m.class_ = uop % 6u;
+  m.pc = 0x8000000000000000ull + (static_cast<uint64_t>(uop) << 4) + 0x4ull;
+  m.alu_op = uop % 16u;
+  m.md_op = uop % 8u;
+  m.md_w = ((uop >> 0) & 1u) != 0;
+  m.br_funct = uop % 8u;
+  m.is_jal = ((uop >> 1) & 1u) != 0;
+  m.is_jalr = ((uop >> 2) & 1u) != 0;
+  m.writes_link = ((uop >> 3) & 1u) != 0;
+  m.mem_size = uop % 4u;
+  m.mem_signed = ((uop >> 4) & 1u) != 0;
+  m.is_fence = ((uop >> 5) & 1u) != 0;
+  m.is_fence_i = ((uop >> 6) & 1u) != 0;
+  return m;
+}
+
 // One source operand, as the shadow holds it and as the driver offers it.
 struct Source {
   uint32_t tag = 0;
@@ -133,7 +176,7 @@ struct Entry {
   bool granted = false;
   uint64_t age_abs = 0;
   uint32_t uop = 0;
-  uint32_t alu_op = 0;
+  Meta meta;
   uint64_t imm = 0;
   Source s1;
   Source s2;
@@ -146,7 +189,7 @@ struct ExpectedGrant {
   bool valid = false;
   bool from_ins = false;
   uint32_t uop = 0;
-  uint32_t alu_op = 0;
+  Meta meta;
   uint64_t imm = 0;
   uint64_t a = 0;
   uint64_t b = 0;
@@ -165,7 +208,7 @@ struct ExpectedGrant {
 struct Stimulus {
   bool ins_valid = false;
   uint32_t uop = 0;
-  uint32_t alu_op = 0;
+  Meta meta;
   uint64_t imm = 0;
   Source s1;
   Source s2;
@@ -227,24 +270,34 @@ struct Coverage {
 // reinterpretation -- which is the point of typing them the way Verilator does
 // rather than guessing uint32_t for everything and casting.
 //
+// The flattened metadata packet, as the wrapper exposes it. One member per
+// field, typed to the port's own width, so the readback and the drive go
+// through the same names the wrapper uses.
+struct MetaPins {
+  CData* class_; CData* alu_op; CData* md_op; CData* md_w; CData* br_funct;
+  CData* is_jal; CData* is_jalr; CData* writes_link; CData* mem_size;
+  CData* mem_signed; CData* is_fence; CData* is_fence_i;
+  QData* pc;
+};
+
 // One `Pins` per cluster, so both queues are driven and sampled through a
 // single code path.
 struct Pins {
-  CData* ins_valid; CData* ins_ready; SData* ins_uop; CData* ins_alu_op;
+  CData* ins_valid; CData* ins_ready; SData* ins_uop; MetaPins ins_meta;
   QData* ins_imm; CData* ins_src1_tag; CData* ins_src1_gen;
   CData* ins_src1_ready; QData* ins_src1_val; CData* ins_src2_tag;
   CData* ins_src2_gen; CData* ins_src2_ready; QData* ins_src2_val;
   CData* ins_dst_tag; CData* ins_dst_gen;
   CData* wu_valid; CData* wu_tag; CData* wu_gen; QData* wu_val;
   CData* grant_valid; CData* grant_ready; SData* grant_uop;
-  CData* grant_alu_op; QData* grant_imm; QData* grant_a; QData* grant_b;
+  MetaPins grant_meta; QData* grant_imm; QData* grant_a; QData* grant_b;
   CData* grant_dst_tag; CData* grant_dst_gen; CData* grant_index;
   CData* kill_valid; CData* kill_rob_index; CData* kill_rob_gen;
   CData* kill_younger;
   CData* occupied; CData* count; CData* full; CData* dst_conflict;
   CData* age_ctr; CData* alloc_index;
   CData* obs_index; CData* obs_valid; CData* obs_age; CData* obs_ready;
-  CData* obs_granted; SData* obs_uop; CData* obs_alu_op; QData* obs_imm;
+  CData* obs_granted; SData* obs_uop; MetaPins obs_meta; QData* obs_imm;
   CData* obs_src1_tag; CData* obs_src1_gen; CData* obs_src2_tag; CData* obs_src2_gen;
   CData* obs_dst_tag; CData* obs_dst_gen; CData* obs_src1_ready;
   CData* obs_src2_ready; QData* obs_src1_val; QData* obs_src2_val;
@@ -252,6 +305,62 @@ struct Pins {
   IData* wu_total; IData* wu_matched; IData* wu_dup; IData* wu_stale;
   IData* wu_miss;
 };
+// Read the flattened metadata pins into the shadow's packet form. One field per
+// line so a port whose width or meaning drifts is visible here rather than
+// silently folded into a wider assignment.
+Meta ReadMeta(const MetaPins& m) {
+  Meta o;
+  o.class_ = *m.class_;
+  o.pc = *m.pc;
+  o.alu_op = *m.alu_op;
+  o.md_op = *m.md_op;
+  o.md_w = (*m.md_w != 0);
+  o.br_funct = *m.br_funct;
+  o.is_jal = (*m.is_jal != 0);
+  o.is_jalr = (*m.is_jalr != 0);
+  o.writes_link = (*m.writes_link != 0);
+  o.mem_size = *m.mem_size;
+  o.mem_signed = (*m.mem_signed != 0);
+  o.is_fence = (*m.is_fence != 0);
+  o.is_fence_i = (*m.is_fence_i != 0);
+  return o;
+}
+
+// Drive the flattened metadata pins from the packet the shadow holds.
+void WriteMeta(const MetaPins& m, const Meta& v) {
+  *m.class_ = static_cast<uint8_t>(v.class_);
+  *m.pc = v.pc;
+  *m.alu_op = static_cast<uint8_t>(v.alu_op);
+  *m.md_op = static_cast<uint8_t>(v.md_op);
+  *m.md_w = v.md_w;
+  *m.br_funct = static_cast<uint8_t>(v.br_funct);
+  *m.is_jal = v.is_jal;
+  *m.is_jalr = v.is_jalr;
+  *m.writes_link = v.writes_link;
+  *m.mem_size = static_cast<uint8_t>(v.mem_size);
+  *m.mem_signed = v.mem_signed;
+  *m.is_fence = v.is_fence;
+  *m.is_fence_i = v.is_fence_i;
+}
+
+// Compare a metadata packet field by field, naming each field, so a swapped or
+// truncated bit is reported by name rather than as "the packet differs".
+void CheckMeta(mosaic::Reporter& rep, const std::string& at, const Meta& got, const Meta& want) {
+  rep.Check(got.class_ == want.class_, at + "meta class");
+  rep.Check(got.pc == want.pc, at + "meta pc");
+  rep.Check(got.alu_op == want.alu_op, at + "meta alu_op");
+  rep.Check(got.md_op == want.md_op, at + "meta md_op");
+  rep.Check(got.md_w == want.md_w, at + "meta md_w");
+  rep.Check(got.br_funct == want.br_funct, at + "meta br_funct");
+  rep.Check(got.is_jal == want.is_jal, at + "meta is_jal");
+  rep.Check(got.is_jalr == want.is_jalr, at + "meta is_jalr");
+  rep.Check(got.writes_link == want.writes_link, at + "meta writes_link");
+  rep.Check(got.mem_size == want.mem_size, at + "meta mem_size");
+  rep.Check(got.mem_signed == want.mem_signed, at + "meta mem_signed");
+  rep.Check(got.is_fence == want.is_fence, at + "meta is_fence");
+  rep.Check(got.is_fence_i == want.is_fence_i, at + "meta is_fence_i");
+}
+
 // The independent shadow.
 class Shadow {
  public:
@@ -367,7 +476,7 @@ class Shadow {
       g.from_ins = true;
       g.slot = -1;
       g.uop = st.uop;
-      g.alu_op = st.alu_op;
+      g.meta = st.meta;
       g.imm = st.imm;
       g.a = Value(st.s1, st);
       g.b = Value(st.s2, st);
@@ -532,7 +641,7 @@ class Shadow {
       e.valid = true;
       e.age_abs = age_ctr_abs_ - static_cast<uint64_t>(rm.size()) + (base_removed ? 1 : 0);
       e.uop = st.uop;
-      e.alu_op = st.alu_op;
+      e.meta = st.meta;
       e.imm = st.imm;
       e.s1 = st.s1;
       e.s2 = st.s2;
@@ -664,7 +773,7 @@ class Shadow {
   void FillFromSlot(ExpectedGrant& g, int slot, const Stimulus& st) const {
     const Entry& e = slots_[slot];
     g.uop = e.uop;
-    g.alu_op = e.alu_op;
+    g.meta = e.meta;
     g.imm = e.imm;
     g.a = Value(e.s1, st);
     g.b = Value(e.s2, st);
@@ -822,7 +931,7 @@ class Bench {
     Stimulus s;
     s.ins_valid = true;
     s.uop = uop;
-    s.alu_op = kAdd;
+    s.meta = MakeMeta(uop);
     s.imm = 0x1000u + uop;
     s.s1 = Source{s1_tag, s1_gen, s1_ready, 0x1111u + uop};
     s.s2 = Source{s2_tag, s2_gen, s2_ready, 0x2222u + uop};
@@ -853,7 +962,7 @@ class Bench {
   // this and wake that in the same cycle" without hand-building both.
   static Stimulus Merge(const Stimulus& base, const Stimulus& other) {
     Stimulus s = base;
-    if (other.ins_valid) { s.ins_valid = true; s.uop = other.uop; s.alu_op = other.alu_op;
+    if (other.ins_valid) { s.ins_valid = true; s.uop = other.uop; s.meta = other.meta;
                            s.imm = other.imm; s.s1 = other.s1; s.s2 = other.s2;
                            s.dst_tag = other.dst_tag; s.dst_gen = other.dst_gen; }
     if (other.wu_valid) { s.wu_valid = true; s.wu_tag = other.wu_tag; s.wu_gen = other.wu_gen;
@@ -872,6 +981,7 @@ class Bench {
   // What the DUT presented on the cycle the driver last checked.
   bool seen_grant_valid(unsigned c) const { return inst_[c].seen_grant_valid; }
   uint32_t seen_grant_uop(unsigned c) const { return inst_[c].seen_grant_uop; }
+  const Meta& seen_grant_meta(unsigned c) const { return inst_[c].seen_grant_meta; }
   uint64_t seen_grant_a(unsigned c) const { return inst_[c].seen_grant_a; }
   bool seen_ins_valid(unsigned c) const { return inst_[c].seen_ins_valid; }
   bool seen_dst_conflict(unsigned c) const { return inst_[c].seen_dst_conflict; }
@@ -960,7 +1070,7 @@ class Bench {
     Stimulus s;
     s.ins_valid = true;
     s.uop = uop;
-    s.alu_op = kAdd;
+    s.meta = MakeMeta(uop);
     s.imm = 0x2000u + uop;
     s.s1 = Source{tag, gen, false, 0};
     s.s2 = Source{0, 0, true, 0x3333u + uop};   // second source already present
@@ -1000,6 +1110,7 @@ class Bench {
     // reads the top-level grant after `Step` returns is reading the next cycle's
     // combinational value, which is one edge too late.
     uint32_t seen_grant_uop = 0;
+    Meta seen_grant_meta;
     uint64_t seen_grant_a = 0, seen_grant_b = 0;
     bool seen_grant_valid = false;
     bool seen_ins_valid = false;
@@ -1066,9 +1177,6 @@ class Bench {
   std::vector<Instance> inst_;
   uint32_t next_tag_ = 0x40;   // well clear of the tags the phases allocate
   uint32_t dst_next_ = 0x20;
-
-  // The `mosaic_pkg::alu_op_e` encoding, transcribed: ALU_ADD = 0.
-  static constexpr uint32_t kAdd = 0;
 };
 
 // --- pin wiring -----------------------------------------------------------
@@ -1077,7 +1185,14 @@ Pins Bench::PinsFor0() {
   Vmosaic_iq_tb* t = top_;
   Pins p{};
   p.ins_valid = &t->c0_ins_valid; p.ins_ready = &t->c0_ins_ready;
-  p.ins_uop = &t->c0_ins_uop; p.ins_alu_op = &t->c0_ins_alu_op;
+  p.ins_uop = &t->c0_ins_uop;
+  p.ins_meta.class_ = &t->c0_ins_meta_class; p.ins_meta.pc = &t->c0_ins_meta_pc;
+  p.ins_meta.alu_op = &t->c0_ins_meta_alu_op; p.ins_meta.md_op = &t->c0_ins_meta_md_op;
+  p.ins_meta.md_w = &t->c0_ins_meta_md_w; p.ins_meta.br_funct = &t->c0_ins_meta_br_funct;
+  p.ins_meta.is_jal = &t->c0_ins_meta_is_jal; p.ins_meta.is_jalr = &t->c0_ins_meta_is_jalr;
+  p.ins_meta.writes_link = &t->c0_ins_meta_writes_link;
+  p.ins_meta.mem_size = &t->c0_ins_meta_mem_size; p.ins_meta.mem_signed = &t->c0_ins_meta_mem_signed;
+  p.ins_meta.is_fence = &t->c0_ins_meta_is_fence; p.ins_meta.is_fence_i = &t->c0_ins_meta_is_fence_i;
   p.ins_imm = &t->c0_ins_imm;
   p.ins_src1_tag = &t->c0_ins_src1_tag; p.ins_src1_gen = &t->c0_ins_src1_gen;
   p.ins_src1_ready = &t->c0_ins_src1_ready; p.ins_src1_val = &t->c0_ins_src1_val;
@@ -1087,7 +1202,16 @@ Pins Bench::PinsFor0() {
   p.wu_valid = &t->c0_wu_valid; p.wu_tag = &t->c0_wu_tag; p.wu_gen = &t->c0_wu_gen;
   p.wu_val = &t->c0_wu_val;
   p.grant_valid = &t->c0_grant_valid; p.grant_ready = &t->c0_grant_ready;
-  p.grant_uop = &t->c0_grant_uop; p.grant_alu_op = &t->c0_grant_alu_op;
+  p.grant_uop = &t->c0_grant_uop;
+  p.grant_meta.class_ = &t->c0_grant_meta_class; p.grant_meta.pc = &t->c0_grant_meta_pc;
+  p.grant_meta.alu_op = &t->c0_grant_meta_alu_op; p.grant_meta.md_op = &t->c0_grant_meta_md_op;
+  p.grant_meta.md_w = &t->c0_grant_meta_md_w; p.grant_meta.br_funct = &t->c0_grant_meta_br_funct;
+  p.grant_meta.is_jal = &t->c0_grant_meta_is_jal; p.grant_meta.is_jalr = &t->c0_grant_meta_is_jalr;
+  p.grant_meta.writes_link = &t->c0_grant_meta_writes_link;
+  p.grant_meta.mem_size = &t->c0_grant_meta_mem_size;
+  p.grant_meta.mem_signed = &t->c0_grant_meta_mem_signed;
+  p.grant_meta.is_fence = &t->c0_grant_meta_is_fence;
+  p.grant_meta.is_fence_i = &t->c0_grant_meta_is_fence_i;
   p.grant_imm = &t->c0_grant_imm; p.grant_a = &t->c0_grant_a; p.grant_b = &t->c0_grant_b;
   p.grant_dst_tag = &t->c0_grant_dst_tag; p.grant_dst_gen = &t->c0_grant_dst_gen;
   p.grant_index = &t->c0_grant_index;
@@ -1101,7 +1225,14 @@ Pins Bench::PinsFor0() {
   p.obs_granted = &t->c0_obs_granted; p.obs_uop = &t->c0_obs_uop;
   p.obs_src1_tag = &t->c0_obs_src1_tag; p.obs_src1_gen = &t->c0_obs_src1_gen;
   p.obs_src2_tag = &t->c0_obs_src2_tag; p.obs_src2_gen = &t->c0_obs_src2_gen;
-  p.obs_alu_op = &t->c0_obs_alu_op; p.obs_imm = &t->c0_obs_imm;
+  p.obs_meta.class_ = &t->c0_obs_meta_class; p.obs_meta.pc = &t->c0_obs_meta_pc;
+  p.obs_meta.alu_op = &t->c0_obs_meta_alu_op; p.obs_meta.md_op = &t->c0_obs_meta_md_op;
+  p.obs_meta.md_w = &t->c0_obs_meta_md_w; p.obs_meta.br_funct = &t->c0_obs_meta_br_funct;
+  p.obs_meta.is_jal = &t->c0_obs_meta_is_jal; p.obs_meta.is_jalr = &t->c0_obs_meta_is_jalr;
+  p.obs_meta.writes_link = &t->c0_obs_meta_writes_link;
+  p.obs_meta.mem_size = &t->c0_obs_meta_mem_size; p.obs_meta.mem_signed = &t->c0_obs_meta_mem_signed;
+  p.obs_meta.is_fence = &t->c0_obs_meta_is_fence; p.obs_meta.is_fence_i = &t->c0_obs_meta_is_fence_i;
+  p.obs_imm = &t->c0_obs_imm;
   p.obs_dst_tag = &t->c0_obs_dst_tag; p.obs_dst_gen = &t->c0_obs_dst_gen;
   p.obs_src1_ready = &t->c0_obs_src1_ready; p.obs_src2_ready = &t->c0_obs_src2_ready;
   p.obs_src1_val = &t->c0_obs_src1_val; p.obs_src2_val = &t->c0_obs_src2_val;
@@ -1116,7 +1247,14 @@ Pins Bench::PinsFor1() {
   Vmosaic_iq_tb* t = top_;
   Pins p{};
   p.ins_valid = &t->c1_ins_valid; p.ins_ready = &t->c1_ins_ready;
-  p.ins_uop = &t->c1_ins_uop; p.ins_alu_op = &t->c1_ins_alu_op;
+  p.ins_uop = &t->c1_ins_uop;
+  p.ins_meta.class_ = &t->c1_ins_meta_class; p.ins_meta.pc = &t->c1_ins_meta_pc;
+  p.ins_meta.alu_op = &t->c1_ins_meta_alu_op; p.ins_meta.md_op = &t->c1_ins_meta_md_op;
+  p.ins_meta.md_w = &t->c1_ins_meta_md_w; p.ins_meta.br_funct = &t->c1_ins_meta_br_funct;
+  p.ins_meta.is_jal = &t->c1_ins_meta_is_jal; p.ins_meta.is_jalr = &t->c1_ins_meta_is_jalr;
+  p.ins_meta.writes_link = &t->c1_ins_meta_writes_link;
+  p.ins_meta.mem_size = &t->c1_ins_meta_mem_size; p.ins_meta.mem_signed = &t->c1_ins_meta_mem_signed;
+  p.ins_meta.is_fence = &t->c1_ins_meta_is_fence; p.ins_meta.is_fence_i = &t->c1_ins_meta_is_fence_i;
   p.ins_imm = &t->c1_ins_imm;
   p.ins_src1_tag = &t->c1_ins_src1_tag; p.ins_src1_gen = &t->c1_ins_src1_gen;
   p.ins_src1_ready = &t->c1_ins_src1_ready; p.ins_src1_val = &t->c1_ins_src1_val;
@@ -1126,7 +1264,16 @@ Pins Bench::PinsFor1() {
   p.wu_valid = &t->c1_wu_valid; p.wu_tag = &t->c1_wu_tag; p.wu_gen = &t->c1_wu_gen;
   p.wu_val = &t->c1_wu_val;
   p.grant_valid = &t->c1_grant_valid; p.grant_ready = &t->c1_grant_ready;
-  p.grant_uop = &t->c1_grant_uop; p.grant_alu_op = &t->c1_grant_alu_op;
+  p.grant_uop = &t->c1_grant_uop;
+  p.grant_meta.class_ = &t->c1_grant_meta_class; p.grant_meta.pc = &t->c1_grant_meta_pc;
+  p.grant_meta.alu_op = &t->c1_grant_meta_alu_op; p.grant_meta.md_op = &t->c1_grant_meta_md_op;
+  p.grant_meta.md_w = &t->c1_grant_meta_md_w; p.grant_meta.br_funct = &t->c1_grant_meta_br_funct;
+  p.grant_meta.is_jal = &t->c1_grant_meta_is_jal; p.grant_meta.is_jalr = &t->c1_grant_meta_is_jalr;
+  p.grant_meta.writes_link = &t->c1_grant_meta_writes_link;
+  p.grant_meta.mem_size = &t->c1_grant_meta_mem_size;
+  p.grant_meta.mem_signed = &t->c1_grant_meta_mem_signed;
+  p.grant_meta.is_fence = &t->c1_grant_meta_is_fence;
+  p.grant_meta.is_fence_i = &t->c1_grant_meta_is_fence_i;
   p.grant_imm = &t->c1_grant_imm; p.grant_a = &t->c1_grant_a; p.grant_b = &t->c1_grant_b;
   p.grant_dst_tag = &t->c1_grant_dst_tag; p.grant_dst_gen = &t->c1_grant_dst_gen;
   p.grant_index = &t->c1_grant_index;
@@ -1140,7 +1287,14 @@ Pins Bench::PinsFor1() {
   p.obs_granted = &t->c1_obs_granted; p.obs_uop = &t->c1_obs_uop;
   p.obs_src1_tag = &t->c1_obs_src1_tag; p.obs_src1_gen = &t->c1_obs_src1_gen;
   p.obs_src2_tag = &t->c1_obs_src2_tag; p.obs_src2_gen = &t->c1_obs_src2_gen;
-  p.obs_alu_op = &t->c1_obs_alu_op; p.obs_imm = &t->c1_obs_imm;
+  p.obs_meta.class_ = &t->c1_obs_meta_class; p.obs_meta.pc = &t->c1_obs_meta_pc;
+  p.obs_meta.alu_op = &t->c1_obs_meta_alu_op; p.obs_meta.md_op = &t->c1_obs_meta_md_op;
+  p.obs_meta.md_w = &t->c1_obs_meta_md_w; p.obs_meta.br_funct = &t->c1_obs_meta_br_funct;
+  p.obs_meta.is_jal = &t->c1_obs_meta_is_jal; p.obs_meta.is_jalr = &t->c1_obs_meta_is_jalr;
+  p.obs_meta.writes_link = &t->c1_obs_meta_writes_link;
+  p.obs_meta.mem_size = &t->c1_obs_meta_mem_size; p.obs_meta.mem_signed = &t->c1_obs_meta_mem_signed;
+  p.obs_meta.is_fence = &t->c1_obs_meta_is_fence; p.obs_meta.is_fence_i = &t->c1_obs_meta_is_fence_i;
+  p.obs_imm = &t->c1_obs_imm;
   p.obs_dst_tag = &t->c1_obs_dst_tag; p.obs_dst_gen = &t->c1_obs_dst_gen;
   p.obs_src1_ready = &t->c1_obs_src1_ready; p.obs_src2_ready = &t->c1_obs_src2_ready;
   p.obs_src1_val = &t->c1_obs_src1_val; p.obs_src2_val = &t->c1_obs_src2_val;
@@ -1154,7 +1308,7 @@ Pins Bench::PinsFor1() {
 void Bench::Drive(const Pins& p, const Stimulus& s) {
   *p.ins_valid = s.ins_valid;
   *p.ins_uop = s.uop;
-  *p.ins_alu_op = static_cast<uint8_t>(s.alu_op);
+  WriteMeta(p.ins_meta, s.meta);
   *p.ins_imm = s.imm;
   *p.ins_src1_tag = static_cast<uint8_t>(s.s1.tag);
   *p.ins_src1_gen = static_cast<uint8_t>(s.s1.gen);
@@ -1279,7 +1433,7 @@ void Bench::CheckOne(Instance& inst, const Stimulus& s) {
     if (!s.grant_ready) inst.cov.grant_stalls++;
     if (g.from_ins) inst.cov.same_cycle_grant++;
     rep_.Check(*p.grant_uop == g.uop, who + ": granted uop identity");
-    rep_.Check(*p.grant_alu_op == static_cast<uint8_t>(g.alu_op), who + ": granted alu_op");
+    CheckMeta(rep_, who + ": granted ", ReadMeta(p.grant_meta), g.meta);
     rep_.Check(*p.grant_imm == g.imm, who + ": granted immediate");
     rep_.Check(*p.grant_a == g.a, who + ": granted operand a");
     rep_.Check(*p.grant_b == g.b, who + ": granted operand b");
@@ -1382,6 +1536,7 @@ void Bench::CheckOne(Instance& inst, const Stimulus& s) {
 
   inst.seen_grant_valid = grant_valid;
   inst.seen_grant_uop = *p.grant_uop;
+  inst.seen_grant_meta = ReadMeta(p.grant_meta);
   inst.seen_grant_a = *p.grant_a;
   inst.seen_grant_b = *p.grant_b;
   inst.seen_ins_valid = s.ins_valid;
@@ -1441,7 +1596,7 @@ void Bench::CheckSlots(unsigned c) {
       rep_.Check(*p.obs_age == Shadow::Stored(e.age_abs), at + "age");
       rep_.Check((*p.obs_ready != 0) == (e.s1.ready && e.s2.ready), at + "readiness");
       rep_.Check(*p.obs_uop == e.uop, at + "uop identity");
-      rep_.Check(*p.obs_alu_op == static_cast<uint8_t>(e.alu_op), at + "alu_op");
+      CheckMeta(rep_, at, ReadMeta(p.obs_meta), e.meta);
       rep_.Check(*p.obs_imm == e.imm, at + "immediate");
       rep_.Check(*p.obs_dst_tag == static_cast<uint8_t>(e.dst_tag), at + "dst tag");
       rep_.Check(*p.obs_dst_gen == static_cast<uint8_t>(e.dst_gen), at + "dst generation");
@@ -2187,7 +2342,7 @@ void PhaseRandom(Bench& bench, mosaic::Reporter& rep, int cycles, uint64_t cap) 
       if (t.ins_valid) {
         t.uop = MakeUop(rob_index, 1, static_cast<uint32_t>(rng.Below(4)));
         rob_index++;
-        t.alu_op = static_cast<uint32_t>(rng.Below(16));
+        t.meta = MakeMeta(t.uop);
         t.imm = rng.Next();
         t.s1.ready = rng.Chance(60);
         t.s1.value = rng.Next();
@@ -2300,6 +2455,13 @@ int main(int argc, char** argv) {
   out_of_cycles();
 
   // ---- phases 2..13 --------------------------------------------------------
+  // refused-insert runs first: it is the only phase that (a) reaches a refused
+  // insert with the allocation pointer and age counter checked by name, and
+  // (b) does so before any other phase offers an insert into a full queue, so
+  // under `MOSAIC_IQ_MUTANT_REFUSED_INSERT_ADVANCES` its named check is the
+  // *first* failure reported rather than a generic per-cycle mismatch found
+  // later. Every phase drains its queue at entry, so the order is free.
+  phase("refused-insert", PhaseRefusedInsert);
   phase("insert-basic", PhaseInsertBasic);
   phase("oldest-ready", PhaseOldestReady);
   phase("same-cycle", PhaseSameCycle);
@@ -2310,10 +2472,6 @@ int main(int argc, char** argv) {
   phase("back-pressure", PhaseBackPressure);
   phase("kill", PhaseKill);
   phase("dst-conflict", PhaseDstConflict);
-  // Before full-and-order: both reach a refused insert, and the named check of
-  // *this* phase is the one that must carry a refused-insert mutant, so it runs
-  // first and its failure is the first one reported.
-  phase("refused-insert", PhaseRefusedInsert);
   phase("full-and-order", PhaseFullAndOrder);
 
   // ---- phase 14: randomised ------------------------------------------------

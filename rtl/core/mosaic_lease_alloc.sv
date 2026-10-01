@@ -290,7 +290,9 @@ module mosaic_lease_alloc #(
   output logic [31:0]                            o_size_alu,
   output logic [31:0]                            o_size_md,
   output logic [31:0]                            o_size_wb,
-  output logic [31:0]                            o_size_net
+  output logic [31:0]                            o_size_net,
+  output logic [31:0]                            o_dbg0,
+  output logic [31:0]                            o_dbg1
 );
 
   // ------------------------------------------------------------- the ledger
@@ -435,21 +437,24 @@ module mosaic_lease_alloc #(
     end
   endfunction
 
+  logic [31:0]     cand;
+  logic            need_alu;
+  logic            need_md;
+  logic            need_wb;
+  logic            need_net;
+  logic            satisfied;
+  logic [SLOT_W:0] pick_alu;
+  logic [SLOT_W:0] pick_md;
+  logic [SLOT_W:0] pick_wb;
+  logic [SLOT_W:0] pick_net;
+  logic [ROW_W:0]  pick_rec;
+  logic            dbg_rv0;
+
+  assign o_dbg0 = {26'b0, satisfied, pick_rec[ROW_W], pick_alu[SLOT_W], pick_wb[SLOT_W],
+                   free_alu[0], free_wb[0]};
+  assign o_dbg1 = {23'b0, cand[3:0], req_valid[0], need_alu, need_wb, need_md, need_net};
+
   always_comb begin : arb
-    // Block-local: these describe the candidate under consideration and are
-    // meaningless outside the loop, and a module-level signal would infer a
-    // latch for every cycle in which no requester is valid.
-    logic [31:0]     cand;
-    logic            need_alu;
-    logic            need_md;
-    logic            need_wb;
-    logic            need_net;
-    logic            satisfied;
-    logic [SLOT_W:0] pick_alu;
-    logic [SLOT_W:0] pick_md;
-    logic [SLOT_W:0] pick_wb;
-    logic [SLOT_W:0] pick_net;
-    logic [ROW_W:0]  pick_rec;
 
     // ---------------------------------------------------------- defaults
     rel_ok_c    = 1'b0;
@@ -622,10 +627,17 @@ module mosaic_lease_alloc #(
         if (satisfied && pick_rec[ROW_W]) begin
           ready_c[cand] = 1'b1;
           grant_rec_c[cand*IDX_W +: IDX_W] = {{(IDX_W-ROW_W){1'b0}}, pick_rec[ROW_W-1:0]};
-          // The epoch this grant creates: the record's current generation plus
-          // one. The record is free, so its generation is the one its last epoch
-          // ended with, and no other grant can take this record in this cycle.
-          grant_gen_c[cand*GEN_W +: GEN_W] = gen_w[pick_rec[ROW_W-1:0]*GEN_W +: GEN_W] + 1'b1;
+          // The epoch this grant creates. A record that has never been granted
+          // since reset starts at generation 0: the generation array is
+          // deliberately not reset (reset cost is control state, not storage --
+          // see rtl/common/mosaic_ram.sv), so its power-up content is not a fact
+          // this module may depend on, and the value is gated on `used` for
+          // exactly the reason `mosaic_rename` gates on `gen_valid`. Otherwise a
+          // record that *has* been used simply steps its current epoch by one.
+          grant_gen_c[cand*GEN_W +: GEN_W] =
+              used_w[pick_rec[ROW_W-1:0]]
+                  ? (gen_w[pick_rec[ROW_W-1:0]*GEN_W +: GEN_W] + 1'b1)
+                  : {GEN_W{1'b0}};
 
           if (need_alu) begin
             slot_c[(cand*POOLS + 0)*SLOT_W +: SLOT_W] = pick_alu[SLOT_W-1:0];

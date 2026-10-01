@@ -19,6 +19,18 @@
 // a particular occupancy is visible in one instance while the other still
 // disagrees with its own shadow, so a bug cannot cancel out between them.
 //
+// --------------------------------------------------------- the meta packet
+//
+// The DUT carries `mosaic_uop_pkg::uop_meta_t` on `ins_meta`, `grant_meta` and
+// `obs_meta`. Verilator exposes a >64-bit packed struct port as a wide vector,
+// which is awkward to drive and to compare field by field from C++, so this
+// wrapper unpacks it at the boundary: each field of the packet is its own
+// top-level port, the wrapper assembles the struct for the insert path and
+// unpacks it for the grant and observation paths. The unpacking is straight
+// assignment with no logic, and the C++ driver compares every field by name, so
+// a field the DUT swaps or truncates is named rather than merely "the packet
+// differs".
+//
 // Everything else is a straight pass-through: every port is driven by
 // sim/unit/tb_iq.cpp or comes straight out of a DUT output. There is no clock
 // generation, no reset generation and no `$display` in here; the C++ side owns
@@ -26,15 +38,16 @@
 // sim/common/sim_common.h.
 // ============================================================================
 
+/* verilator lint_off UNUSEDPARAM */
+// `mosaic_uop_pkg` carries the frozen metadata packet. It has an include guard
+// (the generated `mosaic_cfg_pkg.svh` it pulls in does not), so a second include
+// in one compilation unit is harmless -- which is why the packet type can be
+// named here without a second transcription of its fields.
+`include "mosaic_uop_pkg.sv"
+/* verilator lint_on UNUSEDPARAM */
+
 `default_nettype none
 `resetall
-
-// The generated package is *not* included here. rtl/core/mosaic_iq.sv already
-// includes it, and a second `include of a header with no include guard is a
-// duplicate package declaration. The geometry this wrapper needs is read back
-// out of the instances below and exported on `o_*_entries` etc, so the C++
-// driver learns the sizes from the hardware that exists rather than from a
-// second transcription of them. See the note above those outputs.
 
 
 module mosaic_iq_tb (
@@ -45,7 +58,19 @@ module mosaic_iq_tb (
   input  logic         c0_ins_valid,
   output logic         c0_ins_ready,
   input  logic [15:0]  c0_ins_uop,
-  input  logic [3:0]   c0_ins_alu_op,
+  input  logic [2:0]   c0_ins_meta_class,
+  input  logic [63:0]  c0_ins_meta_pc,
+  input  logic [3:0]   c0_ins_meta_alu_op,
+  input  logic [2:0]   c0_ins_meta_md_op,
+  input  logic         c0_ins_meta_md_w,
+  input  logic [2:0]   c0_ins_meta_br_funct,
+  input  logic         c0_ins_meta_is_jal,
+  input  logic         c0_ins_meta_is_jalr,
+  input  logic         c0_ins_meta_writes_link,
+  input  logic [2:0]   c0_ins_meta_mem_size,
+  input  logic         c0_ins_meta_mem_signed,
+  input  logic         c0_ins_meta_is_fence,
+  input  logic         c0_ins_meta_is_fence_i,
   input  logic [63:0]  c0_ins_imm,
   input  logic [6:0]   c0_ins_src1_tag,
   input  logic [6:0]   c0_ins_src1_gen,
@@ -68,7 +93,19 @@ module mosaic_iq_tb (
   output logic         c0_grant_valid,
   input  logic         c0_grant_ready,
   output logic [15:0]  c0_grant_uop,
-  output logic [3:0]   c0_grant_alu_op,
+  output logic [2:0]   c0_grant_meta_class,
+  output logic [63:0]  c0_grant_meta_pc,
+  output logic [3:0]   c0_grant_meta_alu_op,
+  output logic [2:0]   c0_grant_meta_md_op,
+  output logic         c0_grant_meta_md_w,
+  output logic [2:0]   c0_grant_meta_br_funct,
+  output logic         c0_grant_meta_is_jal,
+  output logic         c0_grant_meta_is_jalr,
+  output logic         c0_grant_meta_writes_link,
+  output logic [2:0]   c0_grant_meta_mem_size,
+  output logic         c0_grant_meta_mem_signed,
+  output logic         c0_grant_meta_is_fence,
+  output logic         c0_grant_meta_is_fence_i,
   output logic [63:0]  c0_grant_imm,
   output logic [63:0]  c0_grant_a,
   output logic [63:0]  c0_grant_b,
@@ -101,7 +138,19 @@ module mosaic_iq_tb (
   output logic [6:0]   c0_obs_src2_tag,
   output logic [6:0]   c0_obs_src2_gen,
   output logic [15:0]  c0_obs_uop,
-  output logic [3:0]   c0_obs_alu_op,
+  output logic [2:0]   c0_obs_meta_class,
+  output logic [63:0]  c0_obs_meta_pc,
+  output logic [3:0]   c0_obs_meta_alu_op,
+  output logic [2:0]   c0_obs_meta_md_op,
+  output logic         c0_obs_meta_md_w,
+  output logic [2:0]   c0_obs_meta_br_funct,
+  output logic         c0_obs_meta_is_jal,
+  output logic         c0_obs_meta_is_jalr,
+  output logic         c0_obs_meta_writes_link,
+  output logic [2:0]   c0_obs_meta_mem_size,
+  output logic         c0_obs_meta_mem_signed,
+  output logic         c0_obs_meta_is_fence,
+  output logic         c0_obs_meta_is_fence_i,
   output logic [63:0]  c0_obs_imm,
   output logic [6:0]   c0_obs_dst_tag,
   output logic [6:0]   c0_obs_dst_gen,
@@ -124,7 +173,19 @@ module mosaic_iq_tb (
   input  logic         c1_ins_valid,
   output logic         c1_ins_ready,
   input  logic [15:0]  c1_ins_uop,
-  input  logic [3:0]   c1_ins_alu_op,
+  input  logic [2:0]   c1_ins_meta_class,
+  input  logic [63:0]  c1_ins_meta_pc,
+  input  logic [3:0]   c1_ins_meta_alu_op,
+  input  logic [2:0]   c1_ins_meta_md_op,
+  input  logic         c1_ins_meta_md_w,
+  input  logic [2:0]   c1_ins_meta_br_funct,
+  input  logic         c1_ins_meta_is_jal,
+  input  logic         c1_ins_meta_is_jalr,
+  input  logic         c1_ins_meta_writes_link,
+  input  logic [2:0]   c1_ins_meta_mem_size,
+  input  logic         c1_ins_meta_mem_signed,
+  input  logic         c1_ins_meta_is_fence,
+  input  logic         c1_ins_meta_is_fence_i,
   input  logic [63:0]  c1_ins_imm,
   input  logic [6:0]   c1_ins_src1_tag,
   input  logic [6:0]   c1_ins_src1_gen,
@@ -147,7 +208,19 @@ module mosaic_iq_tb (
   output logic         c1_grant_valid,
   input  logic         c1_grant_ready,
   output logic [15:0]  c1_grant_uop,
-  output logic [3:0]   c1_grant_alu_op,
+  output logic [2:0]   c1_grant_meta_class,
+  output logic [63:0]  c1_grant_meta_pc,
+  output logic [3:0]   c1_grant_meta_alu_op,
+  output logic [2:0]   c1_grant_meta_md_op,
+  output logic         c1_grant_meta_md_w,
+  output logic [2:0]   c1_grant_meta_br_funct,
+  output logic         c1_grant_meta_is_jal,
+  output logic         c1_grant_meta_is_jalr,
+  output logic         c1_grant_meta_writes_link,
+  output logic [2:0]   c1_grant_meta_mem_size,
+  output logic         c1_grant_meta_mem_signed,
+  output logic         c1_grant_meta_is_fence,
+  output logic         c1_grant_meta_is_fence_i,
   output logic [63:0]  c1_grant_imm,
   output logic [63:0]  c1_grant_a,
   output logic [63:0]  c1_grant_b,
@@ -180,7 +253,19 @@ module mosaic_iq_tb (
   output logic [6:0]   c1_obs_src2_tag,
   output logic [6:0]   c1_obs_src2_gen,
   output logic [15:0]  c1_obs_uop,
-  output logic [3:0]   c1_obs_alu_op,
+  output logic [2:0]   c1_obs_meta_class,
+  output logic [63:0]  c1_obs_meta_pc,
+  output logic [3:0]   c1_obs_meta_alu_op,
+  output logic [2:0]   c1_obs_meta_md_op,
+  output logic         c1_obs_meta_md_w,
+  output logic [2:0]   c1_obs_meta_br_funct,
+  output logic         c1_obs_meta_is_jal,
+  output logic         c1_obs_meta_is_jalr,
+  output logic         c1_obs_meta_writes_link,
+  output logic [2:0]   c1_obs_meta_mem_size,
+  output logic         c1_obs_meta_mem_signed,
+  output logic         c1_obs_meta_is_fence,
+  output logic         c1_obs_meta_is_fence_i,
   output logic [63:0]  c1_obs_imm,
   output logic [6:0]   c1_obs_dst_tag,
   output logic [6:0]   c1_obs_dst_gen,
@@ -234,7 +319,7 @@ module mosaic_iq_tb (
     // matching prefix by the two assign blocks below.
     logic ins_valid_s, ins_ready_s;
     logic [15:0] ins_uop_s;
-    logic [3:0] ins_alu_op_s;
+    mosaic_uop_pkg::uop_meta_t ins_meta_s;
     logic [63:0] ins_imm_s;
     logic [6:0] ins_src1_tag_s, ins_src2_tag_s, ins_dst_tag_s;
     logic [6:0] ins_src1_gen_s, ins_src2_gen_s, ins_dst_gen_s;
@@ -247,7 +332,7 @@ module mosaic_iq_tb (
 
     logic grant_valid_s, grant_ready_s;
     logic [15:0] grant_uop_s;
-    logic [3:0] grant_alu_op_s;
+    mosaic_uop_pkg::uop_meta_t grant_meta_s;
     logic [63:0] grant_imm_s, grant_a_s, grant_b_s;
     logic [6:0] grant_dst_tag_s, grant_dst_gen_s;
     logic [2:0] grant_index_s;
@@ -267,7 +352,7 @@ module mosaic_iq_tb (
     logic [6:0] obs_src1_tag_s, obs_src1_gen_s, obs_src2_tag_s, obs_src2_gen_s;
     logic [4:0] obs_age_s;
     logic [15:0] obs_uop_s;
-    logic [3:0] obs_alu_op_s;
+    mosaic_uop_pkg::uop_meta_t obs_meta_s;
     logic [63:0] obs_imm_s;
     logic [6:0] obs_dst_tag_s, obs_dst_gen_s;
     logic obs_src1_ready_s, obs_src2_ready_s;
@@ -279,7 +364,21 @@ module mosaic_iq_tb (
     if (c == 0) begin : g_c0
       assign ins_valid_s    = c0_ins_valid;
       assign ins_uop_s      = c0_ins_uop;
-      assign ins_alu_op_s   = c0_ins_alu_op;
+      always_comb begin
+        ins_meta_s.class_      = mosaic_uop_pkg::uop_class_e'(c0_ins_meta_class);
+        ins_meta_s.pc          = c0_ins_meta_pc;
+        ins_meta_s.alu_op      = mosaic_pkg::alu_op_e'(c0_ins_meta_alu_op);
+        ins_meta_s.md_op       = mosaic_pkg::md_op_e'(c0_ins_meta_md_op);
+        ins_meta_s.md_w        = c0_ins_meta_md_w;
+        ins_meta_s.br_funct    = c0_ins_meta_br_funct;
+        ins_meta_s.is_jal      = c0_ins_meta_is_jal;
+        ins_meta_s.is_jalr     = c0_ins_meta_is_jalr;
+        ins_meta_s.writes_link = c0_ins_meta_writes_link;
+        ins_meta_s.mem_size    = c0_ins_meta_mem_size;
+        ins_meta_s.mem_signed  = c0_ins_meta_mem_signed;
+        ins_meta_s.is_fence    = c0_ins_meta_is_fence;
+        ins_meta_s.is_fence_i  = c0_ins_meta_is_fence_i;
+      end
       assign ins_imm_s      = c0_ins_imm;
       assign ins_src1_tag_s = c0_ins_src1_tag;
       assign ins_src1_gen_s = c0_ins_src1_gen;
@@ -304,7 +403,19 @@ module mosaic_iq_tb (
       assign c0_ins_ready   = ins_ready_s;
       assign c0_grant_valid = grant_valid_s;
       assign c0_grant_uop   = grant_uop_s;
-      assign c0_grant_alu_op= grant_alu_op_s;
+      assign c0_grant_meta_class      = grant_meta_s.class_;
+      assign c0_grant_meta_pc         = grant_meta_s.pc;
+      assign c0_grant_meta_alu_op     = grant_meta_s.alu_op;
+      assign c0_grant_meta_md_op      = grant_meta_s.md_op;
+      assign c0_grant_meta_md_w       = grant_meta_s.md_w;
+      assign c0_grant_meta_br_funct   = grant_meta_s.br_funct;
+      assign c0_grant_meta_is_jal     = grant_meta_s.is_jal;
+      assign c0_grant_meta_is_jalr    = grant_meta_s.is_jalr;
+      assign c0_grant_meta_writes_link= grant_meta_s.writes_link;
+      assign c0_grant_meta_mem_size   = grant_meta_s.mem_size;
+      assign c0_grant_meta_mem_signed = grant_meta_s.mem_signed;
+      assign c0_grant_meta_is_fence   = grant_meta_s.is_fence;
+      assign c0_grant_meta_is_fence_i = grant_meta_s.is_fence_i;
       assign c0_grant_imm   = grant_imm_s;
       assign c0_grant_a     = grant_a_s;
       assign c0_grant_b     = grant_b_s;
@@ -326,7 +437,19 @@ module mosaic_iq_tb (
       assign c0_obs_src2_tag = obs_src2_tag_s;
       assign c0_obs_src2_gen = obs_src2_gen_s;
       assign c0_obs_uop     = obs_uop_s;
-      assign c0_obs_alu_op  = obs_alu_op_s;
+      assign c0_obs_meta_class      = obs_meta_s.class_;
+      assign c0_obs_meta_pc         = obs_meta_s.pc;
+      assign c0_obs_meta_alu_op     = obs_meta_s.alu_op;
+      assign c0_obs_meta_md_op      = obs_meta_s.md_op;
+      assign c0_obs_meta_md_w       = obs_meta_s.md_w;
+      assign c0_obs_meta_br_funct   = obs_meta_s.br_funct;
+      assign c0_obs_meta_is_jal     = obs_meta_s.is_jal;
+      assign c0_obs_meta_is_jalr    = obs_meta_s.is_jalr;
+      assign c0_obs_meta_writes_link= obs_meta_s.writes_link;
+      assign c0_obs_meta_mem_size   = obs_meta_s.mem_size;
+      assign c0_obs_meta_mem_signed = obs_meta_s.mem_signed;
+      assign c0_obs_meta_is_fence   = obs_meta_s.is_fence;
+      assign c0_obs_meta_is_fence_i = obs_meta_s.is_fence_i;
       assign c0_obs_imm     = obs_imm_s;
       assign c0_obs_dst_tag = obs_dst_tag_s;
       assign c0_obs_dst_gen = obs_dst_gen_s;
@@ -345,7 +468,21 @@ module mosaic_iq_tb (
     end else begin : g_c1
       assign ins_valid_s    = c1_ins_valid;
       assign ins_uop_s      = c1_ins_uop;
-      assign ins_alu_op_s   = c1_ins_alu_op;
+      always_comb begin
+        ins_meta_s.class_      = mosaic_uop_pkg::uop_class_e'(c1_ins_meta_class);
+        ins_meta_s.pc          = c1_ins_meta_pc;
+        ins_meta_s.alu_op      = mosaic_pkg::alu_op_e'(c1_ins_meta_alu_op);
+        ins_meta_s.md_op       = mosaic_pkg::md_op_e'(c1_ins_meta_md_op);
+        ins_meta_s.md_w        = c1_ins_meta_md_w;
+        ins_meta_s.br_funct    = c1_ins_meta_br_funct;
+        ins_meta_s.is_jal      = c1_ins_meta_is_jal;
+        ins_meta_s.is_jalr     = c1_ins_meta_is_jalr;
+        ins_meta_s.writes_link = c1_ins_meta_writes_link;
+        ins_meta_s.mem_size    = c1_ins_meta_mem_size;
+        ins_meta_s.mem_signed  = c1_ins_meta_mem_signed;
+        ins_meta_s.is_fence    = c1_ins_meta_is_fence;
+        ins_meta_s.is_fence_i  = c1_ins_meta_is_fence_i;
+      end
       assign ins_imm_s      = c1_ins_imm;
       assign ins_src1_tag_s = c1_ins_src1_tag;
       assign ins_src1_gen_s = c1_ins_src1_gen;
@@ -370,7 +507,19 @@ module mosaic_iq_tb (
       assign c1_ins_ready   = ins_ready_s;
       assign c1_grant_valid = grant_valid_s;
       assign c1_grant_uop   = grant_uop_s;
-      assign c1_grant_alu_op= grant_alu_op_s;
+      assign c1_grant_meta_class      = grant_meta_s.class_;
+      assign c1_grant_meta_pc         = grant_meta_s.pc;
+      assign c1_grant_meta_alu_op     = grant_meta_s.alu_op;
+      assign c1_grant_meta_md_op      = grant_meta_s.md_op;
+      assign c1_grant_meta_md_w       = grant_meta_s.md_w;
+      assign c1_grant_meta_br_funct   = grant_meta_s.br_funct;
+      assign c1_grant_meta_is_jal     = grant_meta_s.is_jal;
+      assign c1_grant_meta_is_jalr    = grant_meta_s.is_jalr;
+      assign c1_grant_meta_writes_link= grant_meta_s.writes_link;
+      assign c1_grant_meta_mem_size   = grant_meta_s.mem_size;
+      assign c1_grant_meta_mem_signed = grant_meta_s.mem_signed;
+      assign c1_grant_meta_is_fence   = grant_meta_s.is_fence;
+      assign c1_grant_meta_is_fence_i = grant_meta_s.is_fence_i;
       assign c1_grant_imm   = grant_imm_s;
       assign c1_grant_a     = grant_a_s;
       assign c1_grant_b     = grant_b_s;
@@ -392,7 +541,19 @@ module mosaic_iq_tb (
       assign c1_obs_src2_tag = obs_src2_tag_s;
       assign c1_obs_src2_gen = obs_src2_gen_s;
       assign c1_obs_uop     = obs_uop_s;
-      assign c1_obs_alu_op  = obs_alu_op_s;
+      assign c1_obs_meta_class      = obs_meta_s.class_;
+      assign c1_obs_meta_pc         = obs_meta_s.pc;
+      assign c1_obs_meta_alu_op     = obs_meta_s.alu_op;
+      assign c1_obs_meta_md_op      = obs_meta_s.md_op;
+      assign c1_obs_meta_md_w       = obs_meta_s.md_w;
+      assign c1_obs_meta_br_funct   = obs_meta_s.br_funct;
+      assign c1_obs_meta_is_jal     = obs_meta_s.is_jal;
+      assign c1_obs_meta_is_jalr    = obs_meta_s.is_jalr;
+      assign c1_obs_meta_writes_link= obs_meta_s.writes_link;
+      assign c1_obs_meta_mem_size   = obs_meta_s.mem_size;
+      assign c1_obs_meta_mem_signed = obs_meta_s.mem_signed;
+      assign c1_obs_meta_is_fence   = obs_meta_s.is_fence;
+      assign c1_obs_meta_is_fence_i = obs_meta_s.is_fence_i;
       assign c1_obs_imm     = obs_imm_s;
       assign c1_obs_dst_tag = obs_dst_tag_s;
       assign c1_obs_dst_gen = obs_dst_gen_s;
@@ -416,7 +577,7 @@ module mosaic_iq_tb (
       .ins_valid     (ins_valid_s),
       .ins_ready     (ins_ready_s),
       .ins_uop       (ins_uop_s),
-      .ins_alu_op    (ins_alu_op_s),
+      .ins_meta      (ins_meta_s),
       .ins_imm       (ins_imm_s),
       .ins_src1_tag  (ins_src1_tag_s),
       .ins_src1_gen  (ins_src1_gen_s),
@@ -435,7 +596,7 @@ module mosaic_iq_tb (
       .grant_valid   (grant_valid_s),
       .grant_ready   (grant_ready_s),
       .grant_uop     (grant_uop_s),
-      .grant_alu_op  (grant_alu_op_s),
+      .grant_meta    (grant_meta_s),
       .grant_imm     (grant_imm_s),
       .grant_a       (grant_a_s),
       .grant_b       (grant_b_s),
@@ -462,7 +623,7 @@ module mosaic_iq_tb (
       .obs_src2_tag  (obs_src2_tag_s),
       .obs_src2_gen  (obs_src2_gen_s),
       .obs_uop       (obs_uop_s),
-      .obs_alu_op    (obs_alu_op_s),
+      .obs_meta      (obs_meta_s),
       .obs_imm       (obs_imm_s),
       .obs_dst_tag   (obs_dst_tag_s),
       .obs_dst_gen   (obs_dst_gen_s),

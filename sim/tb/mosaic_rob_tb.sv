@@ -12,7 +12,7 @@
 // Every driver-facing port is a fixed 32-bit (64-bit for the PC) vector, so the
 // C++ driver contains no ROB geometry and would keep compiling if a profile
 // changed the depths. Narrowing to the ROB's own port widths needs those widths,
-// and they come from **the same generated package the RTL reads**, by scope
+// and they come from **the same generated packages the RTL reads**, by scope
 // reference rather than by a second `include`:
 //
 //   * the generated header declares `package mosaic_cfg_pkg` with no include
@@ -24,10 +24,19 @@
 //     requires the declaring file to come first on the command line, which
 //     tools/run_unit.py already guarantees for every case.
 //
-// So there is exactly one geometry in the compilation: the generated package.
-// This file derives its port widths from it with the same rules mosaic_rob uses,
-// and then *reads the elaborated values back* as `o_*_w` outputs so the driver
-// can check the two against each other instead of trusting the derivation.
+// So there is exactly one geometry in the compilation: the generated packages.
+// This file derives its port widths from them, and then *reads the elaborated
+// values back* as `o_*_w` outputs so the driver can check the two against each
+// other instead of trusting the derivation.
+//
+// The identity widths are **not** re-derived by any rule of this wrapper's own.
+// A wrapper that wrote `ID_W = 2 * INDEX_W` would repeat whatever formula the
+// RTL used, so it would keep agreeing with a ROB whose generation width had
+// drifted from the I-002 contract -- which is exactly how this wrapper failed to
+// catch a 12-bit ROB generation against a 7-bit contract. `TAG_W` and `GEN_W`
+// therefore each name their own contract constant, and a tag port is narrowed
+// with `TAG_W` while a generation port is narrowed with `GEN_W`; the two are not
+// interchangeable even where p0 happens to give them the same value.
 
 `default_nettype none
 `resetall
@@ -112,7 +121,8 @@ module mosaic_rob_tb (
     output logic [31:0] o_rob_entries_o,
     output logic [31:0] o_index_w_o,
     output logic [31:0] o_max_uops_o,
-    output logic [31:0] o_id_w_o,
+    output logic [31:0] o_tag_w_o,
+    output logic [31:0] o_gen_w_o,
     output logic [31:0] o_pc_w_o,
     output logic [31:0] o_num_uops_w_o,
     output logic [31:0] o_occ_w_o,
@@ -155,25 +165,30 @@ module mosaic_rob_tb (
   // zero.
   // The second lane's view, declared here and exported to the observation side.
 
-  // The same rules mosaic_rob derives from the same generated package.
+  // The same contract widths mosaic_rob takes from the same generated package.
+  // TAG_W and GEN_W are separate constants on purpose: a port that carries a tag
+  // is narrowed with TAG_W and a port that carries a generation with GEN_W, so
+  // a tag and a generation can never be silently interchanged, and neither is
+  // re-derived by a formula this wrapper invented.
   localparam int unsigned ENTRIES = mosaic_cfg_pkg::MOSAIC_ROB_ENTRIES;
   localparam int unsigned INDEX_W = mosaic_cfg_pkg::MOSAIC_ROB_INDEX_W;
   localparam int unsigned MAX_UOPS = mosaic_cfg_pkg::MOSAIC_MAX_UOPS_PER_MACRO;
+  localparam int unsigned TAG_W   = mosaic_id_pkg::MOSAIC_ID_W_PRF_TAG;
+  localparam int unsigned GEN_W   = mosaic_id_pkg::MOSAIC_ID_W_ROB_GEN;
 
   localparam int unsigned CNT_W = $clog2(MAX_UOPS + 1);
   localparam int unsigned UOP_W = (MAX_UOPS <= 1) ? 1 : $clog2(MAX_UOPS);
   localparam int unsigned OCC_W = $clog2(ENTRIES + 1);
-  localparam int unsigned ID_W  = 2 * INDEX_W;   // both TAG_W and GEN_W
   localparam int unsigned BIT_W = MAX_UOPS;
 
   // The driver hands over 32-bit values and the ROB sees exactly the low bits its
   // own ports declare. Truncating part selects, not casts, so nothing is silent.
   logic [CNT_W-1:0]    alloc_num_uops;
-  logic [ID_W-1:0]     alloc_tag;
+  logic [TAG_W-1:0]    alloc_tag;
   logic [INDEX_W-1:0]  close_index;
-  logic [ID_W-1:0]     close_gen;
+  logic [GEN_W-1:0]    close_gen;
   logic [INDEX_W-1:0]  cmp_index;
-  logic [ID_W-1:0]     cmp_gen;
+  logic [GEN_W-1:0]    cmp_gen;
   logic [UOP_W-1:0]    cmp_uop;
   logic [INDEX_W-1:0]  obs_index;
   logic [BIT_W-1:0]    head_done_mask;
@@ -183,8 +198,8 @@ module mosaic_rob_tb (
   // The second lane's view, declared here and exported to the observation side.
   logic                retire_req_next;
   logic [INDEX_W-1:0]  head1_index;
-  logic [ID_W-1:0]     head1_gen;
-  logic [ID_W-1:0]     head1_tag;
+  logic [GEN_W-1:0]    head1_gen;
+  logic [TAG_W-1:0]    head1_tag;
   logic [CNT_W-1:0]    head1_num_uops;
   logic [BIT_W-1:0]    head1_done_mask;
   logic [CNT_W-1:0]    head1_done_cnt;
@@ -194,11 +209,11 @@ module mosaic_rob_tb (
   // input would be a random value every run instead of a reproducible zero.
   assign retire_req_next = 1'b0;
   assign alloc_num_uops = alloc_num_uops_i[CNT_W-1:0];
-  assign alloc_tag      = alloc_tag_i[ID_W-1:0];
+  assign alloc_tag      = alloc_tag_i[TAG_W-1:0];
   assign close_index    = close_index_i[INDEX_W-1:0];
-  assign close_gen      = close_gen_i[ID_W-1:0];
+  assign close_gen      = close_gen_i[GEN_W-1:0];
   assign cmp_index      = cmp_index_i[INDEX_W-1:0];
-  assign cmp_gen        = cmp_gen_i[ID_W-1:0];
+  assign cmp_gen        = cmp_gen_i[GEN_W-1:0];
   assign cmp_uop        = cmp_uop_i[UOP_W-1:0];
   assign obs_index      = obs_index_i[INDEX_W-1:0];
 
@@ -217,7 +232,7 @@ module mosaic_rob_tb (
       .alloc_full       (alloc_full_o),
       .alloc_bad_uops   (alloc_bad_uops_o),
       .alloc_index      (alloc_index_o[INDEX_W-1:0]),
-      .alloc_gen        (alloc_gen_o[ID_W-1:0]),
+      .alloc_gen        (alloc_gen_o[GEN_W-1:0]),
 
       .close_valid      (close_valid_i),
       .close_index      (close_index),
@@ -244,8 +259,8 @@ module mosaic_rob_tb (
       .head_exc         (head_exc_o),
       .head_closed      (head_closed_o),
       .head_index       (head_index_o[INDEX_W-1:0]),
-      .head_gen         (head_gen_o[ID_W-1:0]),
-      .head_tag         (head_tag_o[ID_W-1:0]),
+      .head_gen         (head_gen_o[GEN_W-1:0]),
+      .head_tag         (head_tag_o[TAG_W-1:0]),
       .head_pc          (head_pc_o),
       .head_num_uops    (head_num_uops_o[CNT_W-1:0]),
       .head_done_mask   (head_done_mask),
@@ -271,8 +286,8 @@ module mosaic_rob_tb (
 
       .obs_index        (obs_index),
       .obs_valid        (obs_valid_o),
-      .obs_gen          (obs_gen_o[ID_W-1:0]),
-      .obs_tag          (obs_tag_o[ID_W-1:0]),
+      .obs_gen          (obs_gen_o[GEN_W-1:0]),
+      .obs_tag          (obs_tag_o[TAG_W-1:0]),
       .obs_pc           (obs_pc_o),
       .obs_num_uops     (obs_num_uops_o[CNT_W-1:0]),
       .obs_done_mask    (obs_done_mask),
@@ -303,7 +318,8 @@ module mosaic_rob_tb (
   assign o_rob_entries_o = 32'(u_rob.ROB_ENTRIES);
   assign o_index_w_o     = 32'(u_rob.ROB_INDEX_W);
   assign o_max_uops_o    = 32'(u_rob.MAX_UOPS);
-  assign o_id_w_o        = 32'(u_rob.GEN_W);
+  assign o_tag_w_o       = 32'(u_rob.TAG_W);
+  assign o_gen_w_o       = 32'(u_rob.GEN_W);
   assign o_pc_w_o        = 32'(u_rob.XLEN);
   assign o_num_uops_w_o  = 32'(u_rob.CNT_W);
   assign o_occ_w_o       = 32'(u_rob.OCC_W);
