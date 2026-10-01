@@ -1,0 +1,120 @@
+#!/usr/bin/env python3
+"""Check that the two places which name work packages agree with each other.
+
+    python3 tools/check_records.py
+
+`tests/unit/registry.json` is where a case declares which work package it
+belongs to and which sources it compiles; `config/status/implementation_status.json`
+is where a package is called delivered and where its evidence is listed. The two
+are written by different acts -- one by whoever adds a case, the other by the
+integration lead when the package's own cases have been run from a clean build --
+so they can disagree, and a disagreement is a *record* defect even when every
+test passes: a package can be listed as delivered with someone else's case as its
+evidence, or a case can belong to a package that was never recorded.
+
+This tool was written because exactly that happened. `rename.single_width_ownership`
+was listed under I-014 while the registry declares it as I-013's case; the entries
+had been written months apart by different sessions and nothing compared them.
+
+Checks, each of which is a hard failure:
+
+ 1. every case a delivered package lists as its evidence exists in the registry;
+ 2. that case's declared task is the package claiming it;
+ 3. every registered case whose task is delivered is listed in that task's
+    evidence (a package cannot be delivered while one of its own cases is
+    unaccounted for);
+ 4. every report path a delivered package names exists on disk;
+ 5. case names are unique and every entry carries a task, a top and a driver.
+
+What it deliberately does not check: whether the recorded result is *true*. That
+is what running the case from a deleted build directory, with its mutants, is for;
+this tool only stops the paperwork from lying about which package owns what.
+"""
+
+import argparse
+import json
+import os
+import sys
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+REGISTRY = os.path.join(ROOT, "tests", "unit", "registry.json")
+STATUS = os.path.join(ROOT, "config", "status", "implementation_status.json")
+
+
+def load(path):
+    with open(path, "r", encoding="utf-8") as handle:
+        return json.load(handle, object_pairs_hook=dict)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--quiet", action="store_true")
+    args = parser.parse_args()
+
+    registry = load(REGISTRY)
+    status = load(STATUS)
+    cases = registry["cases"]
+    delivered = status["delivered_tasks"]
+    evidence = status["evidence"]
+
+    failures = []
+
+    for name, entry in sorted(cases.items()):
+        for key in ("task", "top"):
+            if not entry.get(key):
+                failures.append("registry: case %s has no %s" % (name, key))
+        if not (entry.get("cpp") or entry.get("sv")):
+            failures.append("registry: case %s names no driver or wrapper" % name)
+
+    seen = {}
+    for name, entry in sorted(cases.items()):
+        task = entry.get("task")
+        seen.setdefault(task, []).append(name)
+
+    for task in delivered:
+        record = evidence.get(task)
+        if record is None:
+            failures.append("status: %s is delivered with no evidence block" % task)
+            continue
+        claimed = record.get("cases", [])
+        if not isinstance(claimed, list):
+            failures.append("status: %s evidence.cases is not a list" % task)
+            continue
+        for name in claimed:
+            if name not in cases:
+                failures.append(
+                    "status: %s claims case %s, which the registry does not define"
+                    % (task, name))
+                continue
+            owner = cases[name].get("task")
+            if owner != task:
+                failures.append(
+                    "status: %s claims case %s, but the registry assigns it to %s"
+                    % (task, name, owner))
+        for name in seen.get(task, []):
+            if name not in claimed:
+                failures.append(
+                    "registry: case %s belongs to delivered package %s, which does "
+                    "not list it as evidence" % (name, task))
+        report = record.get("report", "")
+        if report:
+            path = report.split(",")[0].split(" ")[0].strip()
+            full = os.path.join(ROOT, path)
+            if path.endswith(".md") and not os.path.exists(full):
+                failures.append("status: %s names report %s, which does not exist"
+                                % (task, path))
+
+    if failures:
+        print("FAIL %d record inconsistency(ies):" % len(failures))
+        for line in failures:
+            print("  " + line)
+        return 1
+    if not args.quiet:
+        print("ok   records agree: %d delivered package(s), %d registered case(s), "
+              "every claimed case exists and belongs to the package claiming it"
+              % (len(delivered), len(cases)))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

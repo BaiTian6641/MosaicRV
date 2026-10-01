@@ -100,6 +100,13 @@ check-event-contract: check-valid-profile
 	$(PYTHON) tools/check_event_contract.py --profile $(PROFILE)
 	$(PYTHON) tools/check_event_contract.py --profile $(PROFILE) --negative
 
+# The two places that name work packages -- the case registry and the delivery
+# ledger -- must agree about which package owns which case, and every report a
+# package names must exist. Written after a real disagreement (a case claimed by
+# two packages) that every test passed through.
+check-records:
+	$(PYTHON) tools/check_records.py
+
 # ------------------------------------------------------------- config -> RTL
 
 $(GEN_CFG) $(GEN_ID): config/profiles/$(PROFILE).json config/capability_ladder.json \
@@ -243,7 +250,7 @@ check-upstream-pinned:
 check-isolation:
 	$(PYTHON) tools/check_isolation.py
 
-check: check-config check-contracts check-event-contract check-coverage check-capability-matrix check-upstream check-isolation
+check: check-config check-contracts check-event-contract check-records check-coverage check-capability-matrix check-upstream check-isolation
 
 # ---------------------------------------------------------------------- clean
 
