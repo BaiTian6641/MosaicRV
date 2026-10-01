@@ -587,13 +587,25 @@ def _check_geometry(bundle: Bundle, profile_name: str) -> None:
                     "vector.elen=%d disagrees with the profile's isa_target.elen=%s"
                     % (vector["elen"], isa["elen"]),
                 )
-            group_bytes = vector["vrf_banks"] * vector["vrf_bank_bytes"]
-            widest = vector["vlen"] * 8 * vector["lane_groups_large"]
-            if group_bytes * 8 < widest:
+            # A vector register group is LMUL*VLEN bits wide. The VRF as a whole is
+            # vrf_banks * vrf_bank_bytes * 8 bits, which is the total architectural
+            # state; the group is the widest window any one instruction can name.
+            group_capacity_bits = vector["vrf_banks"] * vector["vrf_bank_bytes"] * 8
+            widest_group_bits = vector["vlen"] * vector["lane_groups_large"]
+            if group_capacity_bits < widest_group_bits:
                 bundle.fail(
                     "geometry",
-                    "vector register group holds %d bits but LMUL=%d needs %d bits"
-                    % (group_bytes * 8, vector["lane_groups_large"], widest),
+                    "vector register file holds %d bits but the widest register group "
+                    "(LMUL=%d over VLEN=%d) needs %d bits"
+                    % (group_capacity_bits, vector["lane_groups_large"], vector["vlen"],
+                       widest_group_bits),
+                )
+            expected_groups = (vector["vrf_banks"] * vector["vrf_bank_bytes"] * 8) // vector["vlen"]
+            if expected_groups < vector["lane_groups_large"]:
+                bundle.fail(
+                    "geometry",
+                    "vector register file provides LMUL up to %d but the largest lane "
+                    "quota claims %d" % (expected_groups, vector["lane_groups_large"]),
                 )
             if not (
                 vector["lane_groups_small"] <= vector["lane_groups_medium"]
