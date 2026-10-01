@@ -68,8 +68,23 @@
 `ifndef MOSAIC_UOP_PKG_SV_
 `define MOSAIC_UOP_PKG_SV_
 
+/* verilator lint_off UNUSEDPARAM */
 `include "mosaic_cfg_pkg.svh"
+/* verilator lint_on UNUSEDPARAM */
+// The generated identity package declares every identity width and counter
+// modulus, and a consumer uses a subset of them. Without this guard the unused
+// ones are reported against whichever module happens to pull this package in,
+// which turns a clean gate into noise. It has no include guard of its own
+// either (the same defect the config package used to have, reported to the
+// generator's owner), so the same body can be seen twice in one compilation
+// unit and Verilator reports MODDUP.
+/* verilator lint_off UNUSEDPARAM */
+/* verilator lint_off UNUSEDSIGNAL */
+/* verilator lint_off MODDUP */
 `include "mosaic_id_pkg.svh"
+/* verilator lint_on MODDUP */
+/* verilator lint_on UNUSEDSIGNAL */
+/* verilator lint_on UNUSEDPARAM */
 `include "mosaic_pkg.sv"
 
 package mosaic_uop_pkg;
@@ -222,7 +237,7 @@ package mosaic_uop_pkg;
     logic              we;
     logic [XLEN-1:0]   addr;
     logic [2:0]        size;
-    logic [3:0]        wstrb;      // byte strobes: a byte store must not clobber
+    logic [XLEN/8-1:0] wstrb;      // byte strobes: a byte store must not clobber
     logic [XLEN-1:0]   wdata;
   } mem_req_t;
 

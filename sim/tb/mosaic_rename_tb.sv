@@ -1,9 +1,13 @@
-// Simulation wrapper for CASE=rename.single_width_ownership (work package I-013).
+// Simulation wrapper for CASE=rename.single_width_ownership (I-013) and
+// CASE=rename.same_cycle_chain (I-014).
 //
 // `mosaic_rename` is a stateful single-clock module with combinational source
 // reads and a combinational allocation answer (it describes the edge that is
 // about to happen). This wrapper adds no timing of its own: it passes every
-// port straight through.
+// port straight through -- including the second allocation lane and lane 1's two
+// source ports, which I-014 added for a two-wide group. Which case is being run
+// is the driver's decision (it branches on `--case`); the hardware is the same
+// either way, and a group of one is presented by holding `alloc2_req` low.
 //
 // It does two things of its own, both about geometry:
 //
@@ -52,12 +56,16 @@ localparam int unsigned TB_BANKS     = mosaic_cfg_pkg::MOSAIC_PRF_BANKS;
 localparam int unsigned TB_ROWS      = TB_ENTRIES / TB_BANKS;
 localparam int unsigned TB_JOURNAL   = mosaic_cfg_pkg::MOSAIC_ROB_ENTRIES;
 localparam int unsigned TB_MAP_W     = TB_TAG_W + TB_GEN_W;
+// The undo window's length register is one bit wider than an index, because it
+// has to be able to say "full" as well as name every entry -- the same rule the
+// DUT derives `REN_JLEN_W` from.
+localparam int unsigned TB_JLEN_W    = $clog2(TB_JOURNAL + 1);
 
 module mosaic_rename_tb (
     input  logic                                       clk,
     input  logic                                       rst,
 
-    // allocation
+    // allocation (I-014: a group of up to two macros, one per lane)
     input  logic                                       alloc_req,
     input  logic [4:0]                                 alloc_rd,
     output logic                                       alloc_accepted,
@@ -70,16 +78,43 @@ module mosaic_rename_tb (
     output logic                                       alloc_old_valid,
     output logic [TB_TAG_W-1:0]                        alloc_old_tag,
     output logic [TB_GEN_W-1:0]                        alloc_old_gen,
+    input  logic                                       alloc2_req,
+    input  logic [4:0]                                 alloc2_rd,
+    output logic                                       alloc2_accepted,
+    output logic                                       alloc2_exhausted,
+    output logic                                       alloc2_squashed,
+    output logic                                       alloc2_is_x0,
+    output logic                                       alloc2_new_valid,
+    output logic [TB_TAG_W-1:0]                        alloc2_new_tag,
+    output logic [TB_GEN_W-1:0]                        alloc2_new_gen,
+    output logic                                       alloc2_old_valid,
+    output logic [TB_TAG_W-1:0]                        alloc2_old_tag,
+    output logic [TB_GEN_W-1:0]                        alloc2_old_gen,
 
     // source reads
     input  logic [4:0]                                 rs1_addr,
     input  logic [4:0]                                 rs2_addr,
     output logic                                       rs1_is_x0,
     output logic                                       rs2_is_x0,
+    output logic                                       rs1_ready,
+    output logic                                       rs2_ready,
     output logic [TB_TAG_W-1:0]                        rs1_tag,
     output logic [TB_TAG_W-1:0]                        rs2_tag,
     output logic [TB_GEN_W-1:0]                        rs1_gen,
     output logic [TB_GEN_W-1:0]                        rs2_gen,
+    // lane 1's two sources, plus the same-cycle bypass and readiness view
+    input  logic [4:0]                                 rs3_addr,
+    input  logic [4:0]                                 rs4_addr,
+    output logic                                       rs3_is_x0,
+    output logic                                       rs4_is_x0,
+    output logic                                       rs3_ready,
+    output logic                                       rs4_ready,
+    output logic                                       rs3_bypass,
+    output logic                                       rs4_bypass,
+    output logic [TB_TAG_W-1:0]                        rs3_tag,
+    output logic [TB_TAG_W-1:0]                        rs4_tag,
+    output logic [TB_GEN_W-1:0]                        rs3_gen,
+    output logic [TB_GEN_W-1:0]                        rs4_gen,
 
     // writeback
     input  logic                                       wb_valid,
@@ -106,16 +141,16 @@ module mosaic_rename_tb (
     output logic                                       commit_x0_dropped,
 
     // ------------------------------------------------- I-017: second commit lane
-    // `mosaic_rename` gained a second commit lane for two-wide retirement. This
-    // case keeps testing exactly what it tested before -- single-lane commit --
-    // so the lane is tied **inactive inside this wrapper** rather than exposed
-    // as a port for the driver to leave floating: the runner builds with
-    // `--x-initial unique`, and an undriven input would be a random value every
-    // run instead of a reproducible zero.
-    //
-    // The lane is exercised where its contract lives, in
-    // CASE=commit.head_block_and_dual (sim/tb/mosaic_retire_tb.sv), which
-    // instantiates `mosaic_rename` and drives both lanes.
+    // `mosaic_rename` gained a second commit lane for two-wide retirement. I-014
+    // needs it driven: the WAW release contract of a two-wide rename group is
+    // precisely a statement about what the two commit lanes release, and it can
+    // only be checked against the hardware by presenting both lanes. The
+    // single-width case (CASE=rename.single_width_ownership) leaves the lane
+    // inactive on every cycle, so it still tests exactly what it tested before.
+    input  logic                                       commit2_valid,
+    input  logic [4:0]                                 commit2_rd,
+    input  logic [TB_TAG_W-1:0]                        commit2_tag,
+    input  logic [TB_GEN_W-1:0]                        commit2_gen,
     output logic                                       commit2_accepted,
     output logic                                       commit2_x0_dropped,
 
@@ -136,6 +171,7 @@ module mosaic_rename_tb (
     output logic [TB_ENTRIES*TB_GEN_W-1:0]             dbg_tag_gen,
     output logic [TB_ARCH_REGS*TB_MAP_W-1:0]           dbg_spec_map,
     output logic [TB_ARCH_REGS*TB_MAP_W-1:0]           dbg_cmt_map,
+    output logic [TB_JLEN_W-1:0]                       dbg_j_len,
 
     // the elaborated geometry, read back from the DUT instance
     output logic [31:0]                                o_entries,
@@ -144,20 +180,9 @@ module mosaic_rename_tb (
     output logic [31:0]                                o_arch_regs,
     output logic [31:0]                                o_banks,
     output logic [31:0]                                o_bank_rows,
-    output logic [31:0]                                o_journal
+    output logic [31:0]                                o_journal,
+    output logic [31:0]                                o_jlen_w
 );
-
-  // The inactive second commit lane: named, typed, and tied to a constant so
-  // the connection below reads as a decision rather than as an omission.
-  logic                commit2_idle_valid;
-  logic [4:0]          commit2_idle_rd;
-  logic [TB_TAG_W-1:0] commit2_idle_tag;
-  logic [TB_GEN_W-1:0] commit2_idle_gen;
-
-  assign commit2_idle_valid = 1'b0;
-  assign commit2_idle_rd    = 5'd0;
-  assign commit2_idle_tag   = {TB_TAG_W{1'b0}};
-  assign commit2_idle_gen   = {TB_GEN_W{1'b0}};
 
   mosaic_rename u_ren (
       .clk              (clk),
@@ -176,14 +201,42 @@ module mosaic_rename_tb (
       .alloc_old_tag    (alloc_old_tag),
       .alloc_old_gen    (alloc_old_gen),
 
+      .alloc2_req       (alloc2_req),
+      .alloc2_rd        (alloc2_rd),
+      .alloc2_accepted  (alloc2_accepted),
+      .alloc2_exhausted (alloc2_exhausted),
+      .alloc2_squashed  (alloc2_squashed),
+      .alloc2_is_x0     (alloc2_is_x0),
+      .alloc2_new_valid (alloc2_new_valid),
+      .alloc2_new_tag   (alloc2_new_tag),
+      .alloc2_new_gen   (alloc2_new_gen),
+      .alloc2_old_valid (alloc2_old_valid),
+      .alloc2_old_tag   (alloc2_old_tag),
+      .alloc2_old_gen   (alloc2_old_gen),
+
       .rs1_addr         (rs1_addr),
       .rs2_addr         (rs2_addr),
       .rs1_is_x0        (rs1_is_x0),
       .rs2_is_x0        (rs2_is_x0),
+      .rs1_ready        (rs1_ready),
+      .rs2_ready        (rs2_ready),
       .rs1_tag          (rs1_tag),
       .rs2_tag          (rs2_tag),
       .rs1_gen          (rs1_gen),
       .rs2_gen          (rs2_gen),
+
+      .rs3_addr         (rs3_addr),
+      .rs4_addr         (rs4_addr),
+      .rs3_is_x0        (rs3_is_x0),
+      .rs4_is_x0        (rs4_is_x0),
+      .rs3_ready        (rs3_ready),
+      .rs4_ready        (rs4_ready),
+      .rs3_bypass       (rs3_bypass),
+      .rs4_bypass       (rs4_bypass),
+      .rs3_tag          (rs3_tag),
+      .rs4_tag          (rs4_tag),
+      .rs3_gen          (rs3_gen),
+      .rs4_gen          (rs4_gen),
 
       .wb_valid         (wb_valid),
       .wb_tag           (wb_tag),
@@ -206,12 +259,13 @@ module mosaic_rename_tb (
       .commit_accepted  (commit_accepted),
       .commit_x0_dropped(commit_x0_dropped),
 
-      // The inactive second lane, named so the connection reads as a decision
-      // rather than as an omission.
-      .commit2_valid    (commit2_idle_valid),
-      .commit2_rd       (commit2_idle_rd),
-      .commit2_tag      (commit2_idle_tag),
-      .commit2_gen      (commit2_idle_gen),
+      // The second commit lane, driven by the driver: the WAW release contract
+      // is a statement about what the two lanes release, so the driver has to
+      // present both.
+      .commit2_valid    (commit2_valid),
+      .commit2_rd       (commit2_rd),
+      .commit2_tag      (commit2_tag),
+      .commit2_gen      (commit2_gen),
       .commit2_accepted (commit2_accepted),
       .commit2_x0_dropped(commit2_x0_dropped),
 
@@ -228,7 +282,8 @@ module mosaic_rename_tb (
       .dbg_wb_done      (dbg_wb_done),
       .dbg_tag_gen      (dbg_tag_gen),
       .dbg_spec_map     (dbg_spec_map),
-      .dbg_cmt_map      (dbg_cmt_map)
+      .dbg_cmt_map      (dbg_cmt_map),
+      .dbg_j_len        (dbg_j_len)
   );
   // The geometry, straight from the generated package this file already
   // included to size its ports. There is no second copy: the RTL derives the
@@ -243,6 +298,7 @@ module mosaic_rename_tb (
   assign o_banks     = 32'(TB_BANKS);
   assign o_bank_rows = 32'(TB_ROWS);
   assign o_journal   = 32'(TB_JOURNAL);
+  assign o_jlen_w    = 32'(TB_JLEN_W);
 
 endmodule : mosaic_rename_tb
 

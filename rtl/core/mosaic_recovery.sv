@@ -48,8 +48,14 @@
 //                          would have: the set is right and the next allocation
 //                          is still wrong, which is the failure this whole
 //                          module is about.
-//   epoch                  the fetch epoch, so a response issued before the
-//                          redirect is recognisable as pre-redirect.
+//   epoch                  the fetch epoch at the checkpoint. It is recorded and
+//                          exported, and the restore does **not** put it back:
+//                          the redirect raises the epoch by one so that new
+//                          reservations are distinguishable from the ones the
+//                          squash cancels, and restoring the recorded value
+//                          would undo exactly that. It is the baseline a
+//                          consumer publishes with the redirect, not state the
+//                          restore rewinds.
 //   jmark                  the journal length at the checkpoint: where the undo
 //                          stops.
 //
@@ -137,11 +143,39 @@
 // kills it: those are counted in `redirect_killed` and never silently lost.
 // The queue is emptied on a take, which is the same statement.
 //
-// ------------------------------------------- late responses, credit once
+// Reachability, stated because it is a fact about the shipping build rather than
+// a hope: a live, non-stale candidate is taken in the cycle it is presented, so
+// nothing is ever deferred and the queue is never occupied -- `o_rdq_depth` is
+// zero in every cycle, and the queue half of the candidate set never decides an
+// arbitration. Deferring a *younger* redirect until an older **checkpoint**
+// resolves is not the rule and could not be: an older branch is resolved by the
+// redirect this unit would be refusing to take, so the deferral would be
+// permanent. The queue is dead weight under the rule as stated and is listed as
+// such in results/reports/I-018-recovery.md; it is left in place here because
+// deleting a port is an interface change across the checkpoint consumers, which
+// the integration lead is sequencing (see the report's split section).
 //
-// A redirect raises the epoch. A response carrying an older epoch is a result of
-// a squashed instruction and is dropped at the receiver, and its reserved credit
-// is returned **exactly once**.
+// ----------------------------------- late responses, credit once, age-bounded
+//
+// A redirect kills an *age range*, not an epoch. It raises the epoch, and a
+// response is matched against the reservation's identity by epoch, but whether
+// the response's instruction was squashed is decided by the **owner generation**
+// recorded when the credit was reserved: a reservation whose owner generation is
+// at or above the redirecting branch's is cancelled, and one whose owner is older
+// than the branch survives and its result still lands.
+//
+// That split is forced, not stylistic. An older load or DIV that is still in
+// flight when a *younger* branch mispredicts was issued before the redirect, so
+// it carries a pre-redirect epoch -- and it is not squashed, because the squash
+// only removes work younger than the branch. Dropping everything from the
+// previous epoch would discard the older instruction's result, and the older ROB
+// head would then have a uop that can never complete: precisely the deadlock the
+// I-018 card's blocking rule names ("kill every old-epoch instruction"), and
+// precisely what `docs/implementation-plan.md` §1.3 forbids when it requires the
+// PRF/result epoch check to respect the older instruction still live across a
+// redirect. The same paragraph is why age, not the epoch, is the kill rule; the
+// epoch is still needed, as the (slot, epoch) half of the identity that stops a
+// response for a recycled slot from being read as the live reservation's.
 //
 // "Exactly once" is why the credit is a *table of slots* rather than a counter. A
 // counter cannot tell a second delivery of a credit from the first. A table can:
@@ -150,7 +184,11 @@
 // returned when the cancel is *acknowledged* -- the arrival of the response that
 // is now stale -- and not at the redirect, because returning it at both ends is
 // the mirror image of a credit leak and is exactly as fatal: the fabric
-// over-issues and eventually has two producers writing one destination.
+// over-issues and eventually has two producers writing one destination. The
+// redirect latches `cred_cancel`, one bit per slot, and a response and the
+// redirect that kills it in the same cycle still return the credit once: the
+// classification applies the boundary combinationally for that cycle and the
+// slot's own clear below removes the latch, so a later copy finds a free slot.
 //
 // This is the ABA hazard `config/contracts/interfaces.json` names for the fetch
 // and execute interfaces, and the reason the identity is (slot, epoch) rather
@@ -194,6 +232,22 @@
 // change. The gap is named here rather than papered over with a full flush,
 // because a full flush presented as a precise recovery is precisely the defect
 // this module exists to prevent.
+//
+// -------------------------------------------- the checkpoint release gap
+//
+// A checkpoint is consumed by the restore that squashes its branch, and by
+// nothing else. No port says "the branch this checkpoint belongs to resolved
+// correctly and committed", so the stack only fills: after CKPT_DEPTH live
+// branches every later `ckpt_valid` is refused with `ckpt_refused`. Refusing is
+// the honest, reported answer and the case exercises it, but a machine that can
+// never checkpoint again after eight concurrent branches is not a machine. The
+// release belongs with the same in-order decision that retires the branch, so
+// the port to add is a branch identity (generation) alongside `commit_valid`,
+// and the reason it cannot be inferred from what is here is the reason to state
+// it: `rob_retire` is one bit with no generation, so "retire releases the oldest
+// checkpoint" would release a checkpoint for a branch that has not necessarily
+// retired, and dropping a live checkpoint is a restore to a point that does not
+// exist.
 //
 // --------------------------------------------------------------- mutants
 //
@@ -380,8 +434,8 @@ module mosaic_recovery #(
     input  logic [REC_CRED_W-1:0]         rsp_id,
     input  logic [REC_EPOCH_W-1:0]        rsp_epoch,
     output logic                          rsp_accepted,       // live: consumed the credit
-    output logic                          rsp_dropped_stale,  // pre-redirect: credit returned
-    output logic                          rsp_dropped_dup,    // no credit: already returned
+    output logic                          rsp_dropped_stale,  // owner squashed: credit returned
+    output logic                          rsp_dropped_dup,    // stale identity, or already returned
     output logic                          rsp_dropped_orphan, // no credit: never reserved
     output logic                          credit_return,
     output logic [REC_CRED_W:0]           credits_outstanding,
@@ -512,6 +566,14 @@ module mosaic_recovery #(
   // cannot distinguish a second delivery of a credit from the first, and
   // "exactly once" is precisely the property that needs the distinction.
   logic [CRED_ENTRIES-1:0]  cred_busy;
+  // One bit per reservation: "the redirect that owns this slot's instruction
+  // has been taken, so its result must be discarded and its credit returned".
+  // It is *latched* at the redirect rather than recomputed from the epoch at
+  // the response, because the epoch alone cannot tell an instruction the
+  // redirect squashed from one that was already live before it -- and killing
+  // the latter is a stated failure, not a conservative choice (see the credit
+  // return path below).
+  logic [CRED_ENTRIES-1:0]  cred_cancel;
   logic [REC_EPOCH_W-1:0]   cred_epoch [CRED_ENTRIES];
   logic [REC_ID_W-1:0]      cred_gen   [CRED_ENTRIES];
 
@@ -971,21 +1033,73 @@ module mosaic_recovery #(
   endgenerate
   assign rsp_slot_busy    = rsp_slot_in_range && cred_busy[rsp_id];
 
-  // Classification. A response is live only if it names a reserved slot *and*
-  // carries the current epoch: a reserved slot with an older epoch is a result
-  // of a squashed instruction, and its credit comes back now, once.
+  // Classification asks two different questions, and the answers come from two
+  // different fields. Conflating them is the defect this section exists to
+  // avoid, so they are named separately.
+  //
+  //   * Age -- "did the redirect squash this instruction?" A redirect kills
+  //     every instruction younger than the branch it resolves, and how old a
+  //     reservation is is exactly what `cred_gen`, the owner generation
+  //     recorded at grant, says. A reservation whose owner generation is at or
+  //     above the redirect's is killed; one whose owner is *older* survives,
+  //     and its result must still land. The epoch cannot answer this: an older
+  //     load or DIV that is still live across a younger branch's mispredict
+  //     also carries a pre-redirect epoch, and dropping it is a named failure,
+  //     not a conservative choice. `docs/implementation-plan.md` §1.3 requires
+  //     the PRF/result epoch check to respect "the older instruction that is
+  //     still live across a redirect", and the I-018 card's blocking rule lists
+  //     "kill every old-epoch instruction" as the way to deadlock the older ROB
+  //     head -- the instruction whose result is dropped never completes.
+  //     `cred_cancel` is that comparison latched at the redirect; a redirect
+  //     taken in *this* cycle is applied combinationally by `rsp_killed_by_now`
+  //     so a response arriving with the redirect is classified against the same
+  //     boundary, and the slot's own clear below makes the credit return
+  //     exactly once either way.
+  //   * Identity -- "is this response the one the slot is waiting for?" The
+  //     carried epoch must equal the epoch recorded when the slot was reserved.
+  //     That is the (slot, epoch) identity `config/contracts/interfaces.json`
+  //     requires: without it a response for a recycled slot is decoded as the
+  //     live reservation's result. A busy slot whose epoch does not match is
+  //     therefore *not* a live response for this reservation, and it is not a
+  //     stale one either -- no credit is owed, because the credit was returned
+  //     when the reservation it names was acknowledged.
   //
   // MUTANT 2 (APPLY_STALE_RSP) treats every response for a reserved slot as
   // live, so a squashed instruction's result is written into the restored
   // machine -- the ABA hazard interfaces.json names, made concrete.
+  // MUTANT 6 (EPOCH_ONLY_RSP) is the classification this section replaced: any
+  // response from before the redirect is dropped, so an older instruction whose
+  // result is still in flight is killed.
+  logic rsp_identity_matches;
+  logic rsp_killed_by_now;
+  logic rsp_cancelled;
+  assign rsp_identity_matches = rsp_slot_busy &&
+                                (rsp_epoch == cred_epoch[rsp_id]);
+  assign rsp_killed_by_now    = rsp_slot_busy && pick_found &&
+                                ck_valid[restore_ck] &&
+                                (cred_gen[rsp_id] >= pick_gen);
+  assign rsp_cancelled        = rsp_slot_busy &&
+                                (cred_cancel[rsp_id] || rsp_killed_by_now);
+
 `ifdef MOSAIC_RECOVERY_MUTANT_APPLY_STALE_RSP
   assign rsp_accepted      = rsp_valid && rsp_slot_busy;
   assign rsp_dropped_stale = 1'b0;
-`else
+  assign rsp_dropped_dup   = rsp_valid && rsp_slot_in_range && !rsp_slot_busy;
+`elsif MOSAIC_RECOVERY_MUTANT_EPOCH_ONLY_RSP
   assign rsp_accepted      = rsp_valid && rsp_slot_busy && (rsp_epoch == epoch);
   assign rsp_dropped_stale = rsp_valid && rsp_slot_busy && (rsp_epoch != epoch);
+  assign rsp_dropped_dup   = rsp_valid && rsp_slot_in_range && !rsp_slot_busy;
+`else
+  assign rsp_accepted      = rsp_valid && rsp_identity_matches && !rsp_cancelled;
+  assign rsp_dropped_stale = rsp_valid && rsp_cancelled;
+  // A free slot is a duplicate delivery of an already-acknowledged credit. A
+  // busy slot whose epoch is not the one it was reserved with is the same thing
+  // one recycling later: the response names a reservation that is gone, and
+  // returning a credit for it would inflate the free-credit count.
+  assign rsp_dropped_dup   = rsp_valid && rsp_slot_in_range &&
+                             (!rsp_slot_busy ||
+                              (!rsp_cancelled && !rsp_identity_matches));
 `endif
-  assign rsp_dropped_dup    = rsp_valid && rsp_slot_in_range && !cred_busy[rsp_id];
   assign rsp_dropped_orphan = rsp_valid && !rsp_slot_in_range;
 
   // MUTANT 3 (DOUBLE_CREDIT) returns the credit on the drop *and* on the
@@ -1020,24 +1134,46 @@ module mosaic_recovery #(
   // acknowledged, and the acknowledgement is the arrival of the response that is
   // now stale. Returning it at the redirect as well would be the mirror image of
   // a credit leak and exactly as fatal.
+  //
+  // What the redirect *does* do is mark the slots it owns as cancelled, and the
+  // kill set is an age boundary rather than the whole table: the reservation's
+  // owner generation is compared with the redirecting branch's, and only
+  // reservations at or above it are cancelled. Applying the boundary to the
+  // table *as it stands after this cycle's grant* also covers the reservation
+  // the grant is making in the redirect cycle itself -- a credit taken for a
+  // uop the same cycle's squash is discarding -- without a second rule.
   logic [CRED_ENTRIES-1:0]   cred_busy_q;
+  logic [CRED_ENTRIES-1:0]   cred_cancel_q;
   logic [REC_EPOCH_W-1:0]    cred_epoch_q [CRED_ENTRIES];
   logic [REC_ID_W-1:0]       cred_gen_q   [CRED_ENTRIES];
   always_comb begin
-    cred_busy_q = cred_busy;
+    cred_busy_q   = cred_busy;
+    cred_cancel_q = cred_cancel;
     for (int unsigned c = 0; c < CRED_ENTRIES; c++) begin
       cred_epoch_q[c] = cred_epoch[c];
       cred_gen_q  [c] = cred_gen[c];
     end
     if (cred_req_ok) begin
-      cred_busy_q[cred_free_id] = 1'b1;
-      cred_epoch_q[cred_free_id] = epoch;
-      cred_gen_q  [cred_free_id] = cred_req_rob_gen;
+      cred_busy_q   [cred_free_id] = 1'b1;
+      cred_cancel_q [cred_free_id] = 1'b0;
+      cred_epoch_q  [cred_free_id] = epoch;
+      cred_gen_q    [cred_free_id] = cred_req_rob_gen;
+    end
+    if (pick_found && ck_valid[restore_ck]) begin
+      for (int unsigned c = 0; c < CRED_ENTRIES; c++) begin
+        if (cred_busy_q[c] && (cred_gen_q[c] >= pick_gen)) begin
+          cred_cancel_q[c] = 1'b1;
+        end
+      end
     end
     // Any response frees its slot, whatever the outcome. That is what makes a
-    // second delivery of the same slot find nothing left to return.
+    // second delivery of the same slot find nothing left to return -- and why
+    // the cancel is cleared here too: a redirect and the response it kills in
+    // one cycle must return the credit exactly once, and a later copy of that
+    // response then finds a free slot.
     if (rsp_valid && rsp_slot_in_range) begin
-      cred_busy_q[rsp_id] = 1'b0;
+      cred_busy_q  [rsp_id] = 1'b0;
+      cred_cancel_q[rsp_id] = 1'b0;
     end
   end
 
@@ -1383,6 +1519,16 @@ module mosaic_recovery #(
       j_len      <= {REC_CNT_W{1'b0}};
       epoch      <= {REC_EPOCH_W{1'b0}};
       j_overflow <= 1'b0;
+      // The allocation-order tracker is control state, and it is the validity
+      // bit -- not the value -- that a reset has to clear, the same rule the
+      // generation table follows. Leaving `alloc_seen` set across a reset makes
+      // the first allocation afterwards compare its generation against the
+      // previous run's and report `alloc_gen_regress` on a producer that did
+      // nothing wrong; the report is the only thing this state drives, so a
+      // stale bit is a status output that lies for the first ROB_ENTRIES
+      // allocations after every reset.
+      last_alloc_gen <= {REC_ID_W{1'b0}};
+      alloc_seen     <= 1'b0;
       journal_entries <= 32'd0;
       restores         <= 32'd0;
       ckpt_taken       <= 32'd0;
@@ -1393,7 +1539,8 @@ module mosaic_recovery #(
       ck_depth  <= {(REC_CKPT_W + 1){1'b0}};
       rq_valid  <= {RDQ_DEPTH{1'b0}};
       rq_count  <= {(REC_RDQ_W + 1){1'b0}};
-      cred_busy <= {CRED_ENTRIES{1'b0}};
+      cred_busy   <= {CRED_ENTRIES{1'b0}};
+      cred_cancel <= {CRED_ENTRIES{1'b0}};
     end else begin
       for (int unsigned a = 0; a < REC_ARCH; a++) begin
         spec_map[a] <= spec_map_q[a];
@@ -1471,7 +1618,8 @@ module mosaic_recovery #(
         rq_fault[q] <= rq_fault_q[q];
       end
 
-      cred_busy <= cred_busy_q;
+      cred_busy   <= cred_busy_q;
+      cred_cancel <= cred_cancel_q;
       for (int unsigned c = 0; c < CRED_ENTRIES; c++) begin
         cred_epoch[c] <= cred_epoch_q[c];
         cred_gen  [c] <= cred_gen_q[c];

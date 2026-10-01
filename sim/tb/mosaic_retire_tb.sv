@@ -829,6 +829,39 @@ module mosaic_retire_tb (
   logic [TB_RET_PRF*TB_RET_GEN_W-1:0] ren_tag_gen;
   logic [TB_RET_ARCH*(TB_RET_TAG_W+TB_RET_GEN_W)-1:0] ren_spec_map;
   logic [TB_RET_ARCH*(TB_RET_TAG_W+TB_RET_GEN_W)-1:0] ren_cmt_map;
+  // I-014 added a second allocation lane and a second source-read pair. This
+  // card tests retirement, so lane 1's allocation is tied inactive
+  // (`alloc2_req`/`rs3_addr`/`rs4_addr` = 0), which is exactly the single-width
+  // machine: every lane-1 output is then a refusal/idle and the committed map
+  // behaves as it did before. The outputs are still connected, because an
+  // omitted pin is a build error here (Verilator PINMISSING under -Wall) and
+  // because leaving an input unconnected would let it float.
+  logic                       ren_alloc2_accepted;
+  logic                       ren_alloc2_exhausted;
+  logic                       ren_alloc2_squashed;
+  logic                       ren_alloc2_is_x0;
+  logic                       ren_alloc2_new_valid;
+  logic [TB_RET_TAG_W-1:0]    ren_alloc2_new_tag;
+  logic [TB_RET_GEN_W-1:0]    ren_alloc2_new_gen;
+  logic                       ren_alloc2_old_valid;
+  logic [TB_RET_TAG_W-1:0]    ren_alloc2_old_tag;
+  logic [TB_RET_GEN_W-1:0]    ren_alloc2_old_gen;
+  logic                       ren_rs1_ready;
+  logic                       ren_rs2_ready;
+  logic                       ren_rs3_is_x0;
+  logic                       ren_rs4_is_x0;
+  logic                       ren_rs3_ready;
+  logic                       ren_rs4_ready;
+  logic                       ren_rs3_bypass;
+  logic                       ren_rs4_bypass;
+  logic [TB_RET_TAG_W-1:0]    ren_rs3_tag;
+  logic [TB_RET_TAG_W-1:0]    ren_rs4_tag;
+  logic [TB_RET_GEN_W-1:0]    ren_rs3_gen;
+  logic [TB_RET_GEN_W-1:0]    ren_rs4_gen;
+  // The undo-window depth's width is $clog2(entries+1) by the module's own rule;
+  // derived here from the same generated geometry rather than hardcoded.
+  localparam int unsigned TB_RET_JLEN_W = $clog2(TB_RET_ROB + 1);
+  logic [TB_RET_JLEN_W-1:0]   ren_j_len;
 
   // The per-register slices the packing below reads, declared here because
   // SystemVerilog requires a declaration before use and a generate block cannot
@@ -858,14 +891,45 @@ module mosaic_retire_tb (
       .alloc_old_tag     (ren_alloc_old_tag),
       .alloc_old_gen     (ren_alloc_old_gen),
 
+      // Lane 1 of the allocation group is inactive, so every `alloc2_*` output
+      // is the module's refusal/idle answer and the group is single-width.
+      .alloc2_req        (1'b0),
+      .alloc2_rd         (5'd0),
+      .alloc2_accepted   (ren_alloc2_accepted),
+      .alloc2_exhausted  (ren_alloc2_exhausted),
+      .alloc2_squashed   (ren_alloc2_squashed),
+      .alloc2_is_x0      (ren_alloc2_is_x0),
+      .alloc2_new_valid  (ren_alloc2_new_valid),
+      .alloc2_new_tag    (ren_alloc2_new_tag),
+      .alloc2_new_gen    (ren_alloc2_new_gen),
+      .alloc2_old_valid  (ren_alloc2_old_valid),
+      .alloc2_old_tag    (ren_alloc2_old_tag),
+      .alloc2_old_gen    (ren_alloc2_old_gen),
+
       .rs1_addr          (5'd0),
       .rs2_addr          (5'd0),
       .rs1_is_x0         (ren_rs1_is_x0),
       .rs2_is_x0         (ren_rs2_is_x0),
+      .rs1_ready         (ren_rs1_ready),
+      .rs2_ready         (ren_rs2_ready),
       .rs1_tag           (ren_rs1_tag),
       .rs2_tag           (ren_rs2_tag),
       .rs1_gen           (ren_rs1_gen),
       .rs2_gen           (ren_rs2_gen),
+      // The second source-read pair is addressed at x0 for the same reason: no
+      // read, no bypass, no readiness dependency to model in this card.
+      .rs3_addr          (5'd0),
+      .rs4_addr          (5'd0),
+      .rs3_is_x0         (ren_rs3_is_x0),
+      .rs4_is_x0         (ren_rs4_is_x0),
+      .rs3_ready         (ren_rs3_ready),
+      .rs4_ready         (ren_rs4_ready),
+      .rs3_bypass        (ren_rs3_bypass),
+      .rs4_bypass        (ren_rs4_bypass),
+      .rs3_tag           (ren_rs3_tag),
+      .rs4_tag           (ren_rs4_tag),
+      .rs3_gen           (ren_rs3_gen),
+      .rs4_gen           (ren_rs4_gen),
 
       .wb_valid          (1'b0),
       .wb_tag            ('0),
@@ -914,7 +978,8 @@ module mosaic_retire_tb (
       .dbg_wb_done       (ren_wb_done),
       .dbg_tag_gen       (ren_tag_gen),
       .dbg_spec_map      (ren_spec_map),
-      .dbg_cmt_map       (ren_cmt_map)
+      .dbg_cmt_map       (ren_cmt_map),
+      .dbg_j_len         (ren_j_len)
   );
 
 

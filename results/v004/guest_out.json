@@ -1,0 +1,16 @@
+{
+  "checks": {
+    "dlopen": "ok",
+    "prototypes": "ok:regcpy(void*,bool),memcpy(u64,void*,size,bool),exec(u64)",
+    "reference_step": "ok:ADD=12,ADDI=42,pc+=12",
+    "reg_size": "ok:1400",
+    "state_roundtrip": "ok:gpr/pc/mtvec",
+    "store_direction": "ok:SD visible at 0x80001000",
+    "symbols_present": "ok:9"
+  },
+  "layout_spec": "riscv64-f39e307-xs-ref",
+  "probe": "nemu_guest_probe",
+  "ref_reg_size": 1400,
+  "ref_so": "mosaic-ref/NEMU-f39e/build/riscv64-nemu-interpreter-so",
+  "verdict": "PASS"
+}

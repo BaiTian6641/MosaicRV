@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "case": "csr.precise_trap_mret",
+  "verdict": "FAIL",
+  "detail": "contract violated: warl: mip: RW all-ones read back 0x0x0000000000000000, expected 0x0x0000000000000088",
+  "seed": 1,
+  "max_cycles": 200000,
+  "checks": 4,
+  "failures": 1,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-01T18:57:46Z",
+  "first_mismatch": "warl: mip: RW all-ones read back 0x0x0000000000000000, expected 0x0x0000000000000088: expected contract holds, got contract violated",
+  "failed_checks": ["no contract violation in any phase"]
+}

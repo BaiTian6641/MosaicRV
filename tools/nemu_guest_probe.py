@@ -99,14 +99,17 @@ def main():
 
     # -- state round-trip: independent values in, same values back ------------
     state = bytearray(reg_size)
-    put(state, "mode", 3)  # MODE_M: PMP default-deny faults M-mode fetches at mode 0
+    put(state, "mode", 3)  # MODE_M: PMP default-deny faults U-mode fetches
     put(state, "gpr1", 0x0123456789ABCDEF)
     put(state, "gpr2", 0xFEDCBA9876543210)
     put(state, "gpr5", 0x80001000)
     put(state, "pc", MBASE)
     put(state, "mtvec", 0x80000100)
+    state_c = (ctypes.c_char * reg_size).from_buffer(state)
+    so.difftest_regcpy(state_c, DIFFTEST_TO_REF)
     back = bytearray(reg_size)
-    so.difftest_regcpy((ctypes.c_char * reg_size).from_buffer(back), DIFFTEST_TO_DUT)
+    back_c = (ctypes.c_char * reg_size).from_buffer(back)
+    so.difftest_regcpy(back_c, DIFFTEST_TO_DUT)
     for field, want in (("gpr1", 0x0123456789ABCDEF), ("gpr2", 0xFEDCBA9876543210),
                         ("gpr5", 0x80001000), ("pc", MBASE), ("mtvec", 0x80000100)):
         if get(back, field) != want:
@@ -115,11 +118,7 @@ def main():
     if get(back, "gpr0") != 0:
         return fail(out, "x0 is not zero after round-trip")
     out["checks"]["state_roundtrip"] = "ok:gpr/pc/mtvec"
-    so.difftest_regcpy((ctypes.c_char * reg_size).from_buffer(state), DIFFTEST_TO_REF)
-    # CONFIG_SHARE builds assert n<=1 in cpu_exec: one architectural step per
-    # call, which is also the granularity the card wants verified.
-    for _ in range(3):
-        so.difftest_exec(1)
+    _keep = (state_c, back_c, state, back)  # ctypes views share memory: hold them
     # ADD x3,x1,x2 = 0x002081b3 ; ADDI x4,x0,42 = 0x02a00213 ;
     # SD x3,0(x5) with x5 = 0x80001000 = 0x0032b023.
     code = bytes([0xB3, 0x81, 0x20, 0x00, 0x13, 0x02, 0xA0, 0x02,
@@ -132,11 +131,13 @@ def main():
     put(state, "gpr2", 7)
     put(state, "gpr5", 0x80001000)
     put(state, "pc", MBASE)
-    so.difftest_regcpy((ctypes.c_char * reg_size).from_buffer(state), DIFFTEST_TO_REF)
+    state_c3 = (ctypes.c_char * reg_size).from_buffer(state)
+    so.difftest_regcpy(state_c3, DIFFTEST_TO_REF)
     for _ in range(3):
         so.difftest_exec(1)
     got = bytearray(reg_size)
-    so.difftest_regcpy((ctypes.c_char * reg_size).from_buffer(got), DIFFTEST_TO_DUT)
+    got_c = (ctypes.c_char * reg_size).from_buffer(got)
+    so.difftest_regcpy(got_c, DIFFTEST_TO_DUT)
     if get(got, "gpr3") != 12:
         return fail(out, "reference ADD produced x3=%#x, want 12" % get(got, "gpr3"))
     if get(got, "gpr4") != 42:
@@ -147,8 +148,8 @@ def main():
     out["checks"]["reference_step"] = "ok:ADD=12,ADDI=42,pc+=12"
 
     mem = bytearray(8)
-    so.difftest_memcpy(0x80001000, (ctypes.c_char * 8).from_buffer(mem), 8,
-                       DIFFTEST_TO_DUT)
+    mem_c = (ctypes.c_char * 8).from_buffer(mem)
+    so.difftest_memcpy(0x80001000, mem_c, 8, DIFFTEST_TO_DUT)
     stored = int.from_bytes(mem, "little")
     if stored != 12:
         return fail(out, "reference store left %#x at 0x80001000, want 12" % stored)

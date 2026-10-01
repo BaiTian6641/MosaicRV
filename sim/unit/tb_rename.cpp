@@ -110,11 +110,20 @@ struct Dest {
 
 // --------------------------------------------------------------- the stimulus
 struct Stim {
+  // Lane 0 of the group, and lane 1 of the same group. Program order is lane 0
+  // then lane 1, and `alloc2_req` without `alloc_req` is not a group the core may
+  // present (there is no second macro without a first).
   bool alloc_req = false;
   uint32_t alloc_rd = 0;
+  bool alloc2_req = false;
+  uint32_t alloc2_rd = 0;
 
+  // Four source addresses in (macro, source) order: rs1/rs2 belong to lane 0,
+  // rs3/rs4 to lane 1.
   uint32_t rs1_addr = 0;
   uint32_t rs2_addr = 0;
+  uint32_t rs3_addr = 0;
+  uint32_t rs4_addr = 0;
 
   bool wb_valid = false;
   Dest wb{};
@@ -126,15 +135,24 @@ struct Stim {
   uint32_t commit_rd = 0;
   Dest commit{};
 
+  // The second commit lane (I-017), driven here because the WAW release contract
+  // of a two-wide rename group is a statement about what the two lanes release.
+  bool commit2_valid = false;
+  uint32_t commit2_rd = 0;
+  Dest commit2{};
+
   bool ckpt_valid = false;
   bool squash = false;
 
   std::string str() const {
     return "[alloc=" + Bool(alloc_req) + ":x" + Dec(alloc_rd) +
-           " rs=x" + Dec(rs1_addr) + ",x" + Dec(rs2_addr) + " wb=" + Bool(wb_valid) +
-           wb.str() + " free=" + Bool(free_valid) + free_.str() + " commit=" +
-           Bool(commit_valid) + ":x" + Dec(commit_rd) + commit.str() + " ckpt=" +
-           Bool(ckpt_valid) + " squash=" + Bool(squash) + "]";
+           " alloc2=" + Bool(alloc2_req) + ":x" + Dec(alloc2_rd) +
+           " rs=x" + Dec(rs1_addr) + ",x" + Dec(rs2_addr) +
+           " | x" + Dec(rs3_addr) + ",x" + Dec(rs4_addr) +
+           " wb=" + Bool(wb_valid) + wb.str() + " free=" + Bool(free_valid) + free_.str() +
+           " commit=" + Bool(commit_valid) + ":x" + Dec(commit_rd) + commit.str() +
+           " commit2=" + Bool(commit2_valid) + ":x" + Dec(commit2_rd) + commit2.str() +
+           " ckpt=" + Bool(ckpt_valid) + " squash=" + Bool(squash) + "]";
   }
 };
 
@@ -150,10 +168,36 @@ struct Outputs {
   bool alloc_old_valid = false;
   Dest alloc_old{};
 
+  // Lane 1 of the same group. `alloc2_exhausted` means the *group* could not be
+  // given the tags it needed -- which may be lane 1's own requirement or lane
+  // 0's; the group's refusal is one decision and both lanes report it.
+  bool alloc2_accepted = false;
+  bool alloc2_exhausted = false;
+  bool alloc2_squashed = false;
+  bool alloc2_is_x0 = false;
+  bool alloc2_new_valid = false;
+  Dest alloc2_new{};
+  bool alloc2_old_valid = false;
+  Dest alloc2_old{};
+
   bool rs1_is_x0 = false;
   bool rs2_is_x0 = false;
+  bool rs1_ready = false;
+  bool rs2_ready = false;
   Dest rs1{};
   Dest rs2{};
+
+  // Lane 1's sources, with the same-cycle bypass: `rs3/rs4_bypass` says the
+  // source was resolved from lane 0's new destination rather than from the map,
+  // and a bypassed source is never ready.
+  bool rs3_is_x0 = false;
+  bool rs4_is_x0 = false;
+  bool rs3_ready = false;
+  bool rs4_ready = false;
+  bool rs3_bypass = false;
+  bool rs4_bypass = false;
+  Dest rs3{};
+  Dest rs4{};
 
   bool wb_accepted = false;
   bool wb_stale = false;
@@ -165,6 +209,8 @@ struct Outputs {
 
   bool commit_accepted = false;
   bool commit_x0_dropped = false;
+  bool commit2_accepted = false;
+  bool commit2_x0_dropped = false;
 
   bool squash_accepted = false;
   bool squash_underflow = false;
@@ -259,26 +305,79 @@ class ShadowRename {
   Outputs Eval(const Stim& s) const {
     Outputs o;
 
-    const bool wants_tag = s.alloc_req && (s.alloc_rd != 0);
-    const bool has_free = free_count() > 0;
+    // A group of up to two macros. What it needs is one tag per lane that writes
+    // a non-x0 destination -- 0, 1 or 2 -- and the group is refused whole when
+    // the free set cannot supply all of them. This is the single most important
+    // line in the two-wide contract, and it is deliberately not "one tag, then
+    // see about the second".
+    const bool wants0 = s.alloc_req && (s.alloc_rd != 0);
+    const bool wants1 = s.alloc2_req && (s.alloc2_rd != 0);
+    const uint32_t need = (wants0 ? 1u : 0u) + (wants1 ? 1u : 0u);
+    const bool has_enough = free_count() >= need;
 
     o.alloc_squashed = s.alloc_req && s.squash;
     o.alloc_is_x0 = s.alloc_req && (s.alloc_rd == 0) && !s.squash;
     // Mutually exclusive with the squash report, matching the documented rule: a
-    // squash wins, because it discards the instruction whether or not a tag was
+    // squash wins, because it discards the group whether or not tags were
     // available.
-    o.alloc_exhausted = wants_tag && !has_free && !s.squash;
-    o.alloc_accepted = s.alloc_req && !s.squash && (has_free || s.alloc_rd == 0);
+    o.alloc_exhausted = s.alloc_req && !s.squash && need > 0 && !has_enough;
+    o.alloc_accepted = s.alloc_req && !s.squash && has_enough;
     o.alloc_new_valid = o.alloc_accepted && (s.alloc_rd != 0);
-    o.alloc_new = Dest{Scan(), 0};
-    o.alloc_new.gen = gen_valid_[o.alloc_new.tag] ? ((gen_[o.alloc_new.tag] + 1) & gen_mask_) : 0;
+
+    // Lane 1 is part of the same decision, so its acceptance is the group's --
+    // gated on lane 1 being present at all. A lane 1 without a lane 0 is refused
+    // rather than served: program order admits no second macro without a first.
+    o.alloc2_squashed = s.alloc2_req && s.squash;
+    o.alloc2_is_x0 = s.alloc2_req && (s.alloc2_rd == 0) && !s.squash;
+    o.alloc2_exhausted = s.alloc_req && s.alloc2_req && !s.squash && need > 0 && !has_enough;
+    o.alloc2_accepted = o.alloc_accepted && s.alloc2_req;
+    o.alloc2_new_valid = o.alloc2_accepted && (s.alloc2_rd != 0);
+
+    // Two scans, exactly as two consecutive single-width allocations would run
+    // them: lane 1's starts one past lane 0's tag and cannot see that tag.
+    const uint32_t tag0 = ScanFrom(free_, rot_);
+    std::vector<bool> lane1_mask = free_;
+    if (wants0 && tag0 < entries_) lane1_mask[tag0] = false;
+    const uint32_t lane1_ptr = !wants0 ? rot_
+                                       : ((tag0 + 1 >= entries_) ? 0u : tag0 + 1);
+    const uint32_t tag1 = wants0 ? ScanFrom(lane1_mask, lane1_ptr) : tag0;
+
+    o.alloc_new = Dest{tag0, 0};
+    o.alloc_new.gen = gen_valid_[tag0] ? ((gen_[tag0] + 1) & gen_mask_) : 0;
+    o.alloc2_new = Dest{tag1, 0};
+    o.alloc2_new.gen = gen_valid_[tag1] ? ((gen_[tag1] + 1) & gen_mask_) : 0;
+
     o.alloc_old_valid = o.alloc_new_valid;
     o.alloc_old = spec_[s.alloc_rd];
+    // Lane 1 displaces lane 0's *new* mapping when both lanes write the same rd:
+    // that is the mapping lane 1 really supersedes, and the one its commit will
+    // release.
+    o.alloc2_old_valid = o.alloc2_new_valid;
+    o.alloc2_old = (o.alloc_new_valid && s.alloc2_rd == s.alloc_rd) ? o.alloc_new
+                                                                    : spec_[s.alloc2_rd];
 
     o.rs1_is_x0 = s.rs1_addr == 0;
     o.rs1 = o.rs1_is_x0 ? Dest{0, 0} : spec_[s.rs1_addr];
+    o.rs1_ready = o.rs1_is_x0 || wb_done_[o.rs1.tag];
     o.rs2_is_x0 = s.rs2_addr == 0;
     o.rs2 = o.rs2_is_x0 ? Dest{0, 0} : spec_[s.rs2_addr];
+    o.rs2_ready = o.rs2_is_x0 || wb_done_[o.rs2.tag];
+
+    // Lane 1's sources, with the same-cycle bypass. The bypass is armed only when
+    // lane 0 really allocated a tag this cycle: a refused group and an x0 lane
+    // both leave lane 1 reading the map, which is what the RTL does too. A
+    // bypassed source is never ready -- lane 0's producer is in flight by
+    // construction.
+    const bool hit3 = o.alloc_new_valid && (s.rs3_addr == s.alloc_rd);
+    const bool hit4 = o.alloc_new_valid && (s.rs4_addr == s.alloc_rd);
+    o.rs3_is_x0 = s.rs3_addr == 0;
+    o.rs3_bypass = hit3;
+    o.rs3 = o.rs3_bypass ? o.alloc_new : (o.rs3_is_x0 ? Dest{0, 0} : spec_[s.rs3_addr]);
+    o.rs3_ready = o.rs3_is_x0 || (!o.rs3_bypass && wb_done_[o.rs3.tag]);
+    o.rs4_is_x0 = s.rs4_addr == 0;
+    o.rs4_bypass = hit4;
+    o.rs4 = o.rs4_bypass ? o.alloc_new : (o.rs4_is_x0 ? Dest{0, 0} : spec_[s.rs4_addr]);
+    o.rs4_ready = o.rs4_is_x0 || (!o.rs4_bypass && wb_done_[o.rs4.tag]);
 
     // A writeback is stale unless the identity is the tag's *current owner*: in
     // range, generation valid, not free, and carrying the current generation. A
@@ -306,6 +405,8 @@ class ShadowRename {
 
     o.commit_x0_dropped = s.commit_valid && (s.commit_rd == 0);
     o.commit_accepted = s.commit_valid && (s.commit_rd != 0);
+    o.commit2_x0_dropped = s.commit2_valid && (s.commit2_rd == 0);
+    o.commit2_accepted = s.commit2_valid && (s.commit2_rd != 0);
 
     o.squash_underflow = s.squash && !ckpt_seen_;
     o.squash_accepted = s.squash && ckpt_seen_;
@@ -361,16 +462,35 @@ class ShadowRename {
         j_len_++;
       }
     }
+    // Lane 1's entry follows lane 0's, so the window stays in allocation order and
+    // the undo (which walks it oldest first) can invert both allocations. It is
+    // pushed only if lane 0's entry fit, which is the same rule the RTL applies.
+    if (o.alloc2_new_valid && !(s.ckpt_valid && !s.squash)) {
+      if (j_len_ >= journal_) {
+        j_overflow_ = true;
+      } else {
+        undo_.push_back(UndoEntry{o.alloc2_new.tag, gen_valid_[o.alloc2_new.tag]});
+        j_len_++;
+      }
+    }
 
     // 3. Allocation: take the tag out of the free set, step its generation, and
     //    clear the written flag for the new owner. The rotation point follows the
-    //    tag and wraps to zero at the end of the register file.
+    //    last allocation, so it ends up where two consecutive single-width
+    //    allocations would have left it.
     if (o.alloc_new_valid) {
       free_next[o.alloc_new.tag] = false;
       gen_[o.alloc_new.tag] = o.alloc_new.gen;
       gen_valid_[o.alloc_new.tag] = true;
       wb_done_[o.alloc_new.tag] = false;
       rot_ = (o.alloc_new.tag + 1 >= entries_) ? 0u : o.alloc_new.tag + 1;
+    }
+    if (o.alloc2_new_valid) {
+      free_next[o.alloc2_new.tag] = false;
+      gen_[o.alloc2_new.tag] = o.alloc2_new.gen;
+      gen_valid_[o.alloc2_new.tag] = true;
+      wb_done_[o.alloc2_new.tag] = false;
+      rot_ = (o.alloc2_new.tag + 1 >= entries_) ? 0u : o.alloc2_new.tag + 1;
     }
 
     // 4. An explicit release puts a tag back. The generation does not move: it
@@ -380,8 +500,18 @@ class ShadowRename {
     // 5. A commit releases the mapping it supersedes, if that is a different
     //    identity from the one it installs. A commit is permanent, so it is not
     //    journalled and a later squash does not undo it.
+    //
+    //    Lane 1 compares against the committed map *as lane 0 left it*: in a WAW
+    //    pair that is lane 0's tag, which lane 1's commit is the one that
+    //    supersedes. Against the pre-lane-0 map both lanes would name the same
+    //    superseded mapping and lane 0's tag would never come back.
+    std::vector<Dest> cmt_after_lane0 = cmt_;
+    if (o.commit_accepted) cmt_after_lane0[s.commit_rd] = s.commit;
     if (o.commit_accepted && cmt_[s.commit_rd] != s.commit) {
       free_next[cmt_[s.commit_rd].tag] = true;
+    }
+    if (o.commit2_accepted && cmt_after_lane0[s.commit2_rd] != s.commit2) {
+      free_next[cmt_after_lane0[s.commit2_rd].tag] = true;
     }
 
     // 6. A squash undoes every allocation made after the checkpoint, oldest entry
@@ -408,8 +538,11 @@ class ShadowRename {
     //    top of that -- and since allocation is refused during a squash, the two can
     //    never both write the same entry here.
     if (o.commit_accepted) cmt_[s.commit_rd] = s.commit;
+    if (o.commit2_accepted) cmt_[s.commit2_rd] = s.commit2;
     if (o.squash_accepted) spec_ = cmt_;
     if (o.alloc_new_valid) spec_[s.alloc_rd] = o.alloc_new;
+    // Lane 1 lands after lane 0, so a WAW pair ends with lane 1's mapping.
+    if (o.alloc2_new_valid) spec_[s.alloc2_rd] = o.alloc2_new;
   }
 
  private:
@@ -424,10 +557,15 @@ class ShadowRename {
   // scan walks the reserved range at the bottom of the file as well. Those tags
   // are never free, so the scan passes over them -- which is what keeps the
   // implementation a single linear walk with no special case.
-  uint32_t Scan() const {
+  //
+  // `ScanFrom` takes the mask and the pointer, so lane 1's scan is the same
+  // function over the mask it is given. Lane 1's mask has lane 0's tag cleared and
+  // its pointer starts one past it, which is what makes a two-wide group take the
+  // same two tags as two consecutive single-width allocations.
+  uint32_t ScanFrom(const std::vector<bool>& mask, uint32_t ptr) const {
     for (uint32_t k = 0; k < entries_; k++) {
-      uint32_t t = (rot_ + k) % entries_;
-      if (free_[t]) return t;
+      uint32_t t = (ptr + k) % entries_;
+      if (mask[t]) return t;
     }
     return 0;  // nothing free: the answer is don't-care, and the request is refused
   }
@@ -525,8 +663,12 @@ class Harness {
     dut_->rst = rst ? 1 : 0;
     dut_->alloc_req = s.alloc_req ? 1 : 0;
     dut_->alloc_rd = static_cast<uint8_t>(s.alloc_rd & 0x1f);
+    dut_->alloc2_req = s.alloc2_req ? 1 : 0;
+    dut_->alloc2_rd = static_cast<uint8_t>(s.alloc2_rd & 0x1f);
     dut_->rs1_addr = static_cast<uint8_t>(s.rs1_addr & 0x1f);
     dut_->rs2_addr = static_cast<uint8_t>(s.rs2_addr & 0x1f);
+    dut_->rs3_addr = static_cast<uint8_t>(s.rs3_addr & 0x1f);
+    dut_->rs4_addr = static_cast<uint8_t>(s.rs4_addr & 0x1f);
     dut_->wb_valid = s.wb_valid ? 1 : 0;
     dut_->wb_tag = static_cast<uint8_t>(s.wb.tag & 0x7f);
     dut_->wb_gen = static_cast<uint8_t>(s.wb.gen & 0x7f);
@@ -537,6 +679,10 @@ class Harness {
     dut_->commit_rd = static_cast<uint8_t>(s.commit_rd & 0x1f);
     dut_->commit_tag = static_cast<uint8_t>(s.commit.tag & 0x7f);
     dut_->commit_gen = static_cast<uint8_t>(s.commit.gen & 0x7f);
+    dut_->commit2_valid = s.commit2_valid ? 1 : 0;
+    dut_->commit2_rd = static_cast<uint8_t>(s.commit2_rd & 0x1f);
+    dut_->commit2_tag = static_cast<uint8_t>(s.commit2.tag & 0x7f);
+    dut_->commit2_gen = static_cast<uint8_t>(s.commit2.gen & 0x7f);
     dut_->ckpt_valid = s.ckpt_valid ? 1 : 0;
     dut_->squash = s.squash ? 1 : 0;
     dut_->eval();
@@ -685,10 +831,28 @@ class Harness {
     observed_.alloc_new = Dest{dut_->alloc_new_tag, dut_->alloc_new_gen};
     observed_.alloc_old_valid = dut_->alloc_old_valid != 0;
     observed_.alloc_old = Dest{dut_->alloc_old_tag, dut_->alloc_old_gen};
+    observed_.alloc2_accepted = dut_->alloc2_accepted != 0;
+    observed_.alloc2_exhausted = dut_->alloc2_exhausted != 0;
+    observed_.alloc2_squashed = dut_->alloc2_squashed != 0;
+    observed_.alloc2_is_x0 = dut_->alloc2_is_x0 != 0;
+    observed_.alloc2_new_valid = dut_->alloc2_new_valid != 0;
+    observed_.alloc2_new = Dest{dut_->alloc2_new_tag, dut_->alloc2_new_gen};
+    observed_.alloc2_old_valid = dut_->alloc2_old_valid != 0;
+    observed_.alloc2_old = Dest{dut_->alloc2_old_tag, dut_->alloc2_old_gen};
     observed_.rs1_is_x0 = dut_->rs1_is_x0 != 0;
     observed_.rs2_is_x0 = dut_->rs2_is_x0 != 0;
+    observed_.rs1_ready = dut_->rs1_ready != 0;
+    observed_.rs2_ready = dut_->rs2_ready != 0;
     observed_.rs1 = Dest{dut_->rs1_tag, dut_->rs1_gen};
     observed_.rs2 = Dest{dut_->rs2_tag, dut_->rs2_gen};
+    observed_.rs3_is_x0 = dut_->rs3_is_x0 != 0;
+    observed_.rs4_is_x0 = dut_->rs4_is_x0 != 0;
+    observed_.rs3_ready = dut_->rs3_ready != 0;
+    observed_.rs4_ready = dut_->rs4_ready != 0;
+    observed_.rs3_bypass = dut_->rs3_bypass != 0;
+    observed_.rs4_bypass = dut_->rs4_bypass != 0;
+    observed_.rs3 = Dest{dut_->rs3_tag, dut_->rs3_gen};
+    observed_.rs4 = Dest{dut_->rs4_tag, dut_->rs4_gen};
     observed_.wb_accepted = dut_->wb_accepted != 0;
     observed_.wb_stale = dut_->wb_stale != 0;
     observed_.wb_duplicate = dut_->wb_duplicate != 0;
@@ -697,6 +861,8 @@ class Harness {
     observed_.free_double = dut_->free_double != 0;
     observed_.commit_accepted = dut_->commit_accepted != 0;
     observed_.commit_x0_dropped = dut_->commit_x0_dropped != 0;
+    observed_.commit2_accepted = dut_->commit2_accepted != 0;
+    observed_.commit2_x0_dropped = dut_->commit2_x0_dropped != 0;
     observed_.squash_accepted = dut_->squash_accepted != 0;
     observed_.squash_underflow = dut_->squash_underflow != 0;
     observed_.journal_overflow = dut_->journal_overflow != 0;
@@ -737,8 +903,33 @@ class Harness {
                   Dec(dut_->alloc_old_gen) + stim);
     }
 
+    need(dut_->alloc2_accepted, e.alloc2_accepted, "alloc2_accepted");
+    need(dut_->alloc2_exhausted, e.alloc2_exhausted, "alloc2_exhausted");
+    need(dut_->alloc2_squashed, e.alloc2_squashed, "alloc2_squashed");
+    need(dut_->alloc2_is_x0, e.alloc2_is_x0, "alloc2_is_x0");
+    need(dut_->alloc2_new_valid, e.alloc2_new_valid, "alloc2_new_valid");
+    need(dut_->alloc2_old_valid, e.alloc2_old_valid, "alloc2_old_valid");
+    if (e.alloc2_new_valid) {
+      Require(dut_->alloc2_new_tag == e.alloc2_new.tag, where,
+              "alloc2_new_tag: expected " + Dec(e.alloc2_new.tag) + ", got " +
+                  Dec(dut_->alloc2_new_tag) + stim);
+      Require(dut_->alloc2_new_gen == e.alloc2_new.gen, where,
+              "alloc2_new_gen: expected " + Dec(e.alloc2_new.gen) + ", got " +
+                  Dec(dut_->alloc2_new_gen) + stim);
+    }
+    if (e.alloc2_old_valid) {
+      Require(dut_->alloc2_old_tag == e.alloc2_old.tag, where,
+              "alloc2_old_tag: expected " + Dec(e.alloc2_old.tag) + ", got " +
+                  Dec(dut_->alloc2_old_tag) + stim);
+      Require(dut_->alloc2_old_gen == e.alloc2_old.gen, where,
+              "alloc2_old_gen: expected " + Dec(e.alloc2_old.gen) + ", got " +
+                  Dec(dut_->alloc2_old_gen) + stim);
+    }
+
     need(dut_->rs1_is_x0, e.rs1_is_x0, "rs1_is_x0");
     need(dut_->rs2_is_x0, e.rs2_is_x0, "rs2_is_x0");
+    need(dut_->rs1_ready, e.rs1_ready, "rs1_ready");
+    need(dut_->rs2_ready, e.rs2_ready, "rs2_ready");
     Require(dut_->rs1_tag == e.rs1.tag, where,
             "rs1_tag: expected " + Dec(e.rs1.tag) + ", got " + Dec(dut_->rs1_tag) + stim);
     Require(dut_->rs2_tag == e.rs2.tag, where,
@@ -747,6 +938,21 @@ class Harness {
             "rs1_gen: expected " + Dec(e.rs1.gen) + ", got " + Dec(dut_->rs1_gen) + stim);
     Require(dut_->rs2_gen == e.rs2.gen, where,
             "rs2_gen: expected " + Dec(e.rs2.gen) + ", got " + Dec(dut_->rs2_gen) + stim);
+
+    need(dut_->rs3_is_x0, e.rs3_is_x0, "rs3_is_x0");
+    need(dut_->rs4_is_x0, e.rs4_is_x0, "rs4_is_x0");
+    need(dut_->rs3_ready, e.rs3_ready, "rs3_ready");
+    need(dut_->rs4_ready, e.rs4_ready, "rs4_ready");
+    need(dut_->rs3_bypass, e.rs3_bypass, "rs3_bypass");
+    need(dut_->rs4_bypass, e.rs4_bypass, "rs4_bypass");
+    Require(dut_->rs3_tag == e.rs3.tag, where,
+            "rs3_tag: expected " + Dec(e.rs3.tag) + ", got " + Dec(dut_->rs3_tag) + stim);
+    Require(dut_->rs4_tag == e.rs4.tag, where,
+            "rs4_tag: expected " + Dec(e.rs4.tag) + ", got " + Dec(dut_->rs4_tag) + stim);
+    Require(dut_->rs3_gen == e.rs3.gen, where,
+            "rs3_gen: expected " + Dec(e.rs3.gen) + ", got " + Dec(dut_->rs3_gen) + stim);
+    Require(dut_->rs4_gen == e.rs4.gen, where,
+            "rs4_gen: expected " + Dec(e.rs4.gen) + ", got " + Dec(dut_->rs4_gen) + stim);
 
     need(dut_->wb_accepted, e.wb_accepted, "wb_accepted");
     need(dut_->wb_stale, e.wb_stale, "wb_stale");
@@ -758,6 +964,8 @@ class Harness {
 
     need(dut_->commit_accepted, e.commit_accepted, "commit_accepted");
     need(dut_->commit_x0_dropped, e.commit_x0_dropped, "commit_x0_dropped");
+    need(dut_->commit2_accepted, e.commit2_accepted, "commit2_accepted");
+    need(dut_->commit2_x0_dropped, e.commit2_x0_dropped, "commit2_x0_dropped");
 
     need(dut_->squash_accepted, e.squash_accepted, "squash_accepted");
     need(dut_->squash_underflow, e.squash_underflow, "squash_underflow");
@@ -779,6 +987,19 @@ class Harness {
     Require(!(e.alloc_exhausted && e.alloc_squashed), where,
             "alloc_exhausted and alloc_squashed are both high for one request");
 
+    // The group's two lanes share one decision. An accepted lane 1 with a refused
+    // lane 0 -- or the reverse -- is the half-allocated group the card forbids, so
+    // it is checked here from the DUT's own answers rather than only against the
+    // shadow's: it has to hold for *any* stimulus, including the random soak's.
+    if (s.alloc2_req) {
+      Require(e.alloc2_accepted == e.alloc_accepted, where,
+              "lane 1 accepted=" + Bool(e.alloc2_accepted) + " while lane 0 accepted=" +
+                  Bool(e.alloc_accepted) + ": the group was half-accepted" + stim);
+    }
+    Require(!(e.alloc2_accepted && !s.alloc_req), where,
+            "lane 1 was accepted with no lane 0: program order has no second macro "
+            "without a first");
+
     // Standing invariant: a reported writeback is never accepted for a free tag,
     // and an accepted allocation never returns a tag that is currently owned.
     if (e.wb_accepted) {
@@ -790,6 +1011,17 @@ class Harness {
               "an allocation returned tag " + Dec(e.alloc_new.tag) +
                   ", which was not free: two owners for one physical register");
     }
+    if (e.alloc2_new_valid) {
+      Require(shadow_->free_set()[e.alloc2_new.tag], where,
+              "lane 1's allocation returned tag " + Dec(e.alloc2_new.tag) +
+                  ", which was not free: two owners for one physical register");
+    }
+    // The two lanes of one group never take the same tag. Checked on the DUT's
+    // answers, so a design that reused the tag fails here whatever the shadow
+    // says.
+    Require(!(e.alloc_new_valid && e.alloc2_new_valid && e.alloc_new.tag == e.alloc2_new.tag),
+            where,
+            "both lanes of one group allocated tag " + Dec(e.alloc_new.tag) + stim);
   }
 
   // Compare the whole state, not a projection of it.
@@ -802,6 +1034,14 @@ class Harness {
     Require(DutWbDone() == shadow_->wb_done(), where,
             "the wb_done vector differs from the shadow at tag " +
                 Dec(FirstDiff(DutWbDone(), shadow_->wb_done())));
+
+    // The undo window's depth. This is what says a two-wide group journalled both
+    // of its allocations: the free set after a squash could only show it one event
+    // later, and a group that journalled one lane would leak a tag that no
+    // comparison of the map would name.
+    Require(dut_->dbg_j_len == shadow_->journal_length(), where,
+            "the undo window holds " + Dec(dut_->dbg_j_len) + " entries but the shadow says " +
+                Dec(shadow_->journal_length()));
 
     // The generation table is compared **only where `gen_valid` holds**, and that
     // is the whole contract rather than a convenience. The array is deliberately

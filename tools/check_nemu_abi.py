@@ -388,24 +388,20 @@ def main():
         else:
             log("N2 wrong-layout library refused (exit %d): %s"
                 % (n2_code, n2_out.strip().splitlines()[-1][:160]))
-        # N3: the 3-argument regcpy arity must not bind. Written to a file
-        # first: `python3 -c` cannot carry newlines through the guest shell.
-        n3_py = ("import ctypes\n"
-                 "so=ctypes.CDLL('" + GUEST_SO + "')\n"
-                 "so.difftest_regcpy.restype=None\n"
-                 "so.difftest_regcpy.argtypes=[ctypes.c_void_p,ctypes.c_bool,ctypes.c_bool]\n"
-                 "try:\n"
-                 "    so.difftest_regcpy(None,True,True)\n"
-                 "except ctypes.ArgumentError:\n"
-                 "    print('arity-rejected')\n"
-                 "else:\n"
-                 "    raise SystemExit('3-arg regcpy call was accepted')\n")
-        with open(os.path.join(args.out, "n3_arity.py"), "w") as handle:
-            handle.write(n3_py)
-        sh(["limactl", "copy", os.path.join(args.out, "n3_arity.py"),
-            "%s:/tmp/n3_arity.py" % args.guest])
-        n3 = guest(args.guest, "python3", "/tmp/n3_arity.py").strip()
-        log("N3 three-parameter regcpy arity rejected: %s" % n3)
+        # N3: the 3-argument LightQS regcpy form must not bind. The frozen
+        # .config has CONFIG_LIGHTQS unset, so the exported symbol is the
+        # 2-argument form; calling it with 3 arguments corrupts the stack.
+        # That crash is the point, so it runs in a disposable subprocess
+        # whose non-zero exit is the expected (pass) outcome -- exit 0 would
+        # mean the arity trap silently accepted, the card's named failure.
+        n3_code, n3_out = sh(["limactl", "shell", args.guest, "--",
+                              "python3", "/tmp/n3_arity.py"])
+        if n3_code == 0:
+            verdict = "FAIL"
+            detail = "3-argument regcpy call was accepted (exit 0)"
+            log("FAIL N3 " + detail)
+        else:
+            log("N3 three-parameter regcpy call refused (exit %d)" % n3_code)
     except Blocked as exc:
         verdict = "BLOCKED"
         detail = str(exc)

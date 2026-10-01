@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "case": "interrupt.boundary_replay",
+  "verdict": "FAIL",
+  "detail": "contract violated: masking: cause with mstatus.MIE=0: irq_cause_o was non-zero while no trap was offered",
+  "seed": 1,
+  "max_cycles": 200000,
+  "checks": 1,
+  "failures": 1,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-01T18:57:49Z",
+  "first_mismatch": "masking: cause with mstatus.MIE=0: irq_cause_o was non-zero while no trap was offered: expected contract holds, got contract violated",
+  "failed_checks": ["no contract violation in any phase"]
+}

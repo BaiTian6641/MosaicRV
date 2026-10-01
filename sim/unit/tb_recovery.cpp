@@ -380,6 +380,7 @@ class ShadowRecovery {
         rq_pc_(rdq_depth, 0),
         rq_fault_(rdq_depth, false),
         cred_busy_(cred_entries, false),
+        cred_cancel_(cred_entries, false),
         cred_epoch_(cred_entries, 0),
         cred_gen_(cred_entries, 0) {
     Reset();
@@ -416,6 +417,13 @@ class ShadowRecovery {
   uint32_t CkptJMark(uint32_t index) const { return ck_jmark_[index]; }
   uint32_t CkptGen(uint32_t index) const { return ck_gen_[index]; }
   bool CreditBusy(uint32_t index) const { return cred_busy_[index]; }
+  // The owner generation the reservation was granted for, and whether the
+  // redirect that owns it has been taken. Both exist so a phase can assert the
+  // *contract* -- which reservations a redirect kills -- instead of inferring it
+  // from the DUT's own reports.
+  uint32_t CreditGen(uint32_t index) const { return cred_gen_[index]; }
+  uint32_t CreditEpoch(uint32_t index) const { return cred_epoch_[index]; }
+  bool CreditCancelled(uint32_t index) const { return cred_cancel_[index]; }
 
   // The whole state, as the wide bundles the DUT exports. These are what the
   // restore phase compares, and comparing them is the case's central claim.
@@ -551,6 +559,7 @@ class ShadowRecovery {
     }
     for (uint32_t c = 0; c < cred_entries_; c++) {
       cred_busy_[c] = false;
+      cred_cancel_[c] = false;
       cred_epoch_[c] = 0;
       cred_gen_[c] = 0;
     }
@@ -712,11 +721,31 @@ class ShadowRecovery {
     for (uint32_t c = 0; c < cred_entries_; c++) {
       if (cred_busy_[c]) v.credits_outstanding++;
     }
+    // A response's *kill* is decided by the owner's age, not by the epoch: a
+    // redirect cancels the reservations of the instructions younger than the
+    // branch it resolves, and lets an older instruction's reservation alone so
+    // that an older result still completes. The epoch is the identity check --
+    // it says whether the response belongs to the reservation the slot is
+    // currently holding -- and it is not the kill rule. Deciding both by the
+    // epoch would discard an older load or DIV that the squash never touched,
+    // which `docs/implementation-plan.md` §1.3 forbids and the card names as a
+    // way to deadlock the older ROB head.
     const bool slot_busy = (rsp_id < cred_entries_) && cred_busy_[rsp_id];
     const uint32_t rsp_ep = Mask(s.rsp_epoch, epoch_w_);
-    v.rsp_accepted      = s.rsp_valid && slot_busy && (rsp_ep == epoch_);
-    v.rsp_dropped_stale = s.rsp_valid && slot_busy && (rsp_ep != epoch_);
-    v.rsp_dropped_dup   = s.rsp_valid && (rsp_id < cred_entries_) && !cred_busy_[rsp_id];
+    // A redirect taken in *this* cycle owns the reservation it squashes in the
+    // same cycle; the boundary is applied combinationally so the credit is
+    // returned once and not merely one cycle later.
+    const bool killed_now = slot_busy && p.found && ck_valid_[p.ck] &&
+                            (cred_gen_[rsp_id] >= p.gen);
+    const bool cancelled = slot_busy && (cred_cancel_[rsp_id] || killed_now);
+    const bool identity_matches = slot_busy && (rsp_ep == cred_epoch_[rsp_id]);
+    v.rsp_accepted      = s.rsp_valid && identity_matches && !cancelled;
+    v.rsp_dropped_stale = s.rsp_valid && cancelled;
+    // No credit: a free slot is a delivery of an already-acknowledged credit,
+    // and a busy slot whose carried epoch is not the one it was reserved with is
+    // a delivery for a reservation that is gone.
+    v.rsp_dropped_dup   = s.rsp_valid && (rsp_id < cred_entries_) &&
+                          (!slot_busy || (!cancelled && !identity_matches));
     v.rsp_dropped_orphan = s.rsp_valid && (rsp_id >= cred_entries_);
     v.credit_return     = v.rsp_dropped_stale;
     v.epoch             = epoch_;
@@ -947,14 +976,28 @@ class ShadowRecovery {
       for (uint32_t c = 0; c < cred_entries_; c++) {
         if (!cred_busy_[c]) {
           cred_busy_[c] = true;
+          cred_cancel_[c] = false;
           cred_epoch_[c] = epoch_ & epoch_mask_;
           cred_gen_[c] = Mask(s.cred_req_rob_gen, id_w_);
           break;
         }
       }
     }
+    // The redirect's kill, applied to the table as it stands after this cycle's
+    // grant: one comparison of the owner generation against the redirecting
+    // branch's covers both "reserved earlier and squashed" and "reserved in the
+    // squash cycle itself". Reservations owned by older instructions are
+    // untouched, which is the whole point of an age boundary over an epoch.
+    if (p.found && ck_valid_[p.ck]) {
+      for (uint32_t c = 0; c < cred_entries_; c++) {
+        if (cred_busy_[c] && (cred_gen_[c] >= p.gen)) cred_cancel_[c] = true;
+      }
+    }
     const uint32_t rsp_id = Mask(s.rsp_id, cred_w());
-    if (s.rsp_valid && rsp_id < cred_entries_) cred_busy_[rsp_id] = false;
+    if (s.rsp_valid && rsp_id < cred_entries_) {
+      cred_busy_[rsp_id] = false;
+      cred_cancel_[rsp_id] = false;
+    }
 
     // ---- the generation tracker follows the last *accepted* allocation
     if (v.alloc_new_valid) {
@@ -1127,6 +1170,7 @@ class ShadowRecovery {
   uint32_t rq_count_;
 
   std::vector<bool> cred_busy_;
+  std::vector<bool> cred_cancel_;
   std::vector<uint32_t> cred_epoch_;
   std::vector<uint32_t> cred_gen_;
 
@@ -1699,7 +1743,19 @@ class Harness {
     bit("rob_flush_valid", dut_->rob_flush_valid_o, e.rob_flush_valid);
     bit("o_rob_flush_from_valid", dut_->o_rob_flush_from_valid_o,
         e.rob_flush_from_valid);
-    field("o_rob_flush_from", dut_->o_rob_flush_from_o, e.rob_flush_from);
+    // The flush point is a (value, valid) request pair: the RTL drives the value
+    // unconditionally, from `ck_tail[restore_ck]`, and with no redirect taken
+    // `restore_ck` falls back to slot 0 -- a slot the contract deliberately does
+    // not reset, because validity lives in `ck_valid` and resetting the storage
+    // is not where validity is carried. Comparing that value in a cycle with no
+    // request would therefore compare two don't-cares: the shadow's zeroed model
+    // of an unreset array against whatever the previous phase left in the DUT's.
+    // So the *value* is compared only where it is a value, and the valid bit is
+    // compared in every cycle above. Weakening the port to drive zero when it is
+    // not meaningful would instead make every consumer learn a second rule.
+    if (dut_->o_rob_flush_from_valid_o) {
+      field("o_rob_flush_from", dut_->o_rob_flush_from_o, e.rob_flush_from);
+    }
 
     bit("cred_req_ok", dut_->cred_req_ok_o, e.cred_req_ok);
     bit("cred_req_full", dut_->cred_req_full_o, e.cred_req_full);
@@ -1744,22 +1800,36 @@ class Harness {
     Require(settled_.ckpt_valid == shadow_->CkptValidWide(), where,
             "dbg_ckpt_valid: " +
                 settled_.ckpt_valid.Describe(shadow_->CkptValidWide()) + stim);
-    Require(settled_.ckpt_jmark == shadow_->CkptJMarkWide(), where,
-            "dbg_ckpt_jmark: " +
-                settled_.ckpt_jmark.Describe(shadow_->CkptJMarkWide()) + stim);
-    Require(settled_.ckpt_gen == shadow_->CkptGenWide(), where,
-            "dbg_ckpt_gen: " + settled_.ckpt_gen.Describe(shadow_->CkptGenWide()) +
-                stim);
-    Require(settled_.ckpt_tail == shadow_->CkptTailWide(), where,
-            "dbg_ckpt_tail: " +
-                settled_.ckpt_tail.Describe(shadow_->CkptTailWide()) + stim);
-    Require(settled_.ckpt_alloc_ptr == shadow_->CkptAllocPtrWide(), where,
-            "dbg_ckpt_alloc_ptr: " +
-                settled_.ckpt_alloc_ptr.Describe(shadow_->CkptAllocPtrWide()) + stim);
-    Require(settled_.ckpt_epoch == shadow_->CkptEpochWide(), where,
-            "dbg_ckpt_epoch: " +
-                settled_.ckpt_epoch.Describe(shadow_->CkptEpochWide()) + stim);
-    comparisons_ += 6;
+    // The validity vector is compared raw on every cycle -- *which* checkpoints
+    // are live is exactly the fact that must not drift. The *contents* of a
+    // checkpoint slot are compared only where the slot is live: the RTL leaves a
+    // dead slot's mark, generation and tail stale by design (the arrays are not
+    // reset, and a consumed checkpoint's contents are not scrubbed), so a raw
+    // comparison would demand the restore scrub a declared don't-care and would
+    // fail at the first phase boundary where a slot is left dead with leftover
+    // contents. That is the same masking `Snapshot::CkptEqual` uses for the
+    // restore comparison, so "the restore is exact" means the same thing in both
+    // places instead of two different things.
+    const Wide ck_valid = shadow_->CkptValidWide();
+    auto live_ckpt_field = [&](const char* name, const Wide& got, const Wide& want,
+                               uint32_t per_entry_bits) {
+      const Wide got_live = Snapshot::LiveOnly(got, ck_valid, per_entry_bits);
+      const Wide want_live = Snapshot::LiveOnly(want, ck_valid, per_entry_bits);
+      Require(got_live == want_live, where,
+              std::string(name) + ": " + got_live.Describe(want_live) + stim);
+      ++comparisons_;
+    };
+    live_ckpt_field("dbg_ckpt_jmark", settled_.ckpt_jmark,
+                    shadow_->CkptJMarkWide(), shadow_->cnt_w());
+    live_ckpt_field("dbg_ckpt_gen", settled_.ckpt_gen,
+                    shadow_->CkptGenWide(), shadow_->id_w());
+    live_ckpt_field("dbg_ckpt_tail", settled_.ckpt_tail,
+                    shadow_->CkptTailWide(), shadow_->idx_w());
+    live_ckpt_field("dbg_ckpt_alloc_ptr", settled_.ckpt_alloc_ptr,
+                    shadow_->CkptAllocPtrWide(), shadow_->tag_w());
+    live_ckpt_field("dbg_ckpt_epoch", settled_.ckpt_epoch,
+                    shadow_->CkptEpochWide(), shadow_->epoch_w());
+    comparisons_ += 1;
 
     Invariants(where, stim);
   }

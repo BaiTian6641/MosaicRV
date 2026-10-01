@@ -464,6 +464,13 @@ class ShadowPipeline {
     const uint32_t w = ret_tag_w_ + ret_gen_w_;
     return (w >= 32) ? 0xFFFFFFFFull : ((1ull << w) - 1ull);
   }
+  // The retire unit's destination tag is RET_TAG_W bits, so an allocation tag
+  // wider than that is truncated on the commit port. A phase that compares the
+  // committed map against a raw allocation tag must mask it the same way, or it
+  // asserts that a 12-bit macro tag fits in a 7-bit physical tag.
+  uint32_t ret_tag_mask() const {
+    return (ret_tag_w_ >= 32) ? 0xFFFFFFFFu : ((1u << ret_tag_w_) - 1u);
+  }
   // The generation the shadow handed out for the entry in ROB slot `slot`. A
   // phase that wants to complete or close a specific entry needs it, and it
   // has to come from the shadow rather than from the DUT: reading the DUT's
@@ -743,10 +750,18 @@ class ShadowPipeline {
     // lanes the buffer acknowledged, not the lanes the unit emitted events
     // for. The two agree unless the request and the acknowledgement disagree
     // by a cycle, and that cycle is exactly where the totals used to drift.
+    // The buffer never acknowledges in a cycle it is flushing, and its flush is
+    // the OR of the driver's two flushes and the trap (`rob_flush =
+    // rob_flush_i | flush_valid_i | trap_flush`, sim/tb/mosaic_retire_tb.sv). A
+    // request the buffer refuses produces no event: the module's rule is that
+    // the events follow the acknowledgement, not the request. Modelling the
+    // request alone predicted a retirement on a purely-`rob_flush` cycle that
+    // the buffer had already erased.
+    const bool buffer_flush = s.rob_flush || s.flush_valid || head_trap;
     uint32_t ack = 0;
     bool ack_carry = true;
     for (uint32_t i = 0; i < width_; i++) {
-      const bool bit = (req & (1u << i)) != 0;
+      const bool bit = ((req >> i) & 1u) != 0 && !buffer_flush;
       if (bit && !ack_carry) {
         v->order_fault = true;
       } else if (bit) {
@@ -886,6 +901,22 @@ struct Reports {
   bool commit2_accepted = false;
   uint32_t rob_retire_ack = 0;
   uint32_t rob_retire_ack_next = 0;
+  // Values the DUT *presented* in the cycle under test. They are captured with
+  // the clock low, before the edge, because after the edge they describe the
+  // next cycle: a retiring pair has already left the buffer, so a post-edge read
+  // of `ev_pc` returns zero for both lanes and a post-edge read of `trap_cause`
+  // returns zero because the trap has already flushed its entry. Reading these
+  // after the edge is the two-snapshot mistake -- the payload of the cycle under
+  // test compared against the state of the cycle after it.
+  uint64_t ev_pc_lo = 0;
+  uint64_t ev_pc_hi = 0;
+  uint32_t ev_seq_lo = 0;
+  uint32_t ev_seq_hi = 0;
+  uint64_t trap_pc = 0;
+  uint64_t trap_cause = 0;
+  uint64_t trap_tval = 0;
+  uint64_t csr_rd_data = 0;
+  bool csr_rd_unsupported = false;
 };
 
 // ---------------------------------------------------------------- the harness
@@ -1116,6 +1147,12 @@ class Harness {
   uint32_t ObservedCmtGen(uint32_t a) const {
     return WideWord32(dut_->o_cmt_gen_o, a) & 0xFFu;
   }
+  // The committed-map tag an allocation with `alloc_tag` must install: the
+  // retire unit's destination tag is RET_TAG_W bits, so the map holds the low
+  // bits of the identity the entry carries.
+  uint32_t CmtTagOf(uint32_t alloc_tag) const {
+    return alloc_tag & shadow_->ret_tag_mask();
+  }
   uint32_t ObservedSpecTag(uint32_t a) const {
     return WideWord32(dut_->o_spec_tag_o, a) & 0xFFu;
   }
@@ -1171,8 +1208,14 @@ class Harness {
     dut_->eval();
     return dut_->rob_obs_closed_o != 0;
   }
-  uint64_t CsrRead() const { return dut_->csr_rd_data_o; }
-  bool CsrReadUnsupported() const { return dut_->csr_rd_unsupported_o; }
+  // The CSR read port is combinational and its value is the *pre-edge* state
+  // (the module contract: a write that retires in cycle N is first read in N+1).
+  // It is therefore a value presented in the cycle under test and is read from
+  // the pre-edge capture, not from the live port after the edge -- which would
+  // show the write that just retired and turn the contract's "not visible in the
+  // retiring cycle" into a false failure.
+  uint64_t CsrRead() const { return report_.csr_rd_data; }
+  bool CsrReadUnsupported() const { return report_.csr_rd_unsupported; }
 
   const Counters& counters() const { return counters_; }
   uint64_t comparisons() const { return comparisons_; }
@@ -1186,8 +1229,10 @@ class Harness {
   // compared the packed vector against a single expected number would be
   // comparing two instructions' worth of data as one, which is exactly how an
   // ordering bug hides.
+  // Read from the pre-edge capture: after the edge the retiring pair has left
+  // the buffer and the live port reports zero for both lanes.
   uint64_t PcOfLane(uint32_t lane) const {
-    return WideWord(dut_->ev_pc_o, lane);
+    return (lane == 0) ? report_.ev_pc_lo : report_.ev_pc_hi;
   }
   // ev_seq_o is one 32-bit word per lane (2 words for a 2-wide retire), so
   // lane i's value is word i -- *not* words 2i/2i+1, which is the stride for
@@ -1195,11 +1240,17 @@ class Harness {
   // the end of the port and returns whatever Verilator left adjacent to it,
   // which is how a correct DUT produced ev_seq lane 1 = 1828657216. Match the
   // stride to the field: 32 bits per lane here, against the 64-bit ev_seq_o.
+  // The lane's sequence number as it was *presented* in the cycle under test.
+  // The port is ungated (lane i carries retire_seq + i every cycle), so a
+  // post-edge read returns the next cycle's numbers and the "consecutive pair"
+  // check would pass on any two-wide cycle regardless of what retired.
   uint32_t SeqOfLane(uint32_t lane) const {
-    return static_cast<uint32_t>((dut_->ev_seq_o >> (lane * 32)) & 0xFFu);
+    return (lane == 0) ? report_.ev_seq_lo : report_.ev_seq_hi;
   }
-  uint64_t TrapCause() const { return dut_->trap_cause_o; }
-  uint64_t TrapTval() const { return dut_->trap_tval_o; }
+  // The trap handoff, captured pre-edge: by the time the edge has applied, the
+  // trap has flushed its entry and the live port reads zero.
+  uint64_t TrapCause() const { return report_.trap_cause; }
+  uint64_t TrapTval() const { return report_.trap_tval; }
   uint32_t ObservedPRFEntries() const { return prf_entries_; }
 
   // Sized from the geometry the DUT reported, so nothing in this file is a
@@ -1486,14 +1537,30 @@ class Harness {
     // A recovery flush cycle must retire nothing and commit nothing. Enforced
     // here as well as modelled, because this is the one rule the I-018 boundary
     // depends on and it must not depend on the shadow agreeing.
-    if (s.flush_valid || s.rob_flush) {
+    //
+    // The two flush inputs are not the same signal, and the contract is stated
+    // about exactly one of them. `flush_valid` is the retire unit's own recovery
+    // port ("a `flush_valid` cycle retires nothing", mosaic_retire.sv header),
+    // and the request is gated on it, so a `flush_valid` cycle must also request
+    // nothing. `rob_flush` flushes the buffer *underneath* the unit, which never
+    // sees it: the unit may still assert `retire_req`, and the buffer refuses
+    // the pop, which is why the events follow the acknowledgement. Requiring
+    // `retire_req == 0` on `rob_flush` would assert a rule the module does not
+    // have and cannot see.
+    if (s.flush_valid) {
       Require(dut_->ev_valid_o == 0, where,
-              "a flush cycle emitted " + std::to_string(dut_->ev_valid_o) +
+              "a recovery flush cycle emitted " + std::to_string(dut_->ev_valid_o) +
                   " retire events; a recovery flush retires nothing");
       Require(dut_->commit_valid_o == 0, where,
-              "a flush cycle updated the committed map");
+              "a recovery flush cycle updated the committed map");
       Require(dut_->retire_req_o == 0, where,
-              "a flush cycle requested a retirement");
+              "a recovery flush cycle requested a retirement");
+    } else if (s.rob_flush) {
+      Require(dut_->ev_valid_o == 0, where,
+              "a buffer flush cycle emitted " + std::to_string(dut_->ev_valid_o) +
+                  " retire events; the buffer refused every pop");
+      Require(dut_->commit_valid_o == 0, where,
+              "a buffer flush cycle updated the committed map");
     }
   }
 
@@ -1522,6 +1589,19 @@ class Harness {
     report_.commit2_accepted = dut_->commit2_accepted_o != 0;
     report_.rob_retire_ack = dut_->rob_retire_ack_o;
     report_.rob_retire_ack_next = dut_->rob_retire_ack_next_o;
+    // Presented values, captured here for the same reason: these describe the
+    // cycle under test and are meaningless once the edge has moved the buffer
+    // on. `ev_seq_o` is 32 bits per lane (word i), the payloads are 64 bits per
+    // lane (words 2i/2i+1), so the two use their matching strides.
+    report_.ev_pc_lo = LaneWide(dut_->ev_pc_o, 0);
+    report_.ev_pc_hi = LaneWide(dut_->ev_pc_o, 1);
+    report_.ev_seq_lo = LaneField(dut_->ev_seq_o, 0, width_) & 0xFFu;
+    report_.ev_seq_hi = LaneField(dut_->ev_seq_o, 1, width_) & 0xFFu;
+    report_.trap_pc = dut_->trap_pc_o;
+    report_.trap_cause = dut_->trap_cause_o;
+    report_.trap_tval = dut_->trap_tval_o;
+    report_.csr_rd_data = dut_->csr_rd_data_o;
+    report_.csr_rd_unsupported = dut_->csr_rd_unsupported_o != 0;
   }
 
   // The settled state, compared against the shadow's post-edge state. Reading it
@@ -1996,7 +2076,9 @@ void PhaseDualWidth(Harness* h) {
           "the two lanes' sequence numbers are " + std::to_string(seq0) + " and " +
               std::to_string(seq1) + "; a two-wide retire must be consecutive");
   Require(h->PcOfLane(0) < h->PcOfLane(1), At("dual-width", 0),
-          "lane 0's PC is not below lane 1's: the pair is out of program order");
+          "lane 0's PC is not below lane 1's: the pair is out of program order"
+          " (lane0 pc=" + mosaic::Hex(h->PcOfLane(0)) + " lane1 pc=" +
+          mosaic::Hex(h->PcOfLane(1)) + ")");
 
   // Second lane unretirable: exactly one event, and nothing reordered.
   h->Fresh();
@@ -2051,9 +2133,9 @@ void PhaseCommittedOnce(Harness* h) {
   // entry, then a younger entry allocated into the same slot.
   h->Fresh();
 
-  // The squashed instruction: it writes x5 to tag 60 and is complete, so its
-  // payload is on the wire. If the unit commits on payload rather than on
-  // retirement, the map moves here and nothing undoes it.
+  // The squashed instruction: it writes x5 under its own (entry) tag and is
+  // complete, so its payload is on the wire. If the unit commits on payload
+  // rather than on retirement, the map moves here and nothing undoes it.
   const Harness::Identity doomed = h->Alloc(300);
   h->Complete(doomed);
 
@@ -2066,7 +2148,7 @@ void PhaseCommittedOnce(Harness* h) {
 
   Require(h->Events() == 0, At("committed-once", 0),
           "a flush cycle retired an instruction");
-  Require(h->ObservedCmtTag(5) != 60, At("committed-once", 0),
+  Require(h->ObservedCmtTag(5) != h->CmtTagOf(doomed.tag), At("committed-once", 0),
           "the squashed instruction updated the committed map to tag " +
               std::to_string(h->ObservedCmtTag(5)));
   Require(h->ObservedCmtTag(5) == 5, At("committed-once", 0),
@@ -2085,9 +2167,10 @@ void PhaseCommittedOnce(Harness* h) {
 
   Require(h->Events() == 0x1, At("committed-once", 1),
           "the younger entry did not retire");
-  Require(h->ObservedCmtTag(5) == 60, At("committed-once", 1),
+  Require(h->ObservedCmtTag(5) == h->CmtTagOf(survivor.tag), At("committed-once", 1),
           "x5 maps to tag " + std::to_string(h->ObservedCmtTag(5)) +
-              " after the younger entry retired; expected 60");
+              " after the younger entry retired; expected " +
+              std::to_string(h->CmtTagOf(survivor.tag)));
 
   // Two instructions writing the same rd in one cycle: the younger mapping wins,
   // and only one commit is seen.
@@ -2106,10 +2189,10 @@ void PhaseCommittedOnce(Harness* h) {
   Require(h->Commits() == 0x3, At("committed-once", 2),
           "two instructions writing the same rd produced commit mask " +
               std::to_string(h->Commits()) + "; expected both lanes");
-  Require(h->ObservedCmtTag(20) == second.tag, At("committed-once", 2),
+  Require(h->ObservedCmtTag(20) == h->CmtTagOf(second.tag), At("committed-once", 2),
           "x20 maps to tag " + std::to_string(h->ObservedCmtTag(20)) +
               " after two same-rd commits; expected the younger tag " +
-              std::to_string(second.tag));
+              std::to_string(h->CmtTagOf(second.tag)));
 }
 
 void PhaseCsrAtRetire(Harness* h) {

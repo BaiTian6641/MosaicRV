@@ -248,27 +248,27 @@ module mosaic_csr (
     addr_impl = 1'b1;
     wr_legal  = 1'b0;
     case (csr_addr_i)
-      MOSAIC_CSR_ADDR_MSTATUS:    wr_legal = MOSAIC_CSR_WRITE_LEGAL_MSTATUS;
-      MOSAIC_CSR_ADDR_MISA:       wr_legal = MOSAIC_CSR_WRITE_LEGAL_MISA;
-      MOSAIC_CSR_ADDR_MEDELEG:    wr_legal = MOSAIC_CSR_WRITE_LEGAL_MEDELEG;
-      MOSAIC_CSR_ADDR_MIDELEG:    wr_legal = MOSAIC_CSR_WRITE_LEGAL_MIDELEG;
-      MOSAIC_CSR_ADDR_MIE:        wr_legal = MOSAIC_CSR_WRITE_LEGAL_MIE;
-      MOSAIC_CSR_ADDR_MTVEC:      wr_legal = MOSAIC_CSR_WRITE_LEGAL_MTVEC;
-      MOSAIC_CSR_ADDR_MCOUNTEREN: wr_legal = MOSAIC_CSR_WRITE_LEGAL_MCOUNTEREN;
-      MOSAIC_CSR_ADDR_MSCRATCH:   wr_legal = MOSAIC_CSR_WRITE_LEGAL_MSCRATCH;
-      MOSAIC_CSR_ADDR_MEPC:       wr_legal = MOSAIC_CSR_WRITE_LEGAL_MEPC;
-      MOSAIC_CSR_ADDR_MCAUSE:     wr_legal = MOSAIC_CSR_WRITE_LEGAL_MCAUSE;
-      MOSAIC_CSR_ADDR_MTVAL:      wr_legal = MOSAIC_CSR_WRITE_LEGAL_MTVAL;
-      MOSAIC_CSR_ADDR_MIP:        wr_legal = MOSAIC_CSR_WRITE_LEGAL_MIP;
-      MOSAIC_CSR_ADDR_MVENDORID:  wr_legal = MOSAIC_CSR_WRITE_LEGAL_MVENDORID;
-      MOSAIC_CSR_ADDR_MARCHID:    wr_legal = MOSAIC_CSR_WRITE_LEGAL_MARCHID;
-      MOSAIC_CSR_ADDR_MIMPID:     wr_legal = MOSAIC_CSR_WRITE_LEGAL_MIMPID;
-      MOSAIC_CSR_ADDR_MHARTID:    wr_legal = MOSAIC_CSR_WRITE_LEGAL_MHARTID;
-      MOSAIC_CSR_ADDR_MCYCLE:     wr_legal = MOSAIC_CSR_WRITE_LEGAL_MCYCLE;
-      MOSAIC_CSR_ADDR_MINSTRET:   wr_legal = MOSAIC_CSR_WRITE_LEGAL_MINSTRET;
-      MOSAIC_CSR_ADDR_CYCLE:      wr_legal = MOSAIC_CSR_WRITE_LEGAL_CYCLE;
-      MOSAIC_CSR_ADDR_TIME:       wr_legal = MOSAIC_CSR_WRITE_LEGAL_TIME;
-      MOSAIC_CSR_ADDR_INSTRET:    wr_legal = MOSAIC_CSR_WRITE_LEGAL_INSTRET;
+      mosaic_csr_pkg::MOSAIC_CSR_ADDR_MSTATUS:    wr_legal = mosaic_csr_pkg::MOSAIC_CSR_WRITE_LEGAL_MSTATUS;
+      mosaic_csr_pkg::MOSAIC_CSR_ADDR_MISA:       wr_legal = mosaic_csr_pkg::MOSAIC_CSR_WRITE_LEGAL_MISA;
+      mosaic_csr_pkg::MOSAIC_CSR_ADDR_MEDELEG:    wr_legal = mosaic_csr_pkg::MOSAIC_CSR_WRITE_LEGAL_MEDELEG;
+      mosaic_csr_pkg::MOSAIC_CSR_ADDR_MIDELEG:    wr_legal = mosaic_csr_pkg::MOSAIC_CSR_WRITE_LEGAL_MIDELEG;
+      mosaic_csr_pkg::MOSAIC_CSR_ADDR_MIE:        wr_legal = mosaic_csr_pkg::MOSAIC_CSR_WRITE_LEGAL_MIE;
+      mosaic_csr_pkg::MOSAIC_CSR_ADDR_MTVEC:      wr_legal = mosaic_csr_pkg::MOSAIC_CSR_WRITE_LEGAL_MTVEC;
+      mosaic_csr_pkg::MOSAIC_CSR_ADDR_MCOUNTEREN: wr_legal = mosaic_csr_pkg::MOSAIC_CSR_WRITE_LEGAL_MCOUNTEREN;
+      mosaic_csr_pkg::MOSAIC_CSR_ADDR_MSCRATCH:   wr_legal = mosaic_csr_pkg::MOSAIC_CSR_WRITE_LEGAL_MSCRATCH;
+      mosaic_csr_pkg::MOSAIC_CSR_ADDR_MEPC:       wr_legal = mosaic_csr_pkg::MOSAIC_CSR_WRITE_LEGAL_MEPC;
+      mosaic_csr_pkg::MOSAIC_CSR_ADDR_MCAUSE:     wr_legal = mosaic_csr_pkg::MOSAIC_CSR_WRITE_LEGAL_MCAUSE;
+      mosaic_csr_pkg::MOSAIC_CSR_ADDR_MTVAL:      wr_legal = mosaic_csr_pkg::MOSAIC_CSR_WRITE_LEGAL_MTVAL;
+      mosaic_csr_pkg::MOSAIC_CSR_ADDR_MIP:        wr_legal = mosaic_csr_pkg::MOSAIC_CSR_WRITE_LEGAL_MIP;
+      mosaic_csr_pkg::MOSAIC_CSR_ADDR_MVENDORID:  wr_legal = mosaic_csr_pkg::MOSAIC_CSR_WRITE_LEGAL_MVENDORID;
+      mosaic_csr_pkg::MOSAIC_CSR_ADDR_MARCHID:    wr_legal = mosaic_csr_pkg::MOSAIC_CSR_WRITE_LEGAL_MARCHID;
+      mosaic_csr_pkg::MOSAIC_CSR_ADDR_MIMPID:     wr_legal = mosaic_csr_pkg::MOSAIC_CSR_WRITE_LEGAL_MIMPID;
+      mosaic_csr_pkg::MOSAIC_CSR_ADDR_MHARTID:    wr_legal = mosaic_csr_pkg::MOSAIC_CSR_WRITE_LEGAL_MHARTID;
+      mosaic_csr_pkg::MOSAIC_CSR_ADDR_MCYCLE:     wr_legal = mosaic_csr_pkg::MOSAIC_CSR_WRITE_LEGAL_MCYCLE;
+      mosaic_csr_pkg::MOSAIC_CSR_ADDR_MINSTRET:   wr_legal = mosaic_csr_pkg::MOSAIC_CSR_WRITE_LEGAL_MINSTRET;
+      mosaic_csr_pkg::MOSAIC_CSR_ADDR_CYCLE:      wr_legal = mosaic_csr_pkg::MOSAIC_CSR_WRITE_LEGAL_CYCLE;
+      mosaic_csr_pkg::MOSAIC_CSR_ADDR_TIME:       wr_legal = mosaic_csr_pkg::MOSAIC_CSR_WRITE_LEGAL_TIME;
+      mosaic_csr_pkg::MOSAIC_CSR_ADDR_INSTRET:    wr_legal = mosaic_csr_pkg::MOSAIC_CSR_WRITE_LEGAL_INSTRET;
       default:                    addr_impl = 1'b0;
     endcase
 
@@ -281,7 +281,7 @@ module mosaic_csr (
     `ifdef MOSAIC_CSR_MUTANT_CYCLE_WRITABLE
       // MUTANT: the read-only cycle/instret shadows are treated as writable
       // aliases of mcycle/minstret.
-      if ((csr_addr_i == MOSAIC_CSR_ADDR_CYCLE) || (csr_addr_i == MOSAIC_CSR_ADDR_INSTRET)) begin
+      if ((csr_addr_i == mosaic_csr_pkg::MOSAIC_CSR_ADDR_CYCLE) || (csr_addr_i == mosaic_csr_pkg::MOSAIC_CSR_ADDR_INSTRET)) begin
         wr_legal = 1'b1;
       end
     `endif
@@ -308,29 +308,29 @@ module mosaic_csr (
 
   always_comb begin
     case (csr_addr_i)
-      MOSAIC_CSR_ADDR_MSTATUS:    csr_rdata_stored = mstatus_q;
-      MOSAIC_CSR_ADDR_MISA:       csr_rdata_stored = MOSAIC_CSR_RESET_MISA;
-      MOSAIC_CSR_ADDR_MEDELEG:    csr_rdata_stored = MOSAIC_CSR_RESET_MEDELEG;
-      MOSAIC_CSR_ADDR_MIDELEG:    csr_rdata_stored = MOSAIC_CSR_RESET_MIDELEG;
-      MOSAIC_CSR_ADDR_MIE:        csr_rdata_stored = mie_q;
-      MOSAIC_CSR_ADDR_MTVEC:      csr_rdata_stored = mtvec_q;
-      MOSAIC_CSR_ADDR_MCOUNTEREN: csr_rdata_stored = MOSAIC_CSR_RESET_MCOUNTEREN;
-      MOSAIC_CSR_ADDR_MSCRATCH:   csr_rdata_stored = mscratch_q;
-      MOSAIC_CSR_ADDR_MEPC:       csr_rdata_stored = mepc_q;
-      MOSAIC_CSR_ADDR_MCAUSE:     csr_rdata_stored = mcause_q;
-      MOSAIC_CSR_ADDR_MTVAL:      csr_rdata_stored = mtval_q;
+      mosaic_csr_pkg::MOSAIC_CSR_ADDR_MSTATUS:    csr_rdata_stored = mstatus_q;
+      mosaic_csr_pkg::MOSAIC_CSR_ADDR_MISA:       csr_rdata_stored = mosaic_csr_pkg::MOSAIC_CSR_RESET_MISA;
+      mosaic_csr_pkg::MOSAIC_CSR_ADDR_MEDELEG:    csr_rdata_stored = mosaic_csr_pkg::MOSAIC_CSR_RESET_MEDELEG;
+      mosaic_csr_pkg::MOSAIC_CSR_ADDR_MIDELEG:    csr_rdata_stored = mosaic_csr_pkg::MOSAIC_CSR_RESET_MIDELEG;
+      mosaic_csr_pkg::MOSAIC_CSR_ADDR_MIE:        csr_rdata_stored = mie_q;
+      mosaic_csr_pkg::MOSAIC_CSR_ADDR_MTVEC:      csr_rdata_stored = mtvec_q;
+      mosaic_csr_pkg::MOSAIC_CSR_ADDR_MCOUNTEREN: csr_rdata_stored = mosaic_csr_pkg::MOSAIC_CSR_RESET_MCOUNTEREN;
+      mosaic_csr_pkg::MOSAIC_CSR_ADDR_MSCRATCH:   csr_rdata_stored = mscratch_q;
+      mosaic_csr_pkg::MOSAIC_CSR_ADDR_MEPC:       csr_rdata_stored = mepc_q;
+      mosaic_csr_pkg::MOSAIC_CSR_ADDR_MCAUSE:     csr_rdata_stored = mcause_q;
+      mosaic_csr_pkg::MOSAIC_CSR_ADDR_MTVAL:      csr_rdata_stored = mtval_q;
       // mip is the interrupt unit's view; only the implemented pending bits are
       // readable, and every other bit reads zero (bits 3 and 7 in p0).
-      MOSAIC_CSR_ADDR_MIP:        csr_rdata_stored = mip_i & MOSAIC_CSR_WMASK_MIP;
-      MOSAIC_CSR_ADDR_MVENDORID:  csr_rdata_stored = MOSAIC_CSR_RESET_MVENDORID;
-      MOSAIC_CSR_ADDR_MARCHID:    csr_rdata_stored = MOSAIC_CSR_RESET_MARCHID;
-      MOSAIC_CSR_ADDR_MIMPID:     csr_rdata_stored = MOSAIC_CSR_RESET_MIMPID;
-      MOSAIC_CSR_ADDR_MHARTID:    csr_rdata_stored = MOSAIC_CSR_RESET_MHARTID;
-      MOSAIC_CSR_ADDR_MCYCLE:     csr_rdata_stored = mcycle_q;
-      MOSAIC_CSR_ADDR_MINSTRET:   csr_rdata_stored = minstret_q;
-      MOSAIC_CSR_ADDR_CYCLE:      csr_rdata_stored = mcycle_q;   // read-only shadow
-      MOSAIC_CSR_ADDR_TIME:       csr_rdata_stored = mtime_i;    // read-only shadow
-      MOSAIC_CSR_ADDR_INSTRET:    csr_rdata_stored = minstret_q; // read-only shadow
+      mosaic_csr_pkg::MOSAIC_CSR_ADDR_MIP:        csr_rdata_stored = mip_i & mosaic_csr_pkg::MOSAIC_CSR_WMASK_MIP;
+      mosaic_csr_pkg::MOSAIC_CSR_ADDR_MVENDORID:  csr_rdata_stored = mosaic_csr_pkg::MOSAIC_CSR_RESET_MVENDORID;
+      mosaic_csr_pkg::MOSAIC_CSR_ADDR_MARCHID:    csr_rdata_stored = mosaic_csr_pkg::MOSAIC_CSR_RESET_MARCHID;
+      mosaic_csr_pkg::MOSAIC_CSR_ADDR_MIMPID:     csr_rdata_stored = mosaic_csr_pkg::MOSAIC_CSR_RESET_MIMPID;
+      mosaic_csr_pkg::MOSAIC_CSR_ADDR_MHARTID:    csr_rdata_stored = mosaic_csr_pkg::MOSAIC_CSR_RESET_MHARTID;
+      mosaic_csr_pkg::MOSAIC_CSR_ADDR_MCYCLE:     csr_rdata_stored = mcycle_q;
+      mosaic_csr_pkg::MOSAIC_CSR_ADDR_MINSTRET:   csr_rdata_stored = minstret_q;
+      mosaic_csr_pkg::MOSAIC_CSR_ADDR_CYCLE:      csr_rdata_stored = mcycle_q;   // read-only shadow
+      mosaic_csr_pkg::MOSAIC_CSR_ADDR_TIME:       csr_rdata_stored = mtime_i;    // read-only shadow
+      mosaic_csr_pkg::MOSAIC_CSR_ADDR_INSTRET:    csr_rdata_stored = minstret_q; // read-only shadow
       default:                    csr_rdata_stored = 64'b0;
     endcase
   end
@@ -386,7 +386,7 @@ module mosaic_csr (
   end
 
   // -------------------------------------------------------------- mip forward
-  assign mip_we_o    = wr_accept & (csr_addr_i == MOSAIC_CSR_ADDR_MIP);
+  assign mip_we_o    = wr_accept & (csr_addr_i == mosaic_csr_pkg::MOSAIC_CSR_ADDR_MIP);
   assign mip_op_o    = csr_op_i;
   assign mip_wdata_o = csr_wdata_i;
 
@@ -414,7 +414,7 @@ module mosaic_csr (
       mstatus_d = (mstatus_q & ~(MSTATUS_MIE | MSTATUS_MPIE))
                 | (mstatus_q[3] ? MSTATUS_MPIE : 64'd0)
                 | MSTATUS_MPP;
-      mepc_d    = trap_epc_i & MOSAIC_CSR_WMASK_MEPC;
+      mepc_d    = trap_epc_i & mosaic_csr_pkg::MOSAIC_CSR_WMASK_MEPC;
       mcause_d  = trap_cause_i;
       mtval_d   = trap_tval_i;
     end else if (mret_valid_i) begin
@@ -426,25 +426,25 @@ module mosaic_csr (
                 | MSTATUS_MPP;
     end else if (wr_accept) begin
       case (csr_addr_i)
-        MOSAIC_CSR_ADDR_MSTATUS:
-          mstatus_d = (mstatus_q & ~MOSAIC_CSR_WMASK_MSTATUS)
-                    | (csr_op_result & MOSAIC_CSR_WMASK_MSTATUS);
-        MOSAIC_CSR_ADDR_MIE:
-          mie_d = (mie_q & ~MOSAIC_CSR_WMASK_MIE)
-                | (csr_op_result & MOSAIC_CSR_WMASK_MIE);
-        MOSAIC_CSR_ADDR_MTVEC:
+        mosaic_csr_pkg::MOSAIC_CSR_ADDR_MSTATUS:
+          mstatus_d = (mstatus_q & ~mosaic_csr_pkg::MOSAIC_CSR_WMASK_MSTATUS)
+                    | (csr_op_result & mosaic_csr_pkg::MOSAIC_CSR_WMASK_MSTATUS);
+        mosaic_csr_pkg::MOSAIC_CSR_ADDR_MIE:
+          mie_d = (mie_q & ~mosaic_csr_pkg::MOSAIC_CSR_WMASK_MIE)
+                | (csr_op_result & mosaic_csr_pkg::MOSAIC_CSR_WMASK_MIE);
+        mosaic_csr_pkg::MOSAIC_CSR_ADDR_MTVEC:
           mtvec_d = {csr_op_result[63:2], mtvec_mode_canon(csr_op_result[1:0])};
-        MOSAIC_CSR_ADDR_MSCRATCH: mscratch_d = csr_op_result;
-        MOSAIC_CSR_ADDR_MEPC:
-          mepc_d = csr_op_result & MOSAIC_CSR_WMASK_MEPC;
-        MOSAIC_CSR_ADDR_MCAUSE:  mcause_d = csr_op_result;
-        MOSAIC_CSR_ADDR_MTVAL:   mtval_d = csr_op_result;
-        MOSAIC_CSR_ADDR_MCYCLE:  mcycle_d = csr_op_result;
-        MOSAIC_CSR_ADDR_MINSTRET: minstret_d = csr_op_result;
+        mosaic_csr_pkg::MOSAIC_CSR_ADDR_MSCRATCH: mscratch_d = csr_op_result;
+        mosaic_csr_pkg::MOSAIC_CSR_ADDR_MEPC:
+          mepc_d = csr_op_result & mosaic_csr_pkg::MOSAIC_CSR_WMASK_MEPC;
+        mosaic_csr_pkg::MOSAIC_CSR_ADDR_MCAUSE:  mcause_d = csr_op_result;
+        mosaic_csr_pkg::MOSAIC_CSR_ADDR_MTVAL:   mtval_d = csr_op_result;
+        mosaic_csr_pkg::MOSAIC_CSR_ADDR_MCYCLE:  mcycle_d = csr_op_result;
+        mosaic_csr_pkg::MOSAIC_CSR_ADDR_MINSTRET: minstret_d = csr_op_result;
         `ifdef MOSAIC_CSR_MUTANT_CYCLE_WRITABLE
           // MUTANT: the read-only shadows write through to the counters.
-          MOSAIC_CSR_ADDR_CYCLE:    mcycle_d = csr_op_result;
-          MOSAIC_CSR_ADDR_INSTRET:  minstret_d = csr_op_result;
+          mosaic_csr_pkg::MOSAIC_CSR_ADDR_CYCLE:    mcycle_d = csr_op_result;
+          mosaic_csr_pkg::MOSAIC_CSR_ADDR_INSTRET:  minstret_d = csr_op_result;
         `endif
         // medeleg, mideleg and mip are written here by falling through: the
         // first two canonicalise every bit to 0 (their generated write mask is
@@ -481,15 +481,15 @@ module mosaic_csr (
   // ------------------------------------------------------------------ state
   always_ff @(posedge clk_i) begin
     if (rst_i) begin
-      mstatus_q  <= MOSAIC_CSR_RESET_MSTATUS;
-      mie_q      <= MOSAIC_CSR_RESET_MIE;
-      mtvec_q    <= MOSAIC_CSR_RESET_MTVEC;
-      mscratch_q <= MOSAIC_CSR_RESET_MSCRATCH;
-      mepc_q     <= MOSAIC_CSR_RESET_MEPC;
-      mcause_q   <= MOSAIC_CSR_RESET_MCAUSE;
-      mtval_q    <= MOSAIC_CSR_RESET_MTVAL;
-      mcycle_q   <= MOSAIC_CSR_RESET_MCYCLE;
-      minstret_q <= MOSAIC_CSR_RESET_MINSTRET;
+      mstatus_q  <= mosaic_csr_pkg::MOSAIC_CSR_RESET_MSTATUS;
+      mie_q      <= mosaic_csr_pkg::MOSAIC_CSR_RESET_MIE;
+      mtvec_q    <= mosaic_csr_pkg::MOSAIC_CSR_RESET_MTVEC;
+      mscratch_q <= mosaic_csr_pkg::MOSAIC_CSR_RESET_MSCRATCH;
+      mepc_q     <= mosaic_csr_pkg::MOSAIC_CSR_RESET_MEPC;
+      mcause_q   <= mosaic_csr_pkg::MOSAIC_CSR_RESET_MCAUSE;
+      mtval_q    <= mosaic_csr_pkg::MOSAIC_CSR_RESET_MTVAL;
+      mcycle_q   <= mosaic_csr_pkg::MOSAIC_CSR_RESET_MCYCLE;
+      minstret_q <= mosaic_csr_pkg::MOSAIC_CSR_RESET_MINSTRET;
       o_wr_ctr         <= 32'd0;
       o_illegal_wr_ctr <= 32'd0;
       o_trap_ctr       <= 32'd0;
@@ -522,8 +522,8 @@ module mosaic_csr (
   assign o_mtval_o    = mtval_q;
   assign o_mscratch_o = mscratch_q;
   assign o_mie_o      = mie_q;
-  assign o_mip_o      = mip_i & MOSAIC_CSR_WMASK_MIP;
-  assign o_misa_o     = MOSAIC_CSR_RESET_MISA;
+  assign o_mip_o      = mip_i & mosaic_csr_pkg::MOSAIC_CSR_WMASK_MIP;
+  assign o_misa_o     = mosaic_csr_pkg::MOSAIC_CSR_RESET_MISA;
   assign o_mcycle_o   = mcycle_q;
   assign o_minstret_o = minstret_q;
 

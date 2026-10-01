@@ -208,6 +208,14 @@ def render_sv_id_package(bundle: config_check.Bundle) -> str:
     add("")
     add("package mosaic_id_pkg;")
     add("")
+    add("  // This package is compiled into every file that includes it, and a warning")
+    add("  // is a failure in this project. The identity functions below use only some")
+    add("  // of their arguments' fields, and a consumer names only some of the")
+    add("  // constants, so the unused-signal and unused-parameter checks are silenced")
+    add("  // here rather than at every include site.")
+    add("  /* verilator lint_off UNUSEDSIGNAL */")
+    add("  /* verilator lint_off UNUSEDPARAM */")
+    add("")
     add("  // ---- identity field widths ----")
     for name in sorted(widths):
         add("  localparam int unsigned MOSAIC_ID_W_%-12s = %d;" % (name.upper(), widths[name]))
@@ -256,6 +264,9 @@ def render_sv_id_package(bundle: config_check.Bundle) -> str:
     add("      seq_older = (diff != '0) && (diff[MOSAIC_CNT_W_UOP_SEQUENCE-1]);")
     add("    end")
     add("  endfunction")
+    add("")
+    add("  /* verilator lint_on UNUSEDPARAM */")
+    add("  /* verilator lint_on UNUSEDSIGNAL */")
     add("")
     add("endpackage : mosaic_id_pkg")
     add("")
@@ -361,6 +372,14 @@ def render_sv_csr_package(bundle: config_check.Bundle) -> str:
     add("")
     add("package mosaic_csr_pkg;")
     add("")
+    add("  // This package is compiled into every file that includes it, and a warning is")
+    add("  // a failure in this project. The CSR file names only the constants its own")
+    add("  // roles need and the testbench table uses the rest, so both the unused-")
+    add("  // parameter and unused-signal checks are silenced here rather than at each")
+    add("  // include site.")
+    add("  /* verilator lint_off UNUSEDPARAM */")
+    add("  /* verilator lint_off UNUSEDSIGNAL */")
+    add("")
     add("  localparam int unsigned MOSAIC_CSR_COUNT = %d;" % len(csrs))
     add("")
 
@@ -397,6 +416,9 @@ def render_sv_csr_package(bundle: config_check.Bundle) -> str:
             % (name, 1 if write_legal else 0))
         add("")
 
+    add("  /* verilator lint_on UNUSEDSIGNAL */")
+    add("  /* verilator lint_on UNUSEDPARAM */")
+    add("")
     add("endpackage : mosaic_csr_pkg")
     add("")
     add("`endif  // MOSAIC_CSR_PKG_SV_")
@@ -458,7 +480,7 @@ def render_csr_header(bundle: config_check.Bundle) -> str:
                           "csr %s writable_fields" % csr["name"]) if write_legal else 0
         if csr["name"] in NO_TARGET_WITHOUT_LESS_PRIVILEGE and not less_privileged:
             wmask = 0
-        add('  { "%-11s", 0x%03x, UINT64_C(0x%016x), UINT64_C(0x%016x), %d },'
+        add('  { "%s", 0x%03x, UINT64_C(0x%016x), UINT64_C(0x%016x), %d },'
             % (csr["name"], csr["address"], csr["reset"], wmask, 1 if write_legal else 0))
     add("};")
     add("")
