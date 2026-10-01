@@ -263,6 +263,232 @@
       ],
       "max_cycles": 200000,
       "seed": 1
+    },
+    "muldiv.kill_and_edges": {
+      "task": "I-012",
+      "top": "mosaic_muldiv_tb",
+      "rtl": [
+        "rtl/core/mosaic_muldiv.sv"
+      ],
+      "sv": [
+        "sim/tb/mosaic_muldiv_tb.sv"
+      ],
+      "cpp": [
+        "sim/unit/tb_muldiv.cpp"
+      ],
+      "max_cycles": 200000,
+      "seed": 1
+    },
+    "rename.same_cycle_chain": {
+      "task": "I-014",
+      "top": "mosaic_rename_tb",
+      "rtl": [
+        "rtl/core/mosaic_rename.sv"
+      ],
+      "sv": [
+        "sim/tb/mosaic_rename_tb.sv"
+      ],
+      "cpp": [
+        "sim/unit/tb_rename.cpp"
+      ],
+      "max_cycles": 200000,
+      "seed": 1
+    },
+    "prf.read_bank_collision": {
+      "task": "I-015",
+      "top": "mosaic_prf_tb",
+      "rtl": [
+        "rtl/core/mosaic_prf.sv"
+      ],
+      "sv": [
+        "sim/tb/mosaic_prf_tb.sv"
+      ],
+      "cpp": [
+        "sim/unit/tb_prf.cpp"
+      ],
+      "max_cycles": 200000,
+      "seed": 1
+    },
+    "csr.precise_trap_mret": {
+      "task": "I-019",
+      "top": "mosaic_csr_tb",
+      "rtl": [
+        "rtl/core/mosaic_csr.sv"
+      ],
+      "sv": [
+        "sim/tb/mosaic_csr_tb.sv"
+      ],
+      "cpp": [
+        "sim/unit/tb_csr.cpp"
+      ],
+      "max_cycles": 200000,
+      "seed": 1
+    },
+    "interrupt.boundary_replay": {
+      "task": "I-020",
+      "top": "mosaic_interrupt_tb",
+      "rtl": [
+        "rtl/core/mosaic_interrupt.sv"
+      ],
+      "sv": [
+        "sim/tb/mosaic_interrupt_tb.sv"
+      ],
+      "cpp": [
+        "sim/unit/tb_interrupt.cpp"
+      ],
+      "max_cycles": 200000,
+      "seed": 1
+    },
+    "commit.head_block_and_dual": {
+      "task": "I-017",
+      "top": "mosaic_retire_tb",
+      "rtl": [
+        "rtl/core/mosaic_retire.sv"
+      ],
+      "sv": [
+        "sim/tb/mosaic_retire_tb.sv"
+      ],
+      "cpp": [
+        "sim/unit/tb_retire.cpp"
+      ],
+      "max_cycles": 200000,
+      "seed": 1
+    },
+    "recovery.nested_branch_full_queues": {
+      "task": "I-018",
+      "top": "mosaic_recovery_tb",
+      "rtl": [
+        "rtl/core/mosaic_recovery.sv"
+      ],
+      "sv": [
+        "sim/tb/mosaic_recovery_tb.sv"
+      ],
+      "cpp": [
+        "sim/unit/tb_recovery.cpp"
+      ],
+      "max_cycles": 200000,
+      "seed": 1
+    },
+    "lease.conflict_and_cancel": {
+      "task": "I-024",
+      "top": "mosaic_lease_alloc_tb",
+      "rtl": [
+        "rtl/core/mosaic_lease_alloc.sv"
+      ],
+      "sv": [
+        "sim/tb/mosaic_lease_alloc_tb.sv"
+      ],
+      "cpp": [
+        "sim/unit/tb_lease.cpp"
+      ],
+      "max_cycles": 200000,
+      "seed": 1
+    },
+    "completion.fu_collision": {
+      "task": "I-025",
+      "top": "mosaic_result_fifo_tb",
+      "rtl": [
+        "rtl/core/mosaic_result_fifo.sv"
+      ],
+      "sv": [
+        "sim/tb/mosaic_result_fifo_tb.sv"
+      ],
+      "cpp": [
+        "sim/unit/tb_result_fifo.cpp"
+      ],
+      "max_cycles": 200000,
+      "seed": 1
+    },
+    "wb.same_bank_many_producers": {
+      "task": "I-026",
+      "top": "mosaic_wb_arbiter_tb",
+      "rtl": [
+        "rtl/core/mosaic_wb_arbiter.sv",
+        "rtl/core/mosaic_prf.sv"
+      ],
+      "sv": [
+        "sim/tb/mosaic_wb_arbiter_tb.sv"
+      ],
+      "cpp": [
+        "sim/unit/tb_wb.cpp"
+      ],
+      "max_cycles": 200000,
+      "seed": 1
+    },
+    "remote.kill_with_delayed_response": {
+      "task": "I-028",
+      "top": "mosaic_remote_link_tb",
+      "rtl": [
+        "rtl/core/mosaic_remote_link.sv"
+      ],
+      "sv": [
+        "sim/tb/mosaic_remote_link_tb.sv"
+      ],
+      "cpp": [
+        "sim/unit/tb_remote.cpp"
+      ],
+      "max_cycles": 200000,
+      "seed": 1
+    },
+    "bypass.local_raw_chain": {
+      "task": "I-027",
+      "top": "mosaic_cluster_bypass_tb",
+      "rtl": [
+        "rtl/core/mosaic_cluster_bypass.sv"
+      ],
+      "sv": [
+        "sim/tb/mosaic_cluster_bypass_tb.sv"
+      ],
+      "cpp": [
+        "sim/unit/tb_bypass.cpp"
+      ],
+      "max_cycles": 200000,
+      "seed": 1
+    },
+    "steering.capacity_locality": {
+      "task": "I-029",
+      "top": "mosaic_steering_tb",
+      "rtl": [
+        "rtl/core/mosaic_steering.sv"
+      ],
+      "sv": [
+        "sim/tb/mosaic_steering_tb.sv"
+      ],
+      "cpp": [
+        "sim/unit/tb_steering.cpp"
+      ],
+      "max_cycles": 200000,
+      "seed": 1
+    },
+    "arbiter.forward_progress": {
+      "task": "I-030",
+      "top": "mosaic_arbiter_tb",
+      "rtl": [
+        "rtl/core/mosaic_arbiter.sv"
+      ],
+      "sv": [
+        "sim/tb/mosaic_arbiter_tb.sv"
+      ],
+      "cpp": [
+        "sim/unit/tb_arbiter.cpp"
+      ],
+      "max_cycles": 200000,
+      "seed": 1
+    },
+    "reconfigure.drain_and_generation": {
+      "task": "I-031",
+      "top": "mosaic_owner_fsm_tb",
+      "rtl": [
+        "rtl/core/mosaic_owner_fsm.sv"
+      ],
+      "sv": [
+        "sim/tb/mosaic_owner_fsm_tb.sv"
+      ],
+      "cpp": [
+        "sim/unit/tb_owner_fsm.cpp"
+      ],
+      "max_cycles": 200000,
+      "seed": 1
     }
   }
 }

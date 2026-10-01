@@ -440,22 +440,22 @@ class ShadowPipeline {
   bool took_last_alloc() const { return alloc_took_last_; }
   uint32_t gen_mask() const { return gen_mask_; }
   uint32_t index_w() const { return index_w_; }
+  uint32_t max_uops() const { return max_uops_; }
   uint32_t done_mask() const {
     return (max_uops_ >= 32) ? 0xFFFFFFFFu : ((1u << max_uops_) - 1u);
   }
   // Whether the shadow would take the allocation in `s`: valid, room in the
-  // pre-edge queue, a well-formed child count, and no recovery flush winning
-  // the cycle (the TB ORs both driver flushes into the ROB's `flush_valid`).
-  // A trapping head does NOT refuse an allocation: the trap gates retirement
-  // (`head_exc` blocks `head_ready`, so no ack), never admission -- the ROB's
-  // `alloc_ok` consults only valid/full/bad-uops/flush_valid.
+  // pre-edge queue, a well-formed child count, and no flush winning the cycle
+  // (the TB ORs both driver flushes AND the trap flush into the ROB's
+  // `flush_valid`, so all three refuse an allocation).
   // Computed WITHOUT mutating anything, so Compare can ask it before Apply
   // runs: reading the flag Apply sets afterwards would answer for the previous
   // cycle, not this one.
   bool would_take(const Stim& s) const {
+    const bool head_trap = !queue_.empty() && queue_[0].exc;
     return s.alloc_valid && queue_.size() < rob_entries_ &&
            s.alloc_num_uops >= 1 && s.alloc_num_uops <= max_uops_ &&
-           !s.rob_flush && !s.flush_valid;
+           !s.rob_flush && !s.flush_valid && !head_trap;
   }
   // One lane's identity mask: RET_TAG_W + RET_GEN_W bits. The ev_id compare
   // masks each 32-bit lane to this before comparing, so zero-fill above the
@@ -562,14 +562,12 @@ class ShadowPipeline {
     // Recorded from the PRE-edge occupancy, before pops and flushes below
     // mutate the queue: the ROB decides accept on its own pre-edge occupancy,
     // and the cross-check compares that decision, not the post-edge state.
-    // No trap term: `alloc_ok` never consults the trap, so neither does this.
-    // Full is modelled from the shadow's own pre-edge occupancy: it agrees
-    // with the buffer's `occ_cnt` whenever every prior accept agreed -- and
-    // the allocation cross-check proves that each cycle -- so this is checked,
-    // not assumed.
+    // The trap joins the flush OR: the TB wires `trap_flush` into the ROB's
+    // `flush_valid`, so `alloc_ok` sees it and a trapping head refuses
+    // admission the same cycle it fires.
     alloc_took_last_ = s.alloc_valid && queue_.size() < rob_entries_ &&
                        s.alloc_num_uops >= 1 && s.alloc_num_uops <= max_uops_ &&
-                       !s.rob_flush && !s.flush_valid;
+                       !s.rob_flush && !s.flush_valid && !v.trap_flush;
     // 1. The CSR file and the counters. Written first so a CSR write from a
     //    retiring instruction lands on this cycle's value.
     uint64_t seq_next = retire_seq_ + v.event_count;
@@ -589,8 +587,13 @@ class ShadowPipeline {
     minstret_ = minstret_next;
     mscratch_ = mscratch_next;
 
-    // 2. The queue: a trap or a recovery flush drops everything in flight; a
-    //    pop takes from the front, one entry per acknowledged lane.
+    // 2. The queue: a recovery flush -- or the trap flush the TB ORs into the
+    //    ROB alongside it -- drops everything in flight; a pop takes from the
+    //    front, one entry per acknowledged lane. A flush REFUSES the allocation
+    //    offered in the same cycle: `alloc_ok` is gated on `!flush_valid`, so
+    //    the buffer takes nothing, counts nothing taken, and counts nothing
+    //    squashed for it. The shadow takes nothing either, and counts the
+    //    dropped entries squashed exactly as the ROB's `squashed_total` does.
     const bool trap_or_flush = v.trap_flush || s.rob_flush || s.flush_valid;
     if (trap_or_flush) {
       squashed_ += static_cast<uint32_t>(queue_.size());
@@ -996,11 +999,13 @@ class Harness {
     clk_->Tick();
     dut_->clk = 0;
     dut_->eval();
-    // Refresh the settled allocation identity AFTER the edge: the pointer now
-    // names the slot the NEXT allocation will take. Sampling it before the
-    // edge names the slot the CURRENT stimulus takes -- the same slot twice
-    // for back-to-back allocations, so the second completion overwrites the
-    // first entry's done bit while the buffer files each in its own slot.
+    // Refresh the settled allocation identity AFTER the edge -- under reset
+    // too. The reset edge clears the pointer and generation counter, and the
+    // next Alloc must read those cleared values: skipping the refresh on reset
+    // cycles leaves the PREVIOUS phase's pointer behind, so the first
+    // allocation after Fresh reuses the previous phase's slot while the
+    // buffer takes slot 0 -- and every generation-indexed access after it
+    // disagrees, surfacing here as a phantom alloc_total drift.
     settled_alloc_index_ = dut_->rob_alloc_index_o;
     settled_alloc_gen_ = dut_->rob_alloc_gen_o;
     if (!rst) CompareSettled();
@@ -1272,10 +1277,18 @@ class Harness {
       ++comparisons_;
       const bool dut_took = dut_->rob_alloc_ok_o != 0;
       const bool shadow_took = shadow_->would_take(s);
-      if (dut_took != shadow_took) {
+      // The buffer also reports format refusal: a well-formed take needs the
+      // buffer's own bad-uops flag clear, not just the shadow's range check.
+      // Comparing the shadow's count model against the buffer's flag keeps a
+      // width-narrowing mismatch in the count path (driver word -> CNT_W)
+      // from hiding as a phantom-entry divergence three cycles later.
+      const bool dut_bad = dut_->rob_alloc_bad_o != 0;
+      const bool shadow_bad = !(s.alloc_num_uops >= 1 && s.alloc_num_uops <= shadow_->max_uops());
+      if (dut_took != shadow_took || dut_bad != shadow_bad) {
         Fail(where, "allocation accept disagrees: buffer took " +
                          Bool(dut_took) + ", shadow took " + Bool(shadow_took) +
-                         Describe(s));
+                         " buffer-bad " + Bool(dut_bad) + ", shadow-bad " +
+                         Bool(shadow_bad) + Describe(s));
       }
     }
     // (dump removed: the duplicate-completion double-offer was the cause -- see
@@ -1528,6 +1541,8 @@ class Harness {
     if (dut_->rob_alloc_total_o != shadow_->alloc_total()) {
       Fail(where, "rob_alloc_total: expected " + std::to_string(shadow_->alloc_total()) +
                       ", got " + std::to_string(dut_->rob_alloc_total_o) +
+                      " shadow-occ=" + std::to_string(shadow_->occupied()) +
+                      " dut-occ=" + std::to_string(dut_->rob_occupied_o) +
                       " settled_alloc_index=" + std::to_string(settled_alloc_index_) +
                       " settled_alloc_gen=" + std::to_string(settled_alloc_gen_) +
                       " last_rst=" + std::to_string(last_rst_) +

@@ -62,7 +62,10 @@
 //                      not-ready entry's age slot is released correctly
 //  11  dst-conflict    two live uops naming one destination are reported
 //  12  full-and-order  a full queue refuses inserts and issues in age order
-//  13  randomised      insert / wake / accept / kill against both shadows
+//  13  refused-insert  a refused insert moves neither the allocation pointer
+//                      nor the age, leaves no trace, and the next accepted
+//                      insert lands where the shadow says
+//  14  randomised      insert / wake / accept / kill against both shadows
 //
 // Coverage is counted and asserted at the end, so a stimulus change that stops
 // reaching the wrap, the stale rejection, the duplicate, the full queue or the
@@ -764,6 +767,12 @@ class Bench {
       in.post_full = (*p.full != 0);
       in.post_ins_ready = (*p.ins_ready != 0);
       in.post_wu_stale = *p.wu_stale;
+      in.post_count = *p.count;
+      in.post_alloc_index = *p.alloc_index;
+      in.post_age_ctr = *p.age_ctr;
+      in.post_ins_total = *p.ins_total;
+      in.post_grant_total = *p.grant_total;
+      in.post_kill_total = *p.kill_total;
     }
     clk_.Tick();
     cycles_++;
@@ -879,6 +888,30 @@ class Bench {
   bool post_full(unsigned c) const { return inst_[c].post_full; }
   bool post_ins_ready(unsigned c) const { return inst_[c].post_ins_ready; }
   uint32_t post_wu_stale(unsigned c) const { return inst_[c].post_wu_stale; }
+  uint32_t post_count(unsigned c) const { return inst_[c].post_count; }
+  uint32_t post_alloc_index(unsigned c) const { return inst_[c].post_alloc_index; }
+  uint32_t post_age_ctr(unsigned c) const { return inst_[c].post_age_ctr; }
+  uint32_t post_ins_total(unsigned c) const { return inst_[c].post_ins_total; }
+  uint32_t post_grant_total(unsigned c) const { return inst_[c].post_grant_total; }
+  uint32_t post_kill_total(unsigned c) const { return inst_[c].post_kill_total; }
+
+  // One slot out of a cluster's observation port, read after the clock has
+  // settled. This is a synthesizable status port (obs_index is driven, obs_* is
+  // combinational over register state), not a functional interface, so a phase
+  // may read it directly; it is routed through here so the phase does not reach
+  // through `top()` and so the two clusters go through one code path.
+  struct ObservedSlot { bool valid; uint32_t uop; };
+  ObservedSlot ObserveSlot(unsigned c, unsigned idx) {
+    Instance& in = inst_[c];
+    *in.pins.obs_index = static_cast<uint8_t>(idx);
+    top_->eval();
+    ObservedSlot o;
+    o.valid = (*in.pins.obs_valid != 0);
+    o.uop = *in.pins.obs_uop;
+    *in.pins.obs_index = 0;
+    top_->eval();
+    return o;
+  }
   uint32_t seen_ins_uop(unsigned c) const { return inst_[c].seen_ins_uop; }
   const ExpectedGrant& last_expected(unsigned c) const { return inst_[c].expected; }
   int last_lowest_index(unsigned c) const { return inst_[c].last_lowest_index; }
@@ -985,6 +1018,11 @@ class Bench {
     uint64_t post_grant_a = 0;
     bool post_dst_conflict = false, post_full = false, post_ins_ready = false;
     uint32_t post_wu_stale = 0;
+    // The settled state after the edge, for the status and conservation words
+    // a phase checks across a refusal: occupancy, the allocation pointer, the
+    // age counter and the three conservation tallies.
+    uint32_t post_count = 0, post_alloc_index = 0, post_age_ctr = 0;
+    uint32_t post_ins_total = 0, post_grant_total = 0, post_kill_total = 0;
     uint32_t last_age_ctr = 0;
     // The resident the shadow picked this cycle, and the lowest-index eligible
     // one, both computed at check time against the state the DUT was in. A
@@ -1824,7 +1862,11 @@ void PhaseBackPressure(Bench& bench, mosaic::Reporter& rep) {
   first.grant_ready = false;
   bench.Step(first);
   rep.Check(bench.seen_grant_valid(0), "back-pressure: a grant is on offer");
-  const uint32_t held = bench.top()->c0_grant_uop;
+  // The identity of the offered entry, read from the cycle that was just
+  // checked (`seen_*` is the pre-edge snapshot). Reading the top-level wire
+  // after `Step` returns would sample the next cycle's combinational value --
+  // one edge too late, and a different cycle from every `seen_grant_uop` below.
+  const uint32_t held = bench.seen_grant_uop(0);
 
   // Five cycles of refusal, with a *newer* ready uop offered every cycle. Each
   // of those is younger than the held one, so a queue that re-arbitrated would
@@ -1999,7 +2041,115 @@ void PhaseFullAndOrder(Bench& bench, mosaic::Reporter& rep) {
   rep.Check(bench.shadow(0)->count() == 0, "full: the queue drained");
 }
 
-// Phase 13: randomised traffic against both shadows. Each cluster has its own
+// Phase 13: the refused-insert path, directed.
+//
+// The open question from the earlier session was whether a *refused* insert --
+// one offered while the queue is full -- advances the allocation pointer or
+// consumes an age. The randomised phase reaches a full queue, but only by
+// chance and never at a known allocation pointer, so on its own it cannot
+// separate "the refusal happened" from "the refusal changed the bookkeeping".
+// This phase builds the situation deterministically and asserts its four
+// consequences separately. The shadow decides acceptance from its own occupancy
+// (`count_ < kEntries`), so it models refusal rather than echoing the DUT's
+// decision: if it were fed the DUT's answer there would be nothing to check.
+void PhaseRefusedInsert(Bench& bench, mosaic::Reporter& rep) {
+  Shadow* sh = bench.shadow(0);
+  bench.DrainQueue();
+
+  // Fill to capacity with *blocked* entries, so nothing leaves on its own and
+  // no grant is on offer: the queue stays exactly as built across the refusal.
+  // Each entry gets its own ROB index so the later kill removes exactly one
+  // macro rather than all of them.
+  for (uint32_t i = 0; i < kEntries; i++) {
+    Stimulus s = bench.Blocked(MakeUop(52u + i, 0, 0), 0x30u + i, 1, /*dst*/ 0x40u + i, 1);
+    s.grant_ready = false;
+    bench.Step(s);
+  }
+  rep.Check(sh->count() == kEntries, "refused: the queue is at capacity");
+  rep.Check(bench.post_full(0) && bench.post_count(0) == kEntries,
+            "refused: o_full and o_count agree that it is full");
+
+  const unsigned before_ptr = sh->alloc_ptr();
+  const uint64_t before_age = sh->age_ctr_abs();
+  const uint32_t before_ins = sh->ins_total();
+  const uint32_t before_kills = sh->kill_total();
+
+  // The refused insert. It is ready on both sources so that if the queue
+  // wrongly admitted it, it would be immediately selectable and the mistake
+  // would show on the grant port rather than lying latent in a slot.
+  const uint32_t refused_uop = MakeUop(51, 0, 0);
+  Stimulus over = bench.InsertOnly(refused_uop, true, true, 0, 0, 0, 0, /*dst*/ 0x7e, 1);
+  over.grant_ready = false;
+  bench.Step(over);
+
+  // (a) the DUT refused, and neither pointer nor age moved. The comparisons are
+  // against the DUT's settled state (post_*) and the shadow's independent
+  // bookkeeping; a DUT that advanced on the refusal disagrees with one or both.
+  rep.Check(bench.seen_ins_valid(0) && !bench.seen_ins_ready(0),
+            "refused: ins_valid high with ins_ready low is a real refusal");
+  rep.Check(!bench.post_ins_ready(0), "refused: the DUT still reports not-ready");
+  rep.Check(bench.post_count(0) == kEntries, "refused: o_count is unchanged");
+  rep.Check(bench.post_alloc_index(0) == sh->expected_alloc_slot(),
+            "refused: o_alloc_index did not advance past the shadow's slot");
+  rep.Check(bench.post_age_ctr(0) == Shadow::Stored(sh->age_ctr_abs()),
+            "refused: o_age_ctr did not advance");
+  rep.Check(sh->alloc_ptr() == before_ptr, "refused: the shadow's pointer did not advance");
+  rep.Check(sh->age_ctr_abs() == before_age,
+            "refused: the shadow's age counter did not advance");
+  rep.Check(bench.post_ins_total(0) == before_ins && sh->ins_total() == before_ins,
+            "refused: no insert was counted by either side");
+
+  // (b) the refused entry is not silently dropped from the far side: it is not
+  // resident, and the slot the allocator would have used still holds what was
+  // there -- the DUT's own observation port is asked, not its refusal decision.
+  const int would_be = static_cast<int>(sh->expected_alloc_slot());
+  rep.Check(sh->slot_of(refused_uop) < 0, "refused: the shadow never admitted the entry");
+  const Bench::ObservedSlot at = bench.ObserveSlot(0, static_cast<unsigned>(would_be));
+  rep.Check(at.valid && at.uop != refused_uop,
+            "refused: the refused entry did not appear in the observation port");
+  rep.Check(at.valid && at.uop == sh->slot(static_cast<unsigned>(would_be)).uop,
+            "refused: the far side still holds the shadow's resident");
+
+  // (c) the next accepted insert lands where the shadow says. Free exactly one
+  // slot by killing the oldest macro, then insert; the refusal left the
+  // allocation pointer where it was, so the slot the shadow predicts is the one
+  // the DUT must use -- verified through the observation port, not the DUT's
+  // alloc_index alone.
+  const int oldest = sh->oldest_live();
+  rep.Check(oldest >= 0, "refused: there is an oldest resident to free");
+  const uint32_t victim = sh->slot(static_cast<unsigned>(oldest)).uop;
+  Stimulus k = bench.Kill(UopRobIndex(victim), UopRobGen(victim), /*younger=*/false);
+  k.grant_ready = false;
+  bench.Step(k);
+  rep.Check(sh->count() == kEntries - 1, "refused: the kill freed exactly one slot");
+
+  const unsigned expect_slot = sh->expected_alloc_slot();
+  const uint32_t next_uop = MakeUop(50, 0, 0);
+  Stimulus next = bench.Blocked(next_uop, 0x3f, 1, /*dst*/ 0x7f, 1);
+  next.grant_ready = false;
+  bench.Step(next);
+  rep.Check(bench.seen_ins_ready(0), "refused: the queue accepts again once it has room");
+  rep.Check(sh->slot_of(next_uop) == static_cast<int>(expect_slot),
+            "refused: the next insert landed at the shadow's slot");
+  const Bench::ObservedSlot placed = bench.ObserveSlot(0, expect_slot);
+  rep.Check(placed.valid && placed.uop == next_uop,
+            "refused: the DUT put the next insert in that slot");
+  rep.Check(sh->slot_of(refused_uop) < 0, "refused: the refused entry is still absent");
+
+  // (d) conservation still balances, on the DUT and against the shadow.
+  rep.Check(bench.post_ins_total(0) ==
+                bench.post_grant_total(0) + bench.post_kill_total(0) + bench.post_count(0),
+            "refused: ins_total == grant_total + kill_total + count");
+  rep.Check(bench.post_ins_total(0) == sh->ins_total() &&
+                bench.post_grant_total(0) == sh->grant_total() &&
+                bench.post_kill_total(0) == sh->kill_total() &&
+                bench.post_count(0) == sh->count(),
+            "refused: the conservation counters match the shadow");
+  rep.Check(sh->kill_total() == before_kills + 1,
+            "refused: exactly the one injected kill was counted");
+}
+
+// Phase 14: randomised traffic against both shadows. Each cluster has its own
 // seed, so the two disagree with each other as well as with their own models.
 void PhaseRandom(Bench& bench, mosaic::Reporter& rep, int cycles) {
   // Tags the driver believes are live, so a randomised wakeup sometimes names a
@@ -2136,8 +2286,9 @@ int main(int argc, char** argv) {
   if (!aborted) PhaseKill(bench, rep);
   if (!aborted) PhaseDstConflict(bench, rep);
   if (!aborted) PhaseFullAndOrder(bench, rep);
+  if (!aborted) PhaseRefusedInsert(bench, rep);
 
-  // ---- phase 13: randomised ------------------------------------------------
+  // ---- phase 14: randomised ------------------------------------------------
   if (!aborted) {
     const int budget = static_cast<int>(
         opt.max_cycles > bench.cycles() + 200 ? opt.max_cycles - bench.cycles() - 200 : 2000);

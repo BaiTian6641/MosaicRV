@@ -2,7 +2,7 @@
   "schema_version": 1,
   "case": "retire.head_block_and_dual",
   "verdict": "FAIL",
-  "detail": "contract violated: head-block: cycle 695: rob_alloc_total: expected 1, got 2 settled_alloc_index=2 settled_alloc_gen=2 last_rst=0 last_alloc_valid=1 last_alloc_n=1 ok=1 full=0 bad=0 flush=0",
+  "detail": "contract violated: head-block: cycle 4: an exceptional head produced mask 0; expected only the trap event in lane 0",
   "seed": 1,
   "max_cycles": 200000,
   "checks": 1,
@@ -10,7 +10,7 @@
   "image": "",
   "expect": "",
   "tool": "Verilator 5.052 2026-09-05",
-  "timestamp": "2026-10-01T18:42:16Z",
-  "first_mismatch": "head-block: cycle 695: rob_alloc_total: expected 1, got 2 settled_alloc_index=2 settled_alloc_gen=2 last_rst=0 last_alloc_valid=1 last_alloc_n=1 ok=1 full=0 bad=0 flush=0: expected contract holds, got contract violated",
+  "timestamp": "2026-10-01T18:51:08Z",
+  "first_mismatch": "head-block: cycle 4: an exceptional head produced mask 0; expected only the trap event in lane 0: expected contract holds, got contract violated",
   "failed_checks": ["no contract violation in any phase"]
 }

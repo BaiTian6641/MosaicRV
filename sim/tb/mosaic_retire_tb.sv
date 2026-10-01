@@ -274,17 +274,15 @@ module mosaic_retire_tb (
   assign rob_cmp_gen        = cmp_gen_i[TB_ROB_ID_W-1:0];
   assign rob_cmp_uop        = cmp_uop_i[TB_ROB_UOP_W-1:0];
   assign rob_obs_index      = obs_index_i[TB_RET_RB_W-1:0];
-  // The ROB's flush is the OR of the two driver recovery flushes (`rob_flush_i`
-  // into the queue, `flush_valid_i` into the retire path and hence the ROB).
-  // The trap flush does NOT re-enter the buffer: the ROB observes the trap
-  // through `head_exc` gating `head_ready` (so no retire is acknowledged) and
-  // the retire unit emits the trap event plus `trap_flush_o` downstream to
-  // recovery -- but `flush_valid` also clears slot_valid, and clearing the
-  // buffer underneath a just-taken trap would erase the trapping entry before
-  // recovery sees the redirect.
+  // The ROB's flush is the OR of the two driver recovery flushes
+  // (`rob_flush_i` into the queue, `flush_valid_i` into the retire path and
+  // hence the ROB) plus the retire unit's own trap flush: a trapping entry
+  // leaves the buffer in the cycle it traps, and everything younger with it
+  // (the header contract above says exactly this, and phase (c) proves it by
+  // demanding the buffer come back empty after the trap).
   logic n_trap_flush_o;
   logic rob_flush;
-  assign rob_flush = rob_flush_i | flush_valid_i;
+  assign rob_flush = rob_flush_i | flush_valid_i | n_trap_flush_o;
   // The retire unit's view of the two heads. `rob_ready[0]` *is* the queue's
   // `head_ready` and `rob_ready[1]` is the same predicate one slot on, so the
   // unit cannot hold a private opinion about what is finished.
