@@ -14,32 +14,161 @@ re-demonstrates the six mutants.
 | 1. cycle budget is the whole randomised budget by design | **confirmed** — `cycles == max_cycles - 200` at 60k/120k/200k, flat check rate |
 | 2. directed refused-insert phase | **added** — 4 requirement groups, non-vacuity probed |
 | 3. sampled values / no live-port reads | **one violation found and fixed**; `grep -c 'bench.top()->c'` is now `0` |
-| 4. six mutants re-run | **all six exit 1 with a distinct named first failure** |
-| RTL defect | **none found** — the DUT already refuses correctly |
+| 4. mutants re-run | **all eight exit 1 with a distinct named first failure** |
+| 5. permanent refused-insert mutant | **added** — `MOSAIC_IQ_MUTANT_REFUSED_INSERT_ADVANCES`; the phase's own named check is the first failure |
+| 6. `--max-cycles` hard abort naming the phase | **wired** — demonstrated, exit 1, `while running phase 'age-wrap'` |
+| 7. meta packet interface change | **done** — `ins_meta`/`grant_meta`/`obs_meta`, compared field by field; new `MOSAIC_IQ_MUTANT_META_SWAP` |
+| RTL defect | **none found** — the DUT refuses correctly and carries the packet correctly |
 
 Final case result:
 
 ```
 $ python3 tools/run_unit.py --profile p0 --case iq.wakeup_insert_select
-RESULT PASS iq.wakeup_insert_select 56848546 checks over 199800 cycles, 4 reset cycles, 2 clusters
+RESULT PASS iq.wakeup_insert_select 93878203 checks over 199800 cycles, 4 reset cycles, 2 clusters
 ```
 
-Baseline before this audit: `56850460` checks, PASS. The total cycle count stays
-pinned at `max_cycles - 200` (item 1), so the new phase's clock cycles displace
-an equal number of randomised cycles rather than adding to the run; the small
-−1914-check difference is the different occupancy during those directed cycles
-(`CheckSlots` contributes checks only for slots that are valid), not a change in
-the per-cycle comparison rate.
+Before this audit: `56850460` checks, PASS. After the audit round (directed
+refused-insert phase, hard abort): `56848546`. After the meta-packet
+interface change: **`93878203`** — a large increase, as required, because
+`grant_meta` and `obs_meta` are now 13 fields each compared per cycle per slot.
+The total cycle count stays pinned at `max_cycles - 200` (item 1), so adding
+phases redistributes cycles rather than extending the run.
 
 ## Files touched
 
 | File | Change |
 | --- | --- |
-| `sim/unit/tb_iq.cpp` | new `PhaseRefusedInsert`; `post_*` capture of count/alloc/age/conservation; `ObserveSlot`; one live-port read replaced with the sampled value |
+| `sim/unit/tb_iq.cpp` | new `PhaseRefusedInsert`; `post_*` capture of count/alloc/age/conservation; `ObserveSlot`; one live-port read replaced with the sampled value; `--max-cycles` abort wiring; `Meta` model and field-by-field `grant_meta`/`obs_meta` comparison |
+| `sim/tb/mosaic_iq_tb.sv` | `ins_meta`/`grant_meta`/`obs_meta` flattened into per-field ports and repacked/unpacked at the DUT boundary |
+| `rtl/core/mosaic_iq.sv` | `ins_alu_op`/`grant_alu_op`/`obs_alu_op` replaced by `mosaic_uop_pkg::uop_meta_t` `ins_meta`/`grant_meta`/`obs_meta`; `ent_meta` storage; two new mutants (`REFUSED_INSERT_ADVANCES`, `META_SWAP`) |
 | `results/reports/I-022-iq-coverage.md` | this report |
 
-`rtl/core/mosaic_iq.sv` and `sim/tb/mosaic_iq_tb.sv` are **unchanged**: no DUT
-defect was found.
+No RTL *defect* was found: the interface change is the integrator's frozen
+contract, not a fix.
+
+---
+
+## 5. Follow-up round (interface change and hard abort)
+
+### 5.1 `--max-cycles` is now a hard abort that names the phase
+
+`main()` sets a `phase_name` before every phase (via a small `phase()` helper),
+calls `out_of_cycles()` after each, and passes the absolute cap into
+`PhaseRandom`, whose loop breaks if it is reached. The abort reason is
+`exceeded --max-cycles=<n> while running phase '<name>'`, and the run exits 1.
+No phase's cycle count changes in a normal run: the randomised budget is still
+`max_cycles - cycles_before - 200`, and the per-iteration cap is never reached.
+
+Demonstrated (exit code checked without a pipe):
+
+```
+$ <bin> --case iq.wakeup_insert_select --seed 1 --max-cycles 100
+ABORT: exceeded --max-cycles=100 while running phase 'age-wrap'
+RESULT FAIL iq.wakeup_insert_select exceeded --max-cycles=100 while running phase 'age-wrap'
+abort-exit=1
+```
+
+### 5.2 A permanent mutant for the refused-insert path
+
+`MOSAIC_IQ_MUTANT_REFUSED_INSERT_ADVANCES` adds a separate `ins_adv` net:
+shipping it is `ins_fire && !ins_taken`, and with the define it also advances on
+`ins_valid && !ins_ready` (a refused insert). Both the allocation pointer and
+the age counter key on `ins_adv`; the entry write and occupancy do not, so the
+defect is exactly "a refused insert moved the allocator/age but created no
+entry".
+
+`PhaseRefusedInsert` was moved to run as the *first* directed phase, so no other
+phase can reach a refused insert first, and its named check is the first failure
+reported:
+
+```
+$ <bin> --case ... -DMOSAIC_IQ_MUTANT_REFUSED_INSERT_ADVANCES
+RESULT FAIL iq.wakeup_insert_select 53576702 failed of 93877635 checks over 199800 cycles
+first: CHECK FAILED: refused: o_alloc_index did not advance past the shadow's slot
+first: CHECK FAILED: refused: o_age_ctr did not advance
+```
+
+The failure is the phase's own assertion, not an incidental mismatch.
+
+### 5.3 The meta packet
+
+`rtl/core/mosaic_iq.sv` now takes `mosaic_uop_pkg::uop_meta_t` on `ins_meta`,
+`grant_meta` and `obs_meta`, replacing `ins_alu_op`/`grant_alu_op`/`obs_alu_op`;
+`ins_imm` is unchanged. The packet is stored in `ent_meta[]` with the same
+no-reset policy as the other entry data, and is written once at insert and read
+by the grant, the kill matcher and the observation port. No field is split out
+internally and no width is declared locally — every width comes from the type.
+The header now states why the PC is carried (a branch needs it without a second
+ROB read port; the ROB remains the authority for what retires).
+
+`sim/tb/mosaic_iq_tb.sv` exposes each field of the packet as its own top-level
+port (Verilator's wide-vector representation of a >64-bit packed struct is not
+practical to drive or name from C++), assembling the struct for the insert path
+and unpacking it for grant and observation. `sim/unit/tb_iq.cpp` grew a `Meta`
+model, a `ReadMeta`/`WriteMeta` pair, and a `CheckMeta` that names all thirteen
+fields. `MakeMeta(uop)` makes every field a function of the uop identity, so no
+two uops carry the same packet and a field that is never varied cannot pass.
+
+### 5.4 `MOSAIC_IQ_MUTANT_META_SWAP`
+
+The granted and observed metadata are taken from the adjacent slot
+(`grant_idx ^ 1`, `obs_index_s ^ 1`). It fails on the meta comparison by name:
+
+```
+$ <bin> --case ... -DMOSAIC_IQ_MUTANT_META_SWAP
+RESULT FAIL iq.wakeup_insert_select 17764582 failed of 93878203 checks over 199800 cycles
+first: CHECK FAILED: c0 slot 0: meta class
+first: CHECK FAILED: c0 slot 0: meta pc
+```
+
+### 5.5 Full mutant table (eight, against the green base)
+
+Base: exit 0, `93878203` checks, 0 failures, PASS. Delta is failures − 0.
+
+| `-D` macro | exit | failures (Δ) | first named failure |
+| --- | --- | --- | --- |
+| `MOSAIC_IQ_MUTANT_META_SWAP` | 1 | 17764582 | `c0 slot 0: meta class` |
+| `MOSAIC_IQ_MUTANT_REFUSED_INSERT_ADVANCES` | 1 | 53576702 | `refused: o_alloc_index did not advance past the shadow's slot` |
+| `MOSAIC_IQ_MUTANT_NARROW_AGE` | 1 | 1069026 | `c0 slot 1: age` |
+| `MOSAIC_IQ_MUTANT_NO_GEN_CHECK` | 1 | 55349339 | `c0: grant_valid matches the shadow's prediction` |
+| `MOSAIC_IQ_MUTANT_NO_SAME_CYCLE_WAKEUP` | 1 | 52143167 | `c0: grant_valid matches the shadow's prediction` |
+| `MOSAIC_IQ_MUTANT_UNSTABLE_GRANT` | 1 | 46015289 | `c0: granted uop identity` |
+| `MOSAIC_IQ_MUTANT_DROP_ON_GRANT` | 1 | 51881655 | `c0: the valid vector is exactly the shadow's live slots` |
+| `MOSAIC_IQ_MUTANT_NO_DST_CHECK` | 1 | 52102 | `c0: o_dst_conflict matches the shadow's duplicate-destination search` |
+
+Every macro has a real `ifdef` body in `rtl/core/mosaic_iq.sv` and every row
+changes behaviour with a large, distinct delta and a named failure.
+
+### 5.6 Lint
+
+Scoped to this lane's file, both tools are clean:
+
+```
+$ verilator --lint-only -Wall -Wno-DECLFILENAME --top-module mosaic_iq \
+      -Ibuild/p0/rtl -Irtl/common -Irtl/core rtl/core/mosaic_iq.sv
+verilator-exit=0
+$ slang-tidy --std 1800-2017 --single-unit -I build/p0/rtl rtl/core/mosaic_iq.sv
+slang-exit=0   (warnings only)
+```
+
+The repo-wide commands fail on **two files this lane does not own**, both
+mid-flight sibling work, and are left for the integration lead rather than
+edited here:
+
+* `python3 tools/lint_rtl.py --profile p0` → `rtl/core/mosaic_lease_alloc.sv`
+  (bad `/*verilator ...*/` comment at line 443). `rtl/core/mosaic_iq.sv` is
+  reported `clean as mosaic_iq` before the run stops.
+* `slang-tidy ... $(find rtl -name '*.sv' | sort)` → `rtl/core/mosaic_recovery.sv`
+  (`ckpt_push` used before its declaration, line 716/1005).
+
+## Remaining gaps
+
+* The repo-wide lint gates are red on two sibling-owned files (5.6); this lane's
+  file is clean in isolation.
+* `MOSAIC_IQ_MUTANT_REFUSED_INSERT_ADVANCES` covers the pointer/age half of the
+  refused-insert defect; the "far side" half (a refused entry appearing in a
+  slot) is covered by the directed phase's observation-port checks and the
+  `META_SWAP` mutant, but has no dedicated `ifdef`.
 
 ---
 

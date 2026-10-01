@@ -47,6 +47,21 @@
 // exists for comes from -- two clusters issuing a multiply in one cycle contend
 // for one MD slot, and exactly one of them wins.
 //
+// ------------------------------------------------ a redundancy, stated plainly
+//
+// The ledger is sized by the WB pool and every live lease holds exactly one WB
+// credit for its whole life, so "every record is live" and "the credit pool is
+// empty" are the same fact at every geometry this derivation can produce. The
+// credit term in the all-or-none test is therefore implied by the record test:
+// the mutant that removes it (MOSAIC_LEASE_MUTANT_PARTIAL_GRANT_WB) behaves
+// identically to the shipping build and still passes the case, and that row is
+// in results/reports/I-024-lease.md as a *redundancy probe* rather than as
+// evidence. The term is kept anyway, because it is the contract statement for
+// that class -- a request that names a credit must find one, and the slot is
+// reserved and returned under that name -- and because it is the line that would
+// have to be right if a later profile let one lease hold a different number of
+// credits. What is *not* claimed is that it is independently falsifiable today.
+//
 // --------------------------------------------------- why the ledger is the
 // --------------------------------------------------- only copy of occupancy
 //
@@ -290,9 +305,7 @@ module mosaic_lease_alloc #(
   output logic [31:0]                            o_size_alu,
   output logic [31:0]                            o_size_md,
   output logic [31:0]                            o_size_wb,
-  output logic [31:0]                            o_size_net,
-  output logic [31:0]                            o_dbg0,
-  output logic [31:0]                            o_dbg1
+  output logic [31:0]                            o_size_net
 );
 
   // ------------------------------------------------------------- the ledger
@@ -334,25 +347,6 @@ module mosaic_lease_alloc #(
   logic [MAX_SZ-1:0]            occ_md;
   logic [MAX_SZ-1:0]            occ_wb;
   logic [MAX_SZ-1:0]            occ_net;
-
-  always_comb begin : occ_derive
-    occ_alu = {MAX_SZ{1'b0}};
-    occ_md  = {MAX_SZ{1'b0}};
-    occ_wb  = {MAX_SZ{1'b0}};
-    occ_net = {MAX_SZ{1'b0}};
-    for (int unsigned r = 0; r < LEASES; r++) begin
-      if (lease_live[r]) begin
-        if (lease_mask[r*POOLS + 0])
-          occ_alu[lease_slot[(r*POOLS + 0)*SLOT_W +: SLOT_W]] = 1'b1;
-        if (lease_mask[r*POOLS + 1])
-          occ_md[lease_slot[(r*POOLS + 1)*SLOT_W +: SLOT_W]] = 1'b1;
-        if (lease_mask[r*POOLS + 2])
-          occ_wb[lease_slot[(r*POOLS + 2)*SLOT_W +: SLOT_W]] = 1'b1;
-        if (lease_mask[r*POOLS + 3])
-          occ_net[lease_slot[(r*POOLS + 3)*SLOT_W +: SLOT_W]] = 1'b1;
-      end
-    end
-  end
 
   assign o_occ = {occ_net, occ_wb, occ_md, occ_alu};
 
@@ -401,17 +395,16 @@ module mosaic_lease_alloc #(
   logic                         rel_ok_c, rel_stale_c, rel_repeat_c, rel_cross_c;
   logic                         can_ok_c, can_stale_c, can_repeat_c, can_cross_c;
 
-  // The first free slot of a pool, as `{found, slot}`. `width` is the pool's
-  // real size and is a constant at every call site, so the padding above it can
-  // never be selected.
-  function automatic logic [SLOT_W:0] lowest_free(input logic [MAX_SZ-1:0] occupied,
-                                                  input int unsigned       width);
+  // The first free slot of a pool, as `{found, slot}`. The argument is the
+  // pool's free vector, in which a slot the pool does not have is already marked
+  // not-free, so the scan needs to know nothing about pool sizes.
+  function automatic logic [SLOT_W:0] lowest_free(input logic [MAX_SZ-1:0] free_bits);
     logic found;
     begin
       found = 1'b0;
       lowest_free = {(SLOT_W+1){1'b0}};
       for (int unsigned s = 0; s < MAX_SZ; s++) begin
-        if ((s < width) && !occupied[s] && !found) begin
+        if (free_bits[s] && !found) begin
           found = 1'b1;
           lowest_free[SLOT_W-1:0] = s[SLOT_W-1:0];
         end
@@ -448,13 +441,41 @@ module mosaic_lease_alloc #(
   logic [SLOT_W:0] pick_wb;
   logic [SLOT_W:0] pick_net;
   logic [ROW_W:0]  pick_rec;
-  logic            dbg_rv0;
 
-  assign o_dbg0 = {26'b0, satisfied, pick_rec[ROW_W], pick_alu[SLOT_W], pick_wb[SLOT_W],
-                   free_alu[0], free_wb[0]};
-  assign o_dbg1 = {23'b0, cand[3:0], req_valid[0], need_alu, need_wb, need_md, need_net};
-
+  // --------------------------------------------------------------- one block
+  // Every combinational function of the ledger lives in one `always_comb`: the
+  // occupancy derivation, the terminal classification, the round-robin
+  // arbitration and the packing of the grant ids. Splitting them per concern is
+  // tempting and was the original shape here, but a split leaves the packing of
+  // `grant_id` reading `grant_rec_c` from a *different* block, and in the
+  // generated scheduling of the simulator that dependency was evaluated from a
+  // stale copy: the arbitration selected record 1 and the id port still
+  // reported record 0 (found by this case's per-cycle comparison, not by
+  // inspection). One block has no such ordering to get wrong; the sections
+  // below are still separate to read.
   always_comb begin : arb
+
+    // ------------------------------------------------- derived occupancy
+    // The single source of truth, read back out of the ledger. A lease that
+    // dies on this edge does *not* appear here yet -- this is the pre-edge
+    // view, which is what the unit presents during the cycle under test --
+    // while the working copy below does.
+    occ_alu = {MAX_SZ{1'b0}};
+    occ_md  = {MAX_SZ{1'b0}};
+    occ_wb  = {MAX_SZ{1'b0}};
+    occ_net = {MAX_SZ{1'b0}};
+    for (int unsigned r = 0; r < LEASES; r++) begin
+      if (lease_live[r]) begin
+        if (lease_mask[r*POOLS + 0])
+          occ_alu[lease_slot[(r*POOLS + 0)*SLOT_W +: SLOT_W]] = 1'b1;
+        if (lease_mask[r*POOLS + 1])
+          occ_md[lease_slot[(r*POOLS + 1)*SLOT_W +: SLOT_W]] = 1'b1;
+        if (lease_mask[r*POOLS + 2])
+          occ_wb[lease_slot[(r*POOLS + 2)*SLOT_W +: SLOT_W]] = 1'b1;
+        if (lease_mask[r*POOLS + 3])
+          occ_net[lease_slot[(r*POOLS + 3)*SLOT_W +: SLOT_W]] = 1'b1;
+      end
+    end
 
     // ---------------------------------------------------------- defaults
     rel_ok_c    = 1'b0;
@@ -491,10 +512,30 @@ module mosaic_lease_alloc #(
       end else if (!used_w[rel_idx_f[ROW_W-1:0]]) begin
         rel_stale_c = 1'b1;
       end else if (rel_gen_f != gen_w[rel_idx_f[ROW_W-1:0]*GEN_W +: GEN_W]) begin
+`ifdef MOSAIC_LEASE_MUTANT_STALE_ACCEPT
+        // NEGATIVE CONTROL 5: the generation is dropped from the release test,
+        // so a terminal aimed at a superseded epoch of a recycled record frees
+        // whatever that record holds now -- somebody else's resources, which is
+        // the whole reason the generation exists.
+        rel_ok_c = 1'b1;
+        rel_idx  = rel_idx_f[ROW_W-1:0];
+        live_w[rel_idx_f[ROW_W-1:0]] = 1'b0;
+        end_w[rel_idx_f[ROW_W-1:0]]  = 1'b0;
+`else
         rel_stale_c = 1'b1;
+`endif
       end else if (!live_w[rel_idx_f[ROW_W-1:0]]) begin
+`ifdef MOSAIC_LEASE_MUTANT_DOUBLE_RELEASE
+        // NEGATIVE CONTROL 4: the second release of one lease is accepted as if
+        // it were the first. The same resources are returned twice, so the
+        // released count overtakes the grants and the conservation identity
+        // stops holding.
+        rel_ok_c = 1'b1;
+        rel_idx  = rel_idx_f[ROW_W-1:0];
+`else
         if (end_w[rel_idx_f[ROW_W-1:0]]) rel_cross_c = 1'b1;
         else                             rel_repeat_c = 1'b1;
+`endif
       end else begin
         rel_ok_c      = 1'b1;
         rel_idx       = rel_idx_f[ROW_W-1:0];
@@ -523,10 +564,17 @@ module mosaic_lease_alloc #(
 
     // ------------------------------------------- working availability
     // Derived occupancy first, then the terminals' returns, then the grants.
-    free_alu = ~occ_alu;
-    free_md  = ~occ_md;
-    free_wb  = ~occ_wb;
-    free_net = ~occ_net;
+    // A slot the pool does not have is marked *not free* here, once, rather than
+    // being excluded by a width argument at every scan: that keeps "a pool never
+    // hands out a slot it does not have" a property of the data instead of
+    // something the scan has to be told, and it leaves the scan a plain
+    // lowest-zero-bit search with nothing to get wrong.
+    for (int unsigned s = 0; s < MAX_SZ; s++) begin
+      free_alu[s] = (s < SIZE_ALU) ? ~occ_alu[s] : 1'b0;
+      free_md[s]  = (s < SIZE_MD)  ? ~occ_md[s]  : 1'b0;
+      free_wb[s]  = (s < SIZE_WB)  ? ~occ_wb[s]  : 1'b0;
+      free_net[s] = (s < SIZE_NET) ? ~occ_net[s] : 1'b0;
+    end
 
     rel_frees = rel_ok_c;
     can_frees = can_ok_c;
@@ -595,10 +643,10 @@ module mosaic_lease_alloc #(
       cand = cand + k;
       if (cand >= REQ_COUNT) cand = cand - REQ_COUNT;
 
-      pick_alu = lowest_free(free_alu, SIZE_ALU);
-      pick_md  = lowest_free(free_md,  SIZE_MD);
-      pick_wb  = lowest_free(free_wb,  SIZE_WB);
-      pick_net = lowest_free(free_net, SIZE_NET);
+      pick_alu = lowest_free(free_alu);
+      pick_md  = lowest_free(free_md);
+      pick_wb  = lowest_free(free_wb);
+      pick_net = lowest_free(free_net);
 
       if (req_valid[cand]) begin
         need_alu = req_mask[cand*POOLS + 0];
@@ -615,10 +663,29 @@ module mosaic_lease_alloc #(
         pick_rec = lowest_free_record(live_w);
 
 `ifdef MOSAIC_LEASE_MUTANT_PARTIAL_GRANT
-        // NEGATIVE CONTROL 1: the WB credit is not part of the test, so a uop is
-        // launched with an FU slot reserved and no room for its result. This is
-        // the deadlock the card's Fail criterion names: the FU acquires work it
-        // can never hand back, and the credit may never come.
+        // NEGATIVE CONTROL 1: the FU class is not part of the all-or-none test,
+        // so a request is granted while the functional unit it named is
+        // unavailable. The grant is partial in the direction the card names: the
+        // requester believes it holds an FU, no FU slot was reserved for it, and
+        // the result credit it *did* receive is now held by a uop that cannot
+        // execute. The case catches it in the mirrored half of the partial
+        // phase, where the FU pool is full and the credit is not.
+        satisfied = (!need_md  || pick_md[SLOT_W])  &&
+                    (!need_wb  || pick_wb[SLOT_W])  &&
+                    (!need_net || pick_net[SLOT_W]);
+`endif
+
+`ifdef MOSAIC_LEASE_MUTANT_PARTIAL_GRANT_WB
+        // REDUNDANCY PROBE (not a defect, and deliberately kept as a row in the
+        // report): the result-credit class is dropped from the test. Because the
+        // ledger is sized by the credit pool and every live lease holds exactly
+        // one credit, "no record free" already implies "no credit free" at every
+        // geometry this derivation can produce, so this build behaves exactly
+        // like the shipping one and the case still passes. The term is kept in
+        // the shipping build because it *is* the contract statement for that
+        // class -- a request that names a credit must find one -- but it is not
+        // independently falsifiable here, and saying so is better than a mutant
+        // row that looks like evidence and is not.
         satisfied = (!need_alu || pick_alu[SLOT_W]) &&
                     (!need_md  || pick_md[SLOT_W])  &&
                     (!need_net || pick_net[SLOT_W]);
@@ -664,16 +731,16 @@ module mosaic_lease_alloc #(
           grant_n = grant_n + 32'd1;
           rr_c = (cand == (REQ_COUNT - 1)) ? {RR_W{1'b0}} : cand[RR_W-1:0] + 1'b1;
         end
-`ifdef MOSAIC_LEASE_MUTANT_REFUSAL_CONSUMES
-        else begin
-          // NEGATIVE CONTROL 2: a refused request still takes the class it was
-          // refused for. The refusal now has a side effect, so the next cycle's
-          // availability depends on a request that was never granted -- and the
-          // slot is held by nobody, because no lease id was handed out.
-          live_w[pick_rec[ROW_W-1:0]] = 1'b1;
-        end
-`endif
       end
+    end
+
+    // -------------------------------------------------------- the grant ids
+    // Packed in the same evaluation as the arbitration that produced them: an
+    // id is `{record index, generation}`, laid out exactly like a terminal id
+    // so a requester can hand it straight back.
+    for (int unsigned i = 0; i < REQ_COUNT; i++) begin
+      grant_id[i*LEASE_W +: LEASE_W] =
+          {grant_rec_c[i*IDX_W +: IDX_W], grant_gen_c[i*GEN_W +: GEN_W]};
     end
   end
 
@@ -691,13 +758,6 @@ module mosaic_lease_alloc #(
   assign can_stale        = can_stale_c;
   assign can_repeat       = can_repeat_c;
   assign can_after_release = can_cross_c;
-
-  always_comb begin
-    for (int unsigned i = 0; i < REQ_COUNT; i++) begin
-      grant_id[i*LEASE_W +: LEASE_W] =
-          {grant_rec_c[i*IDX_W +: IDX_W], grant_gen_c[i*GEN_W +: GEN_W]};
-    end
-  end
 
   assign grant_slot = slot_c;
 
@@ -734,12 +794,29 @@ module mosaic_lease_alloc #(
         lease_end_kind[rel_idx] <= 1'b0;
       end
       if (can_ok_c) begin
+`ifdef MOSAIC_LEASE_MUTANT_CANCEL_LEAK
+        // NEGATIVE CONTROL 6: a cancelled lease keeps its reservation. The flush
+        // is reported as accepted and the work is gone, but the credit it held is
+        // never handed back: a request that needs that credit waits forever.
+        lease_end_kind[can_idx] <= 1'b1;
+`else
         lease_live[can_idx]     <= 1'b0;
         lease_end_kind[can_idx] <= 1'b1;
+`endif
       end
 
       for (int unsigned i = 0; i < REQ_COUNT; i++) begin
+`ifdef MOSAIC_LEASE_MUTANT_REFUSAL_CONSUMES
+        // NEGATIVE CONTROL 2: a refused request still takes a lease record, and
+        // with it the slots the arbitration picked for it. The refusal now has a
+        // side effect that survives the edge: the pool fills up with reservations
+        // belonging to a request that was never granted, and because no lease id
+        // was handed out, nothing can ever release them. That is the leak the
+        // card names -- resources consumed by work that does not exist.
+        if (req_valid[i]) begin
+`else
         if (ready_c[i]) begin
+`endif
           lease_live[grant_rec_c[i*IDX_W +: ROW_W]]     <= 1'b1;
           lease_used[grant_rec_c[i*IDX_W +: ROW_W]]     <= 1'b1;
           lease_gen[(grant_rec_c[i*IDX_W +: ROW_W]*GEN_W) +: GEN_W]

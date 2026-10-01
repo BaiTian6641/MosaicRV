@@ -391,6 +391,7 @@ class ShadowRecovery {
   uint32_t arch() const { return arch_; }
   uint32_t rob() const { return rob_; }
   uint32_t tag_w() const { return tag_w_; }
+  uint32_t gen_w() const { return gen_w_; }
   uint32_t id_w() const { return id_w_; }
   uint32_t idx_w() const { return idx_w_; }
   uint32_t epoch_w() const { return epoch_w_; }
@@ -618,6 +619,48 @@ class ShadowRecovery {
     return count;
   }
 
+  // Whether any speculative or committed mapping names this tag. Two owners of one
+  // physical register is the corruption this module exists to prevent, so a
+  // stimulus that frees a tag a live mapping still names is asking the design to
+  // produce a state no correct machine reaches: the free list would hand the tag
+  // to a new instruction while the old mapping still points at it.
+  bool TagOwnedByAnyMap(uint32_t tag) const {
+    for (uint32_t a = 0; a < arch_; a++) {
+      if (spec_tag_[a] == tag || cmt_tag_[a] == tag) return true;
+    }
+    return false;
+  }
+
+  // Whether a restore could free this tag: it sits inside the undo window of a
+  // live checkpoint. A committing instruction is older than every live branch, so
+  // the destination it publishes was allocated *before* every live checkpoint's
+  // mark. A commit naming a tag in a window is a mapping published by a younger
+  // instruction, which in-order retire cannot produce -- and the next restore
+  // would free the tag while the committed map still names it.
+  bool TagInAnyUndoWindow(uint32_t tag) const {
+    for (uint32_t c = 0; c < ckpt_depth_; c++) {
+      if (!ck_valid_[c]) continue;
+      // The checkpointing branch's own destination is freed by the restore as
+      // well, and it is deliberately not in the journal -- so looking only at the
+      // journal window would call a tag safe that the restore is about to free.
+      if (ck_tag_valid_[c] && ck_tag_[c] == tag) return true;
+      if (j_len_ <= ck_jmark_[c]) continue;
+      for (uint32_t k = ck_jmark_[c]; k < j_len_ && k < rob_; k++) {
+        if (j_tag_[k] == tag) return true;
+      }
+    }
+    return false;
+  }
+
+  // The lowest allocated tag that no mapping names: a tag whose owner is gone,
+  // which is the only kind of tag an explicit release may free.
+  uint32_t ReleasableTag() const {
+    for (uint32_t t = 0; t < entries_; t++) {
+      if (!free_.Bit(t) && !TagOwnedByAnyMap(t)) return t;
+    }
+    return entries_;
+  }
+
   // The scan result: the lowest free tag at or after the rotation point, wrapping
   // once. Written from the documented rule rather than from the RTL's loop.
   uint32_t ScanTag() const {
@@ -638,22 +681,28 @@ class ShadowRecovery {
 
     // ---- allocation refusals, each with its own report
     const bool wants_tag = s.alloc_valid && (rd != 0);
+    // The undo bound is a *refusal*, not only a report: an allocation that would
+    // push the window past its bound is not accepted. Reporting the refusal while
+    // still accepting the allocation would journal an index outside the array --
+    // and the array's index is a wrapping field, so the write lands on a live
+    // entry and a later restore returns state the machine never passed through
+    // while reporting success.
+    const bool ckpt_push = s.ckpt_valid && (ck_depth_ < ckpt_depth_) && !Take(s);
+    const bool journal_at_bound = (j_len_ >= rob_);
+    const bool journal_refused = wants_tag && journal_at_bound && !ckpt_push && !Take(s);
     v.alloc_squashed  = s.alloc_valid && Take(s);
     v.alloc_is_x0     = s.alloc_valid && (rd == 0) && !Take(s);
     v.alloc_exhausted = wants_tag && !HasFree() && !Take(s);
-    v.alloc_accepted  = s.alloc_valid && !Take(s) && (HasFree() || (rd == 0));
+    v.alloc_journal_full = journal_refused;
+    v.journal_overflow   = journal_refused;
+    v.alloc_accepted  = s.alloc_valid && !Take(s) && !journal_refused &&
+                        (HasFree() || (rd == 0));
     v.alloc_new_valid = v.alloc_accepted && (rd != 0);
     v.alloc_new_tag   = scan & tag_mask_;
     v.alloc_new_gen   = gen_valid_[scan] ? ((gen_[scan] + 1) & gen_mask()) : 0;
     v.alloc_old_valid = v.alloc_new_valid;
     v.alloc_old_tag   = spec_tag_[rd] & tag_mask_;
     v.alloc_old_gen   = spec_gen_[rd];
-
-    // ---- the undo bound. Reaching it is legal; exceeding it is refused.
-    const bool ckpt_push = s.ckpt_valid && (ck_depth_ < ckpt_depth_) && !Take(s);
-    const bool journal_at_bound = (j_len_ >= rob_);
-    v.alloc_journal_full = wants_tag && journal_at_bound && !ckpt_push && !Take(s);
-    v.journal_overflow    = v.alloc_journal_full;
     v.ckpt_accepted       = ckpt_push;
     v.ckpt_refused        = s.ckpt_valid && !ckpt_push;
     v.ckpt_depth          = ck_depth_;
@@ -1242,6 +1291,15 @@ struct Snapshot {
   Wide ckpt_alloc_ptr;
   Wide ckpt_epoch;
 
+  // The per-checkpoint field widths of the geometry this snapshot came from, so
+  // the checkpoint bundles can be projected to their live slots without every
+  // caller passing five numbers that are already a fact about the capture.
+  uint32_t ckpt_cnt_w = 0;
+  uint32_t ckpt_id_w = 0;
+  uint32_t ckpt_idx_w = 0;
+  uint32_t ckpt_tag_w = 0;
+  uint32_t ckpt_epoch_w = 0;
+
   // A single string key over the whole bundle, so "bit-identical" is one
   // comparison and the message names the first field that differs. The order is
   // fixed here and nowhere else. Checkpoint *contents* are masked by validity:
@@ -1265,11 +1323,19 @@ struct Snapshot {
     out += "|" + std::to_string(j_len);
     out += "|" + std::to_string(free_count);
     Append(out, ckpt_valid);
-    Append(out, ckpt_jmark);
-    Append(out, ckpt_gen);
-    Append(out, ckpt_tail);
-    Append(out, ckpt_alloc_ptr);
-    Append(out, ckpt_epoch);
+    // The contents are projected to their live slots, which is what the note
+    // above this function has always claimed and what `CkptEqual` and
+    // `FirstDifference` do. Appending them raw instead made the key differ
+    // whenever two machines that agree on every live checkpoint disagreed on the
+    // leftover contents of a dead one -- state the RTL deliberately does not
+    // scrub, because the arrays are not reset and validity is carried by
+    // `ckpt_valid`. The validity vector is appended raw, so *which* checkpoints
+    // are live remains part of the key.
+    Append(out, LiveOnly(ckpt_jmark, ckpt_valid, ckpt_cnt_w));
+    Append(out, LiveOnly(ckpt_gen, ckpt_valid, ckpt_id_w));
+    Append(out, LiveOnly(ckpt_tail, ckpt_valid, ckpt_idx_w));
+    Append(out, LiveOnly(ckpt_alloc_ptr, ckpt_valid, ckpt_tag_w));
+    Append(out, LiveOnly(ckpt_epoch, ckpt_valid, ckpt_epoch_w));
     return out;
   }
   // Live-only projection of a per-checkpoint bundle: dead slots read as zero
@@ -1419,6 +1485,14 @@ class Harness {
     dut_->eval();
 
     if (!rst) {
+      // One pre-edge view of this cycle's ports, taken before anything mutates the
+      // shadow and shared by the comparison and the tally. Computing it after
+      // `Apply` instead -- which the tally used to do -- asks the model about the
+      // state it is *producing* rather than the state the cycle acted on, and a
+      // redirect then appears to have consumed the checkpoint it was restoring to:
+      // the restore count stayed at zero through a soak that performed hundreds of
+      // restores, and every one of them was booked as a stale redirect.
+      const ShadowRecovery::View e = shadow_->Peek(s);
       Compare(s);
       // The event reports are captured with the clock still low, *before* the
       // edge, so a phase reading `RedirectTaken()` after `Cycle()` returns is
@@ -1430,7 +1504,7 @@ class Harness {
       // instant for state.
       CaptureReports();
       shadow_->Apply(s);
-      Tally(s);
+      Tally(s, e);
     }
 
     dut_->clk = 1;
@@ -1604,9 +1678,6 @@ class Harness {
   uint32_t LastAllocTag() const { return report_.alloc_new_tag; }
   uint32_t ObservedTail() const { return settled_.tail; }
   uint32_t ObservedAllocPtr() const { return settled_.alloc_ptr; }
-  uint64_t ObservedCkptBundle() const { return dut_->dbg_ckpt_alloc_ptr_o; }
-  uint64_t ObservedCkptValid() const { return dut_->dbg_ckpt_valid_o; }
-  uint64_t ObservedCkptEpoch() const { return dut_->dbg_ckpt_epoch_o; }
   uint64_t settled_ckpt_valid() const { return settled_.ckpt_valid.words.empty() ? 0 : settled_.ckpt_valid.words[0]; }
 
 
@@ -1720,6 +1791,11 @@ class Harness {
     for (size_t w = 0; w < shadow_->CkptGenWords() && w < 2; w++) {
       settled_.ckpt_gen.words[w] = dut_->dbg_ckpt_gen_o[w];
     }
+    settled_.ckpt_cnt_w   = shadow_->cnt_w();
+    settled_.ckpt_id_w    = shadow_->id_w();
+    settled_.ckpt_idx_w   = shadow_->idx_w();
+    settled_.ckpt_tag_w   = shadow_->tag_w();
+    settled_.ckpt_epoch_w = shadow_->epoch_w();
   }
 
   void Capture() {
@@ -1877,7 +1953,11 @@ class Harness {
       const Wide got_live = Snapshot::LiveOnly(got, ck_valid, per_entry_bits);
       const Wide want_live = Snapshot::LiveOnly(want, ck_valid, per_entry_bits);
       Require(got_live == want_live, where,
-              std::string(name) + ": " + got_live.Describe(want_live) + stim);
+              std::string(name) + ": " + got_live.Describe(want_live) +
+                  " [raw got=" + mosaic::Hex(got.words[0]) + " want=" +
+                  mosaic::Hex(want.words[0]) + " valid=" +
+                  mosaic::Hex(ck_valid.words[0]) + " width=" +
+                  std::to_string(per_entry_bits) + "]" + stim);
       ++comparisons_;
     };
     live_ckpt_field("dbg_ckpt_jmark", settled_.ckpt_jmark,
@@ -1991,8 +2071,12 @@ class Harness {
     (void)e;
   }
 
-  void Tally(const Stim& s) {
-    const ShadowRecovery::View e = shadow_->Peek(s);
+  void Tally(const Stim& s, const ShadowRecovery::View& e) {
+    // `e` is the pre-edge view of this cycle's ports, computed once in `Cycle`
+    // before the shadow was applied. Everything counted here is a fact about what
+    // this cycle *asked for*, so it has to come from that view and not from a
+    // fresh look at the state the cycle produced.
+    (void)s;
     if (e.redirect_taken) counters_.restores++;
     if (e.ckpt_accepted) counters_.checkpoints++;
     if (e.redirect_stale) counters_.stale_redirects++;
@@ -2828,6 +2912,8 @@ void PhaseFreeListExact(Harness& h) {
   ShadowRecovery& s = h.shadow();
   const std::string where = "free-list-exact";
 
+  uint32_t commits_moved = 0;
+  uint32_t bound_refusals = 0;
   for (uint32_t round = 0; round < 24; round++) {
     const uint32_t before_free = s.FreeCount();
     Require(before_free > 0, where,
@@ -2854,7 +2940,10 @@ void PhaseFreeListExact(Harness& h) {
             "round " + std::to_string(round) +
                 ": the branch's own allocation changed nothing, so its destination "
                 "is not exercised");
-    for (uint32_t i = 0; i < 5; i++) h.Alloc(12 + (i % 16), /*checkpoint=*/false);
+    for (uint32_t i = 0; i < 5; i++) {
+      h.Alloc(12 + (i % 16), /*checkpoint=*/false);
+      if (h.AllocJournalFull()) bound_refusals++;
+    }
 
     // Commit x10's pre-checkpoint mapping, so the committed map moves and the free
     // set has to be restored to a checkpoint whose committed map has since
@@ -2862,23 +2951,17 @@ void PhaseFreeListExact(Harness& h) {
     // supersedes stays free. The free-mask expectation below is therefore the
     // checkpoint's *plus* that tag, and not the checkpoint's alone: a restore that
     // undid the commit would resurrect a mapping the ISA has already published.
-    {
-      std::fprintf(stderr, "DBGR round=%u alloc_ptr=%u epoch_sh=%u epoch_dut=%u valid=%02x ckepoch_dut=%u ckepoch_sh=%u\n",
-                   round, s.AllocPtr(), s.Epoch(), h.ObservedEpoch(),
-                   (unsigned)(h.ObservedCkptValid() & 0xffu),
-                   (unsigned)(h.ObservedCkptEpoch() & 0x7fu),
-                   (unsigned)(s.CkptEpochWide().words[0] & 0x7fu));
-      for (unsigned i = 0; i < 8; i++) {
-        std::fprintf(stderr, "  slot%u dut=%u sh=%u\n", i,
-                     (unsigned)((h.ObservedCkptBundle() >> (7 * i)) & 0x7fu),
-                     (unsigned)((s.CkptAllocPtrWide().words[0] >> (7 * i)) & 0x7fu));
-      }
-    }
     h.Commit(cmt_rd, cmt_new_tag, cmt_new_gen);
     Require(s.CmtTag(cmt_rd) == cmt_new_tag, where,
             "round " + std::to_string(round) +
-                ": the commit did not move the committed map, so this round would "
-                "test nothing");
+                ": the commit did not land in the committed map");
+    // A commit of the mapping the map already holds is a no-op by contract, and
+    // it is reachable here: once the undo window is at its bound an allocation is
+    // refused, so x10 keeps the mapping it had and the commit has nothing to
+    // supersede. The free-set expectation below follows the *supersede*, not the
+    // commit, because only a supersede frees the tag it replaces.
+    const bool commit_moved = (cmt_new_tag != cmt_old_tag);
+    if (commit_moved) commits_moved++;
     h.Idle();
 
     Stim r;
@@ -2893,7 +2976,7 @@ void PhaseFreeListExact(Harness& h) {
     // permanently...
     const Snapshot after = h.Now();
     Wide expected_free = at_ckpt.free_mask;
-    expected_free.Set(cmt_old_tag, true);
+    if (commit_moved) expected_free.Set(cmt_old_tag, true);
     Require(after.free_mask == expected_free, where,
             "round " + std::to_string(round) + ": the free mask after the squash is "
             "not the checkpoint's plus the tag the commit superseded -- " +
@@ -2925,6 +3008,19 @@ void PhaseFreeListExact(Harness& h) {
                 ": the squash undid a commit -- the committed map is back at the "
                 "mapping the commit replaced");
   }
+
+  // Two coverage facts, because a long run of branches that never reached either
+  // state would pass every check above while proving less than it looks. A commit
+  // that supersedes a mapping is the only case in which the permanent-free rule
+  // is observable at all, and reaching the undo bound is the documented throttle
+  // for a checkpoint left open across many allocations: the allocation is refused
+  // and reported rather than the window being wrapped.
+  Require(commits_moved > 0, where,
+          "no round committed a mapping that replaced another, so the rule that a "
+          "commit's free is not undone was never exercised");
+  Require(bound_refusals > 0, where,
+          "24 rounds of branches never reached the undo bound, so the throttle the "
+          "bound exists for was never exercised");
 
   // The conservation identity: free + owned == entries, on every cycle, has been
   // checked throughout; here it is asserted as a fact about the end state.
@@ -3051,11 +3147,28 @@ void PhaseWrap(Harness& h) {
 
   // More than ROB_ENTRIES allocations, so the tail wraps at least once, with
   // checkpoints and restores interleaved so the wrap happens both inside a
-  // window and across a restore.
+  // window and across a restore. The redirect names the most recent
+  // *checkpoint's* generation: a redirect names the branch it resolves, and a
+  // generation with no live checkpoint is stale by contract -- the phase would
+  // otherwise be asking the unit to resolve an ordinary instruction.
   uint32_t restores = 0;
+  uint32_t accepted = 0;
+  uint32_t last_ckpt_gen = 0;
+  Snapshot ck_snapshot;   // the instant the live checkpoint records
   for (uint32_t i = 0; i < bound * 3; i++) {
     const bool checkpoint = (i % 11) == 0;
+    // The checkpoint records the state *before* the instruction that takes it, so
+    // the expectation is captured before the branch's own allocation. A tail that
+    // has wrapped to zero is a legal value, which is why the restores below are
+    // compared against the recorded instant rather than against a nonzero tail:
+    // "the tail is not zero after a wrap" is true of no invariant in the design.
+    if (checkpoint) ck_snapshot = h.Now();
     const uint32_t gen = h.Alloc(3 + (i % 25), checkpoint);
+    if (h.AllocAccepted()) accepted++;
+    // Recorded before the `i == 0` skip, which exists only because the first
+    // iteration has no restore to perform: the checkpoint taken there is the one
+    // the first redirect resolves.
+    if (checkpoint) last_ckpt_gen = gen;
     if (i == 0) continue;
 
     if ((i % 11) == 5) {
@@ -3063,30 +3176,52 @@ void PhaseWrap(Harness& h) {
       // are both mid-wrap at the moment of the restore.
       Stim r;
       r.redirect0_valid = true;
-      r.redirect0_rob_gen = gen;
+      r.redirect0_rob_gen = last_ckpt_gen;
       r.redirect0_pc = 0x8000b000ull + i;
       h.Cycle(r);
       Require(h.RedirectTaken(), where,
-              "the redirect at allocation " + std::to_string(i) + " was not taken");
+              "the redirect at allocation " + std::to_string(i) +
+                  " was not taken; it names the live checkpoint " +
+                  std::to_string(last_ckpt_gen));
+      // Recovery stays exact across the wrap: the state after the squash is the
+      // checkpoint's, wholesale. This is the phase's actual claim -- the tail and
+      // the rotation point having gone round the ring is what makes it a wrap
+      // test, and the per-cycle comparison is what checks the rotation point's
+      // value while it does.
+      const Snapshot after = h.Now();
+      Require(after.Key() == ck_snapshot.Key(), where,
+              "the restore at allocation " + std::to_string(i) +
+                  " is not exact across the wrap -- " +
+                  Snapshot::FirstDifference(ck_snapshot, after));
       restores++;
     }
   }
 
   Require(restores > 0, where, "the wrap phase performed no restores");
-  Require(s.Tail() != 0 || s.CkptDepth() == 0, where,
-          "the tail state is inconsistent after the wrap");
-  Require(s.FreeCount() > 0, where,
-          "the free list was exhausted by the wrap; a wrap must not leak or "
-          "double-free a tag");
+  // The wrap itself, as a fact rather than a hope: more tags were handed out than
+  // the ring holds, so the tail and the rotation point both went round it at
+  // least once. Refused allocations (the undo bound) are not counted, because a
+  // refused allocation advances no state.
+  Require(accepted > bound, where,
+          "the wrap phase accepted " + std::to_string(accepted) +
+              " allocations, which is not enough to wrap a ring of " +
+              std::to_string(bound));
+  // The end state's claims are the ones the contract makes. "The free list is not
+  // empty" is not one of them: nothing in this phase commits or retires, so the
+  // allocations that survive each restore are still owned by instructions the
+  // model keeps in flight, and they accumulate until the machine runs out of
+  // tags. What must hold is that every rewind above was exact, that the free set
+  // and the owned mappings do not double-count a tag, and that the population the
+  // unit reports is the mask's population -- the last two are checked on every
+  // cycle and asserted here against the final state.
   Require(s.FreeCount() + s.CommittedOwned() <= h.Entries(), where,
           "the conservation identity is violated after the wrap: " +
               std::to_string(s.FreeCount()) + " free + " +
-              std::to_string(s.CommittedOwned()) + " owned");
-
-  // And the tail really did wrap: the shadow's tail has been round the ring more
-  // than once for the number of allocations performed.
-  Require(h.cycles() > bound, where,
-          "the wrap phase did not run long enough to wrap the tail");
+              std::to_string(s.CommittedOwned()) + " owned exceeds " +
+              std::to_string(h.Entries()));
+  Require(s.FreeCount() == static_cast<uint32_t>(s.FreeMask().PopCount()), where,
+          "the free count after the wrap is " + std::to_string(s.FreeCount()) +
+              " against a mask of " + std::to_string(s.FreeMask().PopCount()));
 }
 
 // 9. The credit table at capacity, with duplicates and out-of-order delivery.
@@ -3146,34 +3281,66 @@ void PhaseCreditStress(Harness& h) {
   Require(h.CredReqConflict(), where,
           "a producer reusing a reserved credit id was not reported");
 
-  // Drain again, then raise the epoch and show the whole table goes stale.
+  // A redirect, and the *two halves* of what it cancels. Slot 0 is drained; slot
+  // 1 still holds the reservation made two cycles ago, for an instruction older
+  // than the branch that is about to resolve; and a third reservation is made
+  // after the branch, for an instruction the squash owns.
+  //
+  // The cancellations are by owner age, so the redirect must take the younger one
+  // and leave the older one alone. A design that cancelled by epoch would take
+  // both -- the older result is dropped and the older head never completes --
+  // which is why both halves are asserted here rather than only the count.
   h.Respond(0, h.ObservedEpoch());
   const uint32_t ep = h.ObservedEpoch();
-  h.Alloc(1, /*checkpoint=*/true);
+  const uint32_t branch_gen = h.Alloc(1, /*checkpoint=*/true);
+  uint32_t survivor = slots;
+  for (uint32_t c = 0; c < slots; c++) {
+    if (s.CreditBusy(c)) survivor = c;
+  }
+  Require(survivor < slots, where,
+          "expected the reservation made before the branch to still be busy");
+  const uint32_t young_slot = h.ReserveCreditFor(branch_gen + 1);
+  Require(young_slot < slots && young_slot != survivor, where,
+          "the reservation for the younger instruction did not land in a second "
+          "slot");
+  uint32_t returns_before = s.CreditReturns();
+
   Stim r;
   r.redirect0_valid = true;
-  r.redirect0_rob_gen = s.CkptGen(s.CkptDepth() - 1);
+  r.redirect0_rob_gen = branch_gen;
   r.redirect0_pc = 0x8000c000ull;
   h.Cycle(r);
   Require(h.ObservedEpoch() == ep + 1, where, "the redirect did not raise the epoch");
-
-  // Every response in the old epoch is now stale, and each returns its credit
-  // exactly once -- the count is the assertion.
-  uint32_t expected = 0;
-  for (uint32_t c = 0; c < slots; c++) {
-    if (!s.CreditBusy(c)) continue;
-    h.Respond(c, ep);
-    expected++;
-  }
-  Require(expected > 0, where,
-          "the credit-stress phase cancelled nothing, so it proved nothing");
-  Require(h.ObservedCredits() == 0, where,
-          "every cancelled credit was not returned: " +
+  Require(s.CreditCancelled(young_slot), where,
+          "the redirect did not cancel the reservation of an instruction it owns");
+  Require(!s.CreditCancelled(survivor), where,
+          "the redirect cancelled the reservation of an *older* instruction, "
+          "which the squash does not own");
+  Require(h.ObservedCredits() == 2, where,
+          "the redirect returned a credit before the cancelled response arrived: " +
               std::to_string(h.ObservedCredits()) + " outstanding");
-  Require(h.shadow().CreditReturns() >= expected, where,
+
+  // The older instruction's result arrives in the epoch it was reserved in and is
+  // accepted -- no credit returned, because its credit was consumed.
+  h.Respond(survivor, ep);
+  Require(h.RspAccepted() && !h.CreditReturn(), where,
+          "an older instruction's result was not accepted after the redirect");
+  Require(h.ObservedCredits() == 1, where,
+          "an accepted older result left " + std::to_string(h.ObservedCredits()) +
+              " credits outstanding");
+
+  // The younger instruction's result is dropped and its credit returned exactly
+  // once; the table then holds nothing, and the cumulative return count moved by
+  // exactly one.
+  h.Respond(young_slot, ep);
+  Require(h.RspDroppedStale() && h.CreditReturn(), where,
+          "a squashed instruction's result was not dropped with its credit");
+  Require(h.ObservedCredits() == 0, where,
+          "the cancelled credit was not returned: " +
+              std::to_string(h.ObservedCredits()) + " outstanding");
+  Require(s.CreditReturns() == returns_before + 1, where,
           "the cumulative return count is " +
-              std::to_string(h.shadow().CreditReturns()) + " for " +
-              std::to_string(expected) + " cancelled credits");
+              std::to_string(s.CreditReturns()) + " after one cancellation");
 }
 
 // 10. Random stimulus, compared against the shadow on every cycle.
@@ -3183,6 +3350,8 @@ void PhaseRandom(Harness& h, uint64_t seed, int cycles) {
   const std::string where = "random-soak";
 
   h.Alloc(1, /*checkpoint=*/true);
+  uint32_t committed = 0;
+  uint32_t live_releases = 0;
 
   for (int c = 0; c < cycles; c++) {
     Stim stim;
@@ -3198,12 +3367,24 @@ void PhaseRandom(Harness& h, uint64_t seed, int cycles) {
       }
     }
 
-    // A commit, occasionally.
+    // A commit, occasionally, of a *live* mapping: the tag an instruction
+    // actually allocated and the generation it was given. Committing an arbitrary
+    // tag would install a committed mapping onto a tag nobody owns -- a state the
+    // machine cannot reach, because a commit is the publication of a destination
+    // that has been renamed -- and the standing conservation identity would then
+    // be measuring the stimulus rather than the design.
     if (rng.Chance(15)) {
-      stim.commit_valid = true;
-      stim.commit_rd = 1 + rng.Below(31);
-      stim.commit_tag = rng.Below(h.Entries());
-      stim.commit_gen = rng.Below(8);
+      const uint32_t base = rng.Below(31);
+      for (uint32_t i = 0; i < 31; i++) {
+        const uint32_t rd = 1 + ((base + i) % 31);
+        if (s.TagInAnyUndoWindow(s.SpecTag(rd))) continue;
+        stim.commit_valid = true;
+        stim.commit_rd = rd;
+        stim.commit_tag = s.SpecTag(rd);
+        stim.commit_gen = s.SpecGen(rd);
+        committed++;
+        break;
+      }
       stim.rob_retire = rng.Chance(50);
     }
 
@@ -3214,29 +3395,69 @@ void PhaseRandom(Harness& h, uint64_t seed, int cycles) {
       stim.wb_gen = rng.Chance(30) ? rng.Below(8) : s.Gen(stim.wb_tag);
     }
     if (rng.Chance(8)) {
-      stim.free_valid = true;
-      stim.free_tag = rng.Below(h.Entries());
-      stim.free_gen = rng.Chance(30) ? rng.Below(8) : s.Gen(stim.free_tag);
+      // Two kinds of release, and each is built so that it *is* what it claims.
+      //
+      // A live release frees a tag whose owner is gone: a tag that is allocated
+      // and that no mapping names. It must not name a tag a mapping still holds --
+      // that would hand one physical register to two owners, which is the
+      // corruption this case exists to detect, so a stimulus that produced it
+      // would be the defect rather than the test.
+      //
+      // A stale release carries a generation that is not the tag's, which must be
+      // reported and change nothing. The wrong generation is derived from the
+      // tag's own rather than drawn at random: a random draw that happens to equal
+      // the tag's generation is a *live* release of whatever tag it landed on.
+      const uint32_t releasable = s.ReleasableTag();
+      if (rng.Chance(30) && releasable < h.Entries()) {
+        stim.free_valid = true;
+        stim.free_tag = releasable;
+        stim.free_gen = s.Gen(releasable);
+        live_releases++;
+      } else {
+        stim.free_valid = true;
+        stim.free_tag = rng.Below(h.Entries());
+        stim.free_gen = (s.Gen(stim.free_tag) + 1) & ((1u << s.gen_w()) - 1u);
+      }
     }
 
     // Redirects, usually out of order and sometimes aimed at a generation with
     // no checkpoint, which is the stale case.
     if (rng.Chance(20)) {
-      const uint32_t port = rng.Below(2);
-      const bool live = rng.Chance(60) && s.CkptDepth() > 0;
-      const uint32_t gen = live ? s.CkptGen(rng.Below(s.CkptDepth()))
-                                : rng.Below(64);
       const uint64_t pc = 0x80000000ull + 0x1000ull * rng.Below(64);
-      if (port == 0) {
+      if (rng.Chance(25) && s.CkptDepth() >= 2) {
+        // Two live candidates in one cycle, which is the only way the age rule
+        // *kills* anything: one candidate alone is simply taken, and the
+        // single-port stimulus this phase used to drive could never exercise the
+        // kill path at all -- a coverage check, not a check of the arbiter, is
+        // what noticed. Both generations name live checkpoints, so the older is
+        // taken and the younger is reported killed rather than silently dropped.
+        const uint32_t a = rng.Below(s.CkptDepth());
+        uint32_t b = (a + 1 + rng.Below(s.CkptDepth() - 1)) % s.CkptDepth();
+        if (b == a) b = (a + 1) % s.CkptDepth();
         stim.redirect0_valid = true;
-        stim.redirect0_rob_gen = gen;
+        stim.redirect0_rob_gen = s.CkptGen(a);
         stim.redirect0_pc = pc;
         stim.redirect0_is_fault = rng.Chance(10);
-      } else {
         stim.redirect1_valid = true;
-        stim.redirect1_rob_gen = gen;
-        stim.redirect1_pc = pc;
+        stim.redirect1_rob_gen = s.CkptGen(b);
+        stim.redirect1_pc = pc + 4;
         stim.redirect1_is_fault = rng.Chance(10);
+      } else {
+        const uint32_t port = rng.Below(2);
+        const bool live = rng.Chance(60) && s.CkptDepth() > 0;
+        const uint32_t gen = live ? s.CkptGen(rng.Below(s.CkptDepth()))
+                                  : rng.Below(64);
+        if (port == 0) {
+          stim.redirect0_valid = true;
+          stim.redirect0_rob_gen = gen;
+          stim.redirect0_pc = pc;
+          stim.redirect0_is_fault = rng.Chance(10);
+        } else {
+          stim.redirect1_valid = true;
+          stim.redirect1_rob_gen = gen;
+          stim.redirect1_pc = pc;
+          stim.redirect1_is_fault = rng.Chance(10);
+        }
       }
     }
 
@@ -3265,6 +3486,12 @@ void PhaseRandom(Harness& h, uint64_t seed, int cycles) {
   Require(c.duplicate_responses > 0, where, "the soak produced no duplicate response");
   Require(c.credit_returns > 0, where, "the soak returned no credit");
   Require(c.killed_redirects > 0, where, "the soak never killed a pending redirect");
+  Require(committed > 0, where,
+          "the soak committed no mapping that was publishable, so commit "
+          "precedence over a restore was never exercised");
+  Require(live_releases > 0, where,
+          "the soak never released a tag whose owner had gone, so the explicit "
+          "release path was never exercised");
 }
 
 }  // namespace

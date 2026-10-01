@@ -1449,13 +1449,23 @@ class Harness {
     CMP_U32(Lanes32(dut_->ev_store_o, width_), ev_store);
     CMP_U64_LANES((LaneField(dut_->ev_store_size_o, 0, width_) & 0x7u) |
              (static_cast<uint64_t>(LaneField(dut_->ev_store_size_o, 1, width_)) << 32), ev_store_size);
-    CMP_U32(Lanes32(dut_->commit_valid_o, width_), commit_valid);
-    CMP_U64_LANES((LaneField(dut_->commit_rd_o, 0, width_) & 0x1Fu) |
-             (static_cast<uint64_t>(LaneField(dut_->commit_rd_o, 1, width_)) << 32), commit_rd);
-    CMP_U64_LANES((LaneField(dut_->commit_tag_o, 0, width_) & 0xFFu) |
-             (static_cast<uint64_t>(LaneField(dut_->commit_tag_o, 1, width_)) << 32), commit_tag);
-    CMP_U64_LANES((LaneField(dut_->commit_gen_o, 0, width_) & 0xFFu) |
-             (static_cast<uint64_t>(LaneField(dut_->commit_gen_o, 1, width_)) << 32), commit_gen);
+    {
+      const uint32_t cv = Lanes32(dut_->commit_valid_o, width_);
+      CMP_U32(cv, commit_valid);
+      // The commit identity fields are meaningful only on a lane whose
+      // `commit_valid` is set. A retired write to x0 commits nothing -- "x0 is
+      // not a physical register, so there is no mapping to install and no tag to
+      // release" -- and the module drives the entry's own identity on the port
+      // with `commit_valid` low. That is a don't-care, exactly like the ungated
+      // `ev_seq`, so each lane is compared iff it committed rather than the port
+      // being compared against its free-running shape.
+      CMP_U64_LANES(((cv & 1u) ? (LaneField(dut_->commit_rd_o, 0, width_) & 0x1Fu) : 0u) |
+               ((cv & 2u) ? (static_cast<uint64_t>(LaneField(dut_->commit_rd_o, 1, width_)) << 32) : 0ull), commit_rd);
+      CMP_U64_LANES(((cv & 1u) ? (LaneField(dut_->commit_tag_o, 0, width_) & 0xFFu) : 0u) |
+               ((cv & 2u) ? (static_cast<uint64_t>(LaneField(dut_->commit_tag_o, 1, width_)) << 32) : 0ull), commit_tag);
+      CMP_U64_LANES(((cv & 1u) ? (LaneField(dut_->commit_gen_o, 0, width_) & 0xFFu) : 0u) |
+               ((cv & 2u) ? (static_cast<uint64_t>(LaneField(dut_->commit_gen_o, 1, width_)) << 32) : 0ull), commit_gen);
+    }
     // `ev_valid` and `ev_trap` are the event stream itself: the card's Pass
     // criterion is "events matching a reference", so every lane of them is
     // compared on every cycle. Every other event field is gated on the event
@@ -2250,6 +2260,29 @@ void PhaseCommittedOnce(Harness* h) {
           "x20 maps to tag " + std::to_string(h->ObservedCmtTag(20)) +
               " after two same-rd commits; expected the younger tag " +
               std::to_string(h->CmtTagOf(second.tag)));
+
+  // A write to x0 retires and is counted, but commits nothing: x0 is not a
+  // physical register, so there is no mapping to install and no tag to release.
+  // Without this the `o_x0_retired` output is never high and its comparison is
+  // vacuous.
+  h->Fresh();
+  const Harness::Identity zero = h->Alloc(304);
+  h->Complete(zero);
+
+  Stim s4;
+  s4.pay_valid = 0x1;
+  s4.pay_reg_we = 0x1;
+  s4.pay_rd = 0u;
+  h->Cycle(s4);
+
+  Require(h->Events() == 0x1, At("committed-once", 3),
+          "the x0-writing instruction did not retire: mask " +
+              std::to_string(h->Events()));
+  Require(h->Commits() == 0, At("committed-once", 3),
+          "a write to x0 updated the committed map: mask " +
+              std::to_string(h->Commits()));
+  Require(h->X0Retired(), At("committed-once", 3),
+          "a retired write to x0 was not reported on o_x0_retired");
 }
 
 void PhaseCsrAtRetire(Harness* h) {
@@ -2549,7 +2582,10 @@ void PhaseSoak(Harness* h, int steps) {
         s.pay_valid |= 1u << lane;
         if (rng.Chance(60)) {
           s.pay_reg_we |= 1u << lane;
-          s.pay_rd |= (uint64_t(1 + rng.Below(31))) << (lane * 32);
+          // 0..31, so a retired write to x0 appears in the soak as well: it is
+          // a retirement, not a commit, and the summary counter is taken after
+          // this phase, so an x0-free soak would report the path as uncovered.
+          s.pay_rd |= (uint64_t(rng.Below(32))) << (lane * 32);
           s.pay_value[lane] = rng.Next();
         }
         if (rng.Chance(15)) {

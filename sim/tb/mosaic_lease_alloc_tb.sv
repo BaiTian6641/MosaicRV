@@ -113,9 +113,7 @@ module mosaic_lease_alloc_tb (
     output logic [31:0]                                o_size_alu,
     output logic [31:0]                                o_size_md,
     output logic [31:0]                                o_size_wb,
-    output logic [31:0]                                o_size_net,
-    output logic [31:0]                                o_dbg0,
-    output logic [31:0]                                o_dbg1
+    output logic [31:0]                                o_size_net
 );
 
   mosaic_lease_alloc u_lease (
@@ -170,9 +168,7 @@ module mosaic_lease_alloc_tb (
       .o_size_alu             (o_size_alu),
       .o_size_md              (o_size_md),
       .o_size_wb              (o_size_wb),
-      .o_size_net             (o_size_net),
-      .o_dbg0                 (o_dbg0),
-      .o_dbg1                 (o_dbg1)
+      .o_size_net             (o_size_net)
   );
 
 endmodule : mosaic_lease_alloc_tb

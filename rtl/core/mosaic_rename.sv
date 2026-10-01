@@ -240,6 +240,53 @@
 // start-of-cycle mapping, the `commit2_*` lane releases lane 0's tag, and never
 // both at one lane, never the mapping being installed, never the same tag twice.
 
+// ------------------------------------------------------- the recovery point
+//
+// A checkpoint does two things: it empties the undo window, and it makes the
+// state a later squash restores to. The window is emptied *before* the
+// checkpoint cycle's own allocations are appended, so the recovery point is the
+// state at the **start** of the checkpoint cycle and an allocation made in that
+// same cycle is younger than the checkpoint: it is journalled with the rest of
+// the window and a squash to that checkpoint undoes it. A branch dispatched as
+// lane 1 of a group whose lane 0 allocates in the same cycle is the ordinary
+// case, not a corner, so the two have to agree by construction rather than by
+// the caller avoiding the combination.
+//
+// The restore itself is `spec := cmt_map`, and that is only correct where
+// `spec == cmt_map` at the checkpoint. This is the module's checkable form of
+// "the redirecting branch is the oldest outstanding instruction": an instruction
+// that has allocated a tag and not committed has a speculative mapping that
+// differs from the committed one for its rd, so equality across all 32
+// architectural registers means none is outstanding. At a checkpoint taken with
+// such an instruction in flight, the restore would discard *its* mapping while
+// its tag stays allocated -- it was allocated before the checkpoint, so it is not
+// in the window -- leaving a physical tag neither free nor named by any mapping.
+//
+// So the module checks it and fails closed:
+//
+//   * `ckpt_committed` reports the boundary test every cycle, so a caller
+//     sampling it in the cycle it takes a checkpoint learns immediately whether
+//     that recovery point is usable;
+//   * a squash to a checkpoint that was not at a boundary is **refused** and
+//     reported as `squash_not_committed`, and nothing is restored. The caller
+//     must drain (let the outstanding writes retire) and take a fresh checkpoint,
+//     which is the standard full-flush recovery path. Accepting the squash would
+//     have converted an unmeetable precondition into silent state corruption --
+//     the tags would still be gone from the free list with nothing pointing at
+//     them, and the next allocation would hand out a register whose previous
+//     value no architectural register can reach.
+//   * a squash with no checkpoint at all remains `squash_underflow`: a different
+//     refusal, because the caller's fix is different (take one, rather than drain
+//     and take one).
+//
+// The bound this leaves on the caller is stated exactly: **populate `ckpt_valid`
+// when the branch is the oldest outstanding instruction** (in ROB terms, at the
+// head), which is what makes `spec == cmt` true; the module reports the violation
+// rather than relying on the caller remembering. I-018's controller owns the
+// richer recovery point (a saved speculative map, which removes the boundary
+// requirement altogether); until that is integrated, this module refuses what it
+// cannot restore.
+
 // ------------------------------------------------------------- mutants
 //
 // -DMOSAIC_RENAME_MUTANT_<n> injects exactly one defect to prove the unit test
@@ -265,6 +312,17 @@
 //
 // X0_ALLOC (from I-013) covers both lanes: a write to x0 on either lane
 // allocates a physical tag.
+//
+// The recovery controls are:
+//
+//   CKPT_ALLOC_LEAK  an allocation made in the same cycle as a checkpoint is not
+//                    journalled (the pre-I-014 rule), so the recovery point is
+//                    the end of that cycle while the free set is restored to its
+//                    start: one tag neither free nor owned.
+//   NO_BOUNDARY_CHECK
+//                    a squash to a checkpoint taken with older writers in flight
+//                    is accepted: the restore silently loses their mappings and
+//                    leaves their tags unreachable.
 // ============================================================================
 
 `default_nettype none
@@ -433,16 +491,32 @@ module mosaic_rename (
     output logic                                  commit2_x0_dropped,
 
     // ---------------------------------------------------------- recovery
-    // `ckpt_valid` marks the current journal position as the recovery point.
+    // `ckpt_valid` marks the recovery point. A checkpoint empties the undo
+    // window, so the recovery point it establishes is the state at the **start**
+    // of the checkpoint cycle: an allocation made in that same cycle is younger
+    // than the checkpoint and is journalled with the rest of the window.
+    //
     // `squash` rolls the free list back to it and restores the speculative map
-    // from the committed map. A squash with no checkpoint is refused and
-    // reported: there is nothing to restore to, and pretending otherwise would
-    // discard live speculative state without saying so.
+    // from the committed map. Two refusals, reported separately because they need
+    // different responses: a squash with no checkpoint has nothing to restore to
+    // (`squash_underflow`, the caller takes a checkpoint first), and a squash to a
+    // checkpoint that was *not* at a committed boundary cannot be restored exactly
+    // (`squash_not_committed`, the caller must take a fresh recovery point after
+    // draining). Refusing the second is the difference between reporting a
+    // precondition and silently corrupting state, so it is enforced here rather
+    // than left to a comment.
+    //
+    // `ckpt_committed` reports whether the *current* state is a committed
+    // boundary, i.e. whether a checkpoint taken now would be a recovery point a
+    // squash can restore. It is meaningful every cycle, and it is the signal a
+    // caller should sample in the cycle it asserts `ckpt_valid`.
     input  logic                                  ckpt_valid,
     input  logic                                  squash,
     output logic                                  squash_accepted,
-    output logic                                  squash_underflow,  // squash with no checkpoint
-    output logic                                  journal_overflow,  // undo bound exceeded
+    output logic                                  squash_underflow,      // squash with no checkpoint
+    output logic                                  squash_not_committed,  // squash to a non-boundary checkpoint
+    output logic                                  ckpt_committed,        // a checkpoint now would be restorable
+    output logic                                  journal_overflow,      // undo bound exceeded
 
     // --------------------------------------------------------- occupancy
     // Free tags currently available. Defined as the population count of the
@@ -542,6 +616,10 @@ module mosaic_rename (
   logic [REN_JLEN_W-1:0] j_len;
   logic                  ckpt_seen;
   logic                  j_overflow;
+  // Whether the checkpoint that is the current recovery point was taken at a
+  // committed boundary. See `ckpt_committed` below for what that means and why
+  // the module refuses a squash to a checkpoint that was not.
+  logic                  ckpt_at_boundary;
 
   // ------------------------------------------------------------ small helpers
 
@@ -1005,8 +1083,49 @@ module mosaic_rename (
 `endif
 
   // --------------------------------------------------------------- recovery
+  // A checkpoint is a usable recovery point only where the speculative map
+  // equals the committed map. That equality is the checkable form of "the
+  // redirecting branch is the oldest outstanding instruction": an instruction
+  // that has allocated a tag and not yet committed has a speculative mapping
+  // that differs from the committed one for its rd, so `spec == cmt` for every
+  // architectural register means no such instruction is outstanding.
+  //
+  // It has to be checked because the restore is `spec := cmt`: at a checkpoint
+  // taken with older register-writers still in flight, that assignment discards
+  // *their* mappings -- and their tags stay allocated, because they were
+  // allocated before the checkpoint and are therefore not in the undo window.
+  // The result is a physical tag neither free nor named by any mapping: exactly
+  // the state the ownership invariant forbids, reached by a legal-looking
+  // sequence of requests.
+  logic spec_eq_cmt;
+
+  always_comb begin
+    spec_eq_cmt = 1'b1;
+    for (int unsigned a = 0; a < REN_ARCH_REGS; a++) begin
+      if ((spec_map[a] != cmt_map[a]) || (spec_gen[a] != cmt_gen[a])) begin
+        spec_eq_cmt = 1'b0;
+      end
+    end
+  end
+
+  // Reported every cycle, so a caller can sample it in the cycle it takes a
+  // checkpoint rather than discovering the problem at the mispredict.
+  assign ckpt_committed = spec_eq_cmt;
+
   assign squash_underflow = squash && !ckpt_seen;
-  assign squash_accepted  = squash && ckpt_seen;
+
+`ifdef MOSAIC_RENAME_MUTANT_NO_BOUNDARY_CHECK
+  // NEGATIVE CONTROL 13 (I-014): the boundary check is not enforced. A squash to
+  // a checkpoint taken with older register-writers still in flight is accepted,
+  // and the restore from the committed map silently loses their mappings while
+  // their tags stay allocated and unreachable.
+  assign squash_not_committed = 1'b0;
+  assign squash_accepted      = squash && ckpt_seen;
+`else
+  assign squash_not_committed = squash && ckpt_seen && !ckpt_at_boundary;
+  assign squash_accepted      = squash && ckpt_seen && ckpt_at_boundary;
+`endif
+
   assign journal_overflow = j_overflow;
 
   // How many journal entries a squash has to undo, newest first. The length is
@@ -1193,17 +1312,47 @@ module mosaic_rename (
   // lane 1's entry is one past lane 0's when lane 0 has one, and at the tail when
   // lane 0 allocated nothing (an x0 lane), which is what keeps the window a
   // contiguous run in allocation order.
+  //
+  // `j_tail` is the index this cycle's first entry lands on. A checkpoint empties
+  // the window, and it does so *before* this cycle's entries are appended: the
+  // recovery point is the state at the start of the checkpoint cycle, so an
+  // allocation made in that same cycle is younger than the checkpoint and must be
+  // undone by a squash to it. Dropping it instead (the pre-I-014 rule) left its
+  // tag allocated while the restored map named nothing -- one tag neither free
+  // nor owned per checkpoint-and-allocate cycle.
   logic                  j_push0;
   logic                  j_push1;
   logic [REN_JIDX_W-1:0] j_idx1;
+  logic [REN_JLEN_W-1:0] j_tail;
+
+  assign j_tail = (ckpt_valid && !squash) ? {REN_JLEN_W{1'b0}} : j_len;
+
+`ifdef MOSAIC_RENAME_MUTANT_CKPT_ALLOC_LEAK
+  // NEGATIVE CONTROL 12 (I-014): a checkpoint cycle's allocations are not
+  // journalled (the pre-I-014 rule). The recovery point is then the *end* of the
+  // checkpoint cycle while the free set is restored to its start, so the tag the
+  // group took is neither free nor named by any mapping after a squash.
+  assign j_push0 = alloc_new_valid && !ckpt_valid && (j_len < REN_JLEN_W'(REN_ROB));
+  assign j_idx1  = REN_JIDX_W'(j_push0 ? (j_len + REN_JLEN_W'(1)) : j_len);
+  assign j_push1 = alloc2_new_valid && !ckpt_valid &&
+                   (REN_JLEN_W'(j_idx1) < REN_JLEN_W'(REN_ROB));
+`else
+  assign j_push0 = alloc_new_valid && (j_tail < REN_JLEN_W'(REN_ROB));
+  assign j_idx1  = REN_JIDX_W'(j_push0 ? (j_tail + REN_JLEN_W'(1)) : j_tail);
+  assign j_push1 = alloc2_new_valid && (REN_JLEN_W'(j_idx1) < REN_JLEN_W'(REN_ROB));
+`endif
 
   always_comb begin
-    j_len_q      = j_len;
+    j_len_q      = j_tail;
     j_overflow_q = j_overflow;
 
+    // Lane 1's entry is counted only if lane 0's fit. A window that held a later
+    // entry while missing an earlier one could not be undone: the undo walks
+    // oldest first, and it would step a generation down without the step that
+    // made it go up.
     if (alloc_new_valid) begin
-      if (j_len < REN_JLEN_W'(REN_ROB)) begin
-        j_len_q = j_len + REN_JLEN_W'(1);
+      if (j_len_q < REN_JLEN_W'(REN_ROB)) begin
+        j_len_q = j_len_q + REN_JLEN_W'(1);
       end else begin
         // The undo bound was violated. Reported, not silently absorbed: the
         // alternative is a squash that restores less than the truth while
@@ -1212,10 +1361,6 @@ module mosaic_rename (
       end
     end
 
-    // Lane 1's entry is counted only if lane 0's fit. A window that held a later
-    // entry while missing an earlier one could not be undone: the undo walks
-    // oldest first, and it would step a generation down without the step that
-    // made it go up.
     if (alloc2_new_valid) begin
       if (j_len_q < REN_JLEN_W'(REN_ROB)) begin
         j_len_q      = j_len_q + REN_JLEN_W'(1);
@@ -1224,26 +1369,9 @@ module mosaic_rename (
       end
     end
 
-    // A new checkpoint starts a new undo window. Entries older than it can never
-    // be undone by a squash to that checkpoint, so keeping them would fill the
-    // journal from reset onwards and report `journal_overflow` on a machine that
-    // had squashed correctly every time. Resetting the length here is what makes
-    // the bound mean "allocations since the last checkpoint", which is the bound
-    // the ROB size actually justifies.
-    if (ckpt_valid && !squash) begin
-      j_len_q = {REN_JLEN_W{1'b0}};
-    end
-
     if (squash_accepted) begin
       j_len_q = {REN_JLEN_W{1'b0}};
     end
-  end
-
-  always_comb begin
-    j_push0 = alloc_new_valid && !ckpt_valid && (j_len < REN_JLEN_W'(REN_ROB));
-    j_idx1  = REN_JIDX_W'(j_push0 ? (j_len + REN_JLEN_W'(1)) : j_len);
-    j_push1 = alloc2_new_valid && !ckpt_valid &&
-              (REN_JLEN_W'(j_idx1) < REN_JLEN_W'(REN_ROB));
   end
 
   // -------------------------------------------------------------- registers
@@ -1266,6 +1394,7 @@ module mosaic_rename (
       alloc_ptr  <= REN_TAG_W'(REN_ARCH_REGS);
       j_len      <= {REN_JLEN_W{1'b0}};
       ckpt_seen  <= 1'b0;
+      ckpt_at_boundary <= 1'b0;
       j_overflow <= 1'b0;
     end else begin
       for (int unsigned a = 0; a < REN_ARCH_REGS; a++) begin
@@ -1300,8 +1429,8 @@ module mosaic_rename (
       // the window stays in allocation order and the undo can walk it oldest
       // first -- which is the property the generation rollback depends on.
       if (j_push0) begin
-        j_tag[REN_JIDX_W'(j_len)] <= scan_tag;
-        j_prev_valid[REN_JIDX_W'(j_len)] <= gen_valid[scan_tag];
+        j_tag[REN_JIDX_W'(j_tail)] <= scan_tag;
+        j_prev_valid[REN_JIDX_W'(j_tail)] <= gen_valid[scan_tag];
       end
       if (j_push1) begin
         j_tag[j_idx1] <= alloc2_new_tag;
@@ -1312,6 +1441,10 @@ module mosaic_rename (
       j_overflow <= j_overflow_q;
       if (ckpt_valid && !squash) begin
         ckpt_seen <= 1'b1;
+        // The recovery point is the state at the start of this cycle, so the
+        // boundary test is the pre-edge comparison, not one made after the
+        // cycle's own allocations have landed.
+        ckpt_at_boundary <= spec_eq_cmt;
       end
     end
   end

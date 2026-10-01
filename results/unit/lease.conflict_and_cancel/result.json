@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "case": "lease.conflict_and_cancel",
+  "verdict": "PASS",
+  "detail": "lease contract holds: 4366 shadow comparisons over 4462 cycles, 3 ports / 4 records, seed 1; random: 1231 grants, 635 releases, 592 cancels, 1246 stale ids, 102 repeats, 116 cross-path, 1559 contended cycles, 639 same-cycle terminal+grant, 26 all-pools-full cycles",
+  "seed": 1,
+  "max_cycles": 200000,
+  "checks": 10,
+  "failures": 0,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-01T19:17:15Z",
+  "first_mismatch": ""
+}

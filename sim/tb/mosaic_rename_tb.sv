@@ -159,6 +159,8 @@ module mosaic_rename_tb (
     input  logic                                       squash,
     output logic                                       squash_accepted,
     output logic                                       squash_underflow,
+    output logic                                       squash_not_committed,
+    output logic                                       ckpt_committed,
     output logic                                       journal_overflow,
 
     // occupancy
@@ -273,6 +275,8 @@ module mosaic_rename_tb (
       .squash           (squash),
       .squash_accepted  (squash_accepted),
       .squash_underflow (squash_underflow),
+      .squash_not_committed (squash_not_committed),
+      .ckpt_committed   (ckpt_committed),
       .journal_overflow (journal_overflow),
 
       .free_count       (free_count),

@@ -696,20 +696,6 @@ module mosaic_recovery #(
   // retry) from a write to x0 (nothing to retry at all) -- and the first two
   // need opposite behaviour from everything upstream. A squash wins: the
   // instruction is discarded regardless of whether a tag was available.
-  logic alloc_wants_tag;
-  assign alloc_wants_tag = alloc_valid && (alloc_rd != 5'd0);
-  assign alloc_squashed  = alloc_valid && squash;
-  assign alloc_is_x0     = alloc_valid && (alloc_rd == 5'd0) && !squash;
-  assign alloc_exhausted = alloc_wants_tag && !has_free && !squash;
-  assign alloc_accepted  = alloc_valid && !squash && (has_free || (alloc_rd == 5'd0));
-  assign alloc_new_valid = alloc_accepted && (alloc_rd != 5'd0);
-
-  assign alloc_new_tag = scan_tag;
-  assign alloc_new_gen = gen_valid[scan_tag] ? (gen[scan_tag] + REC_GEN_W'(1))
-                                             : {REC_GEN_W{1'b0}};
-  assign alloc_old_valid = alloc_new_valid;
-  assign alloc_old_tag   = spec_map[alloc_rd];
-  assign alloc_old_gen   = spec_gen[alloc_rd];
 
   // The mapping a commit supersedes, and the one a commit installs. A repeated
   // commit of the same mapping is a no-op rather than a free of the mapping the
@@ -843,10 +829,16 @@ module mosaic_recovery #(
   // register handed to somebody else. It is the single most damaging defect
   // this unit can have, which is why it is the first mutant.
   logic [REC_CKPT_W-1:0] restore_ck;
+  // The mutant scans upward and keeps the highest valid index, which is the
+  // deepest live checkpoint and therefore the same wrong answer a downward scan
+  // would produce. It is written that way because a downward scan over an
+  // `int unsigned` cannot elaborate at all: `c >= 0` is constant-true, so the
+  // loop is infinite and Verilator refuses the build -- a mutant that does not
+  // elaborate proves nothing, and this one did not, in the file as delivered.
 `ifdef MOSAIC_RECOVERY_MUTANT_WRONG_CHECKPOINT
   always_comb begin
     restore_ck = {REC_CKPT_W{1'b0}};
-    for (int unsigned c = CKPT_DEPTH - 1; c >= 0; c--) begin
+    for (int unsigned c = 0; c < CKPT_DEPTH; c++) begin
       if (ck_valid[c]) begin
         restore_ck = REC_CKPT_W'(c);
       end
@@ -957,27 +949,32 @@ module mosaic_recovery #(
   // separate signal so that mutant is a one-line change rather than a second
   // driver on `undo_n`.
   logic [REC_CNT_W-1:0] undo_apply;
-`ifdef MOSAIC_RECOVERY_MUTANT_NO_FREE_RESTORE
-  // NEGATIVE CONTROL: the free set and the generations are not restored. The
-  // speculative map goes back to the checkpoint copy, but every tag allocated
-  // after it stays marked allocated -- so the free count leaks one tag per
-  // squashed instruction and the register file quietly shrinks, while the
-  // journal is still consumed and the free count also stops matching the live
-  // mappings. The shadow catches it on the first cycle after the squash.
-  assign undo_apply = {REC_CNT_W{1'b0}};
- `else
   assign undo_apply = undo_n;
- `endif
-  // The first journal entry the restore undoes. Kept beside `undo_apply` so
-  // the mutant above stays a one-line change: the window is
-  // [undo_base, undo_base + undo_apply), never [0, undo_apply).
+  // The first journal entry the restore undoes: the window is
+  // [undo_apply_base, undo_apply_base + undo_apply), never [0, undo_apply).
   logic [REC_JIDX_W-1:0] undo_apply_base;
- `ifdef MOSAIC_RECOVERY_MUTANT_NO_FREE_RESTORE
-  assign undo_apply_base = {REC_JIDX_W{1'b0}};
- `else
   // Already at the journal index width: direct assignment, no cast.
   assign undo_apply_base = undo_base;
- `endif
+  // Whether the undo's effects are applied at all.
+  //
+  // MUTANT 5 (NO_FREE_RESTORE) is a negative control: the undo window is walked
+  // and the journal is consumed, but the free set, the generations and the
+  // generation-valid bits keep whatever the squashed instructions left behind.
+  // The speculative map still goes back to the checkpoint's copy, so the restored
+  // machine's free list no longer matches its mappings and the free count drifts
+  // by one tag per squashed instruction, while the journal still reports the
+  // restore as having happened.
+  //
+  // It is an enable on the effects rather than a zero count because a count that
+  // is a constant makes the loop's own comparison constant, the build stops on
+  // that warning, and a mutant that does not elaborate proves nothing -- which is
+  // how the previous version of this one behaved.
+  logic undo_effects;
+`ifdef MOSAIC_RECOVERY_MUTANT_NO_FREE_RESTORE
+  assign undo_effects = 1'b0;
+`else
+  assign undo_effects = 1'b1;
+`endif
 
   // A checkpoint is refused when the stack is full, or in the cycle a redirect
   // is taken -- the squash owns that cycle, and pushing a checkpoint for a
@@ -989,6 +986,51 @@ module mosaic_recovery #(
   assign ckpt_accepted = ckpt_push;
   assign ckpt_refused  = ckpt_valid && !ckpt_push;
 
+  // The undo bound, computed here rather than with the journal bookkeeping below
+  // because it is a *refusal*: an allocation that would push the window past its
+  // bound is not accepted, and the window is never wrapped. The decision has to
+  // be made where acceptance is decided, or `alloc_journal_full` reports a
+  // refusal that did not happen while the journal write below wraps its index and
+  // overwrites a live entry -- a restore then returns a state the machine never
+  // passed through, while reporting success.
+  logic alloc_wants_tag;
+  logic journal_at_bound;
+  logic alloc_journal_refused;
+  assign alloc_wants_tag = alloc_valid && (alloc_rd != 5'd0);
+  assign journal_at_bound = (j_len >= REC_CNT_W'(REC_ROB));
+  // A write to x0 allocates nothing and journals nothing, so the bound cannot
+  // apply to it; a checkpointing instruction's own destination is recorded in the
+  // checkpoint rather than the journal, so the bound does not apply to it either;
+  // and the squash owns a squash cycle regardless.
+  assign alloc_journal_refused = alloc_wants_tag && journal_at_bound &&
+                                 !ckpt_push && !squash;
+  assign alloc_squashed  = alloc_valid && squash;
+  assign alloc_is_x0     = alloc_valid && (alloc_rd == 5'd0) && !squash;
+  assign alloc_exhausted = alloc_wants_tag && !has_free && !squash;
+  assign alloc_journal_full = alloc_journal_refused;
+  assign journal_overflow   = alloc_journal_refused;
+  // MUTANT 7 (ACCEPT_AT_BOUND) drops the refusal from acceptance while keeping the
+  // report, which is the defect this block was written to remove: the allocation
+  // is taken, `alloc_journal_full` says it was refused, and the journal write
+  // below lands on the index its own width wrapped -- overwriting a live entry, so
+  // a later restore returns a state the machine never passed through while
+  // reporting success. The case catches it on the allocation's own report, in the
+  // cycle it happens.
+`ifdef MOSAIC_RECOVERY_MUTANT_ACCEPT_AT_BOUND
+  assign alloc_accepted  = alloc_valid && !squash && (has_free || (alloc_rd == 5'd0));
+`else
+  assign alloc_accepted  = alloc_valid && !squash && !alloc_journal_refused &&
+                           (has_free || (alloc_rd == 5'd0));
+`endif
+  assign alloc_new_valid = alloc_accepted && (alloc_rd != 5'd0);
+
+  assign alloc_new_tag = scan_tag;
+  assign alloc_new_gen = gen_valid[scan_tag] ? (gen[scan_tag] + REC_GEN_W'(1))
+                                             : {REC_GEN_W{1'b0}};
+  assign alloc_old_valid = alloc_new_valid;
+  assign alloc_old_tag   = spec_map[alloc_rd];
+  assign alloc_old_gen   = spec_gen[alloc_rd];
+
   // Does this allocation need a journal entry? It does unless it is the
   // checkpointing instruction: the checkpoint is taken at that instruction and
   // the restore restores to *before* it, so its own allocation must not be in
@@ -997,15 +1039,12 @@ module mosaic_recovery #(
   logic alloc_needs_journal;
   assign alloc_needs_journal = alloc_new_valid && !ckpt_push;
 
-  // The undo bound. Reaching it exactly is legal -- it is the steady state for
-  // a full queue. Exceeding it is refused and reported.
-  logic journal_at_bound;
-  assign journal_at_bound = (j_len >= REC_CNT_W'(REC_ROB));
-  assign alloc_journal_full = alloc_wants_tag && journal_at_bound && !ckpt_push && !squash;
-  assign journal_overflow    = alloc_journal_full;
-
-  // An allocation at the bound is refused, so `alloc_new_valid` is false and
-  // nothing is journalled: the window can never exceed its array.
+  // The undo bound itself is computed with the allocation refusals, because
+  // reaching it exactly is legal -- the steady state for a full queue -- and
+  // exceeding it is a refusal there, not merely a report. `alloc_journal_full`
+  // and `journal_overflow` are the two reports of that one decision, and
+  // `alloc_new_valid` is false while it holds, so nothing is journalled and the
+  // window can never exceed its array.
   logic [REC_CNT_W-1:0] j_len_q;
   logic                  j_overflow_q;
 
@@ -1228,12 +1267,14 @@ module mosaic_recovery #(
         // access uses -- so no bit is unused and none is silently truncated.
         automatic logic [REC_JIDX_W-1:0] undo_idx =
             undo_apply_base + REC_JIDX_W'(k);
-        free_q[j_tag[undo_idx]] = 1'b1;
-        gen_q[j_tag[undo_idx]]  =
-            j_prev_valid[undo_idx]
-              ? (gen[j_tag[undo_idx]] - REC_GEN_W'(1))
-              : {REC_GEN_W{1'b0}};
-        genv_q[j_tag[undo_idx]] = j_prev_valid[undo_idx];
+        if (undo_effects) begin
+          free_q[j_tag[undo_idx]] = 1'b1;
+          gen_q[j_tag[undo_idx]]  =
+              j_prev_valid[undo_idx]
+                ? (gen[j_tag[undo_idx]] - REC_GEN_W'(1))
+                : {REC_GEN_W{1'b0}};
+          genv_q[j_tag[undo_idx]] = j_prev_valid[undo_idx];
+        end
       end
     end
 
@@ -1248,6 +1289,21 @@ module mosaic_recovery #(
     //     The tags are distinct allocations, so the order of this loop cannot
     //     matter, exactly as the free set's set semantics guarantee for the undo
     //     window itself.
+    // MUTANT 8 (RESTORE_SELF_ONLY) undoes only the *restored* checkpoint's own
+    // destination, which is the leak this loop was widened to close: a squash
+    // consumes every younger branch's checkpoint too, and each of those owns a
+    // destination that no journal entry covers, so those tags stay allocated
+    // forever while their mappings are rewound away. The case catches it in the
+    // nested phase's free-mask comparison against the checkpoint.
+`ifdef MOSAIC_RECOVERY_MUTANT_RESTORE_SELF_ONLY
+    if (tail_do_restore && ck_tag_valid[restore_ck]) begin
+      free_q[ck_tag[restore_ck]] = 1'b1;
+      gen_q[ck_tag[restore_ck]]  = ck_tag_prev_valid[restore_ck]
+                                       ? ck_tag_prev_gen[restore_ck]
+                                       : {REC_GEN_W{1'b0}};
+      genv_q[ck_tag[restore_ck]] = ck_tag_prev_valid[restore_ck];
+    end
+`else
     if (tail_do_restore) begin
       for (int unsigned c = 0; c < CKPT_DEPTH; c++) begin
         if (ck_valid[c] && (c >= restore_ck) && ck_tag_valid[c]) begin
@@ -1259,6 +1315,7 @@ module mosaic_recovery #(
         end
       end
     end
+`endif
 
     // 4. The owner that made it back writes.
     if (wb_accepted) begin

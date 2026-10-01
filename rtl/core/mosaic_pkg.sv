@@ -26,9 +26,11 @@ package mosaic_pkg;
   localparam logic [6:0] OP_JALR      = 7'b1100111;
   localparam logic [6:0] OP_JAL       = 7'b1101111;
   localparam logic [6:0] OP_MUL_DIV   = 7'b0110011;  // mul div rem + *u variants
-  localparam logic [6:0] OP_32        = 7'b0111011;  // 32-bit result forms; on
-                                                     // RV64 only mulw divw divuw
-                                                     // remw remuw (funct7 0000001)
+  // Opcode 0111011 is OP-32, the 32-bit-result arithmetic forms. RV64I defines
+  // addw subw sllw srlw sraw on it (funct7 0000000 / 0100000) and RV64M adds
+  // mulw divw divuw remw remuw (funct7 0000001). They are RV64 instructions:
+  // RV32I has no OP-32 at all, and the W forms have no RV32 meaning.
+  localparam logic [6:0] OP_32        = 7'b0111011;
   localparam logic [6:0] OP_SYSTEM    = 7'b1110011;  // ecall ebreak mret csr*
 
   // funct3

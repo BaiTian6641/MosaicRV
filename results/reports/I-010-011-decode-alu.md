@@ -1284,3 +1284,96 @@ bug.
   legal instructions. Flagging the omission rather than following it.
 * **`rtl/core/mosaic_pkg.sv` was not modified.**
 * `tests/unit/registry.json` was not modified by this package.
+---
+
+# Correction (I-012 lane, appended — the body above is unchanged)
+
+**What this corrects.** The body of this report lists OP-32 (`0111011`) as reserved
+and calls `addw subw sllw srlw sraw` "the RV32-only word forms … reserved on
+RV64". That is wrong. They are **RV64I** instructions and the shipping decoder
+trapped all five as illegal, together with the per-encoding rationale in
+`sim/unit/tb_decoder.cpp` and the comment on `OP_32` in `mosaic_pkg.sv`. A core
+that traps five legal instructions breaks any compiler that emits them; the
+corpus only passed because it never emitted one.
+
+The correction was found while adding the M-extension word forms to OP-32 for
+work package **I-012** and was authorised by the integration lead. Three
+independent sources agree, and the first two are not the project's own code:
+
+**1. The ISA.** RV32I defines no OP-32 at all, so the W forms cannot be RV32
+forms; RV64I adds ADDW/SUBW/SLLW/SRLW/SRAW on OP-32 with funct7
+`0000000`/`0100000`, exactly as it adds ADD/SLL/SRL/SUB/SRA on OP.
+
+**2. binutils** (`riscv64-elf-as -march=rv64im` + `riscv64-elf-objdump -d -M
+no-aliases`), the same third source this report already used:
+
+```
+   0:	003100bb          	addw	ra,sp,gp
+   4:	403100bb          	subw	ra,sp,gp
+   8:	003110bb          	sllw	ra,sp,gp
+   c:	003150bb          	srlw	ra,sp,gp
+  10:	403150bb          	sraw	ra,sp,gp
+  14:	023100bb          	mulw	ra,sp,gp
+  18:	023140bb          	divw	ra,sp,gp
+  1c:	023150bb          	divuw	ra,sp,gp
+  20:	023160bb          	remw	ra,sp,gp
+  24:	023170bb          	remuw	ra,sp,gp
+  28:	0051009b          	addiw	ra,sp,5
+
+$ objdump -D -b binary -m riscv:rv64 /tmp/raw.bin          # 023110bb 023120bb 023130bb
+   0:	023110bb          	.insn	4, 0x023110bb
+   4:	023120bb          	.insn	4, 0x023120bb
+   8:	023130bb          	.insn	4, 0x023130bb
+```
+
+Ten encodings on OP-32 are legal: the five I word forms with funct7 `0000000`
+(addw `funct3` 000, sllw 001, srlw 101) and `0100000` (subw 000, sraw 101), and
+the five M word forms with funct7 `0000001` (mulw 000, divw 100, divuw 101, remw
+110, remuw 111). Both classes are R-type: rs1 and rs2 are register indices, the
+shift amount is `rs2[4:0]`, and **there is no immediate** in either — the
+shamt-immediate forms are `slliw`/`srliw`/`sraiw` on OP-IMM-32, which were
+already decoded correctly and are untouched. The `023110bb`/`023120bb`/`023130bb`
+attempts disassemble as `.insn`, which is the check that funct3 001/010/011 under
+funct7 `0000001` really are reserved.
+
+**3. This project's own reference path.** `rtl/core/mosaic_bringup_core.sv`
+(OP-32 arm) and its independent C++ model `sim/unit/tb_bringup.cpp` (line ~712)
+already decoded all five as legal `ALU_*W` operations. `mosaic_alu.sv` implements
+them, and before this correction `ALU_SUBW` was produced by **no** decode path in
+the shared decoder.
+
+**What changed.**
+
+| File | Change |
+| --- | --- |
+| `rtl/core/mosaic_decoder.sv` | OP-32 funct7 `0000000`/`0100000` now decode to `ALU_ADDW`/`ALU_SLLW`/`ALU_SRLW`/`ALU_SUBW`/`ALU_SRAW`, legal, `uses_alu` set, `uses_imm` clear; the `md_w` M word forms are unchanged; every genuinely reserved funct7/funct3 stays illegal, and the header prose was corrected |
+| `rtl/core/mosaic_pkg.sv` | the `OP_32` comment corrected (it is no longer this report's "pkg was not modified") |
+| `sim/unit/tb_decoder.cpp` | the reference model decodes both classes; five positive W-form rows and ten binutils-encoding rows were added; the reserved-class block now pins the funct3 patterns each I-word funct7 does *not* define and counts 5 + 5 legal encodings over all 1024; the "reserved on RV64" rationale was deleted |
+| `MOSAIC_DECODER_MUTANT_RV32_WORD_LEGAL` | **deleted** — it mutated the shipping behaviour into what is now, correctly, the shipping behaviour, which made it vacuous |
+| `MOSAIC_DECODER_MUTANT_W_FORMS_ILLEGAL` | **added** — rejects the five RV64I word forms again, i.e. restores exactly this defect so it cannot come back unnoticed |
+
+**Verification after the change.**
+
+```
+python3 tools/run_unit.py --profile p0 --case decode.rv64im_reserved
+  RESULT PASS decode.rv64im_reserved  166733 instructions (82384 legal, 84349 illegal),
+  0 mismatches, 1443 named reserved checks            (checks 169534, failures 0, exit 0)
+
+-DMOSAIC_DECODER_MUTANT_W_FORMS_ILLEGAL
+  exit 1, 2 failures, delta +2 against the green base
+  first mismatch: insn=0x003100bb.valid: expected 0x0000000000000001, got 0x0000000000000000
+
+python3 tools/run_unit.py --profile p0 --case muldiv.kill_and_edges
+  RESULT PASS muldiv.kill_and_edges   (unchanged)
+
+python3 tools/run_unit.py --profile p0 --case core.bringup_vs_reference
+  RESULT PASS core.bringup_vs_reference  corpus 39 programs, 2774346 architectural events,
+  every stream identical to the independent reference
+```
+
+The bring-up case is the one that executes through a decoder and an ALU, and it
+stays green: no second defect in the routing (`uses_alu`/`is_muldiv`/`uses_imm`
+are all as the ALU expects) was found. The legal-instruction count in this report
+rises accordingly (the opcode sweep now finds ten legal OP-32 encodings), and the
+"116 reserved opcodes" figure elsewhere in the body was already superseded when
+I-012 made OP-32 a decoded opcode at all (it is 115 in the current case).

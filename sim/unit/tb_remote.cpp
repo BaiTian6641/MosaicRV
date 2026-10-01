@@ -279,8 +279,8 @@ bool SameRsp(const LinkRsp& a, const LinkRsp& b) {
 // --------------------------------------------------------------- identity
 // A uop identity, packed the way `mosaic_id_pkg::macro_id_t` is:
 // {hart, rob_index, rob_gen, uop_index}. Destination: {gen, tag}.
-constexpr unsigned kHartW = 1, kRobIndexW = 6, kRobGenW = 7, kUopIndexW = 3;
-constexpr unsigned kTagW = 7, kGenW = 8;
+constexpr unsigned kRobIndexW = 6, kRobGenW = 7, kUopIndexW = 3;
+constexpr unsigned kTagW = 7;
 
 uint64_t MakeId(uint32_t hart, uint32_t rob_index, uint32_t rob_gen, uint32_t uop_index) {
   return (static_cast<uint64_t>(hart & 1u) << (kRobIndexW + kRobGenW + kUopIndexW)) |
@@ -463,8 +463,12 @@ class Shadow {
       if (flush_win || kill_win || match_win) freed++;
       if (match_win) any_match = true;
       if (flush_win) any_flush = true;
+      // An alias is a response that named a *live* entry and disagreed with it.
+      // An entry destroyed by this cycle's kill or flush is not an alias: those
+      // are separate reasons, reported by separate counters, and conflating
+      // them would hide which one happened.
       if (rsp_xfer && !match_win && entries_[k].valid && (s.rsp.lid == k) &&
-          kill_hit != static_cast<int>(k)) {
+          kill_hit != static_cast<int>(k) && !s.flush_valid) {
         any_alias = true;
       }
     }
@@ -685,10 +689,26 @@ class Harness {
   // it; phases that reason about a specific cycle use this and not `cycles()`.
   uint64_t driven() const { return cycles_ - 1; }
 
+  // True when nothing is left anywhere: no credit taken, no stage occupied, and
+  // nothing in the remote unit. Reading only the credit counter is not enough
+  // -- a matched response still in the response pipeline holds no credit but is
+  // still on its way, and a "drained" claim that ignored it would be false.
+  bool drained() const {
+    if (dut_->o_outstanding != 0) return false;
+    for (unsigned st = 0; st < kPipeDepth; st++) {
+      if (req_pipe_valid_[st] || rsp_pipe_valid_[st]) return false;
+    }
+    return !remote_.holding() && remote_.pending_count() == 0;
+  }
+
   void Reset(int cycles) {
     for (int i = 0; i < cycles; i++) Cycle(Stim{}, /*rst=*/true);
     shadow_.Reset();
     remote_.Reset();
+    // The stability memory belongs to the cycle stream, not to the model: a
+    // reset ends the stream it was watching.
+    prev_req_stalled_ = false;
+    prev_rsp_stalled_ = false;
   }
 
   // What the DUT presented this cycle, read before the edge.
@@ -696,7 +716,11 @@ class Harness {
     bool req_ready = false;
     bool rem_req_valid = false;
     LinkReq rem_req{};
+    // The response port facing the remote unit: an input of the link, read back
+    // so a check can name what the far side offered.
     bool rem_rsp_valid = false;
+    LinkRsp rem_rsp{};
+    // The response port facing the home side: an output of the link.
     bool rem_rsp_ready = false;
     bool rsp_valid = false;
     LinkRsp rsp{};
@@ -755,13 +779,16 @@ class Harness {
     dut_->flush_valid = s.flush_valid ? 1 : 0;
     dut_->eval();
 
+    // Read the DUT's combinational answer first: the payload-stability check
+    // below compares *this* cycle's offer against the previous cycle's, and it
+    // can only do that if the observation has already been taken.
+    ReadSeen();
+
     Predict pred;
     if (!rst) {
       pred = shadow_.Step(s);
       CompareOutputs(s, pred);
     }
-
-    ReadSeen();
 
     dut_->clk = 1;
     dut_->eval();
@@ -781,12 +808,21 @@ class Harness {
       // delay, and the phase assertions are statements about the hardware
       // rather than about this file's arithmetic.
       if (seen_.rem_req_valid && s.rem_req_ready) remote_.Accept(this_cycle, seen_.rem_req);
-      if (seen_.rsp_valid && s.rsp_ready) remote_.Emitted();
+      // The unit gives up the result it was holding when the *link* took it,
+      // which is the remote response handshake -- not the home delivery, which
+      // happens several cycles later and may never happen at all for a stale
+      // response that the link consumes and drops.
+      if (seen_.rem_rsp_valid && seen_.rem_rsp_ready) remote_.Emitted();
       remote_.Advance(this_cycle + 1);
 
-      CompareState(pred);
-      CompareCounters(pred);
+      // The order decides which check names a defect first. The invariants run
+      // before the state comparison because they are the directed statements --
+      // "an unmatched response was not written anywhere" -- and a mismatch
+      // there names the mechanism, where the state comparison would name the
+      // entry that changed as a consequence.
       CheckInvariants(s, pred);
+      CompareCounters(pred, s);
+      CompareState(pred, s);
       AccumulateCoverage(s, pred);
       ++comparisons_;
     }
@@ -801,6 +837,7 @@ class Harness {
     seen_.rem_req_valid = dut_->rem_req_valid != 0;
     seen_.rem_req = UnpackReq(ReadWide(dut_->rem_req_payload, (kReqW + 31) / 32));
     seen_.rem_rsp_valid = dut_->rem_rsp_valid != 0;
+    seen_.rem_rsp = UnpackRsp(ReadWide(dut_->rem_rsp_payload, (kRspW + 31) / 32));
     seen_.rem_rsp_ready = dut_->rem_rsp_ready != 0;
     seen_.rsp_valid = dut_->rsp_valid != 0;
     seen_.rsp = UnpackRsp(ReadWide(dut_->rsp_payload, (kRspW + 31) / 32));
@@ -896,8 +933,9 @@ class Harness {
     prev_rsp_ = seen_.rsp;
   }
 
-  void CompareState(const Predict& e) {
-    const std::string where = phase_ + ": cycle " + Dec(clk_->cycle()) + " post-edge";
+  void CompareState(const Predict& e, const Stim& s) {
+    const std::string where =
+        phase_ + ": cycle " + Dec(clk_->cycle()) + " post-edge " + s.str();
     for (unsigned k = 0; k < kEntries; k++) {
       Require(entry_valid_[k] == e.entries[k].valid, where,
               "entry " + Dec(k) + " validity: expected " + Bool(e.entries[k].valid) +
@@ -931,8 +969,9 @@ class Harness {
     }
   }
 
-  void CompareCounters(const Predict& e) {
-    const std::string where = phase_ + ": cycle " + Dec(clk_->cycle()) + " post-edge";
+  void CompareCounters(const Predict& e, const Stim& s) {
+    const std::string where =
+        phase_ + ": cycle " + Dec(clk_->cycle()) + " post-edge " + s.str();
     auto need = [&](uint64_t got, uint64_t want, const char* name) {
       Require(got == want, where,
               std::string(name) + ": expected " + Dec(want) + ", got " + Dec(got));
@@ -952,7 +991,8 @@ class Harness {
   }
 
   void CheckInvariants(const Stim& s, const Predict& e) {
-    const std::string where = phase_ + ": cycle " + Dec(clk_->cycle()) + " post-edge";
+    const std::string where =
+        phase_ + ": cycle " + Dec(clk_->cycle()) + " post-edge " + s.str();
 
     uint64_t live = 0;
     for (unsigned k = 0; k < kEntries; k++) live += entry_valid_[k] ? 1 : 0;
@@ -971,17 +1011,21 @@ class Harness {
             "o_alias_rsp_ctr (" + Dec(dut_->o_alias_rsp_ctr) +
                 ") is not a subset of o_stale_rsp_ctr (" + Dec(dut_->o_stale_rsp_ctr) + ")");
 
-    // A response that is transferred and matches nothing must not have entered
-    // the response pipeline: if it had, a stale response would be delivered
-    // later, which is the defect the case exists to catch.
+    // The card's central rule, on the DUT's own wires: a response that matches
+    // no live entry is consumed and *dropped*. If it were loaded into the
+    // response pipeline it would be delivered, which is the stale response
+    // writing into a slot it does not own.
     if (s.rem_rsp_valid && seen_.rem_rsp_ready && !e.ev_matched) {
-      Require(rsp_pipe_valid_[0] == e.rsp_pipe[0].valid, where,
-              "internal: the stale response changed the pipeline (checked above)");
+      Require(!(rsp_pipe_valid_[0] && SameRsp(rsp_pipe_[0], seen_.rem_rsp)), where,
+              "a response that matched no live entry was loaded into the response "
+              "pipeline and would be delivered: " + RspStr(seen_.rem_rsp));
     }
-    // A response that is accepted must not leave a credit behind.
-    if (e.ev_matched && !e.ev_accept) {
-      Require(e.outstanding + e.matched <= e.issued, where,
-              "an accepted response did not reduce the outstanding set");
+    // And the converse: a response that the model says matched must have been
+    // consumed rather than dropped.
+    if (s.rem_rsp_valid && seen_.rem_rsp_ready && e.ev_matched) {
+      Require(rsp_pipe_valid_[0] && SameRsp(rsp_pipe_[0], seen_.rem_rsp), where,
+              "a response that matched a live entry was not loaded into the response "
+              "pipeline unchanged, so its result is lost: " + RspStr(seen_.rem_rsp));
     }
   }
 
@@ -1398,7 +1442,7 @@ void PhaseKillLateResponse(Harness* h, mosaic::Reporter* reporter) {
     uint64_t remote_offered = 0;
     bool killed = false;
     const uint64_t killed_before = h->dut_killed();
-    const uint64_t delivered_before = h->dut_delivered();
+    const uint64_t delivered_at_race = h->dut_delivered();
     for (int c = 0; c < 40 && !killed; c++) {
       Stim in;
       in.req_valid = !accepted;
@@ -1419,7 +1463,7 @@ void PhaseKillLateResponse(Harness* h, mosaic::Reporter* reporter) {
         killed = true;
         Require(h->dut_killed() == killed_before + 1, "kill-vs-response",
                 "the kill did not return exactly one credit");
-        Require(h->dut_delivered() == delivered_before, "kill-vs-response",
+        Require(h->dut_delivered() == delivered_at_race, "kill-vs-response",
                 "a response was delivered for a request killed in the same cycle");
         Require(h->dut_stale() >= 1, "kill-vs-response",
                 "the racing response was not counted as stale");
@@ -1465,11 +1509,82 @@ void PhaseKillLateResponse(Harness* h, mosaic::Reporter* reporter) {
 
 // Phase 5: both directions saturated and released.
 void PhaseBackPressure(Harness* h, mosaic::Reporter* reporter) {
-  // ---- 5a: the request path saturated, with the table full and the pipe full.
-  Fresh(h, "backpressure-request");
+  // ---- 5a: the credit bound. The far end consumes requests but does not
+  // answer them, so the table is what runs out.
+  Fresh(h, "backpressure-credits");
+  h->remote()->SetDelay(1000);   // answered long after this phase is over
   unsigned accepted = 0;
   LinkReq cur = MakeReq(70, 0xE000);
   unsigned next = 71;
+  for (int c = 0; c < 128 && accepted < kEntries; c++) {
+    Stim in;
+    in.req_valid = true;
+    in.req = cur;
+    in.rem_req_ready = 1;
+    in.rsp_ready = 1;
+    h->Run(in);
+    if (h->seen().req_ready) {
+      accepted++;
+      cur = MakeReq(next++, 0xE000);
+    }
+  }
+  Require(accepted == kEntries, "backpressure-credits",
+          "only " + Dec(accepted) + " of " + Dec(kEntries) + " credits were taken");
+  for (int c = 0; c < 4; c++) {
+    Stim in;
+    in.req_valid = true;
+    in.req = cur;
+    in.rem_req_ready = 1;
+    in.rsp_ready = 1;
+    h->Run(in);
+    Require(!h->seen().req_ready, "backpressure-credits",
+            "the link accepted a request with every credit taken");
+  }
+  Require(h->dut_outstanding() == kEntries, "backpressure-credits",
+          "outstanding " + Dec(h->dut_outstanding()) + " != " + Dec(kEntries));
+
+  // Return every credit at once and require that they are usable again: a new
+  // request completes immediately afterwards.
+  const uint64_t killed_before = h->dut_killed();
+  {
+    Stim in;
+    in.flush_valid = true;
+    in.rem_req_ready = 1;
+    in.rsp_ready = 1;
+    h->Run(in);
+  }
+  Require(h->dut_killed() == killed_before + kEntries, "backpressure-credits",
+          "the flush returned " + Dec(h->dut_killed() - killed_before) + " of " +
+              Dec(kEntries) + " credits");
+  Require(h->dut_outstanding() == 0, "backpressure-credits",
+          "a credit survived the flush");
+  const LinkReq after = MakeReq(200, 0xE100);
+  h->remote()->SetDelayFor(after.id, 1);
+  bool accepted2 = false, delivered2 = false;
+  for (int c = 0; c < 40 && !delivered2; c++) {
+    Stim in;
+    in.req_valid = !accepted2;
+    in.req = after;
+    in.rem_req_ready = 1;
+    in.rsp_ready = 1;
+    h->Run(in);
+    if (!accepted2 && h->seen().req_ready) accepted2 = true;
+    if (h->seen().rsp_valid) delivered2 = true;
+  }
+  Require(accepted2 && delivered2, "backpressure-credits",
+          "the credits returned by the flush were not usable: accepted=" +
+              Bool(accepted2) + " delivered=" + Bool(delivered2));
+  reporter->Check(true, "backpressure-credits: " + Dec(kEntries) +
+                            " credits taken, refused at the bound, all returned by one flush");
+
+  // ---- 5b: the pipe bound. The far end accepts nothing at all, so the
+  // request pipeline is what runs out. Its depth, not the credit table, is the
+  // limit while nothing drains -- a documented property of a registered hop.
+  Fresh(h, "backpressure-pipe");
+  h->remote()->SetDelay(1);
+  accepted = 0;
+  cur = MakeReq(210, 0xE200);
+  next = 211;
   for (int c = 0; c < 64 && accepted < kEntries; c++) {
     Stim in;
     in.req_valid = true;
@@ -1479,14 +1594,12 @@ void PhaseBackPressure(Harness* h, mosaic::Reporter* reporter) {
     h->Run(in);
     if (h->seen().req_ready) {
       accepted++;
-      cur = MakeReq(next++, 0xE000);
+      cur = MakeReq(next++, 0xE200);
     }
   }
-  Require(accepted == kEntries, "backpressure-request",
-          "only " + Dec(accepted) + " of " + Dec(kEntries) +
-              " credits were taken with the far end stalled");
-  // With every credit taken, the link must refuse and must not lose the request
-  // it is holding.
+  Require(accepted == kPipeDepth, "backpressure-pipe",
+          "with the far end stalled the link took " + Dec(accepted) + " requests, not the " +
+              Dec(kPipeDepth) + " its pipeline holds");
   for (int c = 0; c < 4; c++) {
     Stim in;
     in.req_valid = true;
@@ -1494,15 +1607,12 @@ void PhaseBackPressure(Harness* h, mosaic::Reporter* reporter) {
     in.rem_req_ready = 0;
     in.rsp_ready = 1;
     h->Run(in);
-    Require(!h->seen().req_ready, "backpressure-request",
-            "the link accepted a request with every credit taken");
+    Require(!h->seen().req_ready, "backpressure-pipe",
+            "the link accepted a request with a full pipeline and a stalled far end");
   }
-  Require(h->dut_outstanding() == kEntries, "backpressure-request",
-          "outstanding " + Dec(h->dut_outstanding()) + " != " + Dec(kEntries));
 
-  // Release: everything drains, including the request that was held.
+  // Release: the held request must be accepted and everything must drain.
   bool held_accepted = false;
-  uint64_t drained_at = 0;
   for (uint64_t c = 0; c < kDrainBound; c++) {
     Stim in;
     in.req_valid = !held_accepted;
@@ -1511,21 +1621,18 @@ void PhaseBackPressure(Harness* h, mosaic::Reporter* reporter) {
     in.rsp_ready = 1;
     h->Run(in);
     if (!held_accepted && h->seen().req_ready) held_accepted = true;
-    if (held_accepted && h->dut_outstanding() == 0 && h->dut_delivered() == kEntries + 1) {
-      drained_at = c;
-      break;
-    }
+    if (held_accepted && h->drained()) break;
   }
-  Require(held_accepted, "backpressure-request", "the held request was never accepted");
-  Require(h->dut_outstanding() == 0 && h->dut_delivered() == kEntries + 1,
-          "backpressure-request",
-          "the saturated request path did not drain: outstanding " +
-              Dec(h->dut_outstanding()) + " delivered " + Dec(h->dut_delivered()) + " of " +
-              Dec(kEntries + 1));
-  reporter->Check(true, "backpressure-request: " + Dec(kEntries) +
-                            " credits taken, no loss, drained in " + Dec(drained_at) + " cycles");
+  Require(held_accepted, "backpressure-pipe", "the held request was never accepted");
+  Require(h->drained(), "backpressure-pipe",
+          "the stalled request path did not drain: outstanding " +
+              Dec(h->dut_outstanding()));
+  Require(h->dut_delivered() == kPipeDepth + 1, "backpressure-pipe",
+          "delivered " + Dec(h->dut_delivered()) + " of " + Dec(kPipeDepth + 1));
+  reporter->Check(true, "backpressure-pipe: the pipeline held " + Dec(kPipeDepth) +
+                            " requests against a stalled far end, with no loss");
 
-  // ---- 5b: the response path saturated. The request path must stay open: the
+  // ---- 5c: the response path saturated. The request path must stay open: the
   // only thing that may refuse a request is a missing credit.
   Fresh(h, "backpressure-response");
   h->remote()->SetDelay(1);
@@ -1573,18 +1680,32 @@ void PhaseBackPressure(Harness* h, mosaic::Reporter* reporter) {
             "a stalled response path refused a request while " + Dec(free_before) +
                 " credits were free: the two channels are sharing a resource");
   }
-  // Release the home side and let everything drain in bounded time.
+  // Release the home side and let everything drain in bounded time. Equal
+  // injected delays mean the responses arrive in the order the requests were
+  // issued, so this is the *in-order* half of the card's ordering requirement;
+  // the out-of-order phase is the other half.
   uint64_t drain_cycles = 0;
+  std::vector<uint64_t> order;
   for (uint64_t c = 0; c < kDrainBound; c++) {
     Stim in;
     in.rem_req_ready = 1;
     in.rsp_ready = 1;
     h->Run(in);
+    if (h->seen().rsp_valid) order.push_back(h->seen().rsp.id);
     drain_cycles = c;
-    if (h->dut_outstanding() == 0 && !h->remote()->holding() &&
-        h->remote()->pending_count() == 0) {
-      break;
-    }
+    if (h->drained()) break;
+  }
+  // The eight requests of this phase, plus the one issued while the response
+  // path was saturated -- each of which must have been delivered exactly once,
+  // in the order the requests were issued.
+  Require(order.size() == kEntries + 1, "backpressure-response",
+          "delivered " + Dec(order.size()) + " responses, expected " +
+              Dec(kEntries + 1));
+  for (unsigned i = 0; i < kEntries + 1; i++) {
+    const uint64_t want = (i < kEntries) ? reqs[i].id : late.id;
+    Require(order[i] == want, "backpressure-response",
+            "delivery " + Dec(i) + " was not request " + Dec(i) +
+                " although every response took the same delay");
   }
   Require(h->dut_outstanding() == 0, "backpressure-response",
           "the response path did not drain: outstanding " + Dec(h->dut_outstanding()));
@@ -1675,8 +1796,7 @@ void PhaseRandom(Harness* h, mosaic::Reporter* reporter, uint64_t seed) {
     in.rsp_ready = 1;
     h->Run(in);
     drained = c;
-    if (h->dut_outstanding() == 0 && !h->remote()->holding() &&
-        h->remote()->pending_count() == 0) {
+    if (h->drained()) {
       empty = true;
       break;
     }
@@ -1691,6 +1811,10 @@ void PhaseRandom(Harness* h, mosaic::Reporter* reporter, uint64_t seed) {
   reporter->Check(true, "random: " + Dec(issued_random) + " requests issued in the soak, "
                         "drained in " + Dec(drained) + " cycles (bound " + Dec(bound) + ")");
 }
+
+// The coverage summary, kept so the RESULT line carries the numbers rather than
+// only the statement that they were non-zero.
+std::string g_coverage;
 
 // The stimulus has to have reached every mechanism, or a shorter path would
 // pass the case without touching the defect it exists for.
@@ -1722,6 +1846,7 @@ void PhaseCoverage(Harness* h, mosaic::Reporter* reporter) {
     reporter->Check(row.value > 0,
                     std::string("the case never exercised ") + row.name);
   }
+  g_coverage = summary;
   reporter->Check(true, "coverage: " + summary);
 }
 
@@ -1758,7 +1883,7 @@ int main(int argc, char** argv) {
     detail = "remote link contract holds: " + std::to_string(harness.comparisons()) +
              " shadow comparisons over " + std::to_string(harness.cycles()) + " cycles, " +
              std::to_string(kEntries) + " credits, latency " + std::to_string(kPipeDepth) +
-             ", seed " + std::to_string(options.seed);
+             ", seed " + std::to_string(options.seed) + "; coverage: " + g_coverage;
   } catch (const Failure& f) {
     reporter.Mismatch(f.what, "contract holds", "contract violated");
     passed = false;

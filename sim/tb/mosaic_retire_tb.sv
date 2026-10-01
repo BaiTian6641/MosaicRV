@@ -986,7 +986,13 @@ module mosaic_retire_tb (
       .dbg_tag_gen       (ren_tag_gen),
       .dbg_spec_map      (ren_spec_map),
       .dbg_cmt_map       (ren_cmt_map),
-      .dbg_j_len         (ren_j_len)
+      .dbg_j_len         (ren_j_len),
+      // Boundary reports the I-018 integration added after this wrapper was
+      // written: tied off here because this card never squashes the rename
+      // unit (its recovery ports above are tied inactive), so both are the
+      // module's idle answers and the committed map behaves as before.
+      .squash_not_committed (),
+      .ckpt_committed       ()
   );
 
 

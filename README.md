@@ -4,6 +4,8 @@
 
 **当前仓库已进入 RTL bring-up 阶段：包含 p0 配置、SystemVerilog RTL、C++/Verilator harness 与有限的 unit/reference smoke evidence；这不等于完整 RISC-V CPU，也不代表所有 p0 ISA 声明已验收。** 当前交付边界见 [实现状态](config/status/implementation_status.json) 与 [进度记录](results/PROGRESS.md)。XiangShan 辅助验证、GW5A/Zynq/Virtex UltraScale+ 三家族实板验证、可移植 ASIC 转换、完整 RVA23U64/S64 mandatory ISA/执行环境与逐项 ratified optional 能力仍需分别闭合。动态调度和聚合收益必须以等资源 fixed/dynamic 对照实测，不能从研究论文直接继承数字。
 
+更新：2026-10-01。p0 的 Stage 1 标量控制路径已基本闭合（decode、ALU/分支、有界取指与重定向、双宽重命名、ROB、local IQ、共享 MUL/DIV、banked PRF、退休与 committed map、M-mode CSR、中断/WFI、预测器），首个双 cluster OoO 核心正在集成；每个工作包以其注册 CASE 的 pass、失败可复现的 mutant 和报告为准，`implementation_status.json` 只记录已从干净构建重跑过的项。**能力广告仍为空**：capability ladder 要求实现任务与验证任务同时交付，目前尚无任何能力满足（`python3 tools/check_coverage.py --verbose` 会逐项列出所缺 ID）。已知的 ISA 级缺陷：decoder 把 RV64I 的 `addw/subw/sllw/srlw/sraw` 当作保留编码，正在修复——这正是“以假设代替规范”的一类检查，与已有的两个同类缺陷一并在 [进度记录](results/PROGRESS.md) 中记录。
+
 
 ## 阅读顺序
 

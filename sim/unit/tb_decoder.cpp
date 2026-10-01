@@ -33,7 +33,7 @@
 //                  - every rd x rs1 pair and every rs1 x rs2 pair
 //                  - every immediate bit, field by field, exhaustively
 //   4. Random    a seeded campaign: half uniform 32-bit words, half words
-//                biased onto the twelve RV64IM opcodes so the legal side gets
+//                biased onto the thirteen RV64IM opcodes so the legal side gets
 //                as much coverage as the illegal side.
 //
 // Every instruction presented is compared field by field. The first mismatch
@@ -351,24 +351,39 @@ Decoded DecodeFields(uint32_t insn) {
       }
     }
     case OP_OP32: {
-      // The M extension's word forms. On RV64 only funct7 0000001 is defined,
-      // and only funct3 000/100/101/110/111 are: the high-half multiplies have
-      // no word form, so 001/010/011 are reserved. Every other funct7 on this
-      // opcode is the RV32-only I word forms (addw subw sllw srlw sraw) and is
-      // reserved on RV64 -- which is exactly what this core is.
-      if (f7 != 1) return {Illegal(), false};
-      if (f3 == 1 || f3 == 2 || f3 == 3) return {Illegal(), false};
+      // OP-32, the 32-bit-result arithmetic forms -- all of them RV64
+      // instructions:
+      //   funct7 0000000 -> addw (funct3 000), sllw (001), srlw (101)
+      //   funct7 0100000 -> subw (000), sraw (101)
+      //   funct7 0000001 -> mulw divw divuw remw remuw (funct3 000/100/101/110/111);
+      //                     001/010/011 are reserved, because the ISA defines no
+      //                     mulhw/mulhsuw/mulhuw
+      // Both classes are R-type/R-form: rs1 and rs2 are register indices, the
+      // shift amount is rs2[4:0], and there is no immediate in either encoding
+      // (the shamt-immediate forms are slliw/srliw/sraiw on OP-IMM-32).
       r.uses_rs1 = 1;
       r.uses_rs2 = 1;
       r.rs1 = static_cast<uint8_t>(rs1);
       r.rs2 = static_cast<uint8_t>(rs2);
       r.rd = static_cast<uint8_t>(rd);
       r.reg_write = rd != 0;
-      r.is_muldiv = 1;
-      r.md_op = static_cast<uint8_t>(f3);
-      r.md_signed = !(f3 == 3 || f3 == 5 || f3 == 7);
-      r.md_w = 1;
-      return {r, true};
+      if (f7 == 1) {
+        if (f3 == 1 || f3 == 2 || f3 == 3) return {Illegal(), false};
+        r.is_muldiv = 1;
+        r.md_op = static_cast<uint8_t>(f3);
+        r.md_signed = !(f3 == 3 || f3 == 5 || f3 == 7);
+        r.md_w = 1;
+        return {r, true};
+      }
+      if (f7 == 0x00) {
+        if (f3 == 0) { r.uses_alu = 1; r.alu_op = ALU_ADDW; return {r, true}; }
+        if (f3 == 1) { r.uses_alu = 1; r.alu_op = ALU_SLLW; return {r, true}; }
+        if (f3 == 5) { r.uses_alu = 1; r.alu_op = ALU_SRLW; return {r, true}; }
+      } else if (f7 == 0x20) {
+        if (f3 == 0) { r.uses_alu = 1; r.alu_op = ALU_SUBW; return {r, true}; }
+        if (f3 == 5) { r.uses_alu = 1; r.alu_op = ALU_SRAW; return {r, true}; }
+      }
+      return {Illegal(), false};
     }
     case OP_BRANCH: {
       // beq 000, bne 001, blt 100, bge 101, bltu 110, bgeu 111; 010 and 011
@@ -712,7 +727,9 @@ class Bench {
                "auipc with imm[31:12] all ones");
 
     // Every legal ALU operation, by number, so a renumbering of mosaic_pkg's
-    // alu_op_e cannot pass unnoticed. The RV32 word forms are absent on purpose.
+    // alu_op_e cannot pass unnoticed. The five OP-32 word forms are here too:
+    // they are RV64I instructions and this decoder now decodes them (see the
+    // correction section of results/reports/I-010-011-decode-alu.md).
     {
       struct { const char* name; uint32_t insn; uint8_t op; } cases[] = {
           {"add",   EncR(OP_MUL_DIV, 0, 1, 2, 3, 0x00), ALU_ADD},
@@ -732,6 +749,11 @@ class Bench {
           {"ori",   EncI(OP_IMM, 6, 1, 2, 4),            ALU_OR},
           {"andi",  EncI(OP_IMM, 7, 1, 2, 4),            ALU_AND},
           {"addiw", EncI(OP_IMM_32, 0, 1, 2, 4),         ALU_ADDW},
+          {"addw",  EncR(OP_OP32, 0, 1, 2, 3, 0x00),     ALU_ADDW},
+          {"subw",  EncR(OP_OP32, 0, 1, 2, 3, 0x20),     ALU_SUBW},
+          {"sllw",  EncR(OP_OP32, 1, 1, 2, 3, 0x00),     ALU_SLLW},
+          {"srlw",  EncR(OP_OP32, 5, 1, 2, 3, 0x00),     ALU_SRLW},
+          {"sraw",  EncR(OP_OP32, 5, 1, 2, 3, 0x20),     ALU_SRAW},
       };
       for (const auto& c : cases) {
         if (!Apply(c.insn)) return;
@@ -785,12 +807,68 @@ class Bench {
       }
     }
 
+    // RV64I word arithmetic forms on OP-32: addw subw sllw srlw sraw. They are
+    // R-type, so rs1 and rs2 are registers, the shift amount is rs2[4:0], and
+    // there is no immediate to expose. All five are exercised by name, and the
+    // exact words are the ones binutils produces (below).
+    {
+      struct { const char* name; uint32_t f3; uint32_t f7; uint8_t op; } w[] = {
+          {"addw", 0, 0x00, ALU_ADDW}, {"sllw", 1, 0x00, ALU_SLLW},
+          {"srlw", 5, 0x00, ALU_SRLW}, {"subw", 0, 0x20, ALU_SUBW},
+          {"sraw", 5, 0x20, ALU_SRAW},
+      };
+      for (const auto& c : w) {
+        if (!Apply(EncR(OP_OP32, c.f3, 4, 5, 6, c.f7))) return;
+        r = Observe();
+        rep_.Check(r.uses_alu && r.alu_op == c.op && !r.is_muldiv && !r.uses_imm,
+                   std::string("RV64I word form ") + c.name);
+        rep_.Check(r.uses_rs1 && r.uses_rs2 && r.reg_write && r.rs1 == 5 &&
+                       r.rs2 == 6 && r.rd == 4,
+                   std::string(c.name) + " reads rs1/rs2 and writes rd");
+        rep_.Check(!r.md_w, std::string(c.name) + " does not set md_w");
+      }
+    }
+
+    // The same ten encodings, as the exact words `riscv64-elf-as -march=rv64im`
+    // produces and `riscv64-elf-objdump -d -M no-aliases` names. A third
+    // source, so a shared misreading of the manual would have to be shared with
+    // binutils too; the table is in results/reports/I-010-011-decode-alu.md.
+    {
+      struct { uint32_t insn; const char* name; uint8_t op; uint8_t mul; uint8_t md; } enc[] = {
+          {0x003100bbu, "addw",  ALU_ADDW, 0, 0},
+          {0x403100bbu, "subw",  ALU_SUBW, 0, 0},
+          {0x003110bbu, "sllw",  ALU_SLLW, 0, 0},
+          {0x003150bbu, "srlw",  ALU_SRLW, 0, 0},
+          {0x403150bbu, "sraw",  ALU_SRAW, 0, 0},
+          {0x023100bbu, "mulw",  0,         1, MD_MUL},
+          {0x023140bbu, "divw",  0,         1, MD_DIV},
+          {0x023150bbu, "divuw", 0,         1, MD_DIVU},
+          {0x023160bbu, "remw",  0,         1, MD_REM},
+          {0x023170bbu, "remuw", 0,         1, MD_REMU},
+      };
+      for (const auto& c : enc) {
+        if (!Apply(c.insn)) return;
+        r = Observe();
+        rep_.Check(r.valid && !r.illegal,
+                   std::string("binutils encoding of ") + c.name + " is legal");
+        if (c.mul) {
+          rep_.Check(r.is_muldiv && r.md_w && r.md_op == c.md,
+                     std::string("binutils encoding of ") + c.name +
+                         " classifies as the M word form");
+        } else {
+          rep_.Check(!r.is_muldiv && r.uses_alu && r.alu_op == c.op,
+                     std::string("binutils encoding of ") + c.name +
+                         " classifies as the RV64I word form");
+        }
+      }
+    }
+
     // M extension WORD forms: OP-32 with funct7 0000001. The five encodings the
     // ISA defines decode with md_w set and the same md_op/md_signed as their
     // 64-bit counterparts. All eight funct3 values are walked here, so the
     // three that are reserved (001/010/011 -- there is no mulhw/mulhsuw/mulhuw)
-    // are pinned as reserved next to the five that are legal, and the RV32-only
-    // I word forms on the same opcode are the negative neighbour.
+    // are pinned as reserved next to the five that are legal, and the funct7
+    // values outside the M and I word classes are pinned as reserved too.
     {
       struct { const char* name; uint32_t f3; uint8_t op; uint8_t sign; } w[] = {
           {"mulw", 0, MD_MUL, 1},   {"divw", 4, MD_DIV, 1},
@@ -812,12 +890,18 @@ class Bench {
         ExpectIllegalState("reserved: no MULH*W form (OP-32 funct3 " +
                            std::to_string(f3) + " with funct7 0000001)");
       }
-      // The negative neighbour: addw and subw are the RV32-only I word forms
-      // and are reserved on RV64, on the very opcode the W forms live on.
-      if (!Apply(EncR(OP_OP32, 0, 4, 5, 6, 0x00))) return;
-      ExpectIllegalState("reserved on RV64: addw");
-      if (!Apply(EncR(OP_OP32, 0, 4, 5, 6, 0x20))) return;
-      ExpectIllegalState("reserved on RV64: subw");
+      // The reserved-encoding neighbours the card names: OP-32 with a funct7
+      // that is none of the M word forms (0000001) or the I word forms
+      // (0000000 / 0100000) is reserved for every funct3. The three funct7
+      // values here are outside all three classes.
+      struct { uint32_t f7; const char* name; } n[] = {
+          {0x02, "0000010"}, {0x21, "0100001"}, {0x7F, "1111111"},
+      };
+      for (const auto& c : n) {
+        if (!Apply(EncR(OP_OP32, 0, 4, 5, 6, c.f7))) return;
+        ExpectIllegalState(std::string("reserved: OP-32 funct7 ") + c.name +
+                           ", which is neither the M nor an I word form");
+      }
     }
 
     // CSR x0 rules: the two rules a decoder most often gets wrong, because both
@@ -961,21 +1045,26 @@ class Bench {
       if (!Apply(Word(OP_JALR, f3, 1, 2, 0, 0x00))) return;
       ExpectIllegalState("reserved: JALR funct3 " + std::to_string(f3));
     }
-    // OP-32. Three reserved classes live on this opcode and each is pinned by
-    // name; the five legal encodings are the M word forms.
+    // OP-32. Ten of its encodings are legal -- the five RV64I word arithmetic
+    // forms and the five M word forms -- and every other combination of funct7
+    // and funct3 is reserved. Each reserved class is pinned by name.
     {
-      // (a) The RV32-only I word forms: reserved on RV64, on the very opcode
-      // the M word forms live on. This is the negative neighbour for the
-      // mulw/divw/... family.
-      struct { const char* name; uint32_t f3; uint32_t f7; } w[] = {
-          {"addw", 0, 0x00}, {"subw", 0, 0x20}, {"sllw", 1, 0x00},
-          {"srlw", 5, 0x00}, {"sraw", 5, 0x20},
-      };
-      for (const auto& c : w) {
-        if (!Apply(Word(OP_OP32, c.f3, 1, 2, 3, c.f7))) return;
-        ExpectIllegalState(std::string("reserved on RV64: ") + c.name);
+      // (a) A defined funct7 with a funct3 it does not define. funct7 0000000
+      // carries only funct3 000/001/101 (addw sllw srlw) and 0100000 only
+      // 000/101 (subw sraw).
+      for (uint32_t f3 = 0; f3 < 8; ++f3) {
+        if (f3 == 0 || f3 == 1 || f3 == 5) continue;
+        if (!Apply(Word(OP_OP32, f3, 1, 2, 3, 0x00))) return;
+        ExpectIllegalState("reserved: OP-32 funct7 0000000 funct3 " +
+                           std::to_string(f3));
       }
-      // (b) The high-half word multiplies: there is no MULHW/MULHSUW/MULHUW, so
+      for (uint32_t f3 = 0; f3 < 8; ++f3) {
+        if (f3 == 0 || f3 == 5) continue;
+        if (!Apply(Word(OP_OP32, f3, 1, 2, 3, 0x20))) return;
+        ExpectIllegalState("reserved: OP-32 funct7 0100000 funct3 " +
+                           std::to_string(f3));
+      }
+      // (b) The high-half M word multiplies: there is no MULHW/MULHSUW/MULHUW, so
       // these three funct3 values under funct7 0000001 are reserved even though
       // the opcode and funct7 are otherwise the M word forms.
       for (uint32_t f3 : {1u, 2u, 3u}) {
@@ -984,16 +1073,24 @@ class Bench {
                            std::to_string(f3) + " with funct7 0000001)");
       }
       // (c) The completeness sweep over all 1024 encodings, counting the legal
-      // ones rather than assuming how many there are.
-      uint32_t legal_op32 = 0;
+      // ones in each class rather than assuming how many there are: five I word
+      // forms and five M word forms, and nothing else.
+      uint32_t legal_iword = 0, legal_mword = 0;
       for (uint32_t f3 = 0; f3 < 8; ++f3) {
         for (uint32_t f7 = 0; f7 < 128; ++f7) {
           if (!Apply(Word(OP_OP32, f3, 1, 2, 3, f7))) return;
-          if (Observe().valid) ++legal_op32;
+          if (!Observe().valid) continue;
+          if (f7 == 0x01) {
+            ++legal_mword;
+          } else {
+            ++legal_iword;
+          }
         }
       }
-      rep_.Check(legal_op32 == 5,
-                 "exactly five OP-32 encodings are legal: the five M word forms");
+      rep_.Check(legal_iword == 5 && legal_mword == 5,
+                 "OP-32 legal set: " + std::to_string(legal_iword) +
+                     " RV64I word forms and " + std::to_string(legal_mword) +
+                     " M word forms, exactly");
     }
     // SYSTEM funct3 100 is reserved.
     if (!Apply(Word(OP_SYSTEM, 4, 1, 2, 3, 0x300))) return;

@@ -14,12 +14,13 @@
 //   * M extension: mul mulh mulhsu mulhu div divu rem remu, classified into
 //     `is_muldiv` / `md_op` / `md_signed` for the muldiv unit (I-012), which
 //     owns the datapath and is not instantiated here.
-//   * M extension word forms: mulw divw divuw remw remuw, on OP-32 (0111011)
-//     with funct7 0000001, classified the same way plus `md_w`. The five
-//     encodings the ISA defines are legal; funct3 001/010/011 are reserved
-//     because there is no mulhw/mulhsuw/mulhuw, and the RV32-only I word forms
-//     (addw subw sllw srlw sraw, funct7 0000000/0100000 on the same opcode) are
-//     reserved on RV64.
+//   * RV64I word arithmetic on OP-32 (0111011): addw subw sllw srlw sraw, on
+//     funct7 0000000/0100000. R-type: rs1 and rs2 are registers and the shift
+//     amount is rs2[4:0], exactly as on the 64-bit OP forms.
+//   * M extension word forms: mulw divw divuw remw remuw, on OP-32 with
+//     funct7 0000001, classified like their 64-bit counterparts plus `md_w`.
+//     The five encodings the ISA defines are legal; funct3 001/010/011 are
+//     reserved because there is no mulhw/mulhsuw/mulhuw.
 //   * mret, classified but not executed: the trap unit (I-019) consumes it.
 //   * Everything else is illegal. There is no partial decode. An instruction is
 //     either legal -- in which case `ctl` is CTL_ILLEGAL with the fields this
@@ -76,11 +77,20 @@
 // not left to fall out of a default arm.
 // results/reports/I-010-011-decode-alu.md explains each reserved class.
 //
-// OP-32 has two reserved classes of its own and both stay illegal here: the
-// three high-half M word encodings (funct3 001/010/011 with funct7 0000001,
-// which would name mulhw/mulhsuw/mulhuw -- the ISA defines no such
-// instructions) and every RV32-only I word form (funct7 0000000/0100000 on the
-// same opcode).
+// OP-32 has reserved classes of its own and all of them stay illegal here:
+// funct3 001/010/011 under funct7 0000001 (which would name mulhw/mulhsuw/
+// mulhuw -- the ISA defines no high-half word multiply), every funct7 other
+// than 0000000, 0100000 and 0000001, and the funct3 patterns those two I-word
+// funct7 values do not define (they carry only 000/001/101 under 0000000 and
+// 000/101 under 0100000).
+//
+// An earlier revision of this file decoded the *whole* of OP-32 as illegal and
+// called the five RV64I word forms "RV32-only ... reserved on RV64". That was
+// wrong: RV32I defines no OP-32 at all, so `addw` and friends are RV64
+// instructions and a core that traps them breaks any compiler that emits them.
+// results/reports/I-010-011-decode-alu.md carries the correction and the
+// objdump evidence; MOSAIC_DECODER_MUTANT_W_FORMS_ILLEGAL restores the defect so
+// that the unit case proves it cannot come back unnoticed.
 //
 // Mutation hooks
 // --------------
@@ -117,11 +127,11 @@ module mosaic_decoder (
 `else
   localparam bit MutSImmAsI    = 1'b0;
 `endif
-`ifdef MOSAIC_DECODER_MUTANT_RV32_WORD_LEGAL
-  localparam bit MutRv32Word  = 1'b1;   // RV32-only I word forms accepted on RV64
+`ifdef MOSAIC_DECODER_MUTANT_W_FORMS_ILLEGAL
+  localparam bit MutWIFormsIllegal = 1'b1;  // the five RV64I OP-32 W arithmetic
+                                            // forms rejected again
 `else
-  localparam bit MutRv32Word  = 1'b0;   // the shipping build: funct7 0000000
-                                        // and 0100000 on OP-32 are reserved
+  localparam bit MutWIFormsIllegal = 1'b0;
 `endif
 `ifdef MOSAIC_DECODER_MUTANT_RESERVED_F3_LEGAL
   localparam bit MutReservedF3 = 1'b1;   // LOAD funct3 111 accepted
@@ -608,19 +618,23 @@ module mosaic_decoder (
       end
 
       // ------------------------------------------------------ OP-32 (W forms)
-      // Opcode 0111011. On RV64 only the M extension's word forms live here:
-      // mulw, divw, divuw, remw and remuw, all selected by funct7 = 0000001 and
-      // separated by funct3 exactly as the 64-bit forms are. They are classified
-      // into the same md_op / md_signed pair as their 64-bit counterparts and
-      // additionally set md_w, so the muldiv unit (I-012) learns the width from
-      // one bit rather than from a second opcode.
+      // Opcode 0111011 carries the 32-bit-result arithmetic forms, and RV64I is
+      // where they live: RV32I defines no OP-32 at all, and the "W" suffix means
+      // "word", not "RV32". Two classes:
       //
-      // funct3 001/010/011 stay reserved: they would name mulhw, mulhsuw and
-      // mulhuw, and the ISA defines no high-half word multiply. So do funct7
-      // 0000000 and 0100000 on this opcode -- addw subw sllw srlw sraw are the
-      // RV32-only I word forms and are reserved on RV64. Accepting them is the
-      // mutation MOSAIC_DECODER_MUTANT_RV32_WORD_LEGAL exists to prove the test
-      // catches.
+      //   * funct7 0000000 / 0100000 -> addw, subw, sllw, srlw, sraw, selected
+      //     by funct3 exactly as add/sub/sll/srl/sra are selected on OP. They
+      //     are R-type: rs1 and rs2 are both registers, the shift amount is
+      //     rs2[4:0], and there is no immediate in this encoding (the
+      //     shamt-immediate forms are slliw/srliw/sraiw on OP-IMM-32).
+      //   * funct7 0000001 -> the M extension's word forms, mulw divw divuw
+      //     remw remuw, with funct3 001/010/011 reserved because there is no
+      //     mulhw/mulhsuw/mulhuw.
+      //
+      // Everything else on this opcode is reserved. Decoding the first class as
+      // illegal was a defect in this decoder: a core that traps addw breaks any
+      // compiler that emits it. riscv64-elf-objdump -d -M no-aliases over the
+      // ten encodings is quoted in results/reports/I-010-011-decode-alu.md.
       mosaic_pkg::OP_32: begin
         ctl.uses_rs1  = 1'b1;
         ctl.uses_rs2  = 1'b1;
@@ -637,28 +651,24 @@ module mosaic_decoder (
           // word result": there is no such instruction, and a reserved encoding
           // that half-works is a reserved encoding that becomes a bug.
           legal = (funct3 != 3'b001) && (funct3 != 3'b010) && (funct3 != 3'b011);
-        end else if (MutRv32Word) begin
-          // Mutation only. The RV32-only I word forms decode as if this were an
-          // RV32 core; on RV64 every one of them must raise an illegal
-          // instruction.
-          ctl.uses_imm = 1'b1;
-          ctl.imm      = imm_i;
+        end else if (!MutWIFormsIllegal) begin
           ctl.uses_alu = 1'b1;
           legal        = 1'b1;
-          case (funct3)
-            mosaic_pkg::F3_ADD_SUB: begin
-              if (funct7 == F7_BASE)     ctl.alu_op = mosaic_pkg::ALU_ADDW;
-              else if (funct7 == F7_ALT) ctl.alu_op = mosaic_pkg::ALU_SUBW;
-              else                          legal = 1'b0;
+          case (funct7)
+            F7_BASE: begin
+              case (funct3)
+                mosaic_pkg::F3_ADD_SUB:  ctl.alu_op = mosaic_pkg::ALU_ADDW;  // addw
+                mosaic_pkg::F3_SLL:      ctl.alu_op = mosaic_pkg::ALU_SLLW;  // sllw
+                mosaic_pkg::F3_SRL_SRA:  ctl.alu_op = mosaic_pkg::ALU_SRLW;  // srlw
+                default:                 legal = 1'b0;
+              endcase
             end
-            mosaic_pkg::F3_SLL: begin
-              if (funct7 == F7_BASE)     ctl.alu_op = mosaic_pkg::ALU_SLLW;
-              else                          legal = 1'b0;
-            end
-            mosaic_pkg::F3_SRL_SRA: begin
-              if (funct7 == F7_BASE)     ctl.alu_op = mosaic_pkg::ALU_SRLW;
-              else if (funct7 == F7_ALT) ctl.alu_op = mosaic_pkg::ALU_SRAW;
-              else                          legal = 1'b0;
+            F7_ALT: begin
+              case (funct3)
+                mosaic_pkg::F3_ADD_SUB:  ctl.alu_op = mosaic_pkg::ALU_SUBW;  // subw
+                mosaic_pkg::F3_SRL_SRA:  ctl.alu_op = mosaic_pkg::ALU_SRAW;  // sraw
+                default:                 legal = 1'b0;
+              endcase
             end
             default: legal = 1'b0;
           endcase

@@ -33,10 +33,16 @@
 //                      same cycle: exactly one wins, the loser has no side
 //                      effect, and it is granted on the edge the winner's
 //                      release returns the slot.
-//   3. partial         a request naming {FU, credit} with only the FU free:
+//   3. partial         a request naming {FU, credit} with every credit held:
 //                      nothing is granted and the FU slot is *not* consumed.
 //                      This is the card's "reserve the FU and wait forever for
-//                      WB" failure, and the phase shows it is unreachable.
+//                      WB" failure, and the phase shows it is unreachable -- the
+//                      reservation it would need is not representable, because
+//                      occupancy is derived from the lease ledger. (At this
+//                      geometry the refusal is *caused* by record exhaustion,
+//                      which by the module's own redundancy argument is the same
+//                      moment the credit pool empties; what the phase establishes
+//                      is the consequence, that no class of the set was taken.)
 //   4. cancel          a flush mid-operation returns everything exactly once; a
 //                      later request succeeds with a new lease id; the old id is
 //                      rejected as stale.
@@ -256,6 +262,13 @@ class ShadowLease {
     o.rr_next = rr_;
 
     std::vector<bool> live_now = live_;
+    // How the current epoch ends is also a *working* value: the release is
+    // applied before the cancel is classified, so a cancel that arrives in the
+    // same cycle as the release sees "released", not whatever the record's
+    // previous epoch ended with. Reading the stale array here made the shadow
+    // report `can_repeat` where the contract (and the DUT) say
+    // `can_after_release` -- the randomised phase found it.
+    std::vector<bool> end_now = cancelled_;
     std::vector<std::vector<uint8_t>> taken = occ_;
 
     // ---- release
@@ -268,12 +281,13 @@ class ShadowLease {
       } else if ((id.gen & gen_mask_) != gen_[id.row]) {
         o.rel_stale = 1;  // a generation never issued, or a superseded epoch
       } else if (!live_now[id.row]) {
-        if (cancelled_[id.row]) o.rel_after_cancel = 1;
+        if (end_now[id.row]) o.rel_after_cancel = 1;
         else o.rel_repeat = 1;
       } else {
         o.rel_ok = 1;
         o.rel_row = id.row;
         live_now[id.row] = false;
+        end_now[id.row] = false;   // the epoch ends *released*, for this cycle's cancel
         ReleaseSlots(&taken, id.row);
       }
     }
@@ -288,12 +302,13 @@ class ShadowLease {
       } else if ((id.gen & gen_mask_) != gen_[id.row]) {
         o.can_stale = 1;
       } else if (!live_now[id.row]) {
-        if (cancelled_[id.row]) o.can_repeat = 1;
+        if (end_now[id.row]) o.can_repeat = 1;
         else o.can_after_release = 1;
       } else {
         o.can_ok = 1;
         o.can_row = id.row;
         live_now[id.row] = false;
+        end_now[id.row] = true;    // the epoch ends *cancelled*
         ReleaseSlots(&taken, id.row);
       }
     }
@@ -630,6 +645,20 @@ class Harness {
       return true;
     }
     bool operator!=(const Snap& o) const { return !(*this == o); }
+    // The ledger projection: everything except the three arrays the module
+    // deliberately does not reset. `o_lease_gen`, `o_lease_mask` and
+    // `o_lease_slot` are meaningful only where `used`/`live` say they are, so
+    // the *cold* state and two runs against it are compared through this
+    // projection. It loses nothing observable: occupancy is derived from the
+    // live leases' reservations, so a divergence in a live lease's slot still
+    // shows up, through `o_occ`.
+    Snap LedgerOnly() const {
+      Snap s = *this;
+      s.gen = 0;
+      s.mask = 0;
+      s.slot = 0;
+      return s;
+    }
     // The ledger part: what the unit *holds*. The rejection counters are reports
     // about a terminal event, and a rejected event is expected to move the one it
     // belongs to -- that is the whole point of counting it -- so they are
@@ -718,7 +747,8 @@ class Harness {
       const LeaseId got{Field(raw, g_.gen_w, g_.idx_w), Field(raw, 0, g_.gen_w)};
       if (got != e.id[i]) {
         Fail(where, "stimulus " + s.str() + ": grant_id[" + Dec(i) + "] is " + got.str() +
-                        ", the contract says " + e.id[i].str());
+                        ", the contract says " + e.id[i].str() + " (DUT state " +
+                        Snapshot().str() + ")");
       }
       for (uint32_t p = 0; p < g_.pools; p++) {
         const uint32_t got_slot = Field(dut_->grant_slot, (i * g_.pools + p) * g_.slot_w, g_.slot_w);
@@ -946,7 +976,7 @@ void PhaseResetState(Harness* h, mosaic::Reporter* reporter) {
 
   h->Reset(4);
   const Harness::Snap after = h->Snapshot();
-  Require(after == cold, "reset-state",
+  Require(after.LedgerOnly() == cold.LedgerOnly(), "reset-state",
           "a reset taken while leases were live did not restore the cold ledger:\n  cold:  " +
               cold.str() + "\n  after: " + after.str());
 
@@ -957,7 +987,10 @@ void PhaseResetState(Harness* h, mosaic::Reporter* reporter) {
     ShadowLease::Out o2 = h->Cycle(TermOnly(g, true, id));
     Require(o2.rel_stale != 0, "reset-state",
             "a pre-reset lease id " + id.str() + " was not rejected after the reset");
-    RequireStateUnchanged(h, cold, "reset-state", "a pre-reset lease id after a reset");
+    // `after`, not `cold`: the three unreset arrays were written by the grants
+    // that happened between the two snapshots, so only the state as it stands
+    // now is a valid baseline for "this event moved nothing".
+    RequireStateUnchanged(h, after, "reset-state", "a pre-reset lease id after a reset");
     ShadowLease::Out o3 = h->Cycle(TermOnly(g, false, id));
     Require(o3.can_stale != 0, "reset-state",
             "a pre-reset lease id " + id.str() + " was not rejected as a cancel after the reset");
@@ -1322,7 +1355,7 @@ void PhaseRefusalReplay(Harness* h, mosaic::Reporter* reporter) {
   // From the refusal onward the two runs must be identical, cycle for cycle.
   Require(snaps_a.size() == snaps_b.size(), "refusal", "the replay scripts differ in length");
   for (uint32_t i = kRefused; i < script.size(); i++) {
-    if (snaps_a[i] != snaps_b[i]) {
+    if (snaps_a[i].LedgerOnly() != snaps_b[i].LedgerOnly()) {
       Fail("refusal",
            "cycle " + Dec(i) + " differs between the run that offered a refused request at cycle " +
                Dec(kRefused) + " and the run that never offered it:\n  offered: " +
@@ -1414,7 +1447,7 @@ LeaseId RandomTarget(mosaic::Rng* rng, ShadowLease* sh, const Geom& g) {
   return LeaseId{g.leases + rng->Below(4), rng->Below(1u << g.gen_w)};
 }
 
-void PhaseRandom(Harness* h, mosaic::Reporter* reporter, uint32_t seed, uint32_t cycles) {
+Coverage PhaseRandom(Harness* h, mosaic::Reporter* reporter, uint32_t seed, uint32_t cycles) {
   const Geom& g = h->shadow()->geom();
   mosaic::Rng rng(seed);
   Coverage cov;
@@ -1484,6 +1517,7 @@ void PhaseRandom(Harness* h, mosaic::Reporter* reporter, uint32_t seed, uint32_t
                       Dec(cov.repeat) + " repeats, " + Dec(cov.crossed) + " cross-path events, " +
                       Dec(cov.conflicts) + " contended cycles and " + Dec(cov.same_cycle) +
                       " same-cycle terminal+grant cycles over " + Dec(cycles) + " cycles");
+  return cov;
 }
 
 }  // namespace
@@ -1529,8 +1563,13 @@ int main(int argc, char** argv) {
   g.size[POOL_MD] = dut.o_size_md;
   g.size[POOL_WB] = dut.o_size_wb;
   g.size[POOL_NET] = dut.o_size_net;
+  // The two derived widths are computed here, before the harness and the shadow
+  // take their copies of the geometry: a copy made first would carry zeros, and
+  // a zero index width silently decodes every lease id as record 0 -- which is
+  // exactly the bug this ordering fix was found by.
   g.row_w = 0;
-  g.idx_w = 0;
+  for (uint32_t r = 1; r < g.leases; r <<= 1) g.row_w++;
+  g.idx_w = g.lease_w - g.gen_w;
 
   Harness harness(&dut, &clk, options.max_cycles, g);
   ShadowLease shadow(g);
@@ -1566,31 +1605,12 @@ int main(int argc, char** argv) {
             "alias immediately");
     Require(g.leases >= 2 && g.req_count >= 2, "geometry",
             "the ledger or the port count is too small to test contention");
-    g.row_w = 0;
-    for (uint32_t r = 1; r < g.leases; r <<= 1) g.row_w++;
-    g.idx_w = g.lease_w - g.gen_w;
     Require(g.idx_w > g.row_w, "geometry",
             "the lease id's index field has no spare encoding, so the out-of-range rejection this "
             "case exercises would be unreachable");
 
     for (uint32_t p = 0; p < g.pools; p++) {
       Require(g.size[p] >= 1, "geometry", "a pool has no slots");
-    }
-
-    // TEMPORARY raw probe (removed before the report).
-    {
-      harness.Reset(4);
-      for (uint32_t mask = 1; mask < 16; mask++) {
-        dut.clk = 0; dut.rst = 0; dut.req_valid = 1; dut.req_mask = mask;
-        dut.rel_valid = 0; dut.can_valid = 0; dut.eval();
-        std::printf("RAW mask=0x%x ready=0x%x gid=0x%x gslot=0x%x occ=0x%x live=0x%x rr=%u dbg0=0x%x dbg1=0x%x\n",
-                    mask, (uint32_t)dut.req_ready, (uint32_t)dut.grant_id,
-                    (uint32_t)dut.grant_slot, (uint32_t)dut.o_occ, (uint32_t)dut.o_lease_live,
-                    (uint32_t)dut.o_rr, (uint32_t)dut.o_dbg0, (uint32_t)dut.o_dbg1);
-      }
-      std::printf("RAW geometry req=%u pools=%u leases=%u max=%u slot_w=%u gen_w=%u lease_w=%u sizes=%u,%u,%u,%u\n",
-                  g.req_count, g.pools, g.leases, g.max_sz, g.slot_w, g.gen_w, g.lease_w,
-                  g.size[0], g.size[1], g.size[2], g.size[3]);
     }
 
     auto fresh = [&]() {
@@ -1636,12 +1656,22 @@ int main(int argc, char** argv) {
 
     fresh();
     harness.Phase("random");
-    PhaseRandom(&harness, &reporter, static_cast<uint32_t>(options.seed), 4000);
+    const Coverage cov =
+        PhaseRandom(&harness, &reporter, static_cast<uint32_t>(options.seed), 4000);
 
+    // The coverage numbers are in the recorded result, not only in an assertion
+    // that would have to fail for anyone to see them.
     detail = "lease contract holds: " + std::to_string(harness.comparisons()) +
              " shadow comparisons over " + std::to_string(harness.cycles()) + " cycles, " +
              std::to_string(g.req_count) + " ports / " + std::to_string(g.leases) +
-             " records, seed " + std::to_string(options.seed);
+             " records, seed " + std::to_string(options.seed) + "; random: " +
+             std::to_string(cov.grants) + " grants, " + std::to_string(cov.releases) +
+             " releases, " + std::to_string(cov.cancels) + " cancels, " +
+             std::to_string(cov.stale) + " stale ids, " + std::to_string(cov.repeat) +
+             " repeats, " + std::to_string(cov.crossed) + " cross-path, " +
+             std::to_string(cov.conflicts) + " contended cycles, " +
+             std::to_string(cov.same_cycle) + " same-cycle terminal+grant, " +
+             std::to_string(cov.full_house) + " all-pools-full cycles";
   } catch (const Failure& f) {
     reporter.Mismatch(f.what, "contract holds", "contract violated");
     passed = false;

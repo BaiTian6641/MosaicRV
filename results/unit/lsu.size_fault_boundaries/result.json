@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "case": "lsu.size_fault_boundaries",
+  "verdict": "PASS",
+  "detail": "lsu endpoint contract holds: 71478 checks over 4118 cycles; 336 loads, 181 stores, 332 memory transactions, 185 misaligned traps, 50 access faults, 517 responses; seed 1",
+  "seed": 1,
+  "max_cycles": 200000,
+  "checks": 1,
+  "failures": 0,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-01T19:17:42Z",
+  "first_mismatch": ""
+}

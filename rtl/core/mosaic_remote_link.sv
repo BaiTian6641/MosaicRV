@@ -129,6 +129,14 @@
 //   * Back-pressure from the far end is one gate deep ((`!full || ready`) from
 //     `rem_req_ready` to `req_ready`), not a ripple through the pipe.
 //
+// One consequence is worth stating because it is a bound a caller can hit: the
+// request pipeline holds `LATENCY` items, so while the far end accepts nothing
+// the link takes at most `LATENCY` credits, not `ENTRIES`. The credit table
+// binds only while the far end is draining. Both numbers are finite, both are
+// observable (`o_outstanding` against `o_entry_valid`, and the request pipeline
+// against `o_req_pipe_valid`), and the back-pressure phase of the case asserts
+// each of them at its own limit rather than assuming one of them is the limit.
+//
 // `MOSAIC_REMOTE_LATENCY` is a real delay in the hardware and not a documented
 // intention: the pipelines are `LATENCY` storage words each, and
 // `MOSAIC_REMOTE_LINK_MUTANT_ONE_CYCLE` forces them to one stage so the

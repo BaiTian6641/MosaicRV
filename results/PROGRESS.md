@@ -1152,3 +1152,177 @@ Stage 0 remains 11 of 239 work packages. In flight at the time of writing: the r
 recovery repairs, two-wide rename, the MUL/DIV report, the issue-queue meta extension and
 its permanent mutant, the lease allocator, the result FIFO, the remote link, the ROB
 identity-width correction, the LSU testbench, and the first integrated core.
+
+---
+
+## 2026-10-01 — two gate defects fixed, both of the same shape
+
+**A capability could be advertised with no verification behind it.** `check_coverage.py`
+collected each capability's `verify_tasks` and then never consulted them:
+`advertisable = all(impl_tasks delivered)`. `config_check.advertised_capabilities()` — the
+function that actually decides which bits go into the generated `misa` — had the same
+rule. So the moment I-019 and I-020 were recorded, `Zicsr` and `Zihpm` became advertisable
+while V-008/V-012 were untouched: the manifest would have claimed an extension whose
+independent cases do not exist. Both now require **both** halves (implementation *and*
+verification) and print what each capability is waiting on
+(`python3 tools/check_coverage.py --verbose`). No capability is advertisable today, which
+is the correct answer: nothing in this tree has an independent positive/negative case yet
+beyond the packages' own unit cases, and the ladder's verify tasks are the plan's own
+statement of what that evidence must be. A capability that names *no* verify task is also
+not advertisable — that is a gap in the ladder, not a licence to publish.
+
+**`make lint-cpp` failed with an error that was about ordering, not code.** Each C++
+driver includes the Verilator-generated header for its own testbench, and that header
+exists only after the case has been built; on a partially-built tree the lint printed
+"fatal error: 'Vmosaic_decoder_tb.h' file not found", which reads like a defect in the
+C++. The target now skips such a file, *names* it, and prints the count — and `make test`
+runs `unit` before `lint-cpp`, so in the gate nothing is skipped. Current output on a
+tree with one unbuilt case: `lint-cpp: 23 file(s) clean` plus
+`SKIPPED (run 'make unit' first): sim/unit/tb_fifo.cpp`.
+
+Both fixes are the same failure mode the project keeps meeting: a checker that reads part
+of its input and reports success, and a failure message that points at the wrong thing. The
+first is now impossible to have silently, because the skipped and the waiting-on lists are
+printed rather than implied.
+
+State at this point: `make check` green, Verilator lint 25/25 clean, `slang-tidy` 0 errors,
+`lint-cpp` clean, manifest generated with 25 sources, 33 registered cases. Ten lanes are
+running (retire and recovery repairs, two-wide rename, MUL/DIV, the IQ meta extension and
+its eight-mutant sweep, lease allocator, remote link, the ROB identity-width correction,
+the LSU testbench, the first integrated core, and the mechanical mutant re-verification of
+the three packages recorded above).
+
+---
+
+## 2026-10-01 — case sweep: 22 pass, 11 fail, and every failure is named
+
+`python3 tools/run_unit.py --profile p0 --all`, 33 registered cases:
+
+| state | cases |
+|---|---|
+| PASS (22) | alu, bringup-vs-reference, commit.head_block_and_dual, completion.fu_collision, csr, decode, fetch, fifo, four harness cases, interrupt, iq, muldiv, predictor, prf, ram, remote.kill_with_delayed_response, rename x2, retire.head_block_and_dual, rob |
+| FAIL — module not written yet (7) | arbiter, bypass, fabric.fixed_two_cluster, lsu (testbench), owner_fsm (I-031), steering, wb — all "lists missing sources", i.e. lanes mid-flight, not defects |
+| FAIL — real (3) | recovery x2 (free-list-exact phase, cycle 420: the checkpoint bundle's epoch/alloc_ptr diverge from the model's while a commit is in flight), lease.conflict_and_cancel |
+
+The two Stage-1 blockers are now green: **`retire.head_block_and_dual` and
+`commit.head_block_and_dual` pass**, and the two-wide rename case passes. So the
+Stage-1 list is down to the recovery lane.
+
+**Independent mutant re-verification (results/reports/mutant-reverification-2026-10-01.md).**
+A separate lane re-ran every mutant in the three packages recorded above: **20 of 20 exit 1**
+with the exact first-mismatch cycle, signal and values their own reports claimed, 26 builds,
+0 build failures, 0 mutants exiting 0, and the base case re-run after each campaign is
+byte-identical to before it. The interrupt package's model hash (`b54cf9434d46c64e…`) was
+reproduced independently. That is the first time in this project that another lane's mutation
+evidence has been re-derived end to end rather than taken on report, and it is the standard
+the remaining packages' reports should be held to.
+
+---
+
+## 2026-10-01 — the decoder traps five mandatory RV64I instructions
+
+Found by the MUL/DIV lane while extending the decoder for the M word forms, and confirmed
+here by reading both sides:
+
+* `rtl/core/mosaic_decoder.sv` decodes OP-32 (`0111011`) as the M word forms when
+  `funct7 == 0000001`, and as **illegal** for every other funct7 — unless a mutant flag is
+  defined.
+* `rtl/core/mosaic_pkg.sv` states OP-32 is "on RV64 only mulw divw divuw remw remuw".
+* `sim/unit/tb_decoder.cpp` asserts the same, calling `addw subw sllw srlw sraw` "the
+  RV32-only I word forms ... reserved on RV64".
+
+RV64I includes ADDW, SUBW, SLLW, SRLW and SRAW — opcode `0111011`, funct7 `0000000` and
+`0100000`, funct3 `000`/`001`/`101`. They are not reserved and they are not "RV32 forms";
+on RV32 they do not exist at all. So the shipping build traps five mandatory instructions
+as illegal, and the testbench *asserts that behaviour as correct*, which is why the case
+has been green since I-010 and why nothing else noticed: the corpus never emits them.
+
+This is the third instance of the same failure shape in this project — a check that
+encodes an assumption instead of the specification (the testbench that re-derived the
+ROB's own width expression, the capability gate that collected `verify_tasks` and never
+read them, and now a reserved-encoding table built from the wrong ISA width). The fix is
+assigned to the lane that found it: decode the five forms, correct the package comment and
+the testbench model, **delete the now-vacuous `MutRv32Word` mutant and add one that
+restores the defect** so the case can catch it by name, re-run decode/muldiv/bringup, and
+append a correction to I-010's report rather than rewriting it.
+
+Also recorded, because it will be asked about: the two retire cases currently do not
+*link* — `mosaic_rename` gained two outputs (`squash_not_committed`, `ckpt_committed`) for
+the checkpoint precondition enforcement, and the retire wrapper does not connect them, so
+Verilator stops with PINMISSING. The rename lane has been authorised to make that minimal
+tie-off. Until it lands, the I-017 PASS that was observed earlier came from a binary built
+before those ports existed, and it is therefore **not** recorded as delivered yet: it will
+be re-run once the tree builds.
+
+---
+
+## 2026-10-01 — handoff: what the ladder says the next wave is
+
+Sixteen packages are recorded as delivered. `python3 tools/check_coverage.py --verbose` now
+computes, from the plan itself, exactly what each capability still waits on — and it says
+something worth acting on:
+
+| capability | waiting on | reading |
+|---|---|---|
+| RV64I (`I`) | I-008, I-011, I-013, I-021, **V-008..V-012** | the four implementation tasks all have green cases already (their mutant evidence is being independently re-derived in round 2 of `results/reports/mutant-reverification-2026-10-01.md`); the **five V tasks are the whole remaining gap** |
+| RV64M (`M`) | **V-008, V-011** | I-012 is recorded; two V tasks stand between it and an advertisable M |
+| Zicsr | **V-008, V-012** | same two V tasks |
+| Zihpm | **V-012** | one V task |
+| Zifencei | I-037, V-014 | I-037 (FENCE/FENCE.I) is Stage 3 |
+| A / Zaamo / Zalrsc | I-039, I-040, V-016, V-020 | Stage 3+ |
+
+So the cheapest real progress towards an *advertisable* p0 profile is not more RTL: it is
+the V-series harness work, and in particular **V-008 (freeze the canonical architectural
+event interface)**, which V-009/V-010/V-011/V-012 and the whole differential path build on.
+Much of its machinery already exists and is exercised: `sim/common/event_tap.*`, the ELF
+loader, the cycle-limit and signature protocol in the bring-up harness, and
+`tools/host_oracle.py`. The remaining work is to *freeze* the interface (fields, semantics,
+what is architectural versus observed) and calibrate the harness against it, then re-run
+the corpus on the frozen definition. That is a documentation-plus-calibration package with
+a re-run as its evidence, not a new RTL design.
+
+Order for the next wave, by dependency and cost:
+
+1. **V-008 → V-010 → V-011 → V-012** (event interface, clock/sampling calibration, ELF and
+   memory bounds, signature and termination). These unblock `I`, `M`, `Zicsr`, `Zihpm`.
+2. **V-009** (reset and initial state replayable) and **V-013/V-014/V-017** once their I-side
+   counterparts land.
+3. The recovery lane's completion, then the **rename/recovery cutover** (delete recovery's
+   duplicated maps and journal, drive rename's `ckpt_valid`/`squash`, enforce the
+   "squash only at the ROB head" precondition in hardware) — this is the integration task
+   that turns two half-machines into one.
+4. The integrated core (I-023) once the fabric lanes land, then the memory path
+   (I-033 testbench → I-034 → I-035) so real programs can run, then the corpus differential
+   on the OoO core with the frozen event interface.
+5. **I-092** (the RVA23 mandatory matrix) before any RVA23 claim; it depends only on I-001
+   and is not started. Everything in §3.2.1 of the implementation plan hangs off it.
+
+Nothing in this list changes the plan's gates; it is the plan's own dependency graph read
+in the order that unblocks the most capabilities per unit of work.
+
+---
+
+## 2026-10-01 — I-024 and I-028 recorded; an unexplained helper behaviour reported rather than buried
+
+Both fabric leaves are delivered and independently re-verified here from clean builds:
+
+* **I-024 (resource leases)** — `lease.conflict_and_cancel` PASS, six mutants each failing
+  with a named first failure and a delta. The seventh mutant is reported as a **redundancy
+  probe that passes identically and is therefore not evidence**; the lane then wrote the
+  falsifiable version of the same defect (a dropped FU class) and that one is caught. That is
+  the correct handling of a mutant that cannot fail, and it is the fourth time this project
+  has met that situation — the first three were reported as gaps, this one was replaced with a
+  control that can actually fail.
+* **I-028 (remote link)** — `remote.kill_with_delayed_response` PASS with six mutants failing,
+  and the header states the recycling rule the card demands: a killed request's entry may be
+  reused, so a late response is matched against the pairing table and dropped as stale and
+  counted, never delivered into the new occupant.
+
+**One thing I am recording because it is not diagnosed.** The lease lane reports that a
+two-argument helper (`lowest_free(occupied, width)`) returned "not found" for an empty pool at
+runtime, while reading the generated C++ showed the expected behaviour; it replaced the helper
+with a one-argument scan and explicitly does **not** claim a root cause. That is the honest
+form of the report, and the reason it matters is that "the tool generated something other than
+what the source says" is a claim about Verilator, not about this design — if it recurs, it
+needs a minimal reproduction before anything else is built on top of the observation. No
+defect is currently open from it: the replacement is tested and the module is green.

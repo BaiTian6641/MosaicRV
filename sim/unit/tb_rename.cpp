@@ -248,6 +248,8 @@ struct Outputs {
 
   bool squash_accepted = false;
   bool squash_underflow = false;
+  bool squash_not_committed = false;
+  bool ckpt_committed = false;
   bool journal_overflow = false;
 
   uint32_t free_count = 0;
@@ -276,6 +278,9 @@ class ShadowRename {
 
   uint32_t gen_mask() const { return gen_mask_; }
   uint32_t journal_length() const { return static_cast<uint32_t>(j_len_); }
+  // Tags this model returned to the free set over the last edge by events that are
+  // not journalled (an explicit release, or a commit releasing what it supersedes).
+  uint32_t last_unjournalled_returns() const { return last_returns_; }
 
 
   // The documented cold state: arch reg i -> tag i at generation 0, those tags
@@ -299,7 +304,9 @@ class ShadowRename {
     undo_.clear();
     j_len_ = 0;
     ckpt_seen_ = false;
+    ckpt_boundary_ = false;
     j_overflow_ = false;
+    last_returns_ = 0;
   }
 
   uint32_t entries() const { return entries_; }
@@ -442,11 +449,31 @@ class ShadowRename {
     o.commit2_x0_dropped = s.commit2_valid && (s.commit2_rd == 0);
     o.commit2_accepted = s.commit2_valid && (s.commit2_rd != 0);
 
+    // A checkpoint is a usable recovery point only where the speculative and
+    // committed maps agree. `ckpt_committed` reports that test every cycle, and a
+    // squash to a checkpoint that failed it is refused: the restore is
+    // `spec := cmt`, so accepting it would discard the mappings of instructions
+    // older than the branch and leave their tags allocated but unreachable. The
+    // two refusals are separate reports because the caller's fix differs -- take a
+    // checkpoint, versus drain and take one.
+    o.ckpt_committed = SpecEqCmt();
     o.squash_underflow = s.squash && !ckpt_seen_;
-    o.squash_accepted = s.squash && ckpt_seen_;
+    o.squash_not_committed = s.squash && ckpt_seen_ && !ckpt_boundary_;
+    o.squash_accepted = s.squash && ckpt_seen_ && ckpt_boundary_;
     o.journal_overflow = j_overflow_;
     o.free_count = free_count();
     return o;
+  }
+
+  // The documented boundary test: the speculative map equals the committed map for
+  // every architectural register. An instruction that has allocated a tag and not
+  // committed has a speculative mapping that differs from the committed one for
+  // its rd, so equality means none is outstanding.
+  bool SpecEqCmt() const {
+    for (uint32_t a = 0; a < arch_regs_; a++) {
+      if (!(spec_[a] == cmt_[a])) return false;
+    }
+    return true;
   }
 
   // ------------------------------------------------------------------ update
@@ -466,27 +493,29 @@ class ShadowRename {
     // names the rule it implements.
     std::vector<bool> free_next = free_;
 
-    // 1. A checkpoint starts a new undo window and marks that one exists. Entries
-    //    older than it can never be undone by a squash to it, so they are dropped
-    //    rather than kept: that is what makes the window's bound "allocations since
-    //    the last checkpoint", which is the bound the register-file size justifies.
+    // Counted here so the harness can check that the free set is exactly the
+    // checkpoint baseline plus the un-journalled returns minus the window depth.
+    last_returns_ = 0;
+
+    // 1. A checkpoint empties the window and marks that one exists. The recovery
+    //    point is the state at the *start* of this cycle, so the window is emptied
+    //    first and this cycle's own allocations are pushed onto it below: a branch
+    //    dispatched as lane 1 of a group whose lane 0 allocates in the same cycle
+    //    is the ordinary case, and its allocation has to be undoable too. The
+    //    boundary test is evaluated on the pre-edge maps, for the same reason.
     //    A squash in the same cycle does not take a new checkpoint -- it is undoing
     //    to the one that already exists.
     if (s.ckpt_valid && !s.squash) {
       undo_.clear();
       j_len_ = 0;
       ckpt_seen_ = true;
+      ckpt_boundary_ = SpecEqCmt();
     }
 
     // 2. One journal entry per allocation, holding the state that allocation
     //    replaced. Allocation is refused in a squash cycle, so the push and the
     //    undo below can never both happen in one cycle.
-    // A checkpoint in the same cycle starts a new window, so an allocation in that
-    // cycle is *not* journalled: it is already younger than the checkpoint, and the
-    // checkpoint is what a later squash will undo to. Journalling it as well would
-    // make the window one entry longer than the hardware's and leave a tag
-    // allocated after a squash that the hardware had correctly returned.
-    if (o.alloc_new_valid && !(s.ckpt_valid && !s.squash)) {
+    if (o.alloc_new_valid) {
       if (j_len_ >= journal_) {
         // More allocations than the journal can hold. The contract is that this is
         // *reported*, so the shadow records it and the test checks the report.
@@ -499,7 +528,7 @@ class ShadowRename {
     // Lane 1's entry follows lane 0's, so the window stays in allocation order and
     // the undo (which walks it oldest first) can invert both allocations. It is
     // pushed only if lane 0's entry fit, which is the same rule the RTL applies.
-    if (o.alloc2_new_valid && !(s.ckpt_valid && !s.squash)) {
+    if (o.alloc2_new_valid) {
       if (j_len_ >= journal_) {
         j_overflow_ = true;
       } else {
@@ -528,8 +557,13 @@ class ShadowRename {
     }
 
     // 4. An explicit release puts a tag back. The generation does not move: it
-    //    counts allocations, not releases.
-    if (o.free_accepted) free_next[s.free_.tag] = true;
+    //    counts allocations, not releases. It is *not* journalled: a release is
+    //    caused by a commit (permanent, older than the checkpoint) and a squash
+    //    must not resurrect it, so it counts as an un-journalled return.
+    if (o.free_accepted) {
+      free_next[s.free_.tag] = true;
+      last_returns_++;
+    }
 
     // 5. A commit releases the mapping it supersedes, if that is a different
     //    identity from the one it installs. A commit is permanent, so it is not
@@ -543,9 +577,11 @@ class ShadowRename {
     if (o.commit_accepted) cmt_after_lane0[s.commit_rd] = s.commit;
     if (o.commit_accepted && cmt_[s.commit_rd] != s.commit) {
       free_next[cmt_[s.commit_rd].tag] = true;
+      last_returns_++;
     }
     if (o.commit2_accepted && cmt_after_lane0[s.commit2_rd] != s.commit2) {
       free_next[cmt_after_lane0[s.commit2_rd].tag] = true;
+      last_returns_++;
     }
 
     // 6. A squash undoes every allocation made after the checkpoint, oldest entry
@@ -638,7 +674,16 @@ class ShadowRename {
   std::vector<UndoEntry> undo_;
   size_t j_len_ = 0;
   bool ckpt_seen_ = false;
+  // Whether the checkpoint that is the current recovery point was taken where
+  // the speculative and committed maps agreed -- the only place this module's
+  // `spec := cmt` restore is exact.
+  bool ckpt_boundary_ = false;
   bool j_overflow_ = false;
+  // Tags returned to the free set this cycle by events that are *not*
+  // journalled: an explicit release, or a commit releasing the mapping it
+  // supersedes. The harness uses it to check that the free set is exactly the
+  // checkpoint baseline plus these returns minus the window depth.
+  uint32_t last_returns_ = 0;
 };
 
 // ------------------------------------------------------------------ the harness
@@ -666,6 +711,23 @@ class Harness {
       Cycle(Stim{}, /*rst=*/true);
     }
     if (shadow_ != nullptr) shadow_->Reset();
+    track_window_ = false;
+    track_base_free_ = 0;
+    track_returns_ = 0;
+  }
+
+  // Track the recovery window for the conservation check in CheckInvariants: a
+  // checkpoint makes the current free set its baseline, and every un-journalled
+  // return since then is counted. Called after the edge, so the baseline is the
+  // pre-edge free count and this cycle's own returns are part of "since the
+  // checkpoint".
+  void NoteWindow(const Stim& s, uint32_t pre_free) {
+    if (s.ckpt_valid && !s.squash) {
+      track_window_ = true;
+      track_base_free_ = pre_free;
+      track_returns_ = 0;
+    }
+    if (track_window_) track_returns_ += shadow_->last_unjournalled_returns();
   }
 
   // One full clock period, in three steps that have to happen in this order:
@@ -720,6 +782,9 @@ class Harness {
     dut_->ckpt_valid = s.ckpt_valid ? 1 : 0;
     dut_->squash = s.squash ? 1 : 0;
     dut_->eval();
+    // The free count at the *start* of this cycle, which is what a checkpoint
+    // taken now makes its recovery point.
+    const uint32_t pre_free = dut_->free_count;
 
     const std::string where = phase_ + ": cycle " + Dec(clk_->cycle());
 
@@ -737,6 +802,7 @@ class Harness {
 
     if (!rst) {
       CompareState(where);
+      NoteWindow(s, pre_free);
       CheckInvariants(where);
       ++comparisons_;
     }
@@ -905,6 +971,8 @@ class Harness {
     observed_.commit2_x0_dropped = dut_->commit2_x0_dropped != 0;
     observed_.squash_accepted = dut_->squash_accepted != 0;
     observed_.squash_underflow = dut_->squash_underflow != 0;
+    observed_.squash_not_committed = dut_->squash_not_committed != 0;
+    observed_.ckpt_committed = dut_->ckpt_committed != 0;
     observed_.journal_overflow = dut_->journal_overflow != 0;
     observed_.free_count = dut_->free_count;
     (void)s;
@@ -1009,7 +1077,15 @@ class Harness {
 
     need(dut_->squash_accepted, e.squash_accepted, "squash_accepted");
     need(dut_->squash_underflow, e.squash_underflow, "squash_underflow");
+    need(dut_->squash_not_committed, e.squash_not_committed, "squash_not_committed");
+    need(dut_->ckpt_committed, e.ckpt_committed, "ckpt_committed");
     need(dut_->journal_overflow, e.journal_overflow, "journal_overflow");
+
+    // The two squash refusals are distinct reasons and must stay distinguishable:
+    // "take a checkpoint first" and "drain and take a usable one" need different
+    // responses from the caller.
+    Require(!(e.squash_underflow && e.squash_not_committed), where,
+            "a refused squash reported both squash_underflow and squash_not_committed" + stim);
 
     Require(dut_->free_count == e.free_count, where,
             "free_count: expected " + Dec(e.free_count) + ", got " +
@@ -1170,6 +1246,27 @@ class Harness {
     Require(!dut_->journal_overflow, where,
             "the DUT reported journal_overflow: the undo window was exceeded, so a squash "
             "would restore less than the truth");
+
+    // Conservation across the current recovery window. Every tag that has left the
+    // free set since the checkpoint is a journalled allocation -- the window depth
+    // -- and every tag that has come back is either the undo or an un-journalled
+    // release (a commit's supersede, or an explicit release). The identity below
+    // therefore has to hold on *every* cycle, not just after a squash, which is
+    // what makes it the arithmetic form of "no tag is leaked, none is handed out
+    // twice, and none is left neither free nor owned". It is the check the
+    // checkpoint-cycle rule used to break: a tag allocated in the checkpoint cycle
+    // but not journalled leaves the free set short of the identity by exactly one
+    // per occurrence.
+    if (track_window_) {
+      const int64_t expected = static_cast<int64_t>(track_base_free_) +
+                               static_cast<int64_t>(track_returns_) -
+                               static_cast<int64_t>(dut_->dbg_j_len);
+      Require(static_cast<int64_t>(dut_->free_count) == expected, where,
+              "free-set conservation over the recovery window failed: free_count is " +
+                  Dec(dut_->free_count) + ", expected baseline " + Dec(track_base_free_) +
+                  " + un-journalled returns " + Dec(track_returns_) + " - window depth " +
+                  Dec(dut_->dbg_j_len) + " = " + Dec(static_cast<uint64_t>(expected)));
+    }
   }
 
   template <typename T>
@@ -1180,6 +1277,13 @@ class Harness {
     }
     return static_cast<uint32_t>(n);
   }
+
+  // Has a checkpoint been taken in this phase, and if so: the free count at the
+  // start of the checkpoint cycle, and how many tags have come back since by
+  // events that are not journalled. See CheckInvariants.
+  bool     track_window_ = false;
+  uint32_t track_base_free_ = 0;
+  uint32_t track_returns_ = 0;
 
   Vmosaic_rename_tb* dut_;
   mosaic::ClockDriver* clk_;
@@ -2107,6 +2211,18 @@ void PhaseExhaustion(Harness* h, mosaic::Reporter* reporter, uint32_t entries,
 }
 
 // Phase 8: a random programme of every request kind.
+//
+// The recovery discipline is the module's, not the campaign's invention. The
+// module reports `ckpt_committed` (the speculative map equals the committed map)
+// and refuses a squash to a checkpoint that was not at such a boundary, so the
+// campaign keeps the register-writing work it has dispatched in a per-register
+// FIFO, retires the *head* of that FIFO -- an in-order retire, which is what a
+// real retire unit does and what makes the committed map move forwards -- and
+// takes a checkpoint only when the FIFO is empty, i.e. when every dispatched
+// writer has committed. Committing a mapping that was allocated after the current
+// checkpoint would install a tag the undo is about to hand back, so the campaign
+// never does it: the window is nothing but allocations, and a squash discards all
+// of them.
 void PhaseRandom(Harness* h, mosaic::Reporter* reporter, uint32_t entries, uint32_t arch_regs,
                  uint32_t seed, uint32_t cycles) {
   mosaic::Rng rng(seed);
@@ -2116,21 +2232,42 @@ void PhaseRandom(Harness* h, mosaic::Reporter* reporter, uint32_t entries, uint3
   // generation, a free tag, an out-of-range tag. A random campaign that only ever
   // aims valid requests cannot find a stale-generation bug.
   std::vector<Dest> handed;
+  // Per-register FIFO of allocated-but-uncommitted destinations.
+  std::vector<std::vector<Dest>> pend(arch_regs);
+  bool in_window = false;
   uint32_t accepted_allocs = 0;
   uint32_t accepted_wbs = 0;
   uint32_t refused_stale = 0;
   uint32_t exhausted = 0;
   uint32_t squashes = 0;
+  uint32_t windows = 0;
   uint32_t out_of_range_rejected = 0;
 
   for (uint32_t i = 0; i < cycles; i++) {
     Stim s;
 
-    // A checkpoint every so often, so squashes have something to restore to and
-    // the journal is exercised rather than merely allocated.
-    if (rng.Chance(4)) s.ckpt_valid = true;
-    if (rng.Chance(6)) s.squash = true;
-    if (rng.Chance(6)) s.alloc_req = true;
+    bool drained = true;
+    for (uint32_t a = 1; a < arch_regs; a++) {
+      if (!pend[a].empty()) {
+        drained = false;
+        break;
+      }
+    }
+
+    // A checkpoint only where the module can accept it as a recovery point, and a
+    // squash only while a window is open. The two are mutually exclusive, so a
+    // squash cycle retires nothing.
+    if (!in_window && drained && rng.Chance(12)) {
+      s.ckpt_valid = true;
+      in_window = true;
+      windows++;
+    }
+    if (in_window && !s.ckpt_valid && rng.Chance(18)) {
+      s.squash = true;
+      in_window = false;
+    }
+
+    if (!s.squash && rng.Chance(6)) s.alloc_req = true;
     if (s.alloc_req) s.alloc_rd = rng.Below(arch_regs);
     s.rs1_addr = rng.Below(arch_regs);
     s.rs2_addr = rng.Below(arch_regs);
@@ -2168,11 +2305,33 @@ void PhaseRandom(Harness* h, mosaic::Reporter* reporter, uint32_t entries, uint3
       }
     }
 
-    if (rng.Chance(15)) {
-      s.commit_valid = true;
-      s.commit_rd = rng.Below(arch_regs);
-      const std::vector<Dest>& cmt = h->shadow_cmt_map();
-      s.commit = cmt[s.commit_rd];
+    // Retire the head of a register's FIFO -- the oldest uncommitted mapping of
+    // that register -- which is what an in-order retire installs. Two lanes are
+    // driven sometimes, to exercise the module's second commit lane as well.
+    //
+    // Never while a window is open: everything allocated after the checkpoint is
+    // younger than it, and an instruction younger than the checkpoint cannot have
+    // committed before the squash that kills it. Committing one would install a
+    // tag the undo is about to hand back, leaving the committed map pointing at a
+    // free physical register.
+    if (!in_window && !s.squash && rng.Chance(60)) {
+      std::vector<uint32_t> ready;
+      for (uint32_t a = 1; a < arch_regs; a++) {
+        if (!pend[a].empty()) ready.push_back(a);
+      }
+      if (!ready.empty()) {
+        const uint32_t idx0 = rng.Below(static_cast<uint32_t>(ready.size()));
+        s.commit_valid = true;
+        s.commit_rd = ready[idx0];
+        s.commit = pend[s.commit_rd].front();
+        if (ready.size() > 1 && rng.Chance(40)) {
+          uint32_t idx1 = rng.Below(static_cast<uint32_t>(ready.size()));
+          if (idx1 == idx0) idx1 = (idx1 + 1) % ready.size();
+          s.commit2_valid = true;
+          s.commit2_rd = ready[idx1];
+          s.commit2 = pend[s.commit2_rd].front();
+        }
+      }
     }
 
     Outputs o = h->Cycle(s);
@@ -2188,6 +2347,21 @@ void PhaseRandom(Harness* h, mosaic::Reporter* reporter, uint32_t entries, uint3
     if (o.wb_accepted) accepted_wbs++;
     if (o.wb_stale) refused_stale++;
     if (o.squash_accepted) squashes++;
+
+    // The campaign's own view of what is outstanding, advanced in the hardware's
+    // order: this cycle's allocations are younger than this cycle's retirements.
+    if (o.alloc_new_valid) pend[s.alloc_rd].push_back(o.alloc_new);
+    if (o.commit_accepted && !pend[s.commit_rd].empty()) {
+      pend[s.commit_rd].erase(pend[s.commit_rd].begin());
+    }
+    if (o.commit2_accepted && !pend[s.commit2_rd].empty()) {
+      pend[s.commit2_rd].erase(pend[s.commit2_rd].begin());
+    }
+    if (o.squash_accepted) {
+      // Everything allocated in the window dies with its ROB entries. The
+      // checkpoint was taken drained, so this empties every queue.
+      for (uint32_t a = 0; a < arch_regs; a++) pend[a].clear();
+    }
 
     // An out-of-range tag must never be accepted, and the campaign aims at them
     // deliberately.
@@ -2808,6 +2982,255 @@ void PhaseTwoWideCkpt(Harness* h, mosaic::Reporter* reporter) {
                   "restored the maps exactly");
 }
 
+// Phase 13b: a checkpoint and a two-wide allocation in the same cycle.
+//
+// This is the ordinary case in an integrated core: a branch is dispatched as one
+// lane of a group and its neighbour may be the instruction that writes a
+// register. The recovery point is the state at the *start* of the checkpoint
+// cycle, so the group's allocations are younger than it and belong in the undo
+// window -- a squash to that checkpoint must return both tags and step both
+// generations back. Before I-014 they were dropped instead, which left the two
+// tags allocated while the restored map named nothing.
+void PhaseTwoWideCkptAlloc(Harness* h, mosaic::Reporter* reporter) {
+  Require(h->DutCmtMap() == h->DutSpecMap(), "twowide-ckptalloc",
+          "the machine is not at a committed boundary before the checkpoint, so the "
+          "phase would not be testing a usable recovery point");
+
+  const std::vector<bool> free_at_ckpt = h->DutFreeMask();
+  const uint32_t count_at_ckpt = h->free_count();
+  const std::vector<uint32_t> gens_at_ckpt = h->dut_gens();
+  const std::vector<bool> genv_at_ckpt = h->DutGenValid();
+
+  // One cycle: the checkpoint, a two-wide group, and the same-cycle chain inside
+  // the group so the bypass is exercised in a checkpoint cycle too.
+  Stim s;
+  s.ckpt_valid = true;
+  s.alloc_req = true;
+  s.alloc_rd = 5;
+  s.alloc2_req = true;
+  s.alloc2_rd = 6;
+  s.rs3_addr = 5;
+  Outputs o = h->Cycle(s);
+
+  Require(o.ckpt_committed, "twowide-ckptalloc",
+          "the module did not report the checkpoint as usable although the machine "
+          "was at a committed boundary");
+  Require(o.alloc_accepted && o.alloc2_accepted, "twowide-ckptalloc",
+          "the group was refused in the checkpoint cycle");
+  Require(o.alloc_new_valid && o.alloc2_new_valid, "twowide-ckptalloc",
+          "the group allocated fewer than two tags in the checkpoint cycle");
+  Require(o.rs3_bypass && o.rs3 == o.alloc_new && !o.rs3_ready, "twowide-ckptalloc",
+          "the same-cycle bypass did not work in the checkpoint cycle");
+  Require(h->dut_j_len() == 2, "twowide-ckptalloc",
+          "a two-wide group allocated in a checkpoint cycle left the undo window at " +
+              Dec(h->dut_j_len()) + " entries, expected 2: the recovery point is the "
+              "start of the cycle, so the group is younger than it and must be "
+              "undoable");
+  Require(h->free_count() == count_at_ckpt - 2, "twowide-ckptalloc",
+          "the group in the checkpoint cycle did not take exactly two tags");
+
+  // More speculative work in the same window.
+  std::vector<Dest> window;
+  for (uint32_t i = 0; i < 2; i++) {
+    Stim a;
+    a.alloc_req = true;
+    a.alloc_rd = 12 + i;
+    Outputs ao = h->Cycle(a);
+    Require(ao.alloc_new_valid, "twowide-ckptalloc", "a window allocation was refused");
+    window.push_back(ao.alloc_new);
+  }
+  Require(h->dut_j_len() == 4, "twowide-ckptalloc",
+          "the window holds " + Dec(h->dut_j_len()) + " entries, expected 4");
+
+  Stim sq;
+  sq.squash = true;
+  Outputs so = h->Cycle(sq);
+  Require(so.squash_accepted, "twowide-ckptalloc",
+          "the squash to a checkpoint taken at a committed boundary was refused");
+  h->Cycle(Stim{});
+
+  // The free set must come back to the *pre-checkpoint* contents, which includes
+  // the two tags the group took in the checkpoint cycle itself.
+  Require(h->DutFreeMask() == free_at_ckpt, "twowide-ckptalloc",
+          "the free set after the squash is not the pre-checkpoint free set: a tag "
+          "allocated in the checkpoint cycle was not returned");
+  Require(h->free_count() == count_at_ckpt, "twowide-ckptalloc",
+          "the free count after the squash is " + Dec(h->free_count()) + ", expected " +
+              Dec(count_at_ckpt));
+  Require(h->DutSpecMap() == h->DutCmtMap(), "twowide-ckptalloc",
+          "the speculative map was not restored from the committed map");
+  Require(h->dut_j_len() == 0, "twowide-ckptalloc", "the squash did not empty the window");
+  Require(h->DutGenValid() == genv_at_ckpt, "twowide-ckptalloc",
+          "gen_valid after the squash is not the checkpoint's");
+  const std::vector<uint32_t> gens_after = h->dut_gens();
+  for (uint32_t t = 0; t < gens_after.size(); t++) {
+    if (!genv_at_ckpt[t]) continue;
+    Require(gens_after[t] == gens_at_ckpt[t], "twowide-ckptalloc",
+            "tag " + Dec(t) + " is at generation " + Dec(gens_after[t]) +
+                " after the squash, expected " + Dec(gens_at_ckpt[t]) +
+                ": an allocation of the window was not undone exactly");
+  }
+
+  // Every tag the window took is back in the pool -- the mask equality above says
+  // so for the whole file -- and each of those tags is *free*, not merely
+  // unreferenced: one that were neither free nor named by a mapping would be the
+  // leak this phase exists to catch.
+  for (const Dest& d : window) {
+    Require(h->shadow_is_free(d.tag), "twowide-ckptalloc",
+            "tag " + Dec(d.tag) + " allocated in the window is not free after the squash");
+  }
+
+  // Re-allocation: the file is usable again, and a fresh two-wide group is
+  // accepted and lands in the map.
+  const std::vector<bool> free_before_realloc = h->DutFreeMask();
+  Stim re;
+  re.alloc_req = true;
+  re.alloc_rd = 5;
+  re.alloc2_req = true;
+  re.alloc2_rd = 6;
+  Outputs ro = h->Cycle(re);
+  Require(ro.alloc_accepted && ro.alloc_new_valid && ro.alloc2_new_valid,
+          "twowide-ckptalloc",
+          "the re-allocation after the squash was refused: tags the squash returned "
+          "are not usable");
+  Require(free_before_realloc[ro.alloc_new.tag] &&
+              free_before_realloc[ro.alloc2_new.tag],
+          "twowide-ckptalloc",
+          "the re-allocation took a tag that was not free");
+  Require(h->free_count() == count_at_ckpt - 2, "twowide-ckptalloc",
+          "the re-allocation did not take exactly two tags");
+  Require(h->DutSpecMap()[5] == ro.alloc_new && h->DutSpecMap()[6] == ro.alloc2_new,
+          "twowide-ckptalloc", "the re-allocation did not land in the speculative map");
+
+  reporter->Check(true,
+                  "twowide-ckptalloc: a checkpoint and a two-wide group in one cycle "
+                  "left the window at 2 entries, and the squash returned both tags, "
+                  "stepped both generations back and left the file fully usable for "
+                  "re-allocation");
+}
+
+// Phase 13c: a checkpoint offered where it cannot be used, and the refusal that
+// keeps it from corrupting the machine.
+//
+// Two register writers are still in flight, so the speculative and committed maps
+// disagree. A squash to a checkpoint taken here would restore the map from the
+// committed one and silently lose the two writers' mappings while their tags stay
+// allocated -- a tag neither free nor named by anything. The module refuses the
+// squash and reports why; the campaign then drains, takes a fresh checkpoint and
+// recovers exactly.
+void PhaseTwoWideCkptBad(Harness* h, mosaic::Reporter* reporter) {
+  // Two outstanding writes: a group that allocates for x5 and x6 and does not
+  // commit either.
+  Stim a;
+  a.alloc_req = true;
+  a.alloc_rd = 5;
+  a.alloc2_req = true;
+  a.alloc2_rd = 6;
+  Outputs ao = h->Cycle(a);
+  Require(ao.alloc_new_valid && ao.alloc2_new_valid, "twowide-ckptbad",
+          "the setup group allocated fewer than two tags");
+
+  // The module must already say that this is not a boundary.
+  Outputs probe = h->Cycle(Stim{});
+  Require(!probe.ckpt_committed, "twowide-ckptbad",
+          "the module reported a committed boundary while two writers are in flight: "
+          "the speculative map cannot equal the committed one here");
+
+  // Take a checkpoint anyway.
+  Stim ck;
+  ck.ckpt_valid = true;
+  Outputs co = h->Cycle(ck);
+  Require(!co.ckpt_committed, "twowide-ckptbad",
+          "the checkpoint was reported as usable although two writers are in flight");
+
+  const uint32_t depth_before = h->dut_j_len();
+  const std::vector<bool> free_before = h->DutFreeMask();
+  const std::vector<Dest> spec_before = h->DutSpecMap();
+  const std::vector<Dest> cmt_before = h->DutCmtMap();
+
+  // A squash to it must be refused, with its own reason, and must change nothing.
+  Stim sq;
+  sq.squash = true;
+  Outputs so = h->Cycle(sq);
+  Require(!so.squash_accepted, "twowide-ckptbad",
+          "a squash to a checkpoint taken with older writers in flight was accepted: "
+          "the restore would discard their mappings and leave their tags unreachable");
+  Require(so.squash_not_committed, "twowide-ckptbad",
+          "the refused squash did not report squash_not_committed");
+  Require(!so.squash_underflow, "twowide-ckptbad",
+          "the refusal was reported as 'no checkpoint', which is a different state "
+          "and needs a different fix from the caller");
+  h->Cycle(Stim{});
+
+  const std::vector<Dest> spec_after_refusal = h->DutSpecMap();
+  Require(h->DutFreeMask() == free_before, "twowide-ckptbad",
+          "a refused squash changed the free set");
+  Require(spec_after_refusal == spec_before, "twowide-ckptbad",
+          "a refused squash changed the speculative map");
+  Require(h->DutCmtMap() == cmt_before, "twowide-ckptbad",
+          "a refused squash changed the committed map");
+  Require(h->dut_j_len() == depth_before, "twowide-ckptbad",
+          "a refused squash consumed undo entries");
+
+  // The invariant this project cares about, checked on the state the refusal left
+  // behind: the two writers still own their tags (nothing was silently freed), and
+  // the two tags they displaced are still accounted for.
+  Require(spec_after_refusal[5] == ao.alloc_new && spec_after_refusal[6] == ao.alloc2_new,
+          "twowide-ckptbad",
+          "a refused squash disturbed the outstanding writers' mappings");
+  Require(!h->shadow_is_free(ao.alloc_new.tag) && !h->shadow_is_free(ao.alloc2_new.tag),
+          "twowide-ckptbad",
+          "a refused squash left an outstanding writer's tag free: it is still owned "
+          "by the mapping the speculative map names");
+
+  // Drain: retire both writers, which is what makes the maps agree again.
+  Stim dc;
+  dc.commit_valid = true;
+  dc.commit_rd = 5;
+  dc.commit = ao.alloc_new;
+  dc.commit2_valid = true;
+  dc.commit2_rd = 6;
+  dc.commit2 = ao.alloc2_new;
+  Outputs dco = h->Cycle(dc);
+  Require(dco.commit_accepted && dco.commit2_accepted, "twowide-ckptbad",
+          "retiring the two outstanding writers was refused");
+  Outputs probe2 = h->Cycle(Stim{});
+  Require(probe2.ckpt_committed, "twowide-ckptbad",
+          "the maps still disagree after both writers retired");
+
+  // A fresh checkpoint at the boundary, a new allocation, and a squash: now the
+  // recovery works, the two commits stand, and the new allocation is undone.
+  Stim ck2;
+  ck2.ckpt_valid = true;
+  Require(h->Cycle(ck2).ckpt_committed, "twowide-ckptbad",
+          "the fresh checkpoint was not reported as usable");
+  Stim na;
+  na.alloc_req = true;
+  na.alloc_rd = 7;
+  Outputs nao = h->Cycle(na);
+  Require(nao.alloc_new_valid, "twowide-ckptbad",
+          "the allocation after the drain was refused");
+  Stim sq2;
+  sq2.squash = true;
+  Outputs sq2o = h->Cycle(sq2);
+  Require(sq2o.squash_accepted, "twowide-ckptbad",
+          "the squash to the fresh boundary checkpoint was refused");
+  h->Cycle(Stim{});
+  Require(h->shadow_is_free(nao.alloc_new.tag), "twowide-ckptbad",
+          "the squashed allocation's tag was not returned to the free set");
+  Require(h->DutSpecMap()[7] == h->DutCmtMap()[7], "twowide-ckptbad",
+          "x7 does not hold its committed mapping after the squash");
+  Require(h->DutCmtMap()[5] == ao.alloc_new && h->DutCmtMap()[6] == ao.alloc2_new,
+          "twowide-ckptbad",
+          "the two commits made before the squash did not survive it");
+
+  reporter->Check(true,
+                  "twowide-ckptbad: a squash to a checkpoint taken with two writers "
+                  "in flight was refused and reported (squash_not_committed, not "
+                  "underflow), the refusal changed nothing, and after draining, a "
+                  "fresh checkpoint squashed exactly");
+}
+
 // Phase 14: a randomized two-wide soak, shadow-compared on every cycle.
 void PhaseTwoWideRandom(Harness* h, mosaic::Reporter* reporter, uint32_t arch_regs,
                         uint32_t seed, uint32_t cycles) {
@@ -3152,6 +3575,14 @@ int main(int argc, char** argv) {
       fresh();
       harness.Phase("twowide-ckpt");
       PhaseTwoWideCkpt(&harness, &reporter);
+
+      fresh();
+      harness.Phase("twowide-ckptalloc");
+      PhaseTwoWideCkptAlloc(&harness, &reporter);
+
+      fresh();
+      harness.Phase("twowide-ckptbad");
+      PhaseTwoWideCkptBad(&harness, &reporter);
 
       fresh();
       harness.Phase("twowide-random");

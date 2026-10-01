@@ -10,7 +10,16 @@
     "I-006",
     "I-015",
     "I-019",
-    "I-020"
+    "I-020",
+    "I-016",
+    "I-014",
+    "I-025",
+    "I-022",
+    "I-017",
+    "I-012",
+    "I-010",
+    "I-028",
+    "I-024"
   ],
   "evidence": {
     "I-001": {
@@ -113,6 +122,109 @@
       "verdict": "PASS",
       "notes": "Case PASS from a clean build with the official runner: 17238 per-cycle shadow comparisons over 5784 cycles, 1471 offered traps (MEI/MSI/MTI), seeds 1/2/7/12345/999983. Seven mutants each exit 1 with a distinct named first failure and a comparison-count delta, and the elaborated model hash differs from the clean build for every mutant, which is the non-vacuity property this project requires. NOT verified: the integrator's half of the boundary contract, the CSR wiring, mideleg beyond bits 3/7/11, analog metastability.",
       "report": "results/reports/I-020-interrupt.md"
+    },
+    "I-016": {
+      "cases": [
+        "rob.out_of_order_children"
+      ],
+      "commands": [
+        "python3 tools/run_unit.py --profile p0 --case rob.out_of_order_children"
+      ],
+      "verdict": "PASS",
+      "notes": "Case PASS through the official runner with the pre-existing cases `retire.head_block_and_dual`/`commit.head_block_and_dual` unchanged in scope. Seven mutants (the six original plus MOSAIC_ROB_MUTANT_GEN_LOW_BITS_ONLY) each rebuild, differ from the shipping binary and exit 1. Integration follow-up recorded in the report: the ROB's identity widths were 12 bits (2*ROB_INDEX_W) while config/contracts/interfaces.json freezes rob_gen = clog2(rob_entries)+1 = 7; both TAG_W and GEN_W now come from build/p0/rtl/mosaic_id_pkg.svh, and the testbench wrapper derives the same widths from the same package. The wrapper previously re-derived the RTL's own expression, which is why the disagreement had never been observable.",
+      "report": "results/reports/I-016-rob.md"
+    },
+    "I-014": {
+      "cases": [
+        "rename.same_cycle_chain",
+        "rename.single_width_ownership"
+      ],
+      "commands": [
+        "python3 tools/run_unit.py --profile p0 --case rename.same_cycle_chain",
+        "python3 tools/run_unit.py --profile p0 --case rename.single_width_ownership"
+      ],
+      "verdict": "PASS",
+      "notes": "Both cases PASS through the official runner; the single-width case is the pre-existing one and is evidence that a group of one behaves exactly as before. Six mutants each rebuilt, shown to differ from the shipping binary, exit 1 with a 0->1 failing-check delta; the six I-013 mutants were re-demonstrated at their documented first mismatches, so the two-wide refactor preserved the earlier evidence. A real defect was found and fixed in the file: the second commit lane's supersede test compared lane 1's tag with itself (a continuous assign reading a variable assigned in the same always_comb block sees the settled value), so a dual retire released no mapping and leaked one physical tag per two-wide retirement; it survived because the retire case never checked the rename free set. NOT verified: profile p0 only; a checkpoint presented in the same cycle as an allocation is still a known corner (assigned to the lane as a follow-up, since the integrated core takes a checkpoint per branch dispatch); journal_overflow under a two-wide group is argued rather than run.",
+      "report": "results/reports/I-014-rename2w.md"
+    },
+    "I-025": {
+      "cases": [
+        "completion.fu_collision"
+      ],
+      "commands": [
+        "python3 tools/run_unit.py --profile p0 --case completion.fu_collision"
+      ],
+      "verdict": "PASS",
+      "notes": "Case PASS through the official runner. Six mutants each rebuilt, shown to differ from the shipping binary and exit 1 with a delta: drop-on-collision, valid-as-a-pulse, exception dropped by a following ordinary result, occupancy off by one, kill delivering the killed entry, kill not counted. Valid is holdable rather than a pulse, a same-cycle collision loses nothing, and an exception payload is never overwritten. NOT verified: no consumer yet (I-026), so the result-to-PRF write, the value-visible wakeup and the bank arbitration are untested; only the p0 geometry was elaborated; no timing or area claim.",
+      "report": "results/reports/I-025-result-fifo.md"
+    },
+    "I-022": {
+      "cases": [
+        "iq.wakeup_insert_select"
+      ],
+      "commands": [
+        "python3 tools/run_unit.py --profile p0 --case iq.wakeup_insert_select"
+      ],
+      "verdict": "PASS",
+      "notes": "Case PASS with 93878203 checks over 199800 cycles (up from 56848546 before the audit: the uop_meta_t fields are now compared per grant and per slot, so the check count rose rather than the coverage shrinking). Audit findings: the randomised phase consumes the whole remaining cycle budget by design and compares every cycle; a directed refused-insert phase was added and the previously undiagnosed 'does a refused insert advance the allocation pointer' question is now covered by a permanent mutant MOSAIC_IQ_MUTANT_REFUSED_INSERT_ADVANCES; zero phase assertions read a live port after the clock edge (one violation was found and fixed). Eight mutants each rebuilt, shown to differ from the shipping binary, exit 1 with a distinct named first failure and a delta. --max-cycles is now a hard abort that names the phase. Interface change: ins_meta/grant_meta/obs_meta (mosaic_uop_pkg::uop_meta_t) replace the 4-bit alu_op field; the meta swap mutant fails by name.",
+      "report": "results/reports/I-022-iq-coverage.md"
+    },
+    "I-017": {
+      "cases": [
+        "retire.head_block_and_dual",
+        "commit.head_block_and_dual"
+      ],
+      "commands": [
+        "python3 tools/run_unit.py --profile p0 --case retire.head_block_and_dual",
+        "python3 tools/run_unit.py --profile p0 --case commit.head_block_and_dual"
+      ],
+      "verdict": "PASS",
+      "notes": "Both cases PASS (the second is the card-named alias for the same binary), 469499 per-cycle shadow comparisons at seed 1. Seven mutants each rebuilt, shown to differ from the shipping binary, exit 1 with a +1 first-failure delta. The verdict on the original failure: the DUT was right and the testbench was wrong -- the module decides head_trap on the head alone (not gated on completeness, and taking priority over a recovery flush), events follow the ack rather than the request, and a flush cycle retires nothing. Two mutants that previously produced a zero delta are now detected because the case gained a per-cycle retire_req comparison: a mutant that cannot fail is not evidence, and this package turned two of them into real ones. NOT verified: no external reference model (the oracle is the in-file shadow plus the real ROB and rename); no RTL lint from this package (no RTL changed); the soak is 4000 random steps, not exhaustive.",
+      "report": "results/reports/I-017-retire.md"
+    },
+    "I-012": {
+      "cases": [
+        "muldiv.kill_and_edges"
+      ],
+      "commands": [
+        "python3 tools/run_unit.py --profile p0 --case muldiv.kill_and_edges"
+      ],
+      "verdict": "PASS",
+      "notes": "Case PASS (1155304 checks, 76192 shadow comparisons, 1238 directed operations, 98 cancellations, 2 killed results, measured latencies 65/33) and decode.rv64im_reserved must also be re-run because this package extended the decoder. Seven mutants each rebuilt, shown to differ from the shipping binary, exit 1 with a failure delta (flush ignored, drop-unready, result stuck, div-by-zero constant, W ignored with +113726, unstable result, and the new decoder W_FORMS_ILLEGAL). One mutant was DELETED as vacuous: MOSAIC_DECODER_MUTANT_RV32_WORD_LEGAL mutated the decoder into the behaviour the shipping build now has correctly. ISA defect found by this package and fixed: the decoder trapped RV64I addw/subw/sllw/srlw/sraw as reserved (they are mandatory); OP-32 is now decoded in full (5 I-word forms + 5 M-word forms, reserved patterns re-derived, legal set 10 of 1024), and I-010's report carries an appended correction with binutils evidence. NOT verified: no integration (no ROB/IQ consumer, no result credit, no late-writeback path), p0 geometry only, and the three unreachable W high-half combinations have no external oracle.",
+      "report": "results/reports/I-012-muldiv.md"
+    },
+    "I-010": {
+      "cases": [
+        "decode.rv64im_reserved"
+      ],
+      "commands": [
+        "python3 tools/run_unit.py --profile p0 --case decode.rv64im_reserved"
+      ],
+      "verdict": "PASS",
+      "notes": "Case PASS from a clean rebuild (169534 checks over 166733 instructions: 82384 legal, 84349 illegal, 1443 named reserved checks). Verified independently by the integration lead: the shipping binary passes and MOSAIC_DECODER_MUTANT_W_FORMS_ILLEGAL makes it fail with exit 1 and 2 named failures. Correction recorded: the package originally asserted that the RV64I word-arithmetic forms (addw/subw/sllw/srlw/sraw) are reserved on RV64 -- they are mandatory RV64I, opcode 0111011 with funct7 0000000/0100000. The decoder, the package comment and the testbench model are fixed, the case now tests the five forms positively, and the vacuous mutant that encoded the old assumption is deleted. The second half of the package (I-011, the integer ALU) has its own case alu.boundaries, PASS.",
+      "report": "results/reports/I-010-011-decode-alu.md"
+    },
+    "I-028": {
+      "cases": [
+        "remote.kill_with_delayed_response"
+      ],
+      "commands": [
+        "python3 tools/run_unit.py --profile p0 --case remote.kill_with_delayed_response"
+      ],
+      "verdict": "PASS",
+      "notes": "Case PASS from a clean build (build/p0/unit/<case> removed first). Six mutants each rebuilt, shown to differ from the shipping binary, exit 1 with a +1 first-failure delta: stale response accepted; identity matched on the id alone without the generation; latency collapsed to one cycle; credit not returned on a kill; request/response sharing one channel (the circular-wait blocker); identity dropped from the response. The header states the recycling rule the card demands: a killed request's entry may be handed to the next request, so a late response is matched against the pairing table and dropped as stale and counted (o_stale_rsp_ctr) rather than delivered. NOT verified: no real remote functional unit or router behind the far side (the far end is a testbench model with a selected fixed delay); no formal no-deadlock proof (structural argument plus a bounded drain test); reset while the far end is still driving is not exercised; counters are proved non-wrapping only within the runner's cycle budget; no route/steering field (that is I-029).",
+      "report": "results/reports/I-028-remote-link.md"
+    },
+    "I-024": {
+      "cases": [
+        "lease.conflict_and_cancel"
+      ],
+      "commands": [
+        "python3 tools/run_unit.py --profile p0 --case lease.conflict_and_cancel"
+      ],
+      "verdict": "PASS",
+      "notes": "Case PASS from a clean build (build/p0/unit/<case> removed first): 4366 per-cycle shadow comparisons over 4462 cycles, soak coverage 1231 grants / 635 releases / 592 cancels / 1246 stale ids / 1559 contended cycles / 639 same-cycle terminal+grant / 26 all-pools-full cycles. Six mutants each exit 1 with a distinct named first failure and a check-count delta. A seventh mutant (the credit term dropped) passes identically and is reported as a redundancy probe rather than as evidence: occupancy is derived from the lease ledger and every live lease holds one credit, so at this geometry 'no record free' implies 'no credit free'. The falsifiable form of that defect (a dropped FU class) was written instead and is caught. The card's blockers are the ones tested: all-or-none grant, a refusal with no side effect, and a cancel returning the credit exactly once. NOT verified: p0 geometry only (the driver asserts the geometry so another profile fails loudly); the generation ABA bound is documented, not closed; no real requester exists yet (I-025/I-026/I-028 provide the plumbing); reconfiguration (FREEZE/DRAIN/REVOKED/INSTALL) belongs to I-031; fairness is observed, not proven.",
+      "report": "results/reports/I-024-lease.md"
     }
   }
 }

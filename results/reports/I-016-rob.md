@@ -884,7 +884,8 @@ MUTANT: -DMOSAIC_ROB_MUTANT_GEN_LOW_BITS_ONLY
 Each mutant is rebuilt, differs from the shipping binary, and exits 1; the
 base build exits 0 with zero failing checks, so every mutant's failure count
 delta is **+1 failing check against the base**. The six existing mutants fail in
-exactly the phase recorded in §10.
+exactly the phase recorded in §10. The sweep is §10's harness verbatim with
+`MOSAIC_ROB_MUTANT_GEN_LOW_BITS_ONLY` appended to its `for D in ...` list.
 
 **The new control, and why the width needs one.** The wrap scenario's victim
 carries generation 0 and the occupant that recycles its slot carries 64, so it
@@ -898,29 +899,30 @@ width is wrong. (Stated as design intent: the mutant is verified to fail under
 the 7-bit contract; it is not claimed to fail under a 12-bit build, which would
 require re-editing the width.)
 
-### The two retire cases, and whose they are
+### The two retire cases
 
 `commit.head_block_and_dual` and `retire.head_block_and_dual` instantiate this
-ROB through `mosaic_retire`. After the width correction both fail at cycle 393,
-deterministically:
+ROB through `mosaic_retire`, so they are the integration consumers of the
+corrected width. Both **PASS** against the corrected ROB:
 
 ```
-MISMATCH in-order: cycle 393: slot 0: generation disagrees: shadow 128, buffer 0
+$ python3 tools/run_unit.py --profile p0 --case commit.head_block_and_dual --case retire.head_block_and_dual
+PASS commit.head_block_and_dual   task=I-017
+PASS retire.head_block_and_dual   task=I-017
 ```
 
-The failure is in `sim/unit/tb_retire.cpp`, not in the ROB. That file's shadow
-passes a mask *value* where a width is expected: `gen_mask_ = Mask(~0u, gen_w)`
-is `0x7f`, and `e.gen = Mask(next_alloc_gen_++, gen_mask_)` (and the
-reconciliation `Mask(e->gen, shadow_->gen_mask())`) treat `0x7f` as a bit count
-that is `>= 32`, so `Mask()` returns its argument unchanged and the shadow's
-generation never wraps. With the old 12-bit ROB generation the shadow never
-reached 128; with the contract's 7-bit generation the DUT wraps at 128 while the
-shadow keeps counting. `sim/tb/mosaic_retire_tb.sv` already names the contract
-widths (`TB_ROB_TAG_W`/`TB_ROB_GEN_W` from `mosaic_id_pkg`), so that lane is
-mid-migration. The retile lane was told; `sim/unit/tb_retire.cpp` was **not**
-edited here, per the "do not touch another lane's file" rule. This is the only
-acceptance item not green, and it is red because of another lane's in-flight
-edits.
+On the first run after the width correction they were briefly red at cycle 393
+(`slot 0: generation disagrees: shadow 128, buffer 0`). The failure was in
+`sim/unit/tb_retire.cpp`, not the ROB: that file's shadow passed a mask *value*
+where a width was expected -- `gen_mask_ = Mask(~0u, gen_w)` is `0x7f`, and
+`Mask(next_alloc_gen_++, gen_mask_)` treats `0x7f` as a bit count that is
+`>= 32`, so `Mask()` returns its argument unchanged and the shadow's generation
+never wrapped. With the old 12-bit ROB generation the shadow never reached 128;
+with the contract's 7-bit generation the DUT wraps at 128 while the shadow kept
+counting. `sim/tb/mosaic_retire_tb.sv` already named the contract widths, so
+that lane was mid-migration; it has since corrected the width-vs-mask use in
+`tb_retire.cpp` and both cases are green. No change was needed in
+`mosaic_rob.sv`, and `sim/unit/tb_retire.cpp` was never edited here.
 
 ### Files changed by this follow-up
 
@@ -935,15 +937,16 @@ edits.
 
 ```
 python3 tools/run_unit.py --profile p0 --case rob.out_of_order_children      # PASS
-python3 tools/run_unit.py --profile p0 --case commit.head_block_and_dual     # FAIL (retire lane)
-python3 tools/run_unit.py --profile p0 --case retire.head_block_and_dual     # FAIL (retire lane)
+python3 tools/run_unit.py --profile p0 --case commit.head_block_and_dual     # PASS
+python3 tools/run_unit.py --profile p0 --case retire.head_block_and_dual     # PASS
 verilator --lint-only -Wall -Wno-DECLFILENAME --top-module mosaic_rob \
     -Ibuild/p0/rtl -Irtl/core -Irtl/common rtl/core/mosaic_rob.sv            # exit=0
 slang-tidy --std 1800-2017 -I build/p0/rtl rtl/core/mosaic_rob.sv            # exit=0
 clang++ -std=c++17 -fsyntax-only -Wall -Wextra -Wshadow -isystem $VERILATOR_ROOT/include \
     -I build/p0/sim -I sim/common -I build/p0/unit/rob.out_of_order_children/obj_dir \
     sim/unit/tb_rob.cpp                                                      # exit=0
-make lint-cpp    # fails on sim/unit/tb_fifo.cpp: 'Vmosaic_fifo_tb.h' not found --
-                 # its obj_dir was never built in this workspace, unrelated to this change
-bash /tmp/robmut.sh   # shipping PASS, seven mutants each exit=1
+make lint-cpp   # exit=0: "lint-cpp: 23 file(s) clean"; tb_fifo.cpp skipped because
+                # its generated header is not built in this workspace (the target's
+                # own "run 'make unit' first" note)
+# §10's mutation harness with the new define in its loop
 ```

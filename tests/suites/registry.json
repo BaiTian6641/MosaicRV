@@ -5,7 +5,9 @@
     "bringup-v1": {
       "intent": "The Stage 0 bring-up core executed against every firmware corpus ELF, compared instruction-by-instruction against an independent Python reference model. This is the differential evidence that the frontend, decoder, ALU, M extension and trap path are architecturally correct; it says nothing about the out-of-order fabric, which does not exist yet.",
       "gate": "I-008",
-      "cases": ["core.bringup_vs_reference"]
+      "cases": [
+        "core.bringup_vs_reference"
+      ]
     },
     "unit-infrastructure-v1": {
       "intent": "Leaf infrastructure that everything else reuses: the valid/ready FIFO and skid buffer, the synchronous RAM abstraction, and the simulation harness itself including its refusal to load a malformed image and its enforcement of the cycle limit.",
@@ -22,17 +24,42 @@
     "scalar-decode-v1": {
       "intent": "Decoder and integer execution units against their own independent references, including the reserved-encoding enumeration that keeps a legal-looking decode of an illegal encoding from passing.",
       "gate": "I-010,I-011",
-      "cases": ["decode.rv64im_reserved", "alu.boundaries"]
+      "cases": [
+        "decode.rv64im_reserved",
+        "alu.boundaries"
+      ]
+    },
+    "scalar-directed-v1": {
+      "intent": "The Stage-1 scalar control path as a set: decode, the integer ALU and branch comparator, bounded fetch with redirect, two-wide rename (single- and two-lane groups), the architectural ROB, the local issue queue, the shared MUL/DIV, the banked PRF, retirement with the committed map, the M-mode CSR file, the interrupt/WFI boundary and the predictor. Each case carries its own independent model and its own mutants; this suite is the regression set that a change to any shared interface (rename/ROB uop identity, PRF tag/generation, CSR table) must be re-run against. It says nothing about the execution fabric: no case here drives two clusters, a remote link or a lease.",
+      "gate": "I-080",
+      "cases": [
+        "decode.rv64im_reserved",
+        "alu.boundaries",
+        "fetch.redirect_late_response",
+        "predictor.btb_aliasing",
+        "rename.single_width_ownership",
+        "rename.same_cycle_chain",
+        "rob.out_of_order_children",
+        "iq.wakeup_insert_select",
+        "muldiv.kill_and_edges",
+        "prf.read_bank_collision",
+        "retire.head_block_and_dual",
+        "commit.head_block_and_dual",
+        "recovery.checkpoint_exact_restore",
+        "recovery.nested_branch_full_queues",
+        "csr.precise_trap_mret",
+        "interrupt.boundary_replay",
+        "core.bringup_vs_reference"
+      ]
     }
   },
   "not_yet_defined": {
-    "note": "docs/implementation-plan.md I-080 requires four suites at the p0 gate. They are not defined here because the fabric they exercise does not exist yet. They are listed so their absence is explicit rather than discovered at the gate, and this object must never be treated as satisfying them.",
+    "note": "docs/implementation-plan.md I-080 requires four suites at the p0 gate. One is now defined (scalar-directed-v1, above, the Stage-1 regression set). The remaining three are still not defined because the hardware they exercise does not exist yet, and this object must never be treated as satisfying them.",
     "required_by_I-080": [
-      "scalar-directed-v1",
       "scalar-random-v1",
       "metamorphic-v1",
       "fabric-transition-v1"
     ],
-    "blocked_on": "I-022..I-032 (execution fabric) and I-033..I-038 (memory system)"
+    "blocked_on": "scalar-random-v1 and metamorphic-v1 need the integrated core plus the memory path (I-023, I-033..I-038); fabric-transition-v1 needs the lease/remote/ownership state machines (I-024..I-031)."
   }
 }
