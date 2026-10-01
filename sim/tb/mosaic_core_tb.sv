@@ -188,6 +188,7 @@ module mosaic_core_tb (
     output logic [31:0] o_mem_lsu_txn_o,
     output logic [31:0] o_mem_lsu_misaligned_o,
     output logic [31:0] o_mem_lsu_access_fault_o,
+    output logic        o_mem_lsu_busy_o,
     output logic [31:0] o_mem_ins_stall_o,
     output logic        o_mem_squash_valid_o,
 
@@ -441,6 +442,7 @@ module mosaic_core_tb (
       .o_mem_lsu_txn   (o_mem_lsu_txn_o),
       .o_mem_lsu_misaligned(o_mem_lsu_misaligned_o),
       .o_mem_lsu_access_fault(o_mem_lsu_access_fault_o),
+      .o_mem_lsu_busy  (o_mem_lsu_busy_o),
       .o_mem_ins_stall (o_mem_ins_stall_o),
       .o_mem_squash_valid(o_mem_squash_valid_o),
       .o_dbg_redir_bundle(o_dbg_redir_o),

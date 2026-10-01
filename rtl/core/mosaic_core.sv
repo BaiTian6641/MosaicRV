@@ -198,6 +198,11 @@ module mosaic_core (
     output logic [31:0]                 o_mem_lsu_txn,
     output logic [31:0]                 o_mem_lsu_misaligned,
     output logic [31:0]                 o_mem_lsu_access_fault,
+    // The endpoint's own "a transaction is outstanding" flag. It is the third
+    // term of the FENCE/FENCE.I drain rule (I-037): a store leaves the queue when
+    // the endpoint accepts it, so "the store queue is empty" does not by itself
+    // mean the memory path has drained.
+    output logic                        o_mem_lsu_busy,
     output logic [31:0]                 o_mem_ins_stall,
     output logic                        o_mem_squash_valid,
 
@@ -572,6 +577,7 @@ module mosaic_core (
   logic [CORE_RET_N*CORE_TAG_W-1:0] ret_commit_tag;
   logic [CORE_RET_N*CORE_XLEN-1:0] retire_pay_value;
   logic                      head_pending_taken;
+  logic                      head_fence_i_pending;
 
   // evidence
   logic [31:0] commit_ctr, redirect_ctr, recovering_ctr, stop_ctr, cycle_ctr;
@@ -639,6 +645,7 @@ module mosaic_core (
   mosaic_uop_pkg::lsu_rsp_t   ep_rsp;
   logic                       ep_owner_q;
   logic [31:0]                lsu_txn_ctr, lsu_misaligned_ctr, lsu_access_fault_ctr;
+  logic                       ep_busy;
 
   logic                       lsu_wb_valid, lsu_wb_ready;
   mosaic_uop_pkg::wb_event_t  lsu_wb_ev, store_wb_ev, lq_wb_ev;
@@ -683,6 +690,15 @@ module mosaic_core (
   mosaic_pkg::csr_op_e        sys_csr_op_q;
   logic                       sys_csr_reads_q, sys_csr_writes_q;
   logic                       sys_ecall_q, sys_ebreak_q, sys_mret_q, sys_wfi_q;
+  // The two fence class bits, staged exactly like the rest of the system
+  // payload. They are the whole of what the fence rule reads: this profile
+  // treats fence's fm/pred/succ fields conservatively and does not distinguish
+  // fence.tso (see results/reports/I-037-fence.md).
+  logic                       sys_fence_q, sys_fence_i_q;
+  logic                       fence_like_q;      // a fence or fence.i is staged
+  logic                       fence_pending;     // ... and its rule still binds
+  logic                       fence_mem_ok;      // "the memory path has drained"
+  logic                       mem_path_idle;
   logic [CORE_XLEN-1:0]       sys_src1_q;
   logic [CORE_TAG_W-1:0]      sys_dst_tag_q;
   logic [CORE_IGEN_W-1:0]     sys_dst_gen_q;
@@ -732,6 +748,7 @@ module mosaic_core (
   logic                       disp_sys_csr_reads, disp_sys_csr_writes;
   logic                       disp_sys_is_ecall, disp_sys_is_ebreak;
   logic                       disp_sys_is_mret, disp_sys_is_wfi;
+  logic                       disp_sys_is_fence, disp_sys_is_fence_i;
   logic [CORE_XLEN-1:0]       disp_sys_src1_val;
   logic [CORE_TAG_W-1:0]      disp_sys_dst_tag;
   logic [CORE_IGEN_W-1:0]     disp_sys_dst_gen;
@@ -1622,6 +1639,8 @@ module mosaic_core (
       .sys_ins_is_ebreak(disp_sys_is_ebreak),
       .sys_ins_is_mret  (disp_sys_is_mret),
       .sys_ins_is_wfi   (disp_sys_is_wfi),
+      .sys_ins_is_fence (disp_sys_is_fence),
+      .sys_ins_is_fence_i(disp_sys_is_fence_i),
       .sys_ins_src1_val (disp_sys_src1_val),
       .sys_ins_dst_tag  (disp_sys_dst_tag),
       .sys_ins_dst_gen  (disp_sys_dst_gen),
@@ -1840,6 +1859,67 @@ module mosaic_core (
   // taken.
   assign sys_ins_ready_int = !sys_valid_q;
 
+  // --------------------------------------------------------------------------
+  // The fence rule (I-037)
+  // --------------------------------------------------------------------------
+  // A FENCE or FENCE.I is resolved here, at the ROB head, exactly as a CSR
+  // access is -- but its completion is not "the head is reached". The rule this
+  // profile ships is the conservative one the work package asks for:
+  //
+  //   A fence is complete only when the memory path it orders is *idle*: the
+  //   store queue holds nothing, the load queue holds nothing, and the memory
+  //   endpoint has no transaction outstanding (no accepted request in flight
+  //   and no response still held for a consumer).
+  //
+  //   While a fence is staged, no *younger* memory macro may be handed to a
+  //   queue: the memory insert port is refused, so a load or store younger than
+  //   the fence cannot allocate until the fence has retired. Younger non-memory
+  //   work still allocates and executes; it simply cannot retire past the fence,
+  //   because the fence owns the ROB head.
+  //
+  // Why each conjunction is there, and what is deliberately *not* drained, is
+  // argued in results/reports/I-037-fence.md. In one line: the store queue and
+  // the endpoint are the two structures through which a younger access could
+  // otherwise overtake a store this fence must order; the load queue is drained
+  // with them because the load queue is where a *prior* access could still be
+  // outstanding, and this profile chose the strong reading ("every older access
+  // has completed") over the minimum RVWMO obligation.
+  //
+  // `fence_like_q` is the staged class; `fence_pending` is the same thing named
+  // for the block, and both clear when the macro retires or a redirect discards
+  // it (the staging entry's own lifetime).
+  assign fence_like_q = sys_valid_q && (sys_fence_q || sys_fence_i_q);
+  assign fence_pending = fence_like_q;
+
+  assign mem_path_idle = (sq_count == {CORE_MEM_CNT_W{1'b0}}) &&
+                         (lq_count == {CORE_MEM_CNT_W{1'b0}}) &&
+                         !ep_busy;
+
+`ifdef MOSAIC_CORE_MUTANT_FENCE_EARLY
+  // NEGATIVE CONTROL: the fence does not wait for the memory path. It is
+  // "complete" as soon as it reaches the ROB head, so it can retire with an
+  // older store still queued -- CASE=fence.code_and_data_order's
+  // "the store queue is empty at every fence retirement" check names it, and
+  // the data-ordering program reads a device register one access too early.
+  assign fence_mem_ok = 1'b1;
+`else
+  assign fence_mem_ok = !fence_like_q || mem_path_idle;
+`endif
+
+`ifdef MOSAIC_CORE_MUTANT_FENCE_ACCESS_PAST
+  // NEGATIVE CONTROL: younger *loads* are not blocked while a fence is staged
+  // (younger stores still are: a younger store in the queue would make the
+  // fence's own "store queue empty" drain rule unsatisfiable, so the mutation
+  // would deadlock rather than let an access past). The younger load allocates
+  // and issues while the older store is still queued, reads the device before
+  // the publish, and the data-ordering program publishes a wrong difference.
+  logic fence_block_younger_c;
+  assign fence_block_younger_c = fence_pending && disp_mem_is_store;
+`else
+  logic fence_block_younger_c;
+  assign fence_block_younger_c = fence_pending;
+`endif
+
   // The one thing that makes a system macro trap rather than complete. `csr_illegal`
   // is "the address is not implemented"; `csr_wr_illegal` is "this write is not
   // legal for that address" (a read-only CSR, or one the profile does not
@@ -1878,7 +1958,8 @@ module mosaic_core (
   // MRET twice.
   assign sys_exec = sys_head && !rob_head_complete && !sys_wb_pending_q &&
                     !head_exc_trap && !irq_valid &&
-                    !sys_trap_q && !recovering && !redirect_valid && !core_stop;
+                    !sys_trap_q && !recovering && !redirect_valid && !core_stop &&
+                    fence_mem_ok;
   // The trap this macro resolves to, latched in the cycle its completion is
   // accepted so that the trap controller sees it at the boundary one cycle later.
   assign sys_trap_now = sys_head && !rob_head_complete && sys_exc;
@@ -2016,17 +2097,45 @@ module mosaic_core (
   assign ret_req_gated = ret_req[0] && !trap_decision;
 
   // The redirect request. A trap acts immediately (the trapping entry does not
-  // retire); an MRET acts through the ordinary head-retire gate, in the cycle the
-  // MRET instruction retires.
-`ifdef MOSAIC_CORE_MUTANT_MRET_PC_WRONG
+  // retire); an MRET or a FENCE.I acts through the ordinary head-retire gate, in
+  // the cycle the instruction retires.
+  //
+  // FENCE.I re-enters the pipeline at the instruction after itself (pc + 4). It
+  // is a *system* redirect -- `sys_redirect_kill` -- so the front end, the decode
+  // buffer, the clusters, both memory queues and the rename state are all torn
+  // down and rebuilt from the committed boundary, exactly as they are for a trap.
+  // That teardown is the invalidation: every instruction the fetch unit had
+  // already delivered (in the decode buffer, in dispatch, in the pipeline) is
+  // discarded, and the fetch that follows is a fresh one with the redirect's
+  // epoch. See results/reports/I-037-fence.md.
+`ifdef MOSAIC_CORE_MUTANT_FENCEI_SKIP
+  // NEGATIVE CONTROL: FENCE.I resumes one instruction too far, so the first
+  // instruction after it is skipped. A legitimate instruction is lost -- a wrong
+  // retirement stream, not a hang.
+  assign sys_redir_pc = trap_decision ? csr_trap_target
+                                      : (sys_fence_i_q ? (rob_head_pc + CORE_XLEN'(8))
+                                                       : csr_mret_target);
+`elsif MOSAIC_CORE_MUTANT_MRET_PC_WRONG
   // NEGATIVE CONTROL: MRET returns to the instruction after mepc. The failing
   // program's interrupt round trip then resumes one instruction late.
   assign sys_redir_pc = trap_decision ? csr_trap_target
-                                      : (csr_mret_target + CORE_XLEN'(4));
+                                      : (sys_fence_i_q ? (rob_head_pc + CORE_XLEN'(4))
+                                                       : (csr_mret_target + CORE_XLEN'(4)));
 `else
-  assign sys_redir_pc = trap_decision ? csr_trap_target : csr_mret_target;
+  assign sys_redir_pc = trap_decision ? csr_trap_target
+                                      : (sys_fence_i_q ? (rob_head_pc + CORE_XLEN'(4))
+                                                       : csr_mret_target);
 `endif
+`ifdef MOSAIC_CORE_MUTANT_FENCEI_NO_INVALIDATE
+  // NEGATIVE CONTROL: FENCE.I completes like a plain fence and does *not*
+  // redirect, so the front end keeps the instruction view it delivered before
+  // the publishing store. The stale bytes the program patched execute, which is
+  // the card's first failure mode.
   assign sys_redir_req_valid = trap_decision || (sys_head && sys_mret_q);
+`else
+  assign sys_redir_req_valid = trap_decision || (sys_head && sys_mret_q) ||
+                               (sys_head && sys_fence_i_q);
+`endif
   assign sys_redir_act_now   = trap_decision;
 
   // -------------------------------------------------- the exception payload
@@ -2069,6 +2178,8 @@ module mosaic_core (
       sys_ebreak_q       <= 1'b0;
       sys_mret_q         <= 1'b0;
       sys_wfi_q          <= 1'b0;
+      sys_fence_q        <= 1'b0;
+      sys_fence_i_q      <= 1'b0;
       sys_src1_q         <= {CORE_XLEN{1'b0}};
       sys_dst_tag_q      <= {CORE_TAG_W{1'b0}};
       sys_dst_gen_q      <= {CORE_IGEN_W{1'b0}};
@@ -2116,6 +2227,8 @@ module mosaic_core (
         sys_ebreak_q     <= disp_sys_is_ebreak;
         sys_mret_q       <= disp_sys_is_mret;
         sys_wfi_q        <= disp_sys_is_wfi;
+        sys_fence_q      <= disp_sys_is_fence;
+        sys_fence_i_q    <= disp_sys_is_fence_i;
         sys_src1_q       <= disp_sys_src1_val;
         sys_dst_tag_q    <= disp_sys_dst_tag;
         sys_dst_gen_q    <= disp_sys_dst_gen;
@@ -2391,7 +2504,15 @@ module mosaic_core (
         (c1_redir_valid && c1_redir_taken &&
          (c1_redir_idx == rob_head_index) && (c1_redir_gen == rob_head_gen));
   end
-  assign rob_retire_req_next = ret_req[1] && !head_pending_taken;
+  // FENCE.I is the second such barrier, and for a stronger reason: the
+  // instruction immediately after it may well be the *stale* one it exists to
+  // invalidate. The arbiter acts on the fence's retirement edge and the redirect
+  // the machine applies one cycle later; if lane 1 retired in that same cycle the
+  // younger instruction would commit before the flush that discards it, which is
+  // exactly "a stale byte executed". So while a FENCE.I is the head -- waiting to
+  // drain, or retiring -- lane 1 does not leave the ROB. (I-037.)
+  assign head_fence_i_pending = sys_head && sys_fence_i_q;
+  assign rob_retire_req_next = ret_req[1] && !head_pending_taken && !head_fence_i_pending;
 
   always_comb begin
     retire_clr_valid[0] = rob_retire_ack;
@@ -2535,7 +2656,7 @@ module mosaic_core (
       .mem_rsp_valid_i      (dmem_rsp_valid),
       .mem_rsp_ready_o      (dmem_rsp_ready),
       .mem_rsp_i            (dmem_rsp),
-      .o_busy               (),
+      .o_busy               (ep_busy),
       .o_load_ctr           (),
       .o_store_ctr          (),
       .o_txn_ctr            (lsu_txn_ctr),
@@ -2811,10 +2932,27 @@ module mosaic_core (
   // never allocated into the store queue (the queue's contract is that only a
   // non-faulting store may reach memory) and its completion is the fault. A
   // store that does not fault takes the queue exactly as before.
-  assign disp_mem_ready = disp_mem_is_store
+  //
+  // `fence_block_younger_c` is the FENCE/FENCE.I rule's younger-access block
+  // (I-037): while a fence is staged, no memory macro is handed to a queue, so a
+  // load or store younger than the fence cannot allocate until the fence has
+  // retired. The refusal is here, at the one port both queues are fed from, so
+  // "younger than the fence" is the same predicate for both.
+  //
+  // `!rob_flush_pulse` is the same rule for a redirect, and it closes a window
+  // the queues cannot close themselves: their squash removes the entries
+  // resident when it is applied, not one *inserted in that same cycle*. A macro
+  // at the dispatch head is always younger than the redirecting instruction, so
+  // it is dead work either way -- refusing the insert here means the queue never
+  // holds an entry whose ROB slot the flush has already freed. Without it a
+  // store inserted on the flush edge survives, is never authorised (its ROB
+  // entry is gone) and blocks the queue head for ever; CASE=fence.code_and_data_order's
+  // FENCE.I redirect is what exposed it.
+  assign disp_mem_ready = !fence_block_younger_c && !rob_flush_pulse &&
+      (disp_mem_is_store
       ? (disp_store_faults ? (lsu_wb_ready && !lq_result_valid)
                            : (sq_alloc_ready && lsu_wb_ready && !lq_result_valid))
-      : lq_alloc_ready;
+      : lq_alloc_ready);
 
   assign lq_alloc_valid  = disp_mem_valid && !disp_mem_is_store && disp_mem_ready;
   assign sq_alloc_valid  = disp_mem_valid &&  disp_mem_is_store && !disp_store_faults &&
@@ -2949,6 +3087,7 @@ module mosaic_core (
   assign o_mem_lsu_txn        = lsu_txn_ctr;
   assign o_mem_lsu_misaligned = lsu_misaligned_ctr;
   assign o_mem_lsu_access_fault = lsu_access_fault_ctr;
+  assign o_mem_lsu_busy       = ep_busy;
   assign o_mem_ins_stall      = mem_ins_stall_ctr;
   assign o_mem_squash_valid   = sq_squash_valid;
 

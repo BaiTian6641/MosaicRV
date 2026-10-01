@@ -36,7 +36,8 @@
     "I-034",
     "V-012",
     "I-035",
-    "V-010"
+    "V-010",
+    "I-037"
   ],
   "evidence": {
     "I-001": {
@@ -439,6 +440,17 @@
       "verdict": "PASS",
       "notes": "Clock and sampling-loop calibration -- the package that makes every other case's event counts exact, and the last gate on the base integer set. Case PASS from a clean build: three runs (zero latency and two item-by-item latency plans), 630 cycles, 45 instructions per run, with three independent tallies agreeing exactly -- the reference model's events, the event tap's records and the fetch accepts -- plus 110 checks. A repeated-sampling detector is built in: no record may be emitted twice for the same (retire_seq, pc) identity and the sequence numbers must be dense. Four harness mutants (each rebuilt from a wiped directory with its -D in the build command) exit 1 with their own named first check, including the double-eval one the detector exists for. The package also audited all thirty drivers' clocking discipline against the drive-low / eval-low / eval-rising / eval-falling / one-settled-sample convention and reported each deviation rather than rewriting other lanes' drivers: tb_harness.cpp evaluates twice in the high phase (idempotent, no input changes between them, both before the retire sample) and tb_wb.cpp's extra low-phase eval is an input change rather than a re-sample, so neither can double-count; the alu/decoder cases are combinational and have no timeline; nine of thirty drivers never call dut.final() and no sim/tb/*.sv contains a final block, a timescale, a delay, an initial block or $finish, so dut.final() executes no design code anywhere in the tree -- the card's 'missing final before the end' fail mode has no instance, and the case asserts Verilator's time()==0 and eventsPending()==false instead; --timing is enabled nowhere in the tree, so the 'pending events not advanced' fail mode has no instance either. Regressions re-run after the harness edit: core.bringup_vs_reference, reset.replay_determinism, loader.elf_boundaries, exit.protocol_termination and harness.bad_image all PASS, and V-009's five reset mutants still all exit 1. NOT verified: the audit is a reading of the drivers, not a proof about them; the detector is exercised only through this case's own runs; no other package's driver was rewritten even where it deviates. IMPORTANT follow-up recorded by the lane: dut.final() being a no-op tree-wide means the end-of-run assertion discipline the card asks for currently holds for this case only, and any future per-case final check must be added case by case.",
       "report": "results/reports/V-010-sampling.md"
+    },
+    "I-037": {
+      "cases": [
+        "fence.code_and_data_order"
+      ],
+      "commands": [
+        "python3 tools/run_unit.py --profile p0 --case fence.code_and_data_order"
+      ],
+      "verdict": "PASS",
+      "notes": "FENCE and FENCE.I in the out-of-order core. Case PASS from a clean build (checks=15, retires=33, one FENCE.I redirect, 5 store transactions, the data-ordering results matching the expectation). The rule implemented is stated as a rule and is conservative as the card demands: a fence completes only when the memory path is idle -- store queue empty, load queue empty, and the LSU endpoint neither holding nor expecting a transaction -- and while a fence is staged the single memory insert port is refused so no younger memory macro can be handed to a queue. FENCE.I adds a system redirect to its own pc+4, which advances the fetch epoch and cancels outstanding fetch slots, purges the decode buffer and ROB, flushes both memory queues and restores rename to the committed map; retire lane 1 is suppressed while a FENCE.I is at the head so the following instruction cannot retire before the redirect flushes it. FENCE explicitly does not touch the fetch view, is not a cache flush, and is not a cross-hart synchronisation. Four mutants, each failing by name and each matching a card fail mode: FENCE_EARLY (a fence completing while an older access is still outstanding), FENCEI_NO_INVALIDATE (stale instruction bytes executed -- the card's first fail mode), FENCEI_SKIP, and FENCE_ACCESS_PAST (a younger access proceeding past the fence). The case exercises self-modifying code for real and detects a stale fetch. A pre-existing defect was found and fixed while doing this: a memory macro inserted in the same cycle as a redirect survived the queue squash, so the core now refuses the insert while rob_flush_pulse is high. All eight other core and memory cases still pass. Gaps stated by the lane: cross-hart ordering cannot be exercised at all in p0 (one hart), so 'FENCE is not an automatic cross-hart I-cache sync' is confirmed by construction only; fence.tso is not distinguished from a full fence (stronger, never weaker, but not tested); the fetch unit's outstanding-request table is exercised only indirectly -- the invalidation reuses the same redirect/epoch path as fetch.redirect_late_response and the case does not read the fetch cancellation counters, so 'a slot was outstanding' is marked [INFERENCE] rather than claimed; and the load-queue conjunct of the drain rule is checked for emptiness but its ordering effect is not independently stressed, because the single in-order endpoint already forces an older load to complete before a younger store.",
+      "report": "results/reports/I-037-fence.md"
     }
   }
 }

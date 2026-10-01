@@ -22,15 +22,15 @@
 //
 // ------------------------------------------------------- unsupported macros
 //
-// This package **does not** service fence/fence.i (I-037). Dispatching one of
-// them into an execution unit that cannot complete it would leave a macro in the
-// ROB that never completes -- a hang dressed up as execution. So they are
-// refused, loudly and counted, and the refusal happens **before the group is
-// presented to rename**: nothing is allocated, nothing is leaked, and the
-// machine stops cleanly at that instruction instead of executing something wrong.
-// That ordering is the whole reason the check sits here rather than at the issue
-// queue: rename has already allocated by the time the issue queue could have
-// refused.
+// What this package still refuses is an invalid decode and, until a trap vector
+// is installed, ECALL/EBREAK -- the two system instructions whose whole
+// architectural effect is to trap. Dispatching a macro the machine cannot
+// complete would leave it in the ROB for ever, so the refusal happens **before
+// the group is presented to rename**: nothing is allocated, nothing is leaked,
+// and the machine stops cleanly at that instruction instead of executing
+// something wrong. That ordering is the whole reason the check sits here rather
+// than at the issue queue: rename has already allocated by the time the issue
+// queue could have refused.
 //
 // Loads and stores used to be on that list. They are not any more: the memory
 // path (I-033..I-038) is integrated, and a memory macro leaves through the
@@ -43,6 +43,12 @@
 // through its own insert port, to be resolved by the core's system unit when it
 // reaches the ROB head. See the system insert port's note for why that boundary
 // and not an execution unit.
+//
+// FENCE and FENCE.I were the last entry on that list and are not any more
+// (I-037). They leave through the same system insert port: the ordering a fence
+// enforces is a property of the memory path and the fetch front end, neither of
+// which a cluster can see, so the core's system unit resolves them at the ROB
+// head exactly as it resolves a CSR access.
 //
 // ---------------------------------------------------------------- operands
 //
@@ -258,14 +264,21 @@ module mosaic_dispatch (
     output logic                        mem_ins_dst_x0,
 
     // ------------------------------------------------- system insert (I-019)
-    // A CSR write/read, ECALL, EBREAK, MRET or WFI leaves dispatch here instead
-    // of entering a cluster or a memory queue. It has no execution unit: it is
-    // *resolved at the architectural boundary*, because a CSR read must see the
-    // CSR state left by every older instruction and a CSR write must not be
-    // visible until its own instruction retires. So the macro is allocated into
-    // the ROB like any other and its payload is staged for the core's system
-    // unit (mosaic_core.sv section 10a), which acts when the macro reaches the
-    // ROB head.
+    // A CSR write/read, ECALL, EBREAK, MRET, WFI or FENCE/FENCE.I leaves
+    // dispatch here instead of entering a cluster or a memory queue. It has no
+    // execution unit: it is *resolved at the architectural boundary*, because a
+    // CSR read must see the CSR state left by every older instruction and a CSR
+    // write must not be visible until its own instruction retires, and a fence
+    // must not complete until every older memory access has. So the macro is
+    // allocated into the ROB like any other and its payload is staged for the
+    // core's system unit (mosaic_core.sv section 10a), which acts when the macro
+    // reaches the ROB head.
+    //
+    // A fence is on this port rather than on a cluster because the ordering it
+    // enforces is a property of the whole memory path (the queues and the
+    // endpoint) and of the fetch front end for FENCE.I, none of which a cluster
+    // can see. The core's system unit applies the drain-and-block rule and, for
+    // FENCE.I, the front-end invalidation (I-037).
     //
     // The transport rule is the cluster's: `valid` with the payload held stable
     // until `ready`. The operand is the CSR instruction's write operand -- the
@@ -285,6 +298,12 @@ module mosaic_dispatch (
     output logic                        sys_ins_is_ebreak,
     output logic                        sys_ins_is_mret,
     output logic                        sys_ins_is_wfi,
+    // FENCE and FENCE.I are the other two macros the system unit resolves; they
+    // carry no operand the core uses (the ISA defines fence's fields as
+    // ordering hints this profile does not interpret) so the two class bits are
+    // the whole payload beyond the identity.
+    output logic                        sys_ins_is_fence,
+    output logic                        sys_ins_is_fence_i,
     output logic [DSP_XLEN-1:0]         sys_ins_src1_val,
     output logic [DSP_TAG_W-1:0]        sys_ins_dst_tag,
     output logic [DSP_IGEN_W-1:0]       sys_ins_dst_gen,
@@ -394,6 +413,11 @@ module mosaic_dispatch (
     logic                    sys_ebreak;
     logic                    sys_mret;
     logic                    sys_wfi;
+    // FENCE / FENCE.I are resolved by the system unit too (I-037); the class
+    // bits are all the payload the core reads, because this profile treats the
+    // fm/pred/succ fields conservatively and ignores them.
+    logic                    sys_fence;
+    logic                    sys_fence_i;
   } disp_ent_t;
 
   disp_ent_t            q_mem [0:DSP_DEPTH-1];
@@ -465,12 +489,13 @@ module mosaic_dispatch (
     // and allocated into its queue through the memory insert port below. A
     // CSR/system macro is a service too: it is allocated into the ROB and
     // resolved by the core's system unit at the architectural boundary (see the
-    // system insert port's note). What remains refused is everything the
-    // machine still has no path for: an invalid decode, FENCE/FENCE.I (I-037),
-    // and -- until a trap vector is installed -- the two system instructions
-    // whose entire architectural effect is to trap.
-    l0_unsupported = dec_valid[0] && (!dec_ctl0.valid || dec_ctl0.is_miscmem) ||
-                     l0_trap_unarmed;
+    // system insert port's note). FENCE and FENCE.I are on that same port: the
+    // core's system unit drains the memory path and, for FENCE.I, invalidates
+    // this hart's instruction view (I-037). What remains refused is everything
+    // the machine still has no path for: an invalid decode, and -- until a trap
+    // vector is installed -- the two system instructions whose entire
+    // architectural effect is to trap.
+    l0_unsupported = dec_valid[0] && !dec_ctl0.valid || l0_trap_unarmed;
   end
 
   // --------------------------------------------------------------------------
@@ -629,6 +654,8 @@ module mosaic_dispatch (
         q_mem[i].s2_x0   <= 1'b0;
         q_mem[i].s2_const<= 1'b0;
         q_mem[i].sys     <= 1'b0;
+        q_mem[i].sys_fence   <= 1'b0;
+        q_mem[i].sys_fence_i <= 1'b0;
       end
     end else if (recovering) begin
       // A redirect drops every macro from the ROB at and above the head, and
@@ -674,7 +701,7 @@ module mosaic_dispatch (
         // it for the ISA reference.
         q_mem[push_at].s2_const <= !dec_ctl0.uses_rs2 || s2_init_fold;
         q_mem[push_at].s2_cval  <= s2_init_fold ? {DSP_XLEN{1'b0}} : dec_ctl0.imm;
-        q_mem[push_at].sys          <= dec_ctl0.is_system;
+        q_mem[push_at].sys          <= dec_ctl0.is_system || dec_ctl0.is_miscmem;
         q_mem[push_at].sys_csr_addr <= dec_ctl0.csr_addr;
         q_mem[push_at].sys_csr_op   <= dec_ctl0.csr_op;
         q_mem[push_at].sys_csr_reads <= dec_ctl0.csr_reads;
@@ -683,6 +710,8 @@ module mosaic_dispatch (
         q_mem[push_at].sys_ebreak   <= dec_ctl0.is_ebreak;
         q_mem[push_at].sys_mret     <= dec_ctl0.is_mret;
         q_mem[push_at].sys_wfi      <= dec_ctl0.is_wfi;
+        q_mem[push_at].sys_fence    <= dec_ctl0.is_miscmem && !dec_ctl0.is_fence_i;
+        q_mem[push_at].sys_fence_i  <= dec_ctl0.is_fence_i;
       end
     end
   end
@@ -979,6 +1008,8 @@ module mosaic_dispatch (
     sys_ins_is_ebreak  = head.sys_ebreak;
     sys_ins_is_mret    = head.sys_mret;
     sys_ins_is_wfi     = head.sys_wfi;
+    sys_ins_is_fence   = head.sys_fence;
+    sys_ins_is_fence_i = head.sys_fence_i;
     sys_ins_src1_val   = sys_src1_val;
     sys_ins_dst_x0     = head.dst_x0;
     sys_ins_dst_tag    = head.dst_x0 ? {DSP_TAG_W{1'b0}} : head.dst_tag;
