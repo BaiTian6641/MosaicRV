@@ -55,11 +55,12 @@
 #define MOSAIC_TRAPLOG_REC_WORDS  2              /* { mcause, mtval }        */
 #define MOSAIC_TRAPLOG_REC_BYTES  (MOSAIC_TRAPLOG_REC_WORDS * 8)
 
-#define MOSAIC_INPUT_BASE         0x80001080UL
-#define MOSAIC_INPUT_WORDS        4              /* a, b, c, (reserved)      */
-#define MOSAIC_INPUT_BYTE_OFF     0
+/* The three program inputs are compiled into .rodata as mosaic_prog_inputs,
+ * which the linker places immediately after .text inside the loadable image.
+ * A harness-supplied FROMHOST word overwrites word 0 in place. */
+#define MOSAIC_INPUT_WORDS        3              /* a, b, c                  */
 
-#define MOSAIC_SCRATCH_BASE       0x80001100UL
+#define MOSAIC_SCRATCH_BASE       0x80001080UL
 #define MOSAIC_SCRATCH_SIZE       128
 
 /* Machine-mode CSR numbers (RISC-V Privileged Spec v1.12) */
@@ -148,11 +149,14 @@ static inline volatile unsigned long *mosaic_traplog(unsigned int index)
          + (unsigned long)MOSAIC_TRAPLOG_REC_BYTES * index);
 }
 
-/* program input words, overwritten by FROMHOST for word 0 */
+/* program input words; word 0 is overwritten in place when the harness
+ * supplies a non-zero FROMHOST.  The base address is a link-time symbol,
+ * so this accessor is only usable from C linked against mosaic_p0.ld. */
+extern unsigned long mosaic_prog_inputs[];
+
 static inline volatile unsigned long *mosaic_input(unsigned int index)
 {
-    return (volatile unsigned long *)
-        ((unsigned long)MOSAIC_INPUT_BASE + 8UL * index);
+    return &mosaic_prog_inputs[index];
 }
 
 static inline volatile unsigned char *mosaic_scratch(void)
@@ -202,17 +206,17 @@ static inline void mosaic_write_mepc(unsigned long value)
  * numeric value here would silently change the addressing mode.  The script
  * places these symbols at exactly MOSAIC_*_BASE. */
 .macro MOSAIC_LOAD_INPUTS
-    la      s2, __input_start
-    ld      a0, MOSAIC_INPUT_BYTE_OFF +  0(s2)
-    ld      a1, MOSAIC_INPUT_BYTE_OFF +  8(s2)
-    ld      a2, MOSAIC_INPUT_BYTE_OFF + 16(s2)
+    la      s2, mosaic_prog_inputs
+    ld      a0, 0(s2)
+    ld      a1, 8(s2)
+    ld      a2, 16(s2)
 .endm
 
 /* Establish the three reserved base pointers. */
 .macro MOSAIC_SETUP_BASES
     la      s0, __signature_start
     la      s1, __scratch_start
-    la      s2, __input_start
+    la      s2, mosaic_prog_inputs
 .endm
 
 /* sig[0..3] = signature word 0..3 */

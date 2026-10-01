@@ -38,7 +38,8 @@ main:
     sd      a1, 8(s3)
     srli    t0, a0, 32
     sw      t0, 16(s3)
-    andi    t1, a0, 0xFFFF
+    slli    t1, a0, 48
+    srli    t1, t1, 48                          /* t1 = a & 0xffff */
     sh      t1, 20(s3)
     andi    t2, a1, 0xFF
     sb      t2, 22(s3)
@@ -47,7 +48,8 @@ main:
     sd      a0, 24(s3)
     add     t4, a0, a2
     sd      t4, 32(s3)
-    andi    t5, a1, 0xFFFF
+    slli    t5, a1, 48
+    srli    t5, t5, 48                          /* t5 = b & 0xffff */
     sh      t5, 40(s3)
 
     /* ---- reads ---- */

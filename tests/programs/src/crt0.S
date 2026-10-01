@@ -12,24 +12,25 @@
  *   2. point mscratch at the dedicated trap stack
  *   3. install the machine trap vector (mtvec, direct mode)
  *   4. zero every NOLOAD region, one region at a time
- *   5. seed the runtime input area from the compiled-in per-input defaults
- *   6. let the harness override input word 0 through FROMHOST
- *   7. read TOHOST once (spec: reads 0 while the program runs)
- *   8. call main(); if it returns, finish PASS
+ *   5. let the harness override input word 0 through FROMHOST
+ *   6. read TOHOST once (spec: reads 0 while the program runs)
+ *   7. call main(); if it returns, finish PASS
  */
 
 #include "platform.h"
 
-/* The stack is declared here, explicitly, with an explicit size and
- * alignment.  The linker script places the .stack output section wherever it
- * fits in RAM; nothing about it depends on a symbol this package did not
- * define itself. */
+/* The stacks are declared here, explicitly, with an explicit size and
+ * alignment.  The linker script places the containing output section
+ * wherever it fits in RAM; nothing about them depends on a symbol this
+ * package did not define itself. */
     .equ MOSAIC_STACK_SIZE,  16384
     .equ MOSAIC_STACK_ALIGN, 16
 
 /* Per-input compiled-in defaults, overridden by the Makefile with
  * -DPROG_INPUT0/-DPROG_INPUT1/-DPROG_INPUT2 so that each (program, input)
- * pair gets its own ELF. */
+ * pair gets its own ELF.  They live in .rodata, which is ordinary RAM as far
+ * as the hart is concerned, so the FROMHOST override can be written straight
+ * over word 0 without a copy. */
 #ifndef PROG_INPUT0
 #define PROG_INPUT0 0
 #endif
@@ -94,52 +95,31 @@ _start:
     la      a1, __traplog_end
     call    zero_region
 
-    la      a0, __input_start
-    la      a1, __input_end
-    call    zero_region
-
     la      a0, __scratch_start
     la      a1, __scratch_end
     call    zero_region
 
-    la      a0, mosaic_stack_bottom
-    la      a1, mosaic_stack_top
+    la      a0, __bss_stack_start
+    la      a1, __bss_stack_end
     call    zero_region
 
-    la      a0, mosaic_trapstack_bottom
-    la      a1, mosaic_trapstack_top
-    call    zero_region
-
-    /* 5. seed the runtime input area from the compiled-in defaults.
-     *    Program input index 0 may then be overridden by the harness. */
-    la      t0, __input_start
-    la      t1, mosaic_prog_inputs
-    ld      t2,  0(t1)
-    sd      t2,  0(t0)
-    ld      t2,  8(t1)
-    sd      t2,  8(t0)
-    ld      t2, 16(t1)
-    sd      t2, 16(t0)
-    ld      t2, 24(t1)
-    sd      t2, 24(t0)
-
-    /* 6. FROMHOST override of input word 0.
+    /* 5. FROMHOST override of input word 0.
      *    Per protocol a harness that supplies no input leaves FROMHOST at 0,
      *    which must be treated as "no override" rather than as an input. */
     li      t3, MOSAIC_FROMHOST
     ld      t4, 0(t3)
     beqz    t4, 7f
-    la      t5, __input_start
+    la      t5, mosaic_prog_inputs
     sd      t4, 0(t5)
 7:
 
-    /* 7. TOHOST read probe.  Protocol: reads 0 while the program runs. */
-    li      t3, MOSAIC_TOHOST
-    ld      t4, 0(t3)
+    /* 6. TOHOST read probe.  Protocol: reads 0 while the program runs.
+     *    FROMHOST and TOHOST are adjacent registers of the same device. */
+    ld      t4, -8(t3)
     la      t5, mosaic_tohost_probe
     sd      t4, 0(t5)
 
-    /* 8. run the program */
+    /* 7. run the program */
     call    main
 
     /* main returned without writing TOHOST itself: report PASS, code 0.
@@ -150,7 +130,8 @@ _start:
     .size   _start, . - _start
 
 /* ================================================================== */
-/* Compiled-in input defaults (read-only, lives in the loadable image)  */
+/* Compiled-in input defaults (read-only by convention, lives in the   */
+/* loadable image so the harness loader has nothing extra to map)       */
 /* ================================================================== */
     .section .rodata, "a", @progbits
     .balign 8
@@ -159,7 +140,6 @@ mosaic_prog_inputs:
     .dword  PROG_INPUT0
     .dword  PROG_INPUT1
     .dword  PROG_INPUT2
-    .dword  0
     .size   mosaic_prog_inputs, . - mosaic_prog_inputs
 
 /* ================================================================== */
@@ -190,7 +170,7 @@ tohost_finish:
  *
  * Zero [start, end) with 8-byte stores once the cursor is 8-byte aligned,
  * then finish with a byte-at-a-time tail.  Used once per NOLOAD region so a
- * region never depends on the linker having produced a bss length that is a
+ * region never depends on the linker having produced a length that is a
  * multiple of 8. */
     .globl  zero_region
     .type   zero_region, @function

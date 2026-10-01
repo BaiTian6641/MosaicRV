@@ -103,15 +103,6 @@ trap_expect:
     ret
     .size   trap_expect, . - trap_expect
 
-/* trap_disarm() -- clear the arm so the next trap is fatal. */
-    .globl  trap_disarm
-    .type   trap_disarm, @function
-trap_disarm:
-    la      t0, mosaic_mexpc_arm
-    sd      zero, 0(t0)
-    ret
-    .size   trap_disarm, . - trap_disarm
-
 /* ================================================================== */
 /* trap_entry                                                          */
 /* ================================================================== */
