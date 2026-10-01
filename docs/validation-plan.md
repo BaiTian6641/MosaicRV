@@ -22,7 +22,7 @@
 | Difftest | `3729300ae233816d332d057f170472ebe35147b0` | 上述 XiangShan 树中的 gitlink；接口、生成器、C++ 比较器必须一起冻结，不能只复制 bundle 名。[VR-002、VR-003] |
 | ready-to-run | `c4114ce3fffcd5c147c525014b40f1c841347238` | 同一 XiangShan gitlink；NEMU `.so` 和样例 workload 可用于上游环境校准，不能直接作为新核 RV64IM 程序。[VR-004] |
 | NEMU | `f39e3077d7bac3cd9a3a853a9300a5f8f0293a2c` | ready-to-run 提交明确给出的参考库来源。单 hart 配置是 `riscv64-xs-ref_defconfig`；目录核实的双 hart 文件是 `riscv64-xs-dual-ref_defconfig`，不能照抄提交消息中顺序不同的文件名。配置启用 RVV/H/Sv48 等许多功能，不是 p0 配置。[VR-004、VR-005] |
-| XiangShan Mill | `0.12.3` | 冻结 `.mill-version`。Dockerfile 基镜像是 `ghcr.io/openxiangshan/xs-env:latest`，这**不是可重现 pin**；实施时解析镜像 digest、所有包版本、JDK/Chisel/firtool 依赖闭包。[VR-002] |
+| XiangShan Mill | `0.12.3` | 冻结 `.mill-version`。上游 Dockerfile 仍写 `ghcr.io/openxiangshan/xs-env:latest`，本地 Rosetta runner 已将 AMD64 manifest 固定为 `ghcr.io/openxiangshan/xs-env@sha256:a0aa7dc5554a7273a1f790bd1059b4624460c3191e94873697bbe6a20b0dc667`，并在构建日志确认 Dockerfile 中的 `latest` 解析到此 digest；这只是本地环境 pin，不修改上游 Dockerfile，也不证明其他平台 manifest 相同。[VR-002] |
 | Verilator | `v5.052`，tag object `efa4927be48e75c3cd08fc848b198d1d9d237f00` → commit `ea338be98e1e838d3518809ce8899f85a009963c`，tag 日期 2026-09-05 | 当前在线手册标示 5.052；是原生 SV+C++ 的候选基线，不声称与 XiangShan 候选组合已实测兼容。[VR-008] |
 | Spike 主线 | `0bff12123b1fd510e19e19634dd997dbade70e54`，2026-09-28 | 主线 CLI/语义对照候选；C++ 内部接口不受公开 API 稳定性保证。XiangShan 的 `riscv64-spike-so` 来自 OpenXiangShan fork，**不是**主线 Spike 原生提供 NEMU ABI。[VR-004、VR-006] |
 | Sail RISC-V model | release `0.14.1` → commit `e4b243f4eb5d1ed05bbbc030ad338c2a32c45d72`；ACT4 固定 README 也指定 `0.14.1` | 它是 Sail 模型版本，不是 Sail compiler 版本；源码构建需 Sail compiler ≥0.20.2，但本地验证采用官方 Mac-arm64 release asset，SHA-256 `bc35be7b45a21f60d32915ccd8f9f1746f5a342399e4d65a8fb2b7c1e81babdf`。其他平台 artifact hash 分开冻结。[VR-007、VR-009] |
@@ -38,7 +38,9 @@
 
 ## 2. Upstream command evidence and staged project entrypoints
 
-#### A. 已在上游原文核实的示例；本轮没有执行
+#### A. 已核实的上游原文命令；本地实跑另见验证记录
+
+以下命令是冻结版本 README 中的示例，本轮没有逐条、原样执行 `MinimalConfig` 流程；已完成的 `make emu` 与 CoreMark/NEMU 校准记录见[验证记录](verification.md)。校准结果不代表以下命令逐字重放，也不代表 MosaicRV DUT 通过。
 
 在冻结的 XiangShan 工作目录，完成它的依赖、绝对路径 `NEMU_HOME`/`NOOP_HOME`/`AM_HOME` 与子模块初始化后，上游 README 原文给出：[VR-002]
 

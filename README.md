@@ -39,7 +39,7 @@
 
 - 三块实板的完整 part/package/speed grade、board revision、clock/pins、编程接口；Zynq 必须区分 7000 与 UltraScale+ MPSoC。
 - exact-part vendor tool/IP/license 与 RAM 行为；部分 Gowin PDF 本轮 HTTP 403、AMD 动态门户未取得完整正文，文档明确限制，不据此猜脚本或时序。
-- 工具/OCI 镜像依赖闭包、新核参考配置/ABI；已列 SHA 是来源核实，尚未构建或执行兼容性验证。
+- 新核参考配置/ABI与精确工具闭包仍需完成；XiangShan、NEMU、Sail、ACT4 的来源 pin、当前 runner 与上游校准见[验证记录](docs/verification.md) §6，可用 `make check-upstream-pinned` 重验。ACT/Sail 校准及 XiangShan/NEMU CoreMark smoke 不等于 MosaicRV adapter/profile 兼容或 DUT PASS；`ready-to-run` 样例仓库未声明 license，许可审核前不得再分发。
 - ASIC 的合法 PDK、库/SRAM/IO、PVT、DFT、foundry signoff 与样片资源。
 
 这些是未来任务的显式输入，不阻止本次完整规划交付，也不能被当成已完成的硬件成果。

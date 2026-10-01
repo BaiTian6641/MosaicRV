@@ -233,16 +233,34 @@ print(json.dumps({"status":"PASS", "original_documents":3,
 
 2026-09-30 RVA23 细查后复核：§1 嵌入式检查器再次 `PASS`；仍是 239 个任务（98 I/90 V/51 H）、90 行集成依赖、642 条无环依赖边、62 个引用、111 个本地链接、22 份文档、11 份指南与 239 张任务卡，Git whitespace 为 PASS。另以针对脚本核对 RVA23U64/S64 的 59 个 mandatory/Sha 名称与 23 个 ratified option 在实施、验证、RVA23 阶段指南中均有归属，并在平台/README 中明确 Core、项目选项组合与 Server Platform 边界。此证据只覆盖规划文档完整性，不声称任何 CPU 功能、DIEL 实测、板测或 ASIC 结果。
 
+2026-09-30 工具校准收尾：`make check-docs` 与 `make check-upstream-pinned` 均按本文命令实跑；文档检查 PASS，覆盖仍为 102 个来源标题、239 个任务、642 条依赖边、62 个引用、118 个本地链接、89 个外部 URL、22 份文档与 11 份 stage 指南，whitespace PASS。严格上游目标要求项均匹配已记录的 source/tool/artifact identity；它同时明确报告 ready-to-run 许可未声明、MosaicRV NEMU/Difftest adapter 与 ACT4 DUT runner 未完成，因此不构成 DUT PASS。
+
 ## 6. 2026-09-30 外部 ISA/ACT 工具环境与校准结果
 
-本记录针对当前 Darwin arm64 工作站，不是可移植 runner 镜像。当前无 Docker/Podman/Colima，也没有配置 SSH Linux 主机；计划要求的 Linux x86-64 XiangShan/NEMU 环境因此仍 BLOCKED。
+本记录针对当前 Darwin arm64 工作站，不是可移植 runner 镜像。没有安装 Docker Desktop；Lima 提供独立的 Linux x86-64 QEMU fallback 与 Rosetta-backed Docker VZ guest，详见下列实际校准。
+
+- **Linux x86-64 fallback**：Lima `2.2.0` + QEMU `11.1.2`, instance `mosaic-x86`, Ubuntu `24.04.4`, `uname -m=x86_64`; image URL `https://cloud-images.ubuntu.com/releases/noble/release-20260705/ubuntu-24.04-server-cloudimg-amd64.img`, SHA-256 `ffe6203da54deeb6db5d2a98a83f9ec8e55f149d3f7ba622e1abe5fa966ee3d6`. Config: 8 vCPU/24 GiB/200 GiB. Lima marks full-system cross-architecture QEMU extremely slow; retain as architecture/ABI fallback, not performance evidence.
+- **Rosetta Docker runner**：Lima VZ guest `mosaic-rosetta` 启用 Rosetta binfmt；Docker Engine `29.8.2` 报告 Linux/aarch64 daemon，而 `docker run --platform=linux/amd64 alpine:3.22 uname -m` 输出 `x86_64`。另以固定镜像执行 `docker run --pull=never --rm --platform=linux/amd64 --entrypoint /bin/uname ghcr.io/openxiangshan/xs-env@sha256:a0aa7dc5554a7273a1f790bd1059b4624460c3191e94873697bbe6a20b0dc667 -m`，实测同为 `x86_64`；Linux x86 userland 在 Rosetta 下运行，非原生 x86 kernel。
+- **XiangShan image pin**：GHCR manifest index 为 `sha256:6ccf6df6019f63c55d1d00492e2fe7ce540a477bc7be40d0dd23971607889685`；固定的 Linux/amd64 manifest 为 `sha256:a0aa7dc5554a7273a1f790bd1059b4624460c3191e94873697bbe6a20b0dc667`。已按 amd64 manifest digest 拉取，并将本地 `ghcr.io/openxiangshan/xs-env:latest` alias 指向该 immutable manifest；BuildKit 输出确认 base 为 `latest@sha256:a0aa...`。既往 `xsdev:HEAD` build 记录的 image ID 是 `sha256:b7260cdecf593d5c1639b5e41a446f91aff9dc628ac29f2450830e10a6cc6996`；本次复核时当前 `mosaic-rosetta` Docker daemon 已无 `xsdev:HEAD` tag，故 live inventory 只把 base digest 列为可用。
+- **Rosetta Docker XiangShan/NEMU smoke**：XiangShan `e7bab53e66dfb3c4a1d11cf9519b0396f8576cae` 的 157 个递归 gitlink 均匹配；固定 `xs-env` AMD64 manifest 上构建 `xsdev:HEAD`。首次 24-GiB elaboration 被 kernel OOM-killer 终止（Mill Java RSS 约 12.3 GiB）；把 Rosetta guest RAM 扩至 40 GiB 后，在 x86_64 Docker container 内完成 `make emu`。同一 Rosetta Docker environment 编译 NEMU `f39e3077d7bac3cd9a3a853a9300a5f8f0293a2c` reference `.so`，并运行上游 `coremark-2-iteration.bin`：Difftest enabled、`HIT GOOD TRAP`，663,692 instructions / 463,152 cycles / IPC 1.43299。Host wall time约 938 秒，只作功能证据，不作性能数据。Dockerfile 的 upstream `latest` 通过预先拉取/别名固定到 line 242 的 AMD64 digest；Makefile Docker run 必须在 container 内设置 `IN_XSDEV_DOCKER=y`、`NOOP_HOME=/work`，否则 ARM host 会在 `difftest/build` 路径失败。
+
+- **Live source/artifact inventory**：宿主端 `python3 tools/check_upstream.py` 通过固定 Git commit、worktree cleanliness、157 XiangShan / 1 NEMU recursive gitlinks、AMD64 image manifest 与已构建 artifact SHA-256 核验。当前哈希：XiangShan `build/verilator-compile/emu`=`72186b6c089932c6cc7e1915dd0674f3971eda5f38918382b3c2f46a3f83a5ed`；NEMU `.so`=`8a6f428dda7b6696fbc38a9413228a238c0fe59b0c08544d84f2d9c7d3417689`；CoreMark ELF=`c764afb8bfd69542620a4794b858867dd1e455efaac56c28eb477f1732f83e8e`。`ready-to-run` 固定 commit 为 `c4114ce3fffcd5c147c525014b40f1c841347238`，但其 [GitHub license metadata](https://api.github.com/repos/OpenXiangShan/ready-to-run) 为 `null`；检查器因此将 workload 与 ELF 标为 **BLOCKED: legal authorization unresolved**，虽已有功能运行记录，也不得据此声称许可已确认或再分发。
+
+- **严格复核命令**：先让 `mosaic-rosetta` guest 处于 Running，再执行 `make check-upstream-pinned`。该目标要求 XiangShan/NEMU pinned source、递归 gitlinks、AMD64 manifest、已构建 emulator/reference artifact、Sail 与 ACT source，并核对 ACT4 `.mise.toml` 的工具版本及 CLI；报告仍显式保留 ready-to-run 许可与 MosaicRV adapter/DUT-runner blockers。
+
+```sh
+make check-upstream-pinned
+```
+
+
+- **Native macOS NEMU 尝试边界**：另一会话在 Darwin 对非 pinned commit `274a9eaeb2c2e090c7eeb26a77e5a623c890289b` 尝试七次，未生成 binary；记录的问题包括 Clang 拒绝 GCC-only flags、SDL2 headers 缺失、`-Werror=format` 等。该结果只说明那一 checkout/toolchain 的 native build 失败，不证明所有 macOS 构建都不可能；pinned `f39...` Linux/Docker build 和本次 Difftest smoke 已通过。
 
 - **Sail**：安装官方 [`0.14.1` Mac-arm64 release](https://github.com/riscv/sail-riscv/releases/tag/0.14.1)，资产 `sail-riscv-Mac-arm64.tar.gz` SHA-256 为 `bc35be7b45a21f60d32915ccd8f9f1746f5a342399e4d65a8fb2b7c1e81babdf`；`sail_riscv_sim --version` 实际输出 `0.14.1`。源码 commit `e4b243f4eb5d1ed05bbbc030ad338c2a32c45d72`；工具安装在 `$HOME/mosaic-ref/sail-riscv-0.14.1`。
-- **ACT4**：[`riscv/riscv-arch-test`](https://github.com/riscv/riscv-arch-test/commit/96493a91448ca50780013fd892daec2c204487ba) checkout 固定在 `96493a91448ca50780013fd892daec2c204487ba`，source checkout clean。`mise 2026.9.15` 已安装；ACT4 `.mise.toml` 的 Ruby `3.4.11`、uv `0.11.33`、Bundler `4.0.21`、prek `0.5.3`、ShellCheck `0.11.0` 均已安装并实查版本。ACT Python CLI `uv run act --help` 正常。
+- **ACT4**：[`riscv/riscv-arch-test`](https://github.com/riscv/riscv-arch-test/commit/96493a91448ca50780013fd892daec2c204487ba) checkout 固定在 `96493a91448ca50780013fd892daec2c204487ba`，source checkout clean。`mise 2026.9.15` 已安装；ACT4 `.mise.toml` 的 Ruby `3.4.11`、uv `0.11.33`、Bundler `4.0.21`、prek `0.5.3`、ShellCheck `0.11.0` 均已安装。ACT CLI 使用 `mise exec -C "$HOME/mosaic-ref/riscv-arch-test" -- uv run act --help` 实测正常；未激活 mise 的系统 PATH 是 uv `0.12.12`、Ruby `2.6.10`、Bundler `1.17.2`，不可代替项目锁定版本。严格 inventory 会检查 uv/Ruby/Bundler 版本并执行 ACT CLI。
 - **UDB/Z3 适配**：ACT4 首次 UDB 检查失败，UDB `0.1.17` 试图在 Darwin 加载 Linux AArch64 `libz3.so`（Mach-O loader 拒绝 ELF）。已安装 Homebrew Z3 `5.1.0`，并在隔离 `$HOME/mosaic-ref/act4-native-cache` 中将 UDB 预期的 `libz3.so` 名称指向原生 `libz3.dylib`；再次配置检查通过，未修改上游 gem 或仓库代码。
 - **ACT4/Sail/calibration smoke**：使用上游 `config/sail/sail-rv64-max` 样例参考配置、仅过滤 `EXTENSIONS=I`，生成 51 个 RV64I ELF；逐个通过上游 `run_tests.py` 在 Sail 0.14.1 上执行，`summary.log` 为 51/51 `RVCP-SUMMARY: TEST PASSED`。51 个 ELF 的 SHA-256 清单保存在 `$HOME/mosaic-ref/act4-calibration-work-nativez3/sail-rv64-max/elfs.sha256`。这只校准生成器、UDB、编译器、Sail 与 ACT runner 的连通性：测试基于 Sail max 配置并在同一 Sail 模型回放，不是独立 oracle，也不是 MosaicRV DUT 验收；ACT 官方明确其不是 verification tests。
 - **交叉工具链边界**：当前 Homebrew `riscv64-elf-gcc` 为 GCC `16.2.0`、Binutils `2.47.20260726`。固定 ACT4 README 列 GCC `15`/Binutils `2.44` 或 LLVM `22` 为其当时受支持/CI 测试基线。上述 ACT smoke 实际使用 GCC 16，虽通过，不代表闭合精确工具链兼容性；交叉工具链 source/hash 仍需冻结。
-- **Spike 与环境审计**：Spike commit `0bff12123b1fd510e19e19634dd997dbade70e54` 的本地 `spike --help` 输出 `1.1.1-dev`。`python3 tools/check_upstream.py --require riscv-arch-test --require sail_riscv_sim --require spike --require riscv64-elf-gcc --require riscv64-elf-objdump` 通过，且明确列出 XiangShan/NEMU 的 BLOCKED 原因。
-- **未完成集成**：尚无 MosaicRV 专属 ACT4 UDB/Sail/linker/`rvmodel_macros.h` 配置或 DUT ELF runner；不得拿 `sail-rv64-max` 样例或上述 51/51 冒称 p0 通过。XiangShan `e7bab53e66dfb3c4a1d11cf9519b0396f8576cae` 递归 source closure/build，以及 NEMU `f39e3077d7bac3cd9a3a853a9300a5f8f0293a2c` reference build/ABI calibration，仍需 Linux x86-64 runner。
 
-后续补齐 Linux runner 或 MosaicRV DUT ACT 配置时，另起带版本与哈希的 run record；本条不自动升级为 DUT PASS。
+**MosaicRV 验收边界**：没有 MosaicRV 专属 ACT4 UDB/Sail/linker/`rvmodel_macros.h` 配置、DUT ELF runner 或 NEMU/Difftest adapter。ACT 51/51 是 Sail-max self-replay；Rosetta Docker CoreMark 是 XiangShan/NEMU 上游校准；两者都不等于新核 p0 correctness。任何“DUT PASS”仍要求显式 MosaicRV profile、DUT execution 与可重放证据。
+
+后续完成 MosaicRV DUT ACT/Difftest adapter 或更换 source/image/tool pin 时，另起带版本与哈希的 run record；上游 sample PASS 不自动升级为 DUT PASS。

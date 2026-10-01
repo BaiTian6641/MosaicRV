@@ -39,7 +39,7 @@ SLANG_TIDY ?= slang-tidy
 # toolchain will turn into a silently different netlist.
 VERILATOR_LINT_FLAGS := --lint-only -Wall -Wno-DECLFILENAME
 
-.PHONY: all help check check-config check-contracts check-coverage check-upstream check-isolation check-docs manifest lint lint-slang lint-cpp \
+.PHONY: all help check check-config check-contracts check-coverage check-upstream check-upstream-pinned check-isolation check-docs manifest lint lint-slang lint-cpp \
         unit sim synth-generic test clean distclean verify-tools
 
 all: check check-docs manifest lint unit
@@ -50,6 +50,8 @@ help:
 	@echo "  make check-docs        the plan documents' own embedded checker"
 	@echo "  make check-config      validate profiles, PMA, CSRs, geometry"
 	@echo "  make check-contracts   validate interface contracts and tag arithmetic"
+	@echo "  make check-upstream    report pinned and optional external inputs"
+	@echo "  make check-upstream-pinned require calibrated upstream pins and the ACT4 runtime"
 	@echo "  make manifest          generate build/$(PROFILE)/manifest.json and RTL config"
 	@echo "  make lint              Verilator lint of the whole design"
 	@echo "  make lint-slang        slang AST/tidy pass over the RTL"
@@ -174,6 +176,22 @@ check-coverage:
 
 check-upstream:
 	$(PYTHON) tools/check_upstream.py
+
+check-upstream-pinned:
+	$(PYTHON) tools/check_upstream.py \
+	  --require XiangShan-e7bab53 \
+	  --require NEMU-f39e307 \
+	  --require xs-env-amd64-image \
+	  --require Rosetta-x86-userland \
+	  --require XiangShan-emu-artifact \
+	  --require NEMU-reference-so \
+	  --require sail_riscv_sim \
+	  --require riscv-arch-test \
+	  --require mise \
+	  --require ACT4-uv \
+	  --require ACT4-ruby \
+	  --require ACT4-bundler \
+	  --require act4-cli
 
 check-isolation:
 	$(PYTHON) tools/check_isolation.py

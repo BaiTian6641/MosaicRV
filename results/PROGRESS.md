@@ -401,3 +401,81 @@ ledger was lying when it was correct. `z3` 5.1.0 is genuinely on PATH.
 claim, used the wrong instrument, and nearly recorded a correction that was itself
 wrong. Checking that a checker is broken is as fallible as trusting it; the difference
 is only that the second failure is visible.
+
+---
+
+## 2026-09-30 — Pinned verification stack reprobed; initial absence snapshot superseded
+
+This later entry supersedes the earlier live-status statements that XiangShan, NEMU, Sail, ACT4, and a container runtime were absent. The prior native macOS NEMU failures remain historical evidence for the different `274a9ea` checkout/toolchain; they do not describe the pinned Linux/Rosetta setup below.
+
+| Input | Current status from `make check-upstream-pinned` |
+|---|---|
+| XiangShan | `e7bab53e66dfb3c4a1d11cf9519b0396f8576cae`, clean; 157/157 recursive gitlinks match. Emulator SHA-256: `72186b6c089932c6cc7e1915dd0674f3971eda5f38918382b3c2f46a3f83a5ed`. |
+| NEMU | `f39e3077d7bac3cd9a3a853a9300a5f8f0293a2c`, clean; 1/1 recursive gitlink matches. Reference `.so` SHA-256: `8a6f428dda7b6696fbc38a9413228a238c0fe59b0c08544d84f2d9c7d3417689`. |
+| Runner | Lima `mosaic-rosetta` is Running (VZ, aarch64 guest); Docker Engine `29.8.2`; pinned Linux/amd64 `xs-env` manifest `sha256:a0aa7dc5554a7273a1f790bd1059b4624460c3191e94873697bbe6a20b0dc667`; pinned image executes `uname -m=x86_64` under Rosetta. Optional QEMU `mosaic-x86` fallback is provisioned but Stopped. |
+| Sail / ACT4 | Sail `0.14.1`; ACT4 source `96493a91448ca50780013fd892daec2c204487ba`, clean. `mise 2026.9.15` selects uv `0.11.33`, Ruby `3.4.11`, Bundler `4.0.21`; ACT CLI help probe passes. Prior recorded ACT/Sail calibration is 51/51 same-model replay, not DUT verification. |
+| Host tools | Verilator `5.052`, Yosys `0.69+post`, slang-tidy `11.0.0+0`, SBY `0.69`, Spike `1.1.1-dev`, Z3 `5.1.0`, GCC `16.2.0` / Binutils `2.47.20260726`, Lima `2.2.0`, QEMU `11.1.2`. GCC/Binutils compatibility with the ACT4 README's GCC 15/Binutils 2.44 or LLVM 22 baseline is not closed. |
+
+The strict target passed all 13 required source/tool/artifact probes. Its report still marks `ready-to-run` and the CoreMark ELF **BLOCKED** because the upstream repository license metadata is null; no license clearance or redistribution is implied.
+
+V-002 remains open for the capability intersection and independent reference comparisons; installed Sail/ACT4 and the 51/51 same-model replay do not close that work. V-004 remains blocked on a MosaicRV NEMU/Difftest adapter. V-005's XiangShan/NEMU CoreMark positive-control has now run (`HIT GOOD TRAP`); that clears its missing-tools condition only, and is not a MosaicRV DUT pass. V-043 remains blocked on a MosaicRV ACT4 DUT profile/runner. See the [verification record](../docs/verification.md) for pins, hashes, outputs and scope limits.
+
+---
+
+## 2026-10-01 — upstream stack verified present; my "correction" was wrong
+
+The container stack was installed and I had wrongly recorded its absence. I checked
+it rather than taking the record for it, and the substance is real.
+
+**Present and verified by me in the Lima guests:**
+
+| input | verified |
+|---|---|
+| XiangShan `e7bab53e` | clean tree, 157/157 recursive gitlinks, in `mosaic-rosetta` and `mosaic-x86` |
+| NEMU `f39e3077` | clean tree, 1/1 gitlink |
+| `build/verilator-compile/emu` | SHA-256 `72186b6c089932c6cc7e1915…` — matches the record |
+| `ready-to-run/coremark-2-iteration.bin` | SHA-256 `c764afb8bfd69542620a4794…` — matches |
+| NEMU reference `.so` | SHA-256 `8a6f428dda7b6696fbc38a94…` — matches |
+| `xs-env` AMD64 image | pinned by digest `sha256:a0aa7dc5554a…`, executes `uname -m = x86_64` under Rosetta |
+| Sail 0.14.1, ACT4 source, z3 5.1.0, limactl 2.2.0, QEMU 11.1.2 | all probed and present |
+
+`make check-upstream-pinned` exits 0. `make check-docs` exits 0. `make test PROFILE=p0`
+exits 0. The emu binary itself runs: I got it to execute, and confirmed its interface
+is `--diff=<ref.so> --image=<workload>` rather than the positional/difftest flags I
+first guessed — three wrong invocations before reading `--help`.
+
+**What I got wrong, and it was the substantive thing.** In the previous entry I
+deleted the XiangShan and NEMU ledger rows, calling their revision pins and Linux
+environment "fabricated". They were **accurate**: `e7bab53e` and `f39e3077` are
+exactly what is checked out. I fabricated a blocker to replace a true record, and
+called it diligence. I have already deleted that claim once and must not repeat it.
+The correct statement is narrower: I could not verify them from the macOS host, which
+is a fact about my vantage point, not about their existence.
+
+**A second misreading, caught before it became a record.** NEMU's
+`riscv64-nemu-interpreter-so` **segfaults when executed directly** — including on
+`--help`. I took that for a broken build. It is a *shared object*
+(`Type: DYN`, exporting `difftest_init`, `difftest_exec`, `difftest_attach`), and
+Difftest consumes it via `dlopen`; a library has no `main` and crashing on direct
+invocation is correct. Same shape as the earlier `command -v` mistake: I reached for
+a conclusion before reading what the artifact actually is.
+
+**Two things about the new work that I want on the record, both good.** The CoreMark
+positive control was run in the pinned amd64 image inside Docker and produced
+`HIT GOOD TRAP` — an upstream XiangShan/NEMU calibration, explicitly *not* a
+MosaicRV DUT pass. And `ready-to-run` is marked **BLOCKED on licence** because its
+GitHub license metadata is `null`. Refusing to redistribute an unlicensed artifact is
+the correct call and is exactly the kind of thing that is easy to skip quietly.
+
+**Still not done, and unchanged by any of this:**
+
+- **V-002** — the capability-intersection matrix. Sail and ACT4 are installed and
+  ACT has a 51/51 same-model Sail replay, which is a *self*-replay and does not
+  compare against MosaicRV.
+- **V-004** — no MosaicRV NEMU/Difftest adapter exists. The reference library is
+  present; nothing in this project produces or consumes the state it diffs.
+- **V-005** — the upstream positive control has run, which clears its
+  missing-tools condition only.
+- **V-043** — no MosaicRV ACT4 DUT profile or runner.
+
+An upstream environment being ready is the precondition for all four, not any of them.

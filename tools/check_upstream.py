@@ -8,17 +8,13 @@ The rule this enforces comes from the plan: **every executable input must have a
 immutable identity, a source and a licence**, and a combination that has not been
 verified must not quietly enter an execution gate.
 
-For each entry the tool *probes the live environment* rather than trusting a
-recorded string, so the ledger cannot go stale silently:
+For each entry the tool probes the live environment rather than trusting a recorded string:
 
-* a source checkout is identified by its HEAD commit, and whether the tree is clean;
-* a tool is identified by running it and capturing its own version output;
-* anything that cannot be located is recorded as `BLOCKED` with the specific reason
-  and the specific thing that would unblock it.
+* source checkouts are identified by HEAD, cleanliness and (for XiangShan/NEMU) recursive gitlink closure;
+* installed tools report their own version; pinned container and build artifacts report exact identities;
+* missing or mismatched inputs are `BLOCKED` with the specific reason, never silently accepted.
 
-`BLOCKED` is never silently `OK`. An absent reference does not enter an execution
-gate: the packages that depend on it stay open rather than being marked
-deferred-and-passed.
+`BLOCKED` is never silently `OK`. An absent reference does not enter an execution gate: the packages that depend on it stay open rather than being marked deferred-and-passed.
 """
 
 from __future__ import annotations
@@ -29,15 +25,50 @@ import os
 import subprocess
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
-from mosaic import config_check  # noqa: E402
-
-REPO_ROOT = config_check.REPO_ROOT
 REF_ROOT = os.path.expanduser("~/mosaic-ref")
+ACT4_ROOT = os.path.join(REF_ROOT, "riscv-arch-test")
+ROSETTA_RUNNER = ["limactl", "shell", "mosaic-rosetta", "--"]
+ROSETTA_REF_ROOT = "/home/flare.guest/mosaic-ref"
+XS_ENV_AMD64 = (
+    "ghcr.io/openxiangshan/xs-env@sha256:"
+    "a0aa7dc5554a7273a1f790bd1059b4624460c3191e94873697bbe6a20b0dc667"
+)
 
 # Third-party trees this project depends on, with what each is for.
 SOURCES = [
+    {
+        "name": "XiangShan-e7bab53",
+        "role": "XiangShan DUT-B source and Difftest host",
+        "path": os.path.join(ROSETTA_REF_ROOT, "XiangShan-e7bab53"),
+        "runner": ROSETTA_RUNNER,
+        "expected_commit": "e7bab53e66dfb3c4a1d11cf9519b0396f8576cae",
+        "licence": "MulanPSL-2.0",
+        "used_for": ["V-005", "V-075"],
+        "check_submodules": True,
+        "require_clean": True,
+    },
+    {
+        "name": "NEMU-f39e307",
+        "role": "Difftest architectural reference source",
+        "path": os.path.join(ROSETTA_REF_ROOT, "NEMU-f39e-pinned"),
+        "runner": ROSETTA_RUNNER,
+        "expected_commit": "f39e3077d7bac3cd9a3a853a9300a5f8f0293a2c",
+        "licence": "MulanPSL-2.0",
+        "used_for": ["V-004", "V-005"],
+        "check_submodules": True,
+        "require_clean": True,
+    },
+    {
+        "name": "ready-to-run-c4114ce",
+        "role": "Upstream prebuilt workloads and Difftest samples",
+        "path": os.path.join(ROSETTA_REF_ROOT, "XiangShan-e7bab53/ready-to-run"),
+        "runner": ROSETTA_RUNNER,
+        "expected_commit": "c4114ce3fffcd5c147c525014b40f1c841347238",
+        "licence": "UNSPECIFIED (GitHub repository license metadata is null)",
+        "licence_review_required": "upstream has no declared license; legal authorization is unresolved",
+        "used_for": ["V-005"],
+        "require_clean": True,
+    },
     {
         "name": "riscv-isa-sim",
         "role": "Spike: independent architectural reference",
@@ -81,33 +112,81 @@ TOOLS = [
     {"name": "sail_riscv_sim",
      "cmd": [os.path.join(REF_ROOT, "sail-riscv-0.14.1", "bin", "sail_riscv_sim"), "--version"],
      "licence": "Other (see upstream LICENCE)", "used_for": ["V-002", "V-006", "V-043"]},
-    {"name": "z3", "cmd": ["z3", "--version"],
+    {"name": "z3", "cmd": ["z3", "--version"], "licence": "MIT",
+     "used_for": ["V-043"]},
+    {"name": "limactl", "cmd": ["limactl", "--version"], "licence": "Apache-2.0",
+     "used_for": ["V-003", "V-004", "V-005"]},
+    {"name": "qemu-system-x86_64", "cmd": ["qemu-system-x86_64", "--version"],
+     "licence": "GPL-2.0-only", "used_for": ["V-003", "V-004", "V-005"]},
+    {"name": "xs-env-amd64-image",
+     "cmd": ROSETTA_RUNNER + ["docker", "image", "inspect", "--format",
+                             "{{.Os}}/{{.Architecture}} {{index .RepoDigests 0}}",
+                             "ghcr.io/openxiangshan/xs-env:latest"],
+     "expected_output": "linux/amd64 " + XS_ENV_AMD64,
+     "licence": "OpenXiangShan xs-env image; component licences vary",
+     "used_for": ["V-005"]},
+    {"name": "Rosetta-x86-userland",
+     "cmd": ROSETTA_RUNNER + ["docker", "run", "--pull=never", "--rm",
+                             "--platform=linux/amd64", "--entrypoint", "/bin/uname",
+                             XS_ENV_AMD64, "-m"],
+     "expected_output": "x86_64",
+     "licence": "Rosetta (Apple proprietary); xs-env component licences vary",
+     "used_for": ["V-003", "V-005"]},
+    {"name": "XiangShan-emu-artifact",
+     "cmd": ROSETTA_RUNNER + ["sha256sum", os.path.join(
+         ROSETTA_REF_ROOT, "XiangShan-e7bab53/build/verilator-compile/emu")],
+     "expected_output": "72186b6c089932c6cc7e1915dd0674f3971eda5f38918382b3c2f46a3f83a5ed  "
+                        + os.path.join(ROSETTA_REF_ROOT,
+                                       "XiangShan-e7bab53/build/verilator-compile/emu"),
+     "licence": "MulanPSL-2.0 (XiangShan source)", "used_for": ["V-005"]},
+    {"name": "NEMU-reference-so",
+     "cmd": ROSETTA_RUNNER + ["sha256sum", os.path.join(
+         ROSETTA_REF_ROOT, "NEMU-f39e-pinned/build/riscv64-nemu-interpreter-so")],
+     "expected_output": "8a6f428dda7b6696fbc38a9413228a238c0fe59b0c08544d84f2d9c7d3417689  "
+                        + os.path.join(ROSETTA_REF_ROOT,
+                                       "NEMU-f39e-pinned/build/riscv64-nemu-interpreter-so"),
+     "licence": "MulanPSL-2.0 (NEMU source)", "used_for": ["V-004", "V-005"]},
+    {"name": "CoreMark-2-iteration-ELF",
+     "cmd": ROSETTA_RUNNER + ["sha256sum", os.path.join(
+         ROSETTA_REF_ROOT, "XiangShan-e7bab53/ready-to-run/coremark-2-iteration.bin")],
+     "expected_output": "c764afb8bfd69542620a4794b858867dd1e455efaac56c28eb477f1732f83e8e  "
+                        + os.path.join(ROSETTA_REF_ROOT,
+                                       "XiangShan-e7bab53/ready-to-run/coremark-2-iteration.bin"),
+     "licence": "UNSPECIFIED (ready-to-run repository license metadata is null)",
+     "licence_review_required": "upstream has no declared license; legal authorization is unresolved",
+     "used_for": ["V-005"]},
+    {"name": "mise", "cmd": ["mise", "--version"],
+     "expected_output": "2026.9.15 macos-arm64 (2026-09-27)",
      "licence": "MIT", "used_for": ["V-043"]},
+    {"name": "ACT4-uv",
+     "cmd": ["mise", "exec", "-C", ACT4_ROOT, "--", "uv", "--version"],
+     "expected_output": "uv 0.11.33 (fece32fc5 2026-07-28 aarch64-apple-darwin)",
+     "licence": "Apache-2.0", "used_for": ["V-043"]},
+    {"name": "ACT4-ruby",
+     "cmd": ["mise", "exec", "-C", ACT4_ROOT, "--", "ruby", "-e", "print RUBY_VERSION"],
+     "expected_output": "3.4.11",
+     "licence": "Ruby License / 2-Clause BSD; per-file notices apply",
+     "used_for": ["V-043"]},
+    {"name": "ACT4-bundler",
+     "cmd": ["mise", "exec", "-C", ACT4_ROOT, "--", "bundle", "--version"],
+     "expected_output": "4.0.21", "licence": "MIT", "used_for": ["V-043"]},
+    {"name": "act4-cli",
+     "cmd": ["mise", "exec", "-C", ACT4_ROOT, "--", "uv", "run", "act", "--help"],
+     "licence": "Apache-2.0 / BSD-3-Clause / CC-BY-4.0 (per file)",
+     "used_for": ["V-002", "V-043"]},
 ]
 
-# References and second DUTs blocked on the documented Linux x86-64 environment.
+# These are MosaicRV-specific gates, not missing upstream installations.
 ABSENT = [
-    {"name": "XiangShan", "role": "second DUT and Difftest host", "gate": "V-005",
-     "unblocked_by": ("CLONE NOT ATTEMPTED. It is a large sbt/Chisel build. The stated "
-                      "revisions and environment in earlier revisions of this ledger were "
-                      "not verified here and have been removed rather than left standing. "
-                      "What is actually true: this host is Darwin arm64 with no container "
-                      "runtime (docker, podman, colima and lima were each probed and are "
-                      "all absent) and no configured remote Linux host. Establishing "
-                      "whether XiangShan builds natively on this host is an untried "
-                      "question, not a proven impossibility.")},
-    {"name": "NEMU", "role": "Difftest reference with a pinned commit trace", "gate": "V-004",
-     "unblocked_by": ("CLONED at ~/mosaic-ref/NEMU, commit 274a9eaeb2c2e090c7eeb26a77e5a623c890289b, "
-                      "and BUILD ATTEMPTED SEVEN TIMES ON THIS HOST. Configuration succeeds; "
-                      "compilation does not. Six distinct blockers in the order hit: "
-                      "(1) NEMU_HOME unset, the Makefile refuses; (2) -lstdc++fs, removed from "
-                      "the libc++ this build links against; (3) -falign-labels=32:9:64:15 and "
-                      "(4) --param max-inline-insns-single=256, both GCC-only tuning flags that "
-                      "clang rejects outright under -Werror; (5) SDL2/SDL.h not installed; "
-                      "(6) printf format-width errors in upstream headers, %lu used for 64-bit "
-                      "types, fatal under -Werror=format. Items 5 and 6 are upstream source "
-                      "defects, not environment setup, so fixing them means patching NEMU "
-                      "itself. No NEMU binary was produced and the checkout has been restored.")},
+    {"name": "MosaicRV-NEMU-Difftest-adapter",
+     "role": "DUT architectural-state/reference ABI", "gate": "V-004",
+     "unblocked_by": ("Implement the MosaicRV state serialization and Difftest ABI; validate round-trip, "
+                      "reference stepping, missing-symbol and wrong-layout negative controls. The pinned "
+                      "upstream NEMU library only establishes the XiangShan sample path.")},
+    {"name": "MosaicRV-ACT4-DUT-runner",
+     "role": "ACT4 DUT profile and ELF execution", "gate": "V-043",
+     "unblocked_by": ("Add the MosaicRV UDB/Sail/linker/rvmodel_macros.h profile and execute every applicable "
+                      "generated ELF on the DUT. The existing 51/51 Sail-max replay is calibration, not DUT PASS.")},
 ]
 
 
@@ -121,39 +200,86 @@ def run(cmd, cwd=None):
         return 127, str(exc)
 
 
+def source_command(entry, *args):
+    runner = entry.get("runner", [])
+    command = runner + ["git", "-C", entry["path"]] + list(args)
+    return run(command, cwd=None if runner else entry["path"])
+
+
 def probe_source(entry):
     path = entry["path"]
-    if not os.path.isdir(os.path.join(path, ".git")):
+    runner = entry.get("runner", [])
+    if not runner and not os.path.isdir(os.path.join(path, ".git")):
         return {"name": entry["name"], "role": entry["role"], "status": "BLOCKED",
                 "licence": entry["licence"], "used_for": entry["used_for"],
                 "expected_commit": entry.get("expected_commit"),
                 "reason": "not checked out at %s" % path}
-    code, out = run(["git", "rev-parse", "HEAD"], cwd=path)
+
+    code, out = source_command(entry, "rev-parse", "HEAD")
     commit = out.strip() if code == 0 else ""
-    _, dirty = run(["git", "status", "--porcelain"], cwd=path)
-    _, subject = run(["git", "log", "-1", "--format=%s"], cwd=path)
+    if code != 0:
+        return {"name": entry["name"], "role": entry["role"], "status": "BLOCKED",
+                "licence": entry["licence"], "used_for": entry["used_for"],
+                "expected_commit": entry.get("expected_commit"), "path": path,
+                "reason": "cannot read source revision: %s" % out.strip()}
+
     expected = entry.get("expected_commit")
     if expected and commit != expected:
         return {"name": entry["name"], "role": entry["role"], "status": "BLOCKED",
                 "licence": entry["licence"], "used_for": entry["used_for"],
                 "expected_commit": expected, "path": path, "commit": commit,
                 "reason": "source revision mismatch; expected %s, found %s" % (expected, commit)}
-    return {"name": entry["name"], "role": entry["role"], "status": "PRESENT",
-            "licence": entry["licence"], "used_for": entry["used_for"],
-            "expected_commit": expected, "path": path, "commit": commit,
-            "subject": subject.strip(), "working_tree_clean": dirty.strip() == ""}
+
+    status_code, dirty = source_command(entry, "status", "--porcelain")
+    _, subject = source_command(entry, "log", "-1", "--format=%s")
+    clean = status_code == 0 and dirty.strip() == ""
+    result = {"name": entry["name"], "role": entry["role"], "status": "PRESENT",
+              "licence": entry["licence"], "used_for": entry["used_for"],
+              "expected_commit": expected, "path": path, "commit": commit,
+              "subject": subject.strip(), "working_tree_clean": clean}
+    if status_code != 0:
+        result.update(status="BLOCKED", reason="cannot read working-tree status: %s" % dirty.strip())
+        return result
+    if entry.get("require_clean") and not clean:
+        result.update(status="BLOCKED", reason="source working tree is not clean")
+        return result
+
+    if entry.get("check_submodules"):
+        submodule_code, submodule_output = source_command(entry, "submodule", "status", "--recursive")
+        submodules = submodule_output.splitlines()
+        mismatched = [line for line in submodules if line[:1] in ("-", "+", "U")]
+        result["submodule_count"] = len(submodules)
+        result["submodules_clean"] = submodule_code == 0 and not mismatched
+        if submodule_code != 0 or mismatched:
+            result.update(status="BLOCKED",
+                          reason="recursive gitlink check failed: %s" %
+                          ("; ".join(mismatched[:3]) if mismatched else submodule_output.strip()))
+            return result
+    if entry.get("licence_review_required"):
+        result.update(status="BLOCKED", reason=entry["licence_review_required"])
+        return result
+    return result
 
 
 def probe_tool(entry):
     code, out = run(entry["cmd"])
-    version = out.strip().splitlines()[0] if out.strip() else ""
-    if code != 0:
+    output = out.strip()
+    version = output.splitlines()[0] if output else ""
+    expected = entry.get("expected_output")
+    if code != 0 or (expected is not None and output != expected):
+        reason = "not installed or not runnable" if code != 0 else (
+            "identity mismatch; expected %r, found %r" % (expected, output))
+        return {"name": entry["name"], "licence": entry["licence"],
+                "used_for": entry["used_for"], "status": "BLOCKED", "reason": reason,
+                "expected_output": expected, "actual_output": output}
+    if entry.get("licence_review_required"):
         return {"name": entry["name"], "licence": entry["licence"],
                 "used_for": entry["used_for"], "status": "BLOCKED",
-                "reason": "not installed or not runnable"}
+                "reason": entry["licence_review_required"],
+                "expected_output": expected, "actual_output": output}
     return {"name": entry["name"], "licence": entry["licence"],
             "used_for": entry["used_for"], "status": "PRESENT",
-            "version": version, "command": entry["cmd"]}
+            "version": version, "command": entry["cmd"], "expected_output": expected}
 
 
 def build_report():
@@ -162,11 +288,9 @@ def build_report():
         "sources": [probe_source(entry) for entry in SOURCES],
         "tools": [probe_tool(entry) for entry in TOOLS],
         "absent": ABSENT,
-        "policy": ("Every executable input has an immutable identity, a source and a licence, "
-                   "probed live rather than read from a stored string. An input that cannot be "
-                   "located is BLOCKED with the specific thing that would unblock it; BLOCKED "
-                   "is never silently treated as OK, and a package depending on an absent "
-                   "reference stays open rather than being marked deferred-and-passed."),
+        "policy": ("Source revision, cleanliness and selected recursive gitlinks are probed live; "
+                   "tools report versions or exact pinned image/artifact identities. BLOCKED inputs "
+                   "remain explicit and do not imply MosaicRV DUT acceptance."),
     }
 
 
@@ -185,9 +309,12 @@ def main() -> int:
     print("source checkouts")
     for entry in report["sources"]:
         if entry["status"] == "PRESENT":
-            print("  ok      %-16s %s  clean=%s  %s"
+            submodules = ("  gitlinks=%d clean=%s"
+                          % (entry["submodule_count"], entry["submodules_clean"])
+                          if "submodule_count" in entry else "")
+            print("  ok      %-16s %s  clean=%s%s  %s"
                   % (entry["name"], entry["commit"][:12], entry["working_tree_clean"],
-                     entry["subject"][:48]))
+                     submodules, entry["subject"][:48]))
         else:
             print("  BLOCKED %-16s %s" % (entry["name"], entry["reason"]))
 
@@ -198,9 +325,9 @@ def main() -> int:
         else:
             print("  BLOCKED %-20s %s" % (entry["name"], entry["reason"]))
 
-    print("absent references, each with what would unblock it")
+    print("MosaicRV-specific gates still blocked")
     for entry in report["absent"]:
-        print("  BLOCKED %-12s gate=%-6s %s"
+        print("  BLOCKED %-32s gate=%-6s %s"
               % (entry["name"], entry["gate"], entry["unblocked_by"][:74]))
 
     present = {e["name"] for e in report["sources"] + report["tools"]
@@ -209,7 +336,10 @@ def main() -> int:
     if missing:
         print("FAIL required input(s) not present: %s" % ", ".join(missing), file=sys.stderr)
         return 1
-    print("PASS every present input has an immutable identity, a source and a licence")
+    if args.require:
+        print("PASS required inputs match their recorded revision/version/identity")
+    else:
+        print("inventory complete; BLOCKED entries above remain unverified")
     return 0
 
 
