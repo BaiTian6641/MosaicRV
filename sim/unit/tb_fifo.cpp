@@ -456,6 +456,10 @@ class Bench {
   int checks_ = 0;
   uint64_t reset_cycles_ = 0;
   int reset_remaining_ = kResetCycles;
+  // Within-cycle snapshot of the skid buffer, taken before the clock edge.
+  uint64_t skid_ready_ = 0;
+  uint64_t skid_valid_ = 0;
+  uint64_t skid_payload_ = 0;
 };
 
 }  // namespace
