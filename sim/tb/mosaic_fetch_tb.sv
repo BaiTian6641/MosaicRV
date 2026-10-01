@@ -131,6 +131,10 @@ module mosaic_fetch_tb #(
     output logic [31:0] deny_count,
     output logic [31:0] cancel_count,
     output logic [63:0] fetch_pc,
+    // mosaic_fetch's own observation bundle (the response classification and the
+    // output register). Brought out so the pin is not left dangling; the
+    // redirect/recovery cases read it through mosaic_core.
+    output logic [127:0] o_dbg_state,
 
     // The elaborated geometry, read back from the DUT instance.
     output logic [31:0] o_fetch_outstanding,
@@ -217,7 +221,8 @@ module mosaic_fetch_tb #(
       .illegal_count       (illegal_count),
       .deny_count          (deny_count),
       .cancel_count        (cancel_count),
-      .fetch_pc            (fetch_pc)
+      .fetch_pc            (fetch_pc),
+      .o_dbg_state         (o_dbg_state)
   );
 
   // Read back from the instance rather than from a second `include of the

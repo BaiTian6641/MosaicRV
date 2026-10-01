@@ -1486,3 +1486,60 @@ has seen a "passing" mutant mean nothing (a define that does not exist in the RT
 does not elaborate, and now a define that never reached the compiler), and the stamp caught all
 three. The rule stands: a mutant's evidence is its build command, its binary hash, **and** its
 exit code.
+
+---
+
+## 2026-10-01 — the core runs: I-023, I-034, I-035-in-flight, and the four defects that were waiting
+
+The integrated machine executes programs now. `fabric.fixed_two_cluster` (17 retires, 8 ALU uops
+per cluster, uop 13 completing 65 cycles before uop 12 while retire order holds) and
+`core.corpus_branch` (8 907 comparisons over 1 783 cycles: 96 control transfers, 48 branches of
+which 26 taken, 27 JAL, 21 JALR, 35 back edges) both pass from clean builds. Four defects were
+found by that work, every one of them of the kind that hides behind a passing directed test:
+
+1. **The decode buffer swapped the first two instructions of every program.** Its push wrote
+   slot 0 whenever nothing was popped, overwriting a live entry the pop had left in slot 1; the
+   observed allocation order was 0,2,1 and the machine retired two instructions out of program
+   order on its first real run.
+2. **Rename's committed map was fed the ROB entry generation instead of the physical tag's
+   generation.** Same width, different counter, so `speculative map == committed map` — the
+   invariant every redirect and the whole I-018 checkpoint path rest on — was false from the
+   first commit onward. It had never been observed because nothing had ever compared the two.
+3. **The redirect arbiter only looked at retire lane 0.** With a two-wide retire a branch that
+   leaves in lane 1 never matches the head, its request stays pending for ever, the branch
+   barrier is never released and the core deadlocks after the *first* taken branch of the
+   program. This is why "make the second cluster real" and "retire two per cycle" cannot be
+   tested separately.
+4. **Dispatch read both operands through one port per bank.** When the two source tags shared a
+   bank the second operand silently became the first and the comparison's value-ok test accepted
+   it: `beq a0,a1` with `a0 = 0x8000000000000000` and `a1 = 0x7fffffffffffffff` resolved
+   *taken*. A same-bank operand conflict is not a performance detail; it is a wrong answer.
+
+The fetch output register was wrong in two ways that produced an unbounded stream of one
+wrong-path PC retiring — and the bring-up case's *own reference model* had the same defect
+(it asserted the defective behaviour at cycle 166), which is the reminder that an independent
+model is only independent if someone checks it against the specification rather than against the
+DUT.
+
+**I-034 closed the first half of the memory path**: the speculative store queue passes with
+299 262 checks over 3 331 cycles, 112 stores allocated, 82 squashed, 24 drained, and seven
+mutants covering both of the card's fail modes. The wrong-path requirement is checked against the
+memory side, not the queue: a squashed store produces zero memory transactions. One contract
+change is on the record — the authorisation watermark is now derived from the cycle's survivors
+rather than adjusted arithmetically, because the soak produced a commit and a squash of the same
+entry in one cycle, which the arithmetic form cannot express. Two testbench defects of the same
+class were found by the soak and both were the *testbench's* fault, not the RTL's: the lane
+convention describes the bus, not the memory, and every directed phase had started its stores at
+lane 0.
+
+**And one open defect, reported rather than fixed**, because it needs its own case and its own
+reproduction: reading an architectural register that has not been written since reset **deadlocks
+the machine**. Rename maps it to a tag/generation the writeback ready table never marks written,
+so the issue queue waits for a wakeup that cannot arrive. `p02_branch` writes every register it
+reads, which is exactly why the case passes. That is the next lane, with a reproducer that must
+fail before the fix and a mutant that reintroduces it afterwards.
+
+**Status: 32 of 239 work packages delivered** (I-001..I-009, I-010..I-026, I-028, I-033, I-034,
+V-008, V-009, V-011), with V-012 and I-035 running and the readiness fix dispatched. Nothing is
+advertisable yet: `M` waits on V-011's sibling V-010, `I` on I-013-adjacent verification, and the
+ladder is deliberately the last thing to move.

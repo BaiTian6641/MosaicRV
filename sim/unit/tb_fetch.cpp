@@ -397,7 +397,20 @@ class ShadowFetch {
         }
         if (e.rsp_release) credit_drop_++;
       }
-    } else if (out_kind_ != 0 && s.out_ready) {
+    }
+    // The output register's own lifecycle, independent of whether a response
+    // fired this cycle, because the two are independent events: a live response
+    // installs a new instruction (and wins over a drain in the same cycle), a
+    // redirect retires whatever the register holds -- that instruction was
+    // fetched after the branch the redirect came from, so it is wrong-path by
+    // construction -- and otherwise the register drains when the consumer takes
+    // it. A dropped (non-live) response must not hold it: it says nothing about
+    // the instruction already in the register. Folding the two into one branch,
+    // which is the form this model shipped with and mirrored the RTL's, makes
+    // the register hold its instruction for ever and deliver it again every
+    // cycle the consumer is ready.
+    if (!(e.rsp_fire && e.rsp_live) &&
+        (s.redirect_valid || (out_kind_ != 0 && s.out_ready))) {
       out_kind_ = 0;
     }
 

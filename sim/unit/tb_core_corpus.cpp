@@ -115,6 +115,8 @@ namespace {
 
 constexpr int kResetCycles = 4;
 constexpr int kQuiesceCycles = 32;
+// A stopped machine whose ROB will not drain: bounded, then reported.
+constexpr int kDrainCycles = 256;
 // A stall is a defect with a location, not a timeout. The whole run is a few
 // hundred cycles; this bound is only reached if the machine stopped making
 // progress, and reporting it as a stall is more useful than exhausting
@@ -380,20 +382,25 @@ RefResult ReferenceRun(const ProgImage& img, uint64_t start) {
           case 0x4u: value = a ^ static_cast<uint64_t>(static_cast<int64_t>(imm_i)); break;
           case 0x6u: value = a | static_cast<uint64_t>(static_cast<int64_t>(imm_i)); break;
           case 0x7u: value = a & static_cast<uint64_t>(static_cast<int64_t>(imm_i)); break;
-          case 0x1u:
-            if ((f7 & 0x3Fu) != 0u) { supported = false; break; }  // SLLI
+          case 0x1u: {
+            // RV64 SLLI: funct6 (bits 31:26) is zero and the shift amount is
+            // the six-bit field at bits 25:20.
+            if (((w >> 26) & 0x3Fu) != 0u) { supported = false; break; }
             value = a << ((w >> 20) & 0x3Fu);
             break;
-          case 0x5u:
-            if (f7 == 0x00u) {
-              value = a >> ((w >> 20) & 0x3Fu);
-            } else if (f7 == 0x20u) {
-              value = static_cast<uint64_t>(
-                  static_cast<int64_t>(a) >> ((w >> 20) & 0x3Fu));
+          }
+          case 0x5u: {
+            const uint32_t funct6 = (w >> 26) & 0x3Fu;
+            const uint32_t shamt = (w >> 20) & 0x3Fu;
+            if (funct6 == 0x00u) {
+              value = a >> shamt;
+            } else if (funct6 == 0x10u) {
+              value = static_cast<uint64_t>(static_cast<int64_t>(a) >> shamt);
             } else {
               supported = false;
             }
             break;
+          }
           default: supported = false; break;
         }
         reg_we = true;
@@ -584,6 +591,17 @@ class Harness {
     ret_mask_ = (g.retire_width >= 32) ? 0xFFFFFFFFu : ((1u << g.retire_width) - 1u);
   }
 
+  // The expectation, supplied before the run so every retirement and every
+  // redirect can be compared *in the cycle it happens* rather than only at the
+  // end. A divergence is then reported at the instruction it happens on, which
+  // is the difference between "a check failed" and "this instruction was
+  // wrong".
+  void Expect(const std::vector<RefInsn>* trace,
+              const std::vector<uint64_t>* targets) {
+    expected_ = trace;
+    expected_targets_ = targets;
+  }
+
   void Phase(const std::string& name) { phase_ = name; }
   uint64_t cycles() const { return cycles_; }
   uint64_t comparisons() const { return comparisons_; }
@@ -616,14 +634,10 @@ class Harness {
     uint64_t cycle = 0;
   };
   const std::vector<Redirect>& redirects() const { return redirects_; }
-  const std::vector<uint64_t>& squash_cycles() const { return squash_cycles_; }
-  const std::vector<uint64_t>& ckpt_cycles() const { return ckpt_cycles_; }
 
   void ClearTrace() {
     retires_.clear();
     redirects_.clear();
-    squash_cycles_.clear();
-    ckpt_cycles_.clear();
     last_progress_ = 0;
     last_commit_ = 0;
     imem_.Reset();
@@ -684,6 +698,18 @@ class Harness {
   bool Stopped() const { return stopped_; }
   bool Occupied() const { return occupied_ != 0; }
 
+  // What the machine is doing, for a failure message.
+  std::string State() const {
+    return "head_pc=" + U64(dut_->o_dbg_head_pc_o) +
+           " head_valid=" + Dec(dut_->o_dbg_head_valid_o) +
+           " occupied=" + Dec(dut_->o_rob_occupied_o) +
+           " allocated=" + Dec(dut_->o_dbg_alloc_ctr_o) +
+           " retired=" + Dec(dut_->o_commit_o) +
+           " stopped=" + Dec(dut_->o_stopped_o) +
+           " redirects=" + Dec(dut_->o_redirect_o) +
+           " recovering=" + Dec(dut_->o_recovering_o);
+  }
+
  private:
   void Observe() {
     Compare("the retire counter equals the event stream published so far",
@@ -703,18 +729,47 @@ class Harness {
               "occupied=0, o_rename_boundary=0 at commit=" + Dec(dut_->o_commit_o));
     }
 
+    // The cycle after a redirect the front end must be fetching the redirect's
+    // target. Checked here rather than left to the retirement stream, because
+    // this is the redirect's own contract: "the winner redirects fetch".
+    if (pending_redirect_cycle_ >= 0 && cycles_ == pending_redirect_cycle_ + 1) {
+      if (dut_->o_fetch_pc_o != pending_redirect_pc_) {
+        Fail(phase_ + " at cycle " + Dec(cycles_),
+             "the front end fetches the redirect's target: after the redirect to " +
+             U64(pending_redirect_pc_) + " the fetch PC is " +
+             U64(dut_->o_fetch_pc_o));
+      }
+      comparisons_++;
+    }
     if (dut_->o_redirect_valid_o != 0) {
       Redirect r;
       r.pc = dut_->o_redirect_pc_o;
       r.cycle = cycles_;
       redirects_.push_back(r);
+      pending_redirect_pc_ = r.pc;
+      pending_redirect_cycle_ = static_cast<int>(cycles_);
+      if (expected_targets_ != nullptr) {
+        if (redirects_.size() > expected_targets_->size()) {
+          Fail(phase_ + " at cycle " + Dec(cycles_),
+               "the redirect the arbiter issues names the taken transfer's target: "
+               "redirect " + Dec(redirects_.size() - 1) + " has no counterpart -- the "
+               "reference executed only " + Dec(expected_targets_->size()) +
+               " taken control transfers");
+        }
+        const uint64_t want = (*expected_targets_)[redirects_.size() - 1];
+        if (r.pc != want) {
+          Fail(phase_ + " at cycle " + Dec(cycles_),
+               "the redirect the arbiter issues names the taken transfer's target: "
+               "redirect " + Dec(redirects_.size() - 1) + " pc expected " + U64(want) +
+               ", got " + U64(r.pc));
+        }
+        comparisons_++;
+      }
       if (std::getenv("MOSAIC_CORPUS_TRACE") != nullptr) {
         std::printf("  [trace] cycle=%5llu REDIRECT to %s\n",
                     static_cast<unsigned long long>(cycles_), U64(r.pc).c_str());
       }
     }
-    if (dut_->o_squash_acc_o != 0) squash_cycles_.push_back(cycles_);
-    if (dut_->o_ckpt_o != 0) ckpt_cycles_.push_back(cycles_);
 
     const uint32_t mask = static_cast<uint32_t>(dut_->ev_valid_o) & ret_mask_;
     if (std::getenv("MOSAIC_CORPUS_TRACE") != nullptr) {
@@ -737,26 +792,29 @@ class Harness {
                     (unsigned long long)(b >> 53 & 1));
       }
     }
-    if (std::getenv("MOSAIC_CORPUS_FRONT") != nullptr) {
-      const auto& fb = dut_->o_dbg_front_o;
-      auto bit = [&](int n) -> int { return (fb[n / 32] >> (n % 32)) & 1u; };
-      auto bits = [&](int lo, int hi) -> uint64_t {
+    if (std::getenv("MOSAIC_CORPUS_FETCH") != nullptr) {
+      const auto& f = dut_->o_dbg_fetch_o;
+      auto fbit = [&](int n) -> int { return (f[n / 32] >> (n % 32)) & 1u; };
+      auto fbits = [&](int lo, int hi) -> uint64_t {
         uint64_t v = 0;
-        for (int n = lo; n <= hi; n++) v |= static_cast<uint64_t>(bit(n)) << (n - lo);
+        for (int n = lo; n <= hi; n++) v |= static_cast<uint64_t>(fbit(n)) << (n - lo);
         return v;
       };
-      const uint64_t fpc = fb[0] | (static_cast<uint64_t>(fb[1]) << 32);
-      const uint64_t opc = (static_cast<uint64_t>(fb[2]) | (static_cast<uint64_t>(fb[3]) << 32))
-                           << 32;
-      std::printf("  [front] cycle=%4llu fetch_pc=%s out_v=%d out_pc=%s out_rdy=%d "
-                  "dbuf=%d%d cnt=%llu take=%d push=%d alloc_idx=%llu rec=%d stop=%d "
-                  "flushbusy=%d%d occ=%llu\n",
-                  static_cast<unsigned long long>(cycles_), U64(fpc).c_str(), bit(96),
-                  U64(opc).c_str(), bit(97), bit(98), bit(99),
-                  static_cast<unsigned long long>(bits(100, 101)), bit(102), bit(103),
-                  static_cast<unsigned long long>(bits(104, 109)), bit(110), bit(111),
-                  bit(112), bit(113),
-                  static_cast<unsigned long long>(bits(116, 127)));
+      std::printf("  [fetch] cycle=%4llu out_v=%d out_pc=%s rsp_v=%d rsp_rdy=%d "
+                  "rsp_fire=%d live=%d stale=%d owns=%d redir=%d rsp_id=%llu "
+                  "rsp_epoch=%llu epoch=%llu req_rdy=%d req_v=%d req_fire=%d "
+                  "busy=%llx canc=%llx slot0_epoch=%llu bits=%08x\n",
+                  static_cast<unsigned long long>(cycles_), fbit(0),
+                  U64(fbits(64, 95)).c_str(), fbit(1), fbit(2), fbit(3), fbit(4), fbit(5),
+                  fbit(6), fbit(7),
+                  static_cast<unsigned long long>(fbits(8, 11)),
+                  static_cast<unsigned long long>(fbits(12, 18)),
+                  static_cast<unsigned long long>(fbits(19, 25)), fbit(26), fbit(27),
+                  fbit(28),
+                  static_cast<unsigned long long>(fbits(29, 32)),
+                  static_cast<unsigned long long>(fbits(33, 36)),
+                  static_cast<unsigned long long>(fbits(37, 43)),
+                  static_cast<unsigned>(fbits(96, 127)));
     }
     if (g_.retire_width >= 2) {
       Compare("retire lane 1 is never set without lane 0",
@@ -779,6 +837,37 @@ class Harness {
                 "prev seq=" + Dec(prev) + " now=" + Dec(r.seq));
       }
       retires_.push_back(r);
+      if (expected_ != nullptr) {
+        if (retires_.size() > expected_->size()) {
+          Fail(phase_ + " at cycle " + Dec(cycles_),
+               "the retirement stream follows the reference: retire " +
+               Dec(retires_.size() - 1) + " at pc " + U64(r.pc) +
+               " has no counterpart -- the reference retires only " +
+               Dec(expected_->size()) + " instructions before the refused macro at " +
+               U64((*expected_).empty() ? 0 : expected_->back().next_pc) + "");
+        }
+        const RefInsn& e = (*expected_)[retires_.size() - 1];
+        if (r.pc != e.pc) {
+          Fail(phase_ + " at cycle " + Dec(cycles_),
+               "the retirement stream follows the reference: retire " +
+               Dec(retires_.size() - 1) + " pc expected " + U64(e.pc) + ", got " +
+               U64(r.pc));
+        }
+        if (r.rd != e.rd || r.reg_we != e.reg_we) {
+          Fail(phase_ + " at cycle " + Dec(cycles_),
+               "the retirement stream follows the reference: retire " +
+               Dec(retires_.size() - 1) + " at " + U64(e.pc) + " destination expected rd=" +
+               Dec(e.rd) + " we=" + Dec(e.reg_we) + ", got rd=" + Dec(r.rd) +
+               " we=" + Dec(r.reg_we));
+        }
+        if (e.reg_we && r.value != e.value) {
+          Fail(phase_ + " at cycle " + Dec(cycles_),
+               "the retirement stream follows the reference: retire " +
+               Dec(retires_.size() - 1) + " at " + U64(e.pc) + " value for x" +
+               Dec(e.rd) + " expected " + U64(e.value) + ", got " + U64(r.value));
+        }
+        comparisons_++;
+      }
       if (std::getenv("MOSAIC_CORPUS_TRACE") != nullptr) {
         std::printf("  [trace] cycle=%5llu retire pc=%s rd=%2u we=%u value=%s "
                     "c0br=%s c1br=%s act=%s wait=%s\n",
@@ -831,8 +920,10 @@ class Harness {
   uint64_t comparisons_ = 0;
   std::vector<Retire> retires_;
   std::vector<Redirect> redirects_;
-  std::vector<uint64_t> squash_cycles_;
-  std::vector<uint64_t> ckpt_cycles_;
+  uint64_t pending_redirect_pc_ = 0;
+  int pending_redirect_cycle_ = -1;
+  const std::vector<RefInsn>* expected_ = nullptr;
+  const std::vector<uint64_t>* expected_targets_ = nullptr;
   uint64_t last_commit_ = 0;
   uint64_t last_alloc_ = 0;
   uint64_t last_progress_ = 0;
@@ -1015,33 +1106,68 @@ RunResult RunOnce(Vmosaic_core_tb* dut, mosaic::Reporter* reporter, uint64_t max
   // are thousands of bytes up; the corpus input table is the nearest thing below
   // it, and the brick must stay under both.
   if (result.brick_end > prologue.at) {
-    Fail("run", "the harness brick reaches the corpus program's input table");
+    Fail("run", "the harness brick reaches the corpus program's own body");
   }
 
   // ---- the expectation: an independent RV64IM interpreter on the same words --
   result.reference = ReferenceRun(image, geometry.reset_vector);
+
+  // The brick builds the inputs with a scratch register. Nothing in the corpus
+  // program may write it, or the brick's own arithmetic would be visible as a
+  // program result; the reference trace is where that is checked.
+  for (const RefInsn& insn : result.reference.trace) {
+    if (insn.pc >= prologue.after && insn.reg_we && insn.rd == kRegScratch) {
+      Fail("run", "the corpus program writes x31 at " + U64(insn.pc) +
+                      ", which is the harness brick's scratch register");
+    }
+  }
 
   // ---- run ----
   Harness harness(dut, reporter, max_cycles, &image);
   harness.Configure(geometry);
   harness.Phase("run-input" + Dec(index));
 
+  // The expected redirect targets, in the order the reference takes them: the
+  // arbiter's output is compared against them as each one is issued.
+  std::vector<uint64_t> expected_targets;
+  for (const RefInsn& insn : result.reference.trace) {
+    if (insn.is_control && insn.taken) expected_targets.push_back(insn.next_pc);
+  }
+  harness.Expect(&result.reference.trace, &expected_targets);
+
   dut->clk = 0;
   dut->rst = 1;
   dut->eval();
   harness.Reset(kResetCycles);
+  // The free-list occupancy after reset is the baseline the run has to give
+  // back: the architectural reset mappings own one tag per register, so "full"
+  // is not "every entry". Comparing against the baseline the machine itself
+  // started from is a conservation check, not a convention this driver invents.
+  const uint64_t free_baseline = dut->o_free_count_o;
   harness.ClearTrace();
 
   int quiet = 0;
+  int stopped_at = -1;
   while (quiet < kQuiesceCycles) {
     harness.Cycle(false);
-    if (harness.Stopped() && !harness.Occupied()) {
-      quiet++;
+    if (harness.Stopped()) {
+      if (stopped_at < 0) stopped_at = static_cast<int>(harness.cycles());
+      if (!harness.Occupied()) {
+        quiet++;
+      } else {
+        quiet = 0;
+        // A stopped machine that still holds work is a stuck machine, not a
+        // timeout: hand it to the comparisons, which say which instruction it
+        // is stuck on.
+        if (static_cast<int>(harness.cycles()) - stopped_at > kDrainCycles) break;
+      }
     } else {
       quiet = 0;
+      stopped_at = -1;
     }
     if (harness.cycles() > 20000) {
-      Fail("run-input" + Dec(index), "the machine did not quiesce after 20000 cycles");
+      Fail("run-input" + Dec(index), "the machine did not stop after 20000 cycles: " +
+                                         harness.State());
     }
   }
 
@@ -1084,18 +1210,47 @@ RunResult RunOnce(Vmosaic_core_tb* dut, mosaic::Reporter* reporter, uint64_t max
     }
   }
 
-  // ---- 1. the per-instruction architectural stream ----
+  // ---- 1. every redirect goes to the resolved transfer's target ----
+  if (harness.redirects().size() != expected_targets.size()) {
+    Fail(ph, "the arbiter issued " + Dec(harness.redirects().size()) +
+                 " redirects, the reference executed " + Dec(expected_targets.size()) +
+                 " taken control transfers");
+  }
+  for (size_t i = 0; i < expected_targets.size(); i++) {
+    if (harness.redirects()[i].pc != expected_targets[i]) {
+      Fail(ph, "redirect " + Dec(i) + " pc: expected the taken transfer's target " +
+                   U64(expected_targets[i]) + ", got " + U64(harness.redirects()[i].pc));
+    }
+  }
+  reporter->Check(true, ph + ": every redirect names the taken transfer's target (" +
+                        Dec(expected_targets.size()) + " redirects)");
+
+  // ---- 2. the per-instruction architectural stream ----
   if (!ref.stopped) {
     Fail(ph, "the reference model never reached a refused macro");
   }
   if (got.size() != ref.trace.size()) {
-    std::string where = "?" ;
-    if (got.size() > ref.trace.size()) {
-      where = U64(got[ref.trace.size()].pc);
+    std::string ctx = "\n";
+    const size_t n = std::min<size_t>(ref.trace.size(), 8);
+    for (size_t i = ref.trace.size() - n; i < ref.trace.size(); i++) {
+      ctx += "      ref  [" + Dec(i) + "] pc=" + U64(ref.trace[i].pc) + " rd=" +
+             Dec(ref.trace[i].rd) + " we=" + Dec(ref.trace[i].reg_we) + " value=" +
+             U64(ref.trace[i].value) + (ref.trace[i].is_control ? " control" : "") +
+             (ref.trace[i].taken ? " taken -> " + U64(ref.trace[i].next_pc) : "") + "\n";
+      if (i < got.size()) {
+        ctx += "      dut  [" + Dec(i) + "] pc=" + U64(got[i].pc) + " rd=" +
+               Dec(got[i].rd) + " we=" + Dec(got[i].reg_we) + " value=" +
+               U64(got[i].value) + "\n";
+      }
+    }
+    ctx += "      ref stops at " + U64(ref.stop_pc) + " word=" +
+           mosaic::Hex(ref.stop_word, 8) + "\n";
+    for (size_t i = ref.trace.size(); i < got.size() && i < ref.trace.size() + 4; i++) {
+      ctx += "      dut  [" + Dec(i) + "] pc=" + U64(got[i].pc) + " rd=" + Dec(got[i].rd) +
+             " we=" + Dec(got[i].reg_we) + " value=" + U64(got[i].value) + "\n";
     }
     Fail(ph, "retired " + Dec(got.size()) + " instructions, the reference predicts " +
-                 Dec(ref.trace.size()) + (got.size() > ref.trace.size()
-                     ? " (first extra instruction at " + where + ")" : ""));
+                 Dec(ref.trace.size()) + ctx);
   }
   for (size_t i = 0; i < ref.trace.size(); i++) {
     const RefInsn& e = ref.trace[i];
@@ -1118,25 +1273,6 @@ RunResult RunOnce(Vmosaic_core_tb* dut, mosaic::Reporter* reporter, uint64_t max
   reporter->Check(true, ph + ": the per-instruction retire stream matches the "
                              "independent RV64IM interpretation (" +
                         Dec(ref.trace.size()) + " instructions)");
-
-  // ---- 2. every redirect goes to the resolved transfer's target ----
-  std::vector<uint64_t> expected_targets;
-  for (const RefInsn& insn : ref.trace) {
-    if (insn.is_control && insn.taken) expected_targets.push_back(insn.next_pc);
-  }
-  if (harness.redirects().size() != expected_targets.size()) {
-    Fail(ph, "the arbiter issued " + Dec(harness.redirects().size()) +
-                 " redirects, the reference executed " + Dec(expected_targets.size()) +
-                 " taken control transfers");
-  }
-  for (size_t i = 0; i < expected_targets.size(); i++) {
-    if (harness.redirects()[i].pc != expected_targets[i]) {
-      Fail(ph, "redirect " + Dec(i) + " pc: expected the taken transfer's target " +
-                   U64(expected_targets[i]) + ", got " + U64(harness.redirects()[i].pc));
-    }
-  }
-  reporter->Check(true, ph + ": every redirect names the taken transfer's target (" +
-                        Dec(expected_targets.size()) + " redirects)");
 
   // ---- 3. the arbiter accounted for every resolution exactly once ----
   if (result.act_ctr != ref.control_total) {
@@ -1188,9 +1324,10 @@ RunResult RunOnce(Vmosaic_core_tb* dut, mosaic::Reporter* reporter, uint64_t max
   if (dut->o_rename_boundary_o == 0) {
     Fail(ph, "the machine did not quiesce at a rename boundary");
   }
-  if (dut->o_free_count_o != geometry.prf_entries) {
-    Fail(ph, "the free list did not return to full: " + Dec(dut->o_free_count_o) + " of " +
-                 Dec(geometry.prf_entries) + " tags free");
+  if (dut->o_free_count_o != free_baseline) {
+    Fail(ph, "the free list did not return to its reset occupancy: " +
+                 Dec(dut->o_free_count_o) + " free, " + Dec(free_baseline) +
+                 " after reset (of " + Dec(geometry.prf_entries) + " tags)");
   }
   reporter->Check(true, ph + ": the machine stopped at the refused macro (" +
                         U64(ref.stop_pc) + ") with an empty ROB at a rename boundary and "

@@ -291,7 +291,12 @@ module mosaic_fetch #(
     output logic [31:0]              illegal_count,
     output logic [31:0]              deny_count,        // issues refused, not dropped
     output logic [31:0]              cancel_count,
-    output logic [XLEN-1:0]          fetch_pc
+    output logic [XLEN-1:0]          fetch_pc,
+    // ------------------------------------------------ observation for a case
+    // The response classification and the output register, so a case can say
+    // *why* an instruction did or did not reach the decoder instead of only that
+    // the retirement stream diverged. Purely an observation port.
+    output logic [127:0]             o_dbg_state
 );
 
   // --------------------------------------------------------------- geometry
@@ -685,9 +690,55 @@ module mosaic_fetch #(
             credit_drop_count <= credit_drop_count + 32'd1;
           end
         end
+      end
+
+      // The output register's own lifecycle, written once and independently of
+      // whether a response fired this cycle, because the two are independent
+      // events:
+      //
+      //   * a live response installs a new instruction and must win over a
+      //     drain in the same cycle (the consumer is taking *this* instruction);
+      //   * a redirect retires whatever the register holds. That instruction
+      //     was fetched after the branch the redirect came from, so it is
+      //     wrong-path by construction, and delivering it afterwards would put
+      //     it in front of the decoder as though it were on the correct path;
+      //   * otherwise it drains when the consumer takes it.
+      //
+      // A dropped (non-live) response must not hold the register: it says
+      // nothing about the instruction already in it, and folding the two into
+      // one branch (the form this replaces) makes the register hold its
+      // instruction for ever, re-delivering it every cycle the consumer is
+      // ready. CASE=core.corpus_branch found exactly that, as an unbounded
+      // stream of one wrong-path PC retiring.
+`ifdef MOSAIC_FETCH_MUTANT_OUT_REG_DRAG
+      // NEGATIVE CONTROL 9: a dropped response in the same cycle as a drain
+      // suppresses the drain, so the instruction in the register is delivered
+      // again and again. This is the re-delivery defect on its own, with the
+      // redirect flush above intact.
+      if (rsp_fire && !rsp_live) begin
+        out_reg_valid <= out_reg_valid;
+      end else if (rsp_fire && rsp_live) begin
+        out_reg_valid <= 1'b1;
+      end else if (redirect_valid || (out_reg_valid && out_ready)) begin
+        out_reg_valid <= 1'b0;
+      end
+`elsif MOSAIC_FETCH_MUTANT_OUT_REG_NO_REDIRECT_FLUSH
+      // NEGATIVE CONTROL 8: the redirect does not retire the instruction the
+      // register holds, so a pre-redirect (wrong-path) instruction is delivered
+      // to the decoder after the redirect. CASE=core.corpus_branch's
+      // per-instruction comparison against the reference names it.
+      if (rsp_fire && rsp_live) begin
+        out_reg_valid <= 1'b1;
       end else if (out_reg_valid && out_ready) begin
         out_reg_valid <= 1'b0;
       end
+`else
+      if (rsp_fire && rsp_live) begin
+        out_reg_valid <= 1'b1;
+      end else if (redirect_valid || (out_reg_valid && out_ready)) begin
+        out_reg_valid <= 1'b0;
+      end
+`endif
 
       // ---------------------------------------------------------- the slots
       // One release per slot per cycle, one issue per cycle, and the issue wins
@@ -753,6 +804,34 @@ module mosaic_fetch #(
       end
 `endif
     end
+  end
+
+  // ------------------------------------------------------------- observation
+  always_comb begin
+    o_dbg_state           = 128'd0;
+    o_dbg_state[0]        = out_reg_valid;
+    o_dbg_state[1]        = rsp_valid;
+    o_dbg_state[2]        = rsp_ready;
+    o_dbg_state[3]        = rsp_fire;
+    o_dbg_state[4]        = rsp_live;
+    o_dbg_state[5]        = rsp_stale;
+    o_dbg_state[6]        = rsp_slot_owns;
+    o_dbg_state[7]        = redirect_valid;
+    o_dbg_state[11:8]     = 4'(rsp_id);
+    o_dbg_state[18:12]    = rsp_epoch;
+    o_dbg_state[25:19]    = epoch_now;
+    o_dbg_state[26]       = req_ready;
+    o_dbg_state[27]       = req_valid;
+    o_dbg_state[28]       = req_fire;
+    o_dbg_state[32:29]    = slot_busy;
+    o_dbg_state[36:33]    = slot_cancelled;
+    o_dbg_state[43:37]    = slot_epoch[0];
+    o_dbg_state[44]       = rsp_kind[1];
+    o_dbg_state[45]       = rsp_fault;
+    o_dbg_state[46]       = rsp_is_32bit;
+    o_dbg_state[63:47]    = 17'd0;
+    o_dbg_state[95:64]    = out_reg_pc[31:0];
+    o_dbg_state[127:96]   = rsp_data;
   end
 
 endmodule : mosaic_fetch

@@ -193,6 +193,10 @@ module mosaic_core (
     // asserted in prose.
     output logic                        o_redirect_valid,
     output logic [CORE_XLEN-1:0]        o_redirect_pc,
+    // The front end's own PC, so the effect of a redirect on the fetch stream is
+    // observable rather than inferred from the retirement stream: the cycle
+    // after a redirect this must be the redirect's target.
+    output logic [CORE_XLEN-1:0]        o_fetch_pc,
     output logic [31:0]                 o_squash_acc_ctr,
     output logic [31:0]                 o_ckpt_ctr,
     // The redirect arbiter's inputs and decision, so a failing case can say
@@ -202,12 +206,9 @@ module mosaic_core (
     //  34:28 c1_gen, 27:22 c1_idx, 21 c1_taken, 20 c1_valid,
     //  19:13 c0_gen, 12:7 c0_idx, 6 c0_taken, 5 c0_valid, 4:0 reserved}
     output logic [63:0]                 o_dbg_redir_bundle,
-    // The front end's state, for the same reason: {127:116 occupied, 115:114
-    // free_rob, 113 c1_flush_busy, 112 c0_flush_busy, 111 core_stop,
-    // 110 recovering, 109:104 alloc_index, 103 dbuf_push, 102 disp_take,
-    // 101:100 dbuf_cnt, 99 dbuf_valid1, 98 dbuf_valid0, 97 out_ready,
-    // 96 out_valid, 95:64 out_pc, 63:0 fetch_pc}
-    output logic [127:0]                o_dbg_front_bundle,
+    // The fetch unit's own response classification and output register, so a
+    // failing case can say why an instruction did or did not reach the decoder.
+    output logic [127:0]                o_dbg_fetch_state,
     // ------------------------------------------------------- debug observability
     // The instructions and the ROB head, so a failing case can say what the
     // machine was doing instead of only that a count was wrong.
@@ -238,6 +239,7 @@ module mosaic_core (
   logic [31:0]               fetch_out_bits;
   logic                      fetch_out_illegal, fetch_out_fault;
   logic                      fetch_pred_next_valid;
+  logic [127:0]              fetch_dbg_state;
   logic [CORE_XLEN-1:0]      fetch_pred_next_pc;
 
   // control
@@ -552,6 +554,7 @@ module mosaic_core (
       .out_illegal        (fetch_out_illegal),
       .out_fault          (fetch_out_fault),
       .out_cause          (),
+      .o_dbg_state        (fetch_dbg_state),
       .outstanding_count  (),
       .cancel_pending     (),
       .epoch_now          (),
@@ -1427,6 +1430,18 @@ module mosaic_core (
       br_inflight <= 1'b0;
     end else if (redir_act_valid && !redir_act_taken) begin
       br_inflight <= 1'b0;
+`ifdef MOSAIC_CORE_MUTANT_EARLY_BARRIER_RELEASE
+      // NEGATIVE CONTROL: the barrier is released when the branch *resolves*,
+      // not when the arbiter has acted on the resolution. Younger work then
+      // reaches the clusters while the redirect is still waiting for the branch
+      // to become the retiring head, and the recovery's precondition -- the
+      // speculative map equals the committed map at the checkpoint -- no longer
+      // holds, so rename refuses the squash and the case's recovery counters
+      // catch it. It is the control for the barrier being load-bearing rather
+      // than decorative; see results/reports/I-023-branches.md.
+    end else if (c0_redir_valid || c1_redir_valid) begin
+      br_inflight <= 1'b0;
+`endif
     end else if (dbuf_valid[0] && alloc_is_branch_macro && !recovering &&
                  !core_stop && (ren_alloc_accepted != 1'b0) &&
                  (rob_free_rob != {CORE_OCC_W{1'b0}})) begin
@@ -1590,6 +1605,7 @@ module mosaic_core (
   assign o_rename_boundary = ren_ckpt_committed;
   assign o_redirect_valid  = redirect_valid;
   assign o_redirect_pc     = redirect_pc;
+  assign o_fetch_pc        = fetch_pc_q;
   assign o_squash_acc_ctr  = squash_acc_ctr;
   assign o_ckpt_ctr        = ckpt_ctr;
 
@@ -1618,25 +1634,7 @@ module mosaic_core (
     o_dbg_redir_bundle[60:54]          = rob_occupied;
     o_dbg_redir_bundle[63:61]          = 3'b000;
   end
-  always_comb begin
-    o_dbg_front_bundle           = 128'd0;
-    o_dbg_front_bundle[63:0]     = fetch_pc_q;
-    o_dbg_front_bundle[95:64]    = fetch_out_pc[63:32];
-    o_dbg_front_bundle[96]       = fetch_out_valid;
-    o_dbg_front_bundle[97]       = fetch_out_ready;
-    o_dbg_front_bundle[98]       = dbuf_valid[0];
-    o_dbg_front_bundle[99]       = dbuf_valid[1];
-    o_dbg_front_bundle[101:100]  = dbuf_cnt;
-    o_dbg_front_bundle[102]      = dbuf_take;
-    o_dbg_front_bundle[103]      = dbuf_push;
-    o_dbg_front_bundle[109:104]  = rob_alloc_index;
-    o_dbg_front_bundle[110]      = recovering;
-    o_dbg_front_bundle[111]      = core_stop;
-    o_dbg_front_bundle[112]      = c0_flush_busy;
-    o_dbg_front_bundle[113]      = c1_flush_busy;
-    o_dbg_front_bundle[115:114]  = 2'b00;
-    o_dbg_front_bundle[127:116]  = 12'(rob_occupied);
-  end
+  assign o_dbg_fetch_state = fetch_dbg_state;
 
   assign o_squash_underflow_ctr = squash_under_ctr;
   assign o_squash_not_committed_ctr = squash_nc_ctr;

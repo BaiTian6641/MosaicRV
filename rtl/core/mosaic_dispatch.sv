@@ -471,6 +471,62 @@ module mosaic_dispatch (
   assign s1_needs_read = head_valid && !head.s1_x0 && !head.s1_const && rq_written[0];
   assign s2_needs_read = head_valid && !head.s2_x0 && !head.s2_const && rq_written[1];
 
+  // -------------------------------------------------------- operand fetch
+  // The register file is banked, and two different architectural registers can
+  // share a bank. When they do, one read port has to serve both, so the pair
+  // cannot be fetched in one cycle: the first source is read into `hold_val`
+  // and the second is read the cycle after, with the held value standing in for
+  // the first. `src_conflict` is what puts the pair into that two-cycle fetch
+  // and `hold_valid` says the held value belongs to the head being presented.
+  //
+  // The form this replaces read the *second* source out of the *first* source's
+  // bank data -- the same value for two different registers -- and accepted it,
+  // because the value-ok test only asked whether that bank's response was
+  // valid. It also reported "the second source is re-offered next cycle", which
+  // could never happen: slot 0 wins a conflict unconditionally, so slot 1 was
+  // never read at all, and a pair sharing a bank compared equal for ever.
+  // CASE=core.corpus_branch found it: `beq a0,a1` with
+  // a0 = 0x8000000000000000 and a1 = 0x7fffffffffffffff was resolved taken.
+  logic                src_conflict;
+  logic                hold_valid;
+  logic [DSP_XLEN-1:0] hold_val;
+
+  always_comb begin
+    src_conflict = s1_needs_read && s2_needs_read &&
+                   (bank_of_src[0] == bank_of_src[1]);
+  end
+
+  always_comb begin
+    // First cycle: slot 0 owns the bank, slot 1 waits (and is counted as a
+    // conflict). Second cycle: slot 1 is read and slot 0 is the held value.
+`ifdef MOSAIC_DISPATCH_MUTANT_BANK_CONFLICT_VALUE
+    // NEGATIVE CONTROL: the conflict is not serialised and the second source's
+    // value is read from the first source's bank data, so a conflicting pair of
+    // operands is always equal. CASE=core.corpus_branch must fail on it.
+    s1_present = s1_needs_read;
+    s2_present = s2_needs_read && (!s1_present || (bank_of_src[1] != bank_of_src[0]));
+`else
+    // First cycle of a conflict: slot 0 owns the bank, slot 1 waits. Second
+    // cycle: slot 1 owns it and slot 0 is served by the held value.
+    s1_present = s1_needs_read && (!src_conflict || !hold_valid);
+    s2_present = s2_needs_read && (!src_conflict || hold_valid);
+`endif
+  end
+
+  always_ff @(posedge clk) begin
+    if (rst) begin
+      hold_valid <= 1'b0;
+      hold_val   <= {DSP_XLEN{1'b0}};
+    end else if (!src_conflict || head_fire) begin
+      hold_valid <= 1'b0;
+    end else begin
+      hold_valid <= 1'b1;
+      if (!hold_valid) begin
+        hold_val <= prf_rsp_data[bank_of_src[0]*DSP_XLEN +: DSP_XLEN];
+      end
+    end
+  end
+
   assign rq_valid[0] = head_valid && !head.s1_x0 && !head.s1_const;
   assign rq_tag[0]   = head.s1_tag;
   assign rq_gen[0]   = head.s1_gen;
@@ -481,12 +537,6 @@ module mosaic_dispatch (
   always_comb begin
     bank_of_src[0] = 2'(32'(head.s1_tag) % 32'(DSP_BANKS));
     bank_of_src[1] = 2'(32'(head.s2_tag) % 32'(DSP_BANKS));
-  end
-
-  always_comb begin
-    s1_present = s1_needs_read;
-    // Slot 0 wins a bank conflict; the second source is re-offered next cycle.
-    s2_present = s2_needs_read && (!s1_present || (bank_of_src[1] != bank_of_src[0]));
   end
 
   always_comb begin
@@ -508,6 +558,13 @@ module mosaic_dispatch (
   end
 
   always_comb begin
+    // A source that did not get the bank this cycle has no response of its own
+    // to check: its value is either the held one (slot 0 in the second cycle of
+    // a conflicting pair) or it is not available yet and the insert waits.
+`ifdef MOSAIC_DISPATCH_MUTANT_BANK_CONFLICT_VALUE
+    // NEGATIVE CONTROL: the value-ok test ignores whether the source actually
+    // owns the bank this cycle, so the second operand silently becomes the
+    // first. CASE=core.corpus_branch must fail on it.
     s1_value_ok = head.s1_x0 || head.s1_const || !rq_written[0] ||
                   (prf_rsp_valid[bank_of_src[0]] &&
                    !prf_rsp_gen_mismatch[bank_of_src[0]] &&
@@ -516,6 +573,17 @@ module mosaic_dispatch (
                   (prf_rsp_valid[bank_of_src[1]] &&
                    !prf_rsp_gen_mismatch[bank_of_src[1]] &&
                    !prf_rsp_never_written[bank_of_src[1]]);
+`else
+    s1_value_ok = head.s1_x0 || head.s1_const || !rq_written[0] ||
+                  (src_conflict && hold_valid) ||
+                  (s1_present && prf_rsp_valid[bank_of_src[0]] &&
+                   !prf_rsp_gen_mismatch[bank_of_src[0]] &&
+                   !prf_rsp_never_written[bank_of_src[0]]);
+    s2_value_ok = head.s2_x0 || head.s2_const || !rq_written[1] ||
+                  (s2_present && prf_rsp_valid[bank_of_src[1]] &&
+                   !prf_rsp_gen_mismatch[bank_of_src[1]] &&
+                   !prf_rsp_never_written[bank_of_src[1]]);
+`endif
     // A source the table calls written but whose PRF response is refused or
     // wrong is an internal inconsistency: the write that set the table also
     // wrote the register file, so it cannot happen. It is counted and the
@@ -544,7 +612,10 @@ module mosaic_dispatch (
   // Insert bus
   // --------------------------------------------------------------------------
   always_comb begin
-    s1_val_sel = prf_rsp_data[bank_of_src[0]*DSP_XLEN +: DSP_XLEN];
+    // During the second cycle of a conflicting pair slot 0 is not read from the
+    // file; its value is the one latched when it was.
+    s1_val_sel = hold_valid ? hold_val
+                            : prf_rsp_data[bank_of_src[0]*DSP_XLEN +: DSP_XLEN];
     s2_val_sel = prf_rsp_data[bank_of_src[1]*DSP_XLEN +: DSP_XLEN];
   end
 
