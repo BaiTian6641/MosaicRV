@@ -11,11 +11,23 @@
  *     reset vector and the first instruction executed out of reset.
  *   - The signature area is its own output section at exactly 0x80000400,
  *     so its presence in the image is provable from the program headers.
+ *     Everything loadable (.text/.rodata/.data) must fit below it; the
+ *     ASSERTs at the bottom turn a violation into a link error.
  *   - .bss gets an explicit [start,end) region; nothing outside it is zeroed.
  *   - Every firmware-owned area is NOLOAD: it occupies address space and a
  *     memsz, but contributes no file bytes.
- *   - Nothing is ever placed in boot_rom (0x00000000, read+exec only). A
+ *   - .bss, .stack and .trapstack are laid out contiguously so the boot code
+ *     can clear them as one region while still clearing each named area as a
+ *     region of its own.
+ *   - Nothing is ever placed in boot_rom (0x00000000, read+exec only).  A
  *     store there must raise a store access fault, and the corpus tests that.
+ *
+ * Address plan:
+ *   0x80000000  .text .rodata .data     (loadable, file-backed)
+ *   0x80000400  .signature               (frozen, 4 x 8 bytes)
+ *   0x80001000  .traplog                 (8 records x {mcause, mtval})
+ *   0x80001080  .scratch                 (128-byte program buffer)
+ *   0x80001100  .bss .stack .trapstack  (NOLOAD, contiguous)
  */
 
 OUTPUT_FORMAT("elf64-littleriscv")
@@ -31,16 +43,18 @@ __ram_end       = 0x80200000;      /* ram base + 2 MiB */
 /* ---- frozen test protocol (config/profiles/p0.json -> test_protocol) ---- */
 __signature_base  = 0x80000400;
 __signature_words = 4;
-__traplog_base    = 0x80000440;
-__input_base      = 0x800004c0;
-__input_words     = 4;
-__scratch_base    = 0x80000500;
+
+/* ---- firmware-owned areas ---- */
+__traplog_base    = 0x80001000;
+__traplog_size    = 128;           /* 8 records x 2 words */
+__scratch_base    = 0x80001080;
 __scratch_size    = 128;
 
 SECTIONS
 {
     /* ================= loadable image ================= */
     . = __ram_base;
+
     .text : ALIGN(4)
     {
         KEEP(*(.text.init))
@@ -50,7 +64,7 @@ SECTIONS
     /* .rodata is deliberately NOT folded into .text.  Keeping it in its own
      * output section means the 8-byte alignment padding between .text and
      * .rodata belongs to neither section, so the executable image contains
-     * no zero word that a fetch could land on and no padding that the
+     * no zero word that a fetch could land on and no padding the
      * disassembly audit would have to whitelist. */
     .rodata : ALIGN(8)
     {
@@ -75,6 +89,7 @@ SECTIONS
         . = ALIGN(8);
         __bss_end = .;
     }
+    __image_code_end = .;
 
     /* ================= test protocol areas ================= */
     . = __signature_base;
@@ -91,17 +106,8 @@ SECTIONS
     {
         __traplog_start = .;
         KEEP(*(.traplog))
-        . = . + (8 * 16);           /* 8 records x 2 words */
+        . = . + __traplog_size;
         __traplog_end = .;
-    }
-
-    . = __input_base;
-    .input (NOLOAD) : ALIGN(8)
-    {
-        __input_start = .;
-        KEEP(*(.input))
-        . = . + (__input_words * 8);
-        __input_end = .;
     }
 
     . = __scratch_base;
@@ -113,19 +119,17 @@ SECTIONS
         __scratch_end = .;
     }
 
-    /* ================= stacks (declared in crt0.S / trap.S) ================= */
-    .stack (NOLOAD) : ALIGN(16)
+    /* ================= bss + stacks, contiguous =================
+     * crt0.S clears these three as one region; each still has its own
+     * explicit [start, end) pair. */
+    .bss_stack (NOLOAD) : ALIGN(16)
     {
-        __stack_section_start = .;
+        __bss_stack_start = .;
         KEEP(*(.stack))
-        __stack_section_end = .;
-    }
-
-    .trapstack (NOLOAD) : ALIGN(16)
-    {
-        __trapstack_section_start = .;
+        . = ALIGN(16);
         KEEP(*(.trapstack))
-        __trapstack_section_end = .;
+        . = ALIGN(16);
+        __bss_stack_end = .;
     }
 
     __image_end = .;
@@ -151,18 +155,16 @@ ASSERT(__ram_base == 0x80000000,
 ASSERT(__signature_base == 0x80000400,
        "signature area must be 0x80000400 (config/profiles/p0.json test_protocol)")
 ASSERT(__bss_start >= __ram_base && __bss_end <= __signature_base,
-       ".bss collides with the signature area at 0x80000400")
-ASSERT(__signature_end <= 0x80000440,
+       "loadable .bss collides with the signature area at 0x80000400")
+ASSERT(__image_code_end <= __signature_base,
+       "loadable image (.text/.rodata/.data/.bss) runs past 0x80000400")
+ASSERT(__signature_end <= __traplog_base,
        "signature area must not overrun the trap log")
-ASSERT(__traplog_end <= __input_base,
-       "trap log must not overrun the input area")
-ASSERT(__input_end <= __scratch_base,
-       "input area must not overrun the scratch buffer")
-ASSERT(__scratch_end <= __stack_section_start,
-       "scratch buffer must not overrun the stack")
-ASSERT(__trapstack_section_end <= __ram_end,
-       "image runs past the end of RAM (2 MiB)")
-ASSERT(__image_end <= __ram_end,
+ASSERT(__traplog_end <= __scratch_base,
+       "trap log must not overrun the scratch buffer")
+ASSERT(__scratch_end <= __bss_stack_start,
+       "scratch buffer must not overrun .bss/.stack")
+ASSERT(__bss_stack_end <= __ram_end,
        "image runs past the end of RAM (2 MiB)")
 ASSERT(__image_end > __boot_rom_end,
        "image must live in RAM, never in boot_rom")

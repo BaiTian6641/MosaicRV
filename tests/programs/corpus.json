@@ -4,7 +4,8 @@
   "isa": "rv64im_zicsr_zifencei",
   "sources": {
     "memory_map": "config/memory/p0.json",
-    "profile": "config/profiles/p0.json"
+    "profile": "config/profiles/p0.json",
+    "misalignment_policy": "config/profiles/p0.json -> misalignment {instruction_fetch: trap, load: trap, store: trap, atomic: trap}"
   },
   "protocol": {
     "tohost": 1056768,
@@ -12,19 +13,19 @@
     "signature": 2147484672,
     "signature_words": 4,
     "pass_code": 1,
-    "traplog": 2147484736,
+    "traplog": 2147487744,
     "traplog_records": 8,
     "traplog_record_words": 2,
-    "input": 2147484864,
+    "input": 2147487872,
     "input_words": 4,
-    "scratch": 2147484928,
+    "scratch": 2147488000,
     "scratch_bytes": 128
   },
   "input_names": ["a", "b", "c"],
   "programs": [
     {
       "name": "p01_addsub",
-      "title": "add / sub / shift / logic, sign-extension and overflow edges",
+      "title": "add / sub / shift / logic with sign-extension and overflow edges",
       "oracle": "p01_addsub",
       "covers": ["ADDI", "ADD", "SUB", "ANDI", "SRA", "SLTU", "SLLI", "SRLI", "XORI"],
       "inputs": [
@@ -35,6 +36,205 @@
          "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
          "expect_traps": []},
         {"a": "0x8000000000000000", "b": "0xffffffffffffffff", "c": 63,
+         "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
+         "expect_traps": []}
+      ]
+    },
+    {
+      "name": "p02_branch",
+      "title": "all six branch conditions, JAL/JALR, JALR bit-0 clear rule",
+      "oracle": "p02_branch",
+      "covers": ["BEQ", "BNE", "BLT", "BGE", "BLTU", "BGEU", "JAL", "JALR", "RET", "SLTU"],
+      "inputs": [
+        {"a": "0x0000000000000000", "b": "0x0000000000000001", "c": 3,
+         "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
+         "expect_traps": []},
+        {"a": "0x8000000000000000", "b": "0x7fffffffffffffff", "c": 5,
+         "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
+         "expect_traps": []},
+        {"a": "0xffffffffffffffff", "b": "0xffffffffffffffff", "c": 9,
+         "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
+         "expect_traps": []}
+      ]
+    },
+    {
+      "name": "p03_loadstore",
+      "title": "byte/half/word/double stores at every width with matching loads",
+      "oracle": "p03_loadstore",
+      "covers": ["SD", "SW", "SH", "SB", "LD", "LW", "LHU", "LH", "LB", "LBU"],
+      "inputs": [
+        {"a": "0x0123456789abcdef", "b": "0xfedcba9876543210", "c": 7,
+         "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
+         "expect_traps": []},
+        {"a": "0x8000000000000001", "b": "0x0000000000000002", "c": "0xffffffffffffffff",
+         "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
+         "expect_traps": []},
+        {"a": "0x0000000000000000", "b": "0xffffffffffffffff", "c": "0x8000000000000000",
+         "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
+         "expect_traps": []}
+      ]
+    },
+    {
+      "name": "p04_mul",
+      "title": "MUL / MULH / MULHSU / MULHU including signed-high cases",
+      "oracle": "p04_mul",
+      "covers": ["MUL", "MULH", "MULHSU", "MULHU"],
+      "inputs": [
+        {"a": "0x0123456789abcdef", "b": "0xfedcba9876543210", "c": "0x8000000000000001",
+         "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
+         "expect_traps": []},
+        {"a": "0xffffffffffffffff", "b": "0xffffffffffffffff", "c": "0x8000000000000000",
+         "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
+         "expect_traps": []},
+        {"a": "0x8000000000000000", "b": "0x8000000000000000", "c": "0x7fffffffffffffff",
+         "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
+         "expect_traps": []}
+      ]
+    },
+    {
+      "name": "p05_divrem",
+      "title": "DIV/DIVU/REM/REMU with divide-by-zero and MIN/-1 overflow",
+      "oracle": "p05_divrem",
+      "covers": ["DIV", "DIVU", "REM", "REMU"],
+      "inputs": [
+        {"a": "0x0123456789abcdef", "b": "0x0000000000000010", "c": "0x0000000000000003",
+         "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
+         "expect_traps": []},
+        {"a": "0x8000000000000000", "b": "0xffffffffffffffff", "c": "0x0000000000000000",
+         "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
+         "expect_traps": []},
+        {"a": "0xffffffffffffffff", "b": "0x0000000000000000", "c": "0xffffffffffffffff",
+         "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
+         "expect_traps": []}
+      ]
+    },
+    {
+      "name": "p06_shiftlogic",
+      "title": "shifts, bitwise logic, SLT/SLTU",
+      "oracle": "p06_shiftlogic",
+      "covers": ["SLLI", "SRLI", "SRAI", "SLL", "SRL", "SRA", "ANDI", "ORI", "XORI", "AND", "OR", "XOR", "SLT", "SLTU"],
+      "inputs": [
+        {"a": "0x8000000000000001", "b": "0x0000000000000003", "c": 1,
+         "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
+         "expect_traps": []},
+        {"a": "0xffffffffffffffff", "b": "0xffffffffffffffff", "c": 63,
+         "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
+         "expect_traps": []},
+        {"a": "0x00000000000000ff", "b": "0xffffffffffffff00", "c": 40,
+         "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
+         "expect_traps": []}
+      ]
+    },
+    {
+      "name": "p07_byteops",
+      "title": "signed vs unsigned byte and half loads",
+      "oracle": "p07_byteops",
+      "covers": ["SB", "SH", "SW", "LB", "LBU", "LH", "LHU", "SLLI", "SRLI", "ANDI", "OR"],
+      "inputs": [
+        {"a": "0x0000000000008080", "b": "0x0000000000007f7f", "c": "0x000000000000ffff",
+         "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
+         "expect_traps": []},
+        {"a": "0x0000000000007f7f", "b": "0x0000000000008080", "c": "0x0000000000008000",
+         "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
+         "expect_traps": []},
+        {"a": "0xffffffffffffffff", "b": "0x0000000000000000", "c": "0xffffffffffffffff",
+         "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
+         "expect_traps": []}
+      ]
+    },
+    {
+      "name": "p08_misaligned",
+      "title": "misaligned loads/stores must trap; aligned neighbours must not",
+      "oracle": "p08_misaligned",
+      "covers": ["LH", "LW", "SH", "SD", "SW", "LBU", "LH", "LW", "TRAP"],
+      "inputs": [
+        {"a": "0x0123456789abcdef", "b": "0xfedcba9876543210", "c": "0x5a5a5a5a5a5a5a5a",
+         "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
+         "expect_traps": [{"cause": 4, "note": "lh at scratch+9, odd address"},
+                          {"cause": 4, "note": "lw at scratch+10, address%4==2"},
+                          {"cause": 6, "note": "sh at scratch+7, odd address"},
+                          {"cause": 6, "note": "sd at scratch+12, address%8==4"},
+                          {"cause": 7, "note": "sw at 0x0, boot_rom is not writable"}]},
+        {"a": "0x8000000000000000", "b": "0x0000000000000000", "c": "0x0000000000000000",
+         "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
+         "expect_traps": [{"cause": 4, "note": "lh at scratch+9, odd address"},
+                          {"cause": 4, "note": "lw at scratch+10, address%4==2"},
+                          {"cause": 6, "note": "sh at scratch+7, odd address"},
+                          {"cause": 6, "note": "sd at scratch+12, address%8==4"},
+                          {"cause": 7, "note": "sw at 0x0, boot_rom is not writable"}]},
+        {"a": "0xffffffffffffffff", "b": "0xffffffffffffffff", "c": "0xffffffffffffffff",
+         "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
+         "expect_traps": [{"cause": 4, "note": "lh at scratch+9, odd address"},
+                          {"cause": 4, "note": "lw at scratch+10, address%4==2"},
+                          {"cause": 6, "note": "sh at scratch+7, odd address"},
+                          {"cause": 6, "note": "sd at scratch+12, address%8==4"},
+                          {"cause": 7, "note": "sw at 0x0, boot_rom is not writable"}]}
+      ]
+    },
+    {
+      "name": "p09_storeload",
+      "title": "load/store to the same address back to back at several widths",
+      "oracle": "p09_storeload",
+      "covers": ["SD", "LD", "SW", "LW", "SH", "SB", "XOR"],
+      "inputs": [
+        {"a": "0x0123456789abcdef", "b": "0xfedcba9876543210", "c": "0xaaaaaaaaaaaaaaaa",
+         "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
+         "expect_traps": []},
+        {"a": "0x0000000000000000", "b": "0xffffffffffffffff", "c": "0x0000000000000000",
+         "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
+         "expect_traps": []},
+        {"a": "0xffffffffffffffff", "b": "0x0000000000000000", "c": "0x5555555555555555",
+         "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
+         "expect_traps": []}
+      ]
+    },
+    {
+      "name": "p10_jalr_link",
+      "title": "JAL/JALR link registers, JALR bit-0 clear, rd==rs1, nested call",
+      "oracle": "p10_jalr_link",
+      "covers": ["JAL", "JALR", "RET", "ADD", "SUB", "XOR", "ADDI"],
+      "inputs": [
+        {"a": "0x0123456789abcdef", "b": "0x0000000000000010", "c": 0,
+         "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
+         "expect_traps": []},
+        {"a": "0xffffffffffffffff", "b": "0x0000000000000001", "c": 0,
+         "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
+         "expect_traps": []},
+        {"a": "0x8000000000000000", "b": "0xffffffffffffffff", "c": 0,
+         "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
+         "expect_traps": []}
+      ]
+    },
+    {
+      "name": "p11_bigmuldiv",
+      "title": "dependent division chain through the M-extension corner cases",
+      "oracle": "p11_bigmuldiv",
+      "covers": ["DIV", "DIVU", "REM", "REMU", "ADD", "XOR"],
+      "inputs": [
+        {"a": "0x0123456789abcdef", "b": "0x0000000000000011", "c": "0x0000000000000005",
+         "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
+         "expect_traps": []},
+        {"a": "0x8000000000000000", "b": "0xffffffffffffffff", "c": "0x0000000000000007",
+         "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
+         "expect_traps": []},
+        {"a": "0xffffffffffffffff", "b": "0x0000000000000000", "c": "0xffffffffffffffff",
+         "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
+         "expect_traps": []}
+      ]
+    },
+    {
+      "name": "p12_memwalk",
+      "title": "16-word pattern build plus a load-only walk with an input-dependent trip count",
+      "oracle": "p12_memwalk",
+      "covers": ["SD", "LD", "SLLI", "XOR", "ADD", "ANDI", "BNEZ", "BGEU", "ADDI", "SRLI"],
+      "inputs": [
+        {"a": "0x0123456789abcdef", "b": "0x1111111111111111", "c": 5,
+         "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
+         "expect_traps": []},
+        {"a": "0xffffffffffffffff", "b": "0x0000000000000001", "c": 2,
+         "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
+         "expect_traps": []},
+        {"a": "0x8000000000000000", "b": "0xaaaaaaaaaaaaaaaa", "c": 8,
          "expect_sig": ["0x0000000000000000", "0x0000000000000000", "0x0000000000000000", "0x0000000000000000"],
          "expect_traps": []}
       ]

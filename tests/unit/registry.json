@@ -100,6 +100,36 @@
       ],
       "max_cycles": 2000,
       "seed": 1
+    },
+    "decode.rv64im_reserved": {
+      "task": "I-010",
+      "top": "mosaic_decoder_tb",
+      "rtl": [
+        "rtl/core/mosaic_decoder.sv"
+      ],
+      "sv": [
+        "sim/tb/mosaic_decoder_tb.sv"
+      ],
+      "cpp": [
+        "sim/unit/tb_decoder.cpp"
+      ],
+      "max_cycles": 200000,
+      "seed": 1
+    },
+    "alu.boundaries": {
+      "task": "I-011",
+      "top": "mosaic_alu_tb",
+      "rtl": [
+        "rtl/core/mosaic_alu.sv"
+      ],
+      "sv": [
+        "sim/tb/mosaic_alu_tb.sv"
+      ],
+      "cpp": [
+        "sim/unit/tb_alu.cpp"
+      ],
+      "max_cycles": 200000,
+      "seed": 1
     }
   }
 }

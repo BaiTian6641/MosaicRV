@@ -1,0 +1,99 @@
+/* tests/programs/src/p10_jalr_link.S
+ *
+ * JAL and JALR link-register semantics, including the JALR bit-0 clear rule.
+ *
+ *   - JAL writes the address of the following instruction into rd.
+ *   - JALR writes the address of the following instruction into rd, and
+ *     clears bit 0 of the computed target.  Here the target is deliberately
+ *     made odd (ori 1) before the jump, so an implementation that does not
+ *     clear bit 0 lands on an address that is not an instruction boundary.
+ *   - JALR reads rs1 before writing rd, so rd == rs1 is legal and must
+ *     yield rd = link address.
+ *
+ * The link values are checked against "address of the instruction after the
+ * jump", which is computed with la.  Both checks must produce exactly 0, and
+ * a layout change cannot make them pass vacuously.
+ *
+ * Covered instructions: jal, jalr, ret, la (auipc+addi), add, sub, xor.
+ *
+ * Call sequence with inputs a, b:
+ *   a0 = a
+ *   jal  p10_jal_b     -> a0 = a + 1
+ *   jalr p10_jalr_b    -> a0 = a + 1 + b
+ *   jalr a3, a3        -> a0 = a + 1 + 2b        (rd == rs1)
+ *   jal  p10_outer     -> a1 = b - 1, a2 = a0 ^ a1
+ *
+ * Computed signature:
+ *   sig0 = jal link delta        (0)
+ *   sig1 = jalr link delta       (0)
+ *   sig2 = a0 after the chain    = a + 1 + 2b
+ *   sig3 = a1 ^ a2               = (b - 1) ^ ((a + 1 + 2b) ^ (b - 1))
+ */
+
+#include "platform.h"
+
+    .section .text, "ax", @progbits
+    .balign 4
+    .globl  main
+    .type   main, @function
+main:
+    MOSAIC_SETUP_BASES
+    MOSAIC_LOAD_INPUTS
+
+    /* ---- JAL link ---- */
+    jal     t0, p10_jal_b
+p10_after_jal:
+    la      t1, p10_after_jal
+    sub     s4, t0, t1                         /* must be 0 */
+
+    /* ---- JALR with bit 0 deliberately set ---- */
+    la      t2, p10_jalr_b
+    ori     t2, t2, 1                          /* JALR must clear bit 0 */
+    jalr    t3, t2
+p10_after_jalr:
+    la      t4, p10_after_jalr
+    sub     s5, t3, t4                         /* must be 0 */
+
+    /* ---- JALR with rd == rs1 ---- */
+    mv      a3, t2
+    jalr    a3, a3
+
+    /* ---- nested call / return through ra ---- */
+    jal     ra, p10_outer
+
+    xor     t0, a1, a2                         /* sig3 */
+
+    SIG0    s4
+    SIG1    s5
+    SIG2    a0
+    SIG3    t0
+    .size   main, . - main
+
+    .balign 4
+p10_jal_b:
+    addi    a0, a0, 1
+    ret
+    .size   p10_jal_b, . - p10_jal_b
+
+    .balign 4
+p10_jalr_b:
+    add     a0, a0, a1
+    ret
+    .size   p10_jalr_b, . - p10_jalr_b
+
+    .balign 4
+p10_outer:
+    addi    sp, sp, -16
+    sd      ra, 0(sp)
+    addi    a1, a1, -1
+    jal     ra, p10_inner
+    ld      ra, 0(sp)
+    addi    sp, sp, 16
+    ret
+    .size   p10_outer, . - p10_outer
+
+    .balign 4
+p10_inner:
+    xor     a2, a0, a1
+    ret
+    .size   p10_inner, . - p10_inner

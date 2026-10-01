@@ -79,6 +79,10 @@ def build_case(profile: str, case_id: str, entry: dict) -> str:
     cmd = ["verilator"] + VERILATOR_FLAGS
     cmd += ["--top-module", entry["top"], "-Mdir", os.path.join(build_dir, "obj_dir")]
     cmd += ["-I%s" % os.path.join(REPO_ROOT, "build", profile, "sim")]
+    # Every core testbench includes mosaic_pkg.sv; it is part of the shared
+    # sources rather than of any one case, for the same reason sim_common.cpp is.
+    cmd += ["-I%s" % os.path.join(REPO_ROOT, "rtl", "core")]
+    cmd += ["-I%s" % os.path.join(REPO_ROOT, "rtl", "common")]
     cmd += ["-CFLAGS", "-I%s" % SIM_COMMON]
     cmd += ["-CFLAGS", "-I%s" % os.path.join(REPO_ROOT, "build", profile, "sim")]
     cmd += ["-o", binary]

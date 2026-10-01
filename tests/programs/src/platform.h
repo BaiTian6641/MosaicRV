@@ -50,16 +50,16 @@
 /* all NOLOAD output sections so they are provably present in the ELF  */
 /* program headers while consuming no file bytes.                     */
 /* ------------------------------------------------------------------ */
-#define MOSAIC_TRAPLOG_BASE       0x80000440UL
+#define MOSAIC_TRAPLOG_BASE       0x80001000UL
 #define MOSAIC_TRAPLOG_RECORDS    8
 #define MOSAIC_TRAPLOG_REC_WORDS  2              /* { mcause, mtval }        */
 #define MOSAIC_TRAPLOG_REC_BYTES  (MOSAIC_TRAPLOG_REC_WORDS * 8)
 
-#define MOSAIC_INPUT_BASE         0x800004C0UL
+#define MOSAIC_INPUT_BASE         0x80001080UL
 #define MOSAIC_INPUT_WORDS        4              /* a, b, c, (reserved)      */
 #define MOSAIC_INPUT_BYTE_OFF     0
 
-#define MOSAIC_SCRATCH_BASE       0x80000500UL
+#define MOSAIC_SCRATCH_BASE       0x80001100UL
 #define MOSAIC_SCRATCH_SIZE       128
 
 /* Machine-mode CSR numbers (RISC-V Privileged Spec v1.12) */
