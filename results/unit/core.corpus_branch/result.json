@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "case": "core.corpus_branch",
+  "verdict": "FAIL",
+  "detail": "contract violated: run-input0: the machine did not quiesce after 20000 cycles",
+  "seed": 1,
+  "max_cycles": 4000000,
+  "checks": 5,
+  "failures": 1,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-01T20:52:00Z",
+  "first_mismatch": "run-input0: the machine did not quiesce after 20000 cycles: expected the control path holds, got contract violated",
+  "failed_checks": ["no contract violation"]
+}

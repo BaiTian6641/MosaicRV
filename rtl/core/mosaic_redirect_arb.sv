@@ -19,6 +19,18 @@
 //     older work keeps retiring, which is required -- a held redirect must not
 //     stall retirement of the instructions in front of it.
 //
+//     "The head" is *both* entries the ROB retires in the cycle: lane 0
+//     (`head_*`) and the entry immediately behind it (`head1_*`). The core
+//     retires two per cycle, and a resolved branch lands in either lane
+//     depending on how the older instructions completed; a request one slot
+//     behind the head that was not accepted as acting there would never become
+//     the lane-0 head, because the ROB can retire both entries in the same
+//     cycle and be empty afterwards. That is a deadlock, not a wait, and it is
+//     what CASE=core.corpus_branch found. Accepting lane 1 keeps the rule's
+//     purpose: by the end of that cycle every older instruction has committed,
+//     either in this cycle or an earlier one. A consumer with a single retire
+//     lane ties `head1_*` low and gets the original rule exactly.
+//
 // ------------------------------------------------------ why the head gate
 //
 // `mosaic_rename`'s squash restores the *speculative map from the committed
@@ -86,11 +98,23 @@ module mosaic_redirect_arb (
     output logic [RDA_N-1:0]           req_ack,     // consumed: acted on or dropped
 
     // ------------------------------------------------- the ROB's head view
+    // The ROB retires two entries per cycle, and a resolved branch can be in
+    // either lane. "The head" for the purpose of this rule is therefore *both*
+    // entries that are leaving this cycle: lane 0 (`off == 0`) and the entry
+    // immediately behind it (`off == 1`). By the end of that cycle every
+    // instruction older than the request has committed either way, which is
+    // exactly what the squash the rule exists to make safe requires. A core
+    // with one retire lane ties the second view low and gets the single-lane
+    // rule unchanged -- which is what the standalone directed test does.
     input  logic                       head_valid,
     input  logic [RDA_IDX_W-1:0]       head_index,
     input  logic [RDA_RGEN_W-1:0]      head_gen,
     input  logic [RDA_OCC_W-1:0]       head_occupied,
-    input  logic                       head_retire, // the head leaves this cycle
+    input  logic                       head_retire, // lane 0 leaves this cycle
+    input  logic                       head1_valid,
+    input  logic [RDA_IDX_W-1:0]       head1_index,
+    input  logic [RDA_RGEN_W-1:0]      head1_gen,
+    input  logic                       head1_retire, // lane 1 leaves this cycle
 
     // ------------------------------------------------------------- the action
     // A one-cycle pulse in the cycle *after* the redirecting head retired, so
@@ -126,12 +150,20 @@ module mosaic_redirect_arb (
       // dead, which is what a redirect that just flushed everything leaves.
       cand[i] = req_valid[i] && head_valid &&
                 (RDA_OCC_W'(off[i]) < head_occupied);
-      // A live entry at the head must carry the head's generation; a different
-      // generation at the same index means the slot has been recycled and the
-      // request belongs to an instruction that no longer exists.
+      // A live entry at a head index must carry that head's generation; a
+      // different generation at the same index means the slot has been recycled
+      // and the request belongs to an instruction that no longer exists.
       dead[i] = req_valid[i] && !cand[i];
       if (req_valid[i] && cand[i] && (off[i] == {RDA_IDX_W{1'b0}}) &&
           (req_rob_gen[i] != head_gen)) begin
+        dead[i] = 1'b1;
+        cand[i] = 1'b0;
+      end
+      // The same test for the second retiring lane. A request one behind the
+      // head whose generation disagrees with that entry's is not the
+      // instruction in it.
+      if (req_valid[i] && cand[i] && (off[i] == RDA_IDX_W'(1)) && head1_valid &&
+          (req_rob_gen[i] != head1_gen)) begin
         dead[i] = 1'b1;
         cand[i] = 1'b0;
       end
@@ -162,16 +194,27 @@ module mosaic_redirect_arb (
 
   // ---------------------------------------------------------------- the action
   logic act;
+  logic at_head0, at_head1;
 
 `ifdef MOSAIC_REDIRECT_MUTANT_NO_HEAD_WAIT
   // NEGATIVE CONTROL 2: the winner acts immediately, without waiting for its
   // macro to reach the head. Everything older than it in the ROB is still in
   // flight and is about to be squashed by a restore that does not cover it.
-  assign act = win_found;
+  assign at_head0 = 1'b0;
+  assign at_head1 = 1'b0;
+  assign act      = win_found;
 `else
-  assign act = win_found && head_valid && head_retire &&
-               (off[win_i] == {RDA_IDX_W{1'b0}}) &&
-               (req_rob_gen[win_i] == head_gen);
+  // Identity equality, not an offset: the request names the instruction, and it
+  // may act when the entry being retired this cycle *is* that instruction -- in
+  // lane 0 or in lane 1. Both are "the head" for the purpose the rule enforces;
+  // see the head-view note in the port list.
+  assign at_head0 = head_valid && head_retire &&
+                    (req_rob_index[win_i] == head_index) &&
+                    (req_rob_gen[win_i] == head_gen);
+  assign at_head1 = head1_valid && head1_retire &&
+                    (req_rob_index[win_i] == head1_index) &&
+                    (req_rob_gen[win_i] == head1_gen);
+  assign act      = win_found && (at_head0 || at_head1);
 `endif
 
   always_comb begin

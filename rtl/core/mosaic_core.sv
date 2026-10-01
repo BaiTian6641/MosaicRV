@@ -185,6 +185,29 @@ module mosaic_core (
     output logic [31:0]                 o_redir_act_ctr,
     output logic [31:0]                 o_redir_wait_ctr,
     output logic [31:0]                 o_redir_dead_ctr,
+    // ---------------------------------------------- the redirect, and the squash
+    // The redirect pulse and its target, so a case can check that the redirect
+    // goes where the resolved branch said instead of inferring it from the
+    // retirement stream; and the rename recovery counters, so the checkpoint's
+    // precondition and the squash's acceptance are observable rather than
+    // asserted in prose.
+    output logic                        o_redirect_valid,
+    output logic [CORE_XLEN-1:0]        o_redirect_pc,
+    output logic [31:0]                 o_squash_acc_ctr,
+    output logic [31:0]                 o_ckpt_ctr,
+    // The redirect arbiter's inputs and decision, so a failing case can say
+    // which one of them was wrong instead of only that no redirect came:
+    // {61:54 occupied, 53 recovering, 52 barrier, 51 act_taken, 50 act_valid,
+    //  49:43 head_gen, 42:37 head_index, 36 head_retire, 35 head_valid,
+    //  34:28 c1_gen, 27:22 c1_idx, 21 c1_taken, 20 c1_valid,
+    //  19:13 c0_gen, 12:7 c0_idx, 6 c0_taken, 5 c0_valid, 4:0 reserved}
+    output logic [63:0]                 o_dbg_redir_bundle,
+    // The front end's state, for the same reason: {127:116 occupied, 115:114
+    // free_rob, 113 c1_flush_busy, 112 c0_flush_busy, 111 core_stop,
+    // 110 recovering, 109:104 alloc_index, 103 dbuf_push, 102 disp_take,
+    // 101:100 dbuf_cnt, 99 dbuf_valid1, 98 dbuf_valid0, 97 out_ready,
+    // 96 out_valid, 95:64 out_pc, 63:0 fetch_pc}
+    output logic [127:0]                o_dbg_front_bundle,
     // ------------------------------------------------------- debug observability
     // The instructions and the ROB head, so a failing case can say what the
     // machine was doing instead of only that a count was wrong.
@@ -275,6 +298,8 @@ module mosaic_core (
   logic [CORE_IGEN_W-1:0]    ren_commit2_gen;
   logic                      ren_squash_underflow, ren_journal_overflow;
   logic                      ren_squash_not_committed, ren_ckpt_committed;
+  logic                      ren_ckpt_valid, ren_squash, ren_squash_accepted;
+  logic                      redirect_delay_q;
   logic [CORE_TAG_W:0]       ren_free_count;
 
   // descriptor store
@@ -417,6 +442,7 @@ module mosaic_core (
   // evidence
   logic [31:0] commit_ctr, redirect_ctr, recovering_ctr, stop_ctr, cycle_ctr;
   logic [31:0] squash_under_ctr, journal_ovf_ctr;
+  logic [31:0] squash_acc_ctr, ckpt_ctr;
   logic [31:0] disp_alloc_ctr, disp_ins_ctr;
   logic [31:0] squash_nc_ctr;
   logic        core_stop_prev;
@@ -459,7 +485,16 @@ module mosaic_core (
     if (rst) begin
       fetch_pc_q <= mosaic_cfg_pkg::MOSAIC_RESET_VECTOR;
     end else if (redirect_valid) begin
+`ifdef MOSAIC_CORE_MUTANT_REDIRECT_NEXT
+      // NEGATIVE CONTROL: the front end resumes one instruction past the
+      // redirect target instead of at it, so the first instruction of the
+      // resolved branch's path is skipped. CASE=core.corpus_branch must fail --
+      // the redirect-port comparison names the wrong PC before the retirement
+      // stream even diverges.
+      fetch_pc_q <= redirect_pc + CORE_XLEN'(4);
+`else
       fetch_pc_q <= redirect_pc;
+`endif
     end else if (fetch_req_fire) begin
       fetch_pc_q <= fetch_pred_next_valid ? fetch_pred_next_pc
                                           : (fetch_pc_q + CORE_XLEN'(4));
@@ -621,7 +656,16 @@ module mosaic_core (
     end else if (redirect_valid || core_stop) begin
       // A redirect discards everything fetched before it; a stop freezes the
       // buffer where it is (the refused macro must stay refused).
+`ifdef MOSAIC_CORE_MUTANT_NO_PURGE
+      // NEGATIVE CONTROL: the redirect does not purge the younger work it
+      // discards. The taken branch's fall-through instruction is already in the
+      // buffer, so it is dispatched after the redirect as though it were on the
+      // correct path, retires, and the case's per-instruction comparison against
+      // the reference names it. CASE=core.corpus_branch must fail.
+      if (1'b0) begin
+`else
       if (redirect_valid) begin
+`endif
         dbuf_valid[0] <= 1'b0;
         dbuf_valid[1] <= 1'b0;
         dbuf_cnt      <= 2'd0;
@@ -711,13 +755,32 @@ module mosaic_core (
       .commit2_gen      (ren_commit2_gen),
       .commit2_accepted (),
       .commit2_x0_dropped(),
-      // No checkpoint and no squash: the recovery is the barrier (see the
-      // header). A checkpoint would be a promise this package does not keep --
-      // it has no saved speculative map -- and rename refuses a squash to a
-      // checkpoint that was not taken at a committed boundary.
-      .ckpt_valid       (1'b0),
-      .squash           (1'b0),
-      .squash_accepted  (),
+      // ------------------------------------------------------- the checkpoint
+      // The redirect pulse is also the cycle the branch's own commit has landed:
+      // `mosaic_retire`'s commit is combinational with the retire
+      // acknowledgement, so at the cycle *after* the branch retires the branch's
+      // mapping is in the committed map and nothing younger has allocated (the
+      // barrier in section 12 is what makes the second half true). That is the
+      // one cycle in which the speculative map equals the committed map, which
+      // is exactly the precondition `mosaic_rename` documents for a checkpoint
+      // it will later accept a squash to. It is sampled here rather than assumed.
+      //
+      // The squash follows one cycle after the checkpoint, when the restore can
+      // no longer race the commit that funded it. `mosaic_rename` refuses
+      // allocation in a squash cycle, and dispatch is held by `recovering` for
+      // the same cycle, so the two cannot collide.
+      //
+      // Under the barrier the squash restores a state that is already correct --
+      // that is the point of the barrier. It is wired, and the case asserts
+      // `ckpt_committed` held at the checkpoint and that the squash was
+      // *accepted*, so the precondition is proved rather than trusted: the day
+      // the barrier is lifted (I-018's saved-map controller), a squash that is
+      // no longer a no-op lands on the same signal, and a checkpoint taken off
+      // the boundary is refused and counted instead of silently corrupting the
+      // map.
+      .ckpt_valid       (ren_ckpt_valid),
+      .squash           (ren_squash),
+      .squash_accepted  (ren_squash_accepted),
       .squash_underflow (ren_squash_underflow),
       .squash_not_committed (ren_squash_not_committed),
       .ckpt_committed   (ren_ckpt_committed),
@@ -1274,6 +1337,15 @@ module mosaic_core (
       .head_gen        (rob_head_gen),
       .head_occupied   (rob_occupied),
       .head_retire     (rob_retire_ack),
+      // The second retire lane. A branch that reaches the head in the cycle the
+      // entry in front of it retires leaves in lane 1, and without this view the
+      // request would wait for a lane-0 head that never comes -- the ROB retires
+      // both entries in that cycle and is empty afterwards. See
+      // mosaic_redirect_arb.sv's head-view note.
+      .head1_valid     (rob_head1_valid),
+      .head1_index     (rob_head1_index),
+      .head1_gen       (rob_head1_gen),
+      .head1_retire    (rob_retire_ack_next),
       .redirect_valid  (redirect_valid),
       .redirect_pc     (redirect_pc),
       .o_act_valid     (redir_act_valid),
@@ -1299,6 +1371,46 @@ module mosaic_core (
       recovering <= 1'b1;
     end else if (recovering && !c0_flush_busy && !c1_flush_busy) begin
       recovering <= 1'b0;
+    end
+  end
+
+  // ------------------------------------------------------- the rename recovery
+  // A redirect retires the branch, and `mosaic_retire` publishes its commit in
+  // that same cycle, so the cycle after a redirect the branch's mapping is in
+  // the committed map. Under the barrier nothing younger than the branch ever
+  // allocated, so speculative == committed holds there -- and that is the only
+  // cycle in which a checkpoint `mosaic_rename` will accept a squash to
+  // (`ckpt_at_boundary` is sampled from `ckpt_committed` at the checkpoint, once,
+  // and held). So:
+  //
+  //   * the checkpoint is taken on the redirect pulse;
+  //   * the squash follows one cycle later, so the commit that funded the
+  //     checkpoint cannot land in the same cycle as the restore that reads the
+  //     committed map.
+  //
+  // `MOSAIC_CORE_MUTANT_EARLY_CKPT` takes the checkpoint one cycle earlier, in
+  // the act cycle -- before the branch's own commit has landed -- which is
+  // exactly the off-boundary checkpoint rename refuses. See the negative-control
+  // note at the site.
+`ifdef MOSAIC_CORE_MUTANT_EARLY_CKPT
+  // NEGATIVE CONTROL: the checkpoint is taken in the cycle the arbiter acts,
+  // before the redirecting branch's commit has been applied to the committed
+  // map. `spec == cmt` does not hold there for a link-writing JAL/JALR, so
+  // rename refuses the squash with `squash_not_committed` -- the defect is a
+  // checkpoint taken off the boundary, and the case's recovery counters catch
+  // it. CASE=core.corpus_branch must fail on it.
+  assign ren_ckpt_valid = redir_act_valid;
+  assign ren_squash     = redirect_valid;
+`else
+  assign ren_ckpt_valid = redirect_valid;
+  assign ren_squash     = redirect_delay_q;
+`endif
+
+  always_ff @(posedge clk) begin
+    if (rst) begin
+      redirect_delay_q <= 1'b0;
+    end else begin
+      redirect_delay_q <= redirect_valid;
     end
   end
 
@@ -1476,6 +1588,56 @@ module mosaic_core (
   // register-writer, and in particular at every redirect; the case asserts it
   // there rather than taking the claim on faith.
   assign o_rename_boundary = ren_ckpt_committed;
+  assign o_redirect_valid  = redirect_valid;
+  assign o_redirect_pc     = redirect_pc;
+  assign o_squash_acc_ctr  = squash_acc_ctr;
+  assign o_ckpt_ctr        = ckpt_ctr;
+
+  always_comb begin
+    o_dbg_redir_bundle                 = {CORE_XLEN{1'b0}};
+    o_dbg_redir_bundle[0]              = c0_redir_valid;
+    o_dbg_redir_bundle[1]              = c1_redir_valid;
+    o_dbg_redir_bundle[2]              = c0_redir_taken;
+    o_dbg_redir_bundle[3]              = c1_redir_taken;
+    o_dbg_redir_bundle[4]              = 1'b0;
+    o_dbg_redir_bundle[5]              = 1'b0;
+    o_dbg_redir_bundle[6]              = 1'b0;
+    o_dbg_redir_bundle[12:7]           = c0_redir_idx;
+    o_dbg_redir_bundle[19:13]          = c0_redir_gen;
+    o_dbg_redir_bundle[20]             = 1'b0;
+    o_dbg_redir_bundle[27:22]          = c1_redir_idx;
+    o_dbg_redir_bundle[34:28]          = c1_redir_gen;
+    o_dbg_redir_bundle[35]             = rob_head_valid;
+    o_dbg_redir_bundle[36]             = rob_retire_ack;
+    o_dbg_redir_bundle[42:37]          = rob_head_index;
+    o_dbg_redir_bundle[49:43]          = rob_head_gen;
+    o_dbg_redir_bundle[50]             = redir_act_valid;
+    o_dbg_redir_bundle[51]             = redir_act_taken;
+    o_dbg_redir_bundle[52]             = br_inflight;
+    o_dbg_redir_bundle[53]             = recovering;
+    o_dbg_redir_bundle[60:54]          = rob_occupied;
+    o_dbg_redir_bundle[63:61]          = 3'b000;
+  end
+  always_comb begin
+    o_dbg_front_bundle           = 128'd0;
+    o_dbg_front_bundle[63:0]     = fetch_pc_q;
+    o_dbg_front_bundle[95:64]    = fetch_out_pc[63:32];
+    o_dbg_front_bundle[96]       = fetch_out_valid;
+    o_dbg_front_bundle[97]       = fetch_out_ready;
+    o_dbg_front_bundle[98]       = dbuf_valid[0];
+    o_dbg_front_bundle[99]       = dbuf_valid[1];
+    o_dbg_front_bundle[101:100]  = dbuf_cnt;
+    o_dbg_front_bundle[102]      = dbuf_take;
+    o_dbg_front_bundle[103]      = dbuf_push;
+    o_dbg_front_bundle[109:104]  = rob_alloc_index;
+    o_dbg_front_bundle[110]      = recovering;
+    o_dbg_front_bundle[111]      = core_stop;
+    o_dbg_front_bundle[112]      = c0_flush_busy;
+    o_dbg_front_bundle[113]      = c1_flush_busy;
+    o_dbg_front_bundle[115:114]  = 2'b00;
+    o_dbg_front_bundle[127:116]  = 12'(rob_occupied);
+  end
+
   assign o_squash_underflow_ctr = squash_under_ctr;
   assign o_squash_not_committed_ctr = squash_nc_ctr;
   assign o_journal_overflow_ctr = journal_ovf_ctr;
@@ -1500,6 +1662,8 @@ module mosaic_core (
       squash_under_ctr <= 32'd0;
       squash_nc_ctr    <= 32'd0;
       journal_ovf_ctr  <= 32'd0;
+      squash_acc_ctr   <= 32'd0;
+      ckpt_ctr         <= 32'd0;
       core_stop_prev   <= 1'b0;
     end else begin
       cycle_ctr      <= cycle_ctr + 32'd1;
@@ -1511,6 +1675,8 @@ module mosaic_core (
       squash_under_ctr <= squash_under_ctr + {31'd0, ren_squash_underflow};
       squash_nc_ctr    <= squash_nc_ctr + {31'd0, ren_squash_not_committed};
       journal_ovf_ctr  <= journal_ovf_ctr + {31'd0, ren_journal_overflow};
+      squash_acc_ctr   <= squash_acc_ctr + {31'd0, ren_squash_accepted};
+      ckpt_ctr         <= ckpt_ctr + {31'd0, ren_ckpt_valid};
       core_stop_prev   <= core_stop;
     end
   end

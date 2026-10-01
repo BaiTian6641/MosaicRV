@@ -420,7 +420,17 @@ module mosaic_cluster (
         rr_pc_q    <= br_target_eff;
         rr_idx_q   <= iq_grant_uop[CL_UOP_ID_W-1 -: CL_IDX_W];
         rr_gen_q   <= iq_grant_uop[CL_IGEN_W + CL_UOP_W - 1 -: CL_RGEN_W];
+`ifdef MOSAIC_CLUSTER_MUTANT_IGNORE_TAKEN
+        // NEGATIVE CONTROL: the resolution is raised as not taken whatever the
+        // comparator said. The arbiter then never redirects, the fall-through
+        // path keeps running, and the wrong-path instructions retire:
+        // CASE=core.corpus_branch must fail on the first instruction after a
+        // taken branch. This is the "a branch's resolution is not taken into
+        // account" control.
+        rr_taken_q <= 1'b0;
+`else
         rr_taken_q <= br_is_taken;
+`endif
         rr_v_q     <= 1'b1;
       end
     end

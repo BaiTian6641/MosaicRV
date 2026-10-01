@@ -69,6 +69,16 @@
 // and it is what makes "a store behind an unauthorised one does not bypass it"
 // a checked property rather than an assumption about the caller.
 //
+// `commit_valid_i` and `squash_valid_i` are not expected in the same cycle: the
+// ROB does not retire in a flush cycle (`mosaic_rob`: `retire_ack = retire_req &&
+// head_ready && !flush_valid`), and a squash kills younger work than anything
+// that retired. The queue nevertheless behaves coherently if they do arrive
+// together, because the watermark is *derived from the survivors* rather than
+// adjusted by arithmetic: it counts the leading entries that are both resident
+// and authorised after this cycle's drain, squash and commit, so a commit whose
+// entry the same cycle's squash takes cannot leave the watermark pointing past
+// the entry it counted.
+//
 // ------------------------------------------------------------ the squash rule
 //
 // A squash withdraws the speculative work the recovery decided is dead. The
@@ -175,9 +185,13 @@
 //     byte-merge rule out of I-035, which owns it.
 //
 // The port is a pure function of the query inputs and the queue's registers, so
-// leaving it unconnected is safe. This case drives it in one phase (see the
-// report) but the visibility contract above is what the case is about, and this
-// port carries no mutant.
+// leaving it unconnected is safe, and nothing in this module or in the case's
+// endpoint depends on it. It is **exercised**: `PhaseForward` in
+// sim/unit/tb_store.cpp drives the rule directly (whole-doubleword, byte, word,
+// crossing-the-boundary, partial-coverage, blocked-by-unknown-address and
+// youngest-wins cases), and every cycle of every phase also compares the two
+// outputs against the rule. It carries no mutant: the visibility contract is
+// what the case is about, and this port cannot change one.
 //
 // ------------------------------------------------------------- negative controls
 //
@@ -565,11 +579,22 @@ module mosaic_store_queue #(
   assign commit_ok_o    = commit_ok_c;
   assign commit_stale_o = commit_valid_i && !commit_ok_c;
 
-  // The watermark after this cycle: an accepted commit authorises up to and
-  // including the entry it named (equal to "exactly one more" in the shipping
-  // rule), and a drain removes one authorised entry from the head.
-  logic [CNT_W-1:0] auth_after_c;
-  assign auth_after_c = commit_ok_c ? (CNT_W'(commit_idx_c) + CNT_W'(1)) : auth_cnt_q;
+  // The watermark after this cycle. It is *derived from the survivors* rather
+  // than adjusted arithmetically: an entry counts only if it is still in the
+  // queue and is authorised, and the watermark is the number of leading such
+  // entries. That is the same statement as the per-entry flags' prefix
+  // invariant, so a drain (which removes the authorised head), a squash (which
+  // removes a suffix of the unauthorised region) and a commit in the same cycle
+  // as either cannot leave the watermark counting an entry that is gone. The
+  // ROB never retires in a flush cycle, so the last combination is not expected
+  // in service -- but the invariant holds if it happens, which is what makes the
+  // exported watermark comparable to the entries rather than merely plausible.
+  logic [ENTRIES-1:0] auth_next_c;
+  always_comb begin
+    for (int unsigned i = 0; i < ENTRIES; i++) begin
+      auth_next_c[i] = auth_c[i] || (commit_ok_c && (IDX_W'(i) == commit_idx_c));
+    end
+  end
 
   // ---------------------------------------------------------------- the drain
   // Position 0 is the offer in the shipping build. The index is a register-like
@@ -645,6 +670,9 @@ module mosaic_store_queue #(
   logic [ENTRIES-1:0] keep_c;
   logic [CNT_W-1:0] next_count_c;
 
+  logic             auth_open_c;
+  logic [CNT_W-1:0] next_auth_cnt_c;
+
   always_comb begin
     // Default: keep the entry where it is. Every position is written on every
     // path, so the array cannot infer storage; positions at or above the new
@@ -652,33 +680,35 @@ module mosaic_store_queue #(
     for (int unsigned i = 0; i < ENTRIES; i++) begin
       ent_next_c[i] = ent_q[i];
     end
-    next_count_c = {CNT_W{1'b0}};
+    next_count_c    = {CNT_W{1'b0}};
+    next_auth_cnt_c = {CNT_W{1'b0}};
+    auth_open_c     = 1'b1;
     for (int unsigned i = 0; i < ENTRIES; i++) begin
       keep_c[i] = resident_c[i] && !squash_drop_c[i] &&
                   !(drain_removes_c && (IDX_W'(i) == drain_idx_c));
       if (keep_c[i]) begin
         ent_next_c[next_count_c[IDX_W-1:0]] = ent_filled_c[i];
         next_count_c = next_count_c + CNT_W'(1);
+        // The watermark counts the *leading* survivors that are authorised, and
+        // stops at the first one that is not: the authorised entries are always
+        // a prefix, so there is nothing to find after that point.
+        if (auth_open_c) begin
+          if (auth_next_c[i]) next_auth_cnt_c = next_auth_cnt_c + CNT_W'(1);
+          else                auth_open_c     = 1'b0;
+        end
       end
     end
     // An accepted allocation is appended at the current occupancy. With
     // ALLOC_REQUIRES_ROOM the append cannot exceed ENTRIES; the mutant asserts
     // acceptance without room, and the guard below is what turns that into a
     // dropped entry (which the conservation identity then names) rather than an
-    // out-of-range write.
+    // out-of-range write. It is appended *after* the watermark is counted, and a
+    // store cannot be authorised in its allocation cycle, so it never affects it.
     if (alloc_ok_c && (next_count_c < CNT_W'(ENTRIES))) begin
       ent_next_c[next_count_c[IDX_W-1:0]] = alloc_entry_c;
       next_count_c = next_count_c + CNT_W'(1);
     end
   end
-
-  // The watermark next state, computed in the pre-removal index domain and
-  // shifted down by the entry the drain removed. `auth_after_c` counts the
-  // authorised entries before the removal, so the removal subtracts one.
-  logic [CNT_W-1:0] next_auth_cnt_c;
-  assign next_auth_cnt_c = (drain_removes_c && (auth_after_c != {CNT_W{1'b0}}))
-                             ? (auth_after_c - CNT_W'(1))
-                             : auth_after_c;
 
   // ------------------------------------------------------------- outputs
   assign o_count    = count_q;

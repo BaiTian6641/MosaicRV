@@ -1,0 +1,1357 @@
+// ============================================================================
+// tb_core_corpus.cpp -- CASE=core.corpus_branch, work package I-023.
+//
+// The DUT is the integrated p0 core (the same top CASE=fabric.fixed_two_cluster
+// drives): fetch -> decode buffer -> dispatch -> two clusters -> writeback
+// arbiter -> ROB -> retire -> commit to rename, with the redirect arbiter on the
+// branch-resolution side.
+//
+// The program is a **real corpus program**, loaded from the ELF that
+// `make -C tests/programs all` produces for `p02_branch` (the corpus program
+// whose whole purpose is the six branch conditions, JAL/JALR and the JALR
+// bit-0 clear rule). The case is about the control path -- branch resolution ->
+// redirect arbiter -> fetch redirect, cluster purge, rename squash -- and this
+// is the program that exercises it.
+//
+// ------------------------------------------------- what the DUT can execute
+//
+// The integrated core services ALU, branch and MUL/DIV macros only: dispatch
+// refuses any macro whose decode names a memory or system operation *before*
+// allocating it, and stops the machine there (mosaic_dispatch.sv). So the
+// corpus program cannot run from `_start`: crt0's second instruction is a CSR
+// write. It cannot run from `main` either: main's fourth instruction is a load.
+//
+// The harness therefore does two declared things, neither of them a change to
+// the corpus program:
+//
+//   1. It writes a brick of instructions at the reset vector -- the address the
+//      core's fixed reset vector names -- that builds the three declared input
+//      words in a0/a1/a2 with immediates (the core has no load path) and jumps
+//      to the program's branch region. crt0 lives there and would not run on
+//      this machine anyway; nothing else the case executes is overwritten, and
+//      the driver asserts that.
+//   2. It enters the corpus program at the first instruction after
+//      `MOSAIC_LOAD_INPUTS` -- the address the driver finds in the loaded image
+//      by matching that macro's five-word pattern, not a hard-coded PC. That
+//      macro is `la s2, mosaic_prog_inputs` followed by three `ld`s, which is
+//      exactly the harness-input read this machine cannot perform; the program
+//      text itself is executed unmodified from there.
+//
+// Everything the DUT retires after that entry point is the corpus program's own
+// instructions, byte for byte as the assembler and linker produced them.
+//
+// ------------------------------------------------------------ the expectation
+//
+// Two expectations, neither of them from the DUT:
+//
+//   * `ReferenceTrace()` in this file is an RV64IM interpreter written from the
+//     ISA text. It decodes the same words the machine is fed and produces the
+//     expected retirement record -- pc, rd, reg-we, value -- for every
+//     instruction, plus the branch statistics. It shares nothing with the RTL:
+//     not a decoder, not an encoding table, not a register file. It stops where
+//     the machine is documented to stop (the first macro dispatch refuses), so
+//     the length of the trace is also a prediction.
+//
+//   * The four signature values the program computes are the values
+//     `tools/host_oracle.py --program p02_branch` computes on the host, an
+//     independent Python model of the ISA over the same declared inputs. They
+//     are quoted in this file with the command that produced them, and the
+//     driver checks the DUT's retired values for the four registers the
+//     program's SIG0..SIG3 macros store against them. That is an expectation
+//     that comes from neither the RTL nor this driver's interpreter.
+//
+// ------------------------------------------------------------- what it checks
+//
+//   1. the per-instruction retirement stream equals the reference, in order;
+//   2. every redirect the arbiter issues goes to the resolved branch's target
+//      (observed on the redirect port, not inferred from the retire stream);
+//   3. the redirect count equals the number of taken control transfers the
+//      reference executed, and every control transfer is acted on exactly once;
+//   4. the arbiter waited for its macro to reach the ROB head (the wait counter
+//      is non-zero) -- the head gate is exercised, not assumed;
+//   5. the rename checkpoint is at a committed boundary and the squash is
+//      accepted: `squash_not_committed` and `squash_underflow` stay zero;
+//   6. the machine stops cleanly at the first refused macro and quiesces with an
+//      empty ROB at a rename boundary;
+//   7. the four signature values equal the host oracle's.
+//
+// ---------------------------------------------------------- what is not here
+//
+// Loads, stores, CSR accesses, traps and interrupts are not in this package, so
+// the program's SIG0..SIG3 stores and its FINISH_PASS never execute: the machine
+// stops just before them. The comparison is therefore per instruction over the
+// architectural event stream, not an end-state check, which is the same form
+// CASE=core.bringup_vs_reference uses. Nothing here is a substitute for the
+// memory path (I-033..I-038) or the trap path (I-019/I-020).
+//
+// The conservative recovery in mosaic_core.sv makes a branch a barrier: nothing
+// is dispatched behind a branch until it has resolved and, if it redirected, its
+// redirect has been applied. The control path this case proves is the one that
+// design has -- redirect arbitration at the ROB head, fetch redirect, front-end
+// purge, ROB flush and the rename squash -- and the report states what the
+// barrier still leaves unexercised (younger uops inside a cluster, which this
+// design can never create).
+// ============================================================================
+
+#include <verilated.h>
+
+#include <algorithm>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <deque>
+#include <fstream>
+#include <map>
+#include <string>
+#include <unistd.h>
+#include <vector>
+
+#include "Vmosaic_core_tb.h"
+#include "elf_loader.h"
+#include "sim_common.h"
+
+namespace {
+
+constexpr int kResetCycles = 4;
+constexpr int kQuiesceCycles = 32;
+// A stall is a defect with a location, not a timeout. The whole run is a few
+// hundred cycles; this bound is only reached if the machine stopped making
+// progress, and reporting it as a stall is more useful than exhausting
+// --max-cycles.
+constexpr int kStallCycles = 4000;
+constexpr int kMaxModelSteps = 100000;
+
+struct Failure {
+  std::string what;
+};
+
+[[noreturn]] void Fail(const std::string& where, const std::string& detail) {
+  throw Failure{where + ": " + detail};
+}
+
+std::string U64(uint64_t value) { return mosaic::Hex(value); }
+std::string Dec(uint64_t value) { return std::to_string(value); }
+
+// ============================================================================
+// Instruction encodings the harness needs (the brick at the reset vector only)
+// ============================================================================
+uint32_t EncR(uint32_t f7, uint32_t rs2, uint32_t rs1, uint32_t f3, uint32_t rd,
+              uint32_t op) {
+  return (f7 << 25) | (rs2 << 20) | (rs1 << 15) | (f3 << 12) | (rd << 7) | op;
+}
+
+uint32_t EncI(int32_t imm, uint32_t rs1, uint32_t f3, uint32_t rd, uint32_t op) {
+  return ((static_cast<uint32_t>(imm) & 0xFFFu) << 20) | (rs1 << 15) | (f3 << 12) |
+         (rd << 7) | op;
+}
+
+uint32_t EncU(uint32_t imm20, uint32_t rd, uint32_t op) {
+  return ((imm20 & 0xFFFFFu) << 12) | (rd << 7) | op;
+}
+
+uint32_t EncJ(int32_t offset, uint32_t rd) {
+  const uint32_t u = static_cast<uint32_t>(offset);
+  const uint32_t imm = (((u >> 20) & 1u) << 31) | (((u >> 1) & 0x3FFu) << 21) |
+                       (((u >> 11) & 1u) << 20) | (((u >> 12) & 0xFFu) << 12);
+  return imm | (rd << 7) | 0x6Fu;
+}
+
+uint32_t EncAddi(uint32_t rd, uint32_t rs1, int32_t imm) {
+  return EncI(imm, rs1, 0x0u, rd, 0x13u);
+}
+uint32_t EncLui(uint32_t rd, uint32_t imm20) { return EncU(imm20, rd, 0x37u); }
+uint32_t EncSlli(uint32_t rd, uint32_t rs1, uint32_t shamt) {
+  return EncI(static_cast<int32_t>(shamt), rs1, 0x1u, rd, 0x13u);
+}
+uint32_t EncSrli(uint32_t rd, uint32_t rs1, uint32_t shamt) {
+  return EncI(static_cast<int32_t>(shamt), rs1, 0x5u, rd, 0x13u);
+}
+uint32_t EncOr(uint32_t rd, uint32_t rs1, uint32_t rs2) {
+  return EncR(0x00u, rs2, rs1, 0x6u, rd, 0x33u);
+}
+
+// ============================================================================
+// The loaded program image
+// ============================================================================
+// The ELF's loadable segments, as words, with the harness's reset-vector brick
+// written on top. The instruction memory returns ECALL for anything not in the
+// image, so a runaway fetch stops the machine cleanly instead of reading a
+// don't-care.
+class ProgImage {
+ public:
+  bool Load(const std::string& path, std::string* detail) {
+    mosaic::Image image;
+    const mosaic::LoadStatus status = mosaic::LoadElf(path, &image, detail);
+    if (status != mosaic::LoadStatus::kOk) {
+      *detail = std::string("ELF refused: ") + mosaic::LoadStatusName(status) + ": " +
+                *detail;
+      return false;
+    }
+    entry_ = image.entry;
+    segments_ = image.segments;
+    for (const mosaic::Segment& seg : image.segments) {
+      for (uint64_t off = 0; off + 4 <= seg.memsz; off += 4) {
+        uint32_t word = 0;
+        for (uint64_t b = 0; b < 4; b++) {
+          if (off + b < seg.filesz) {
+            word |= static_cast<uint32_t>(seg.data[off + b]) << (8 * b);
+          }
+        }
+        words_[seg.vaddr + off] = word;
+      }
+    }
+    if (words_.empty()) {
+      *detail = "the image has no words";
+      return false;
+    }
+    lo_ = words_.begin()->first;
+    hi_ = words_.rbegin()->first;
+    return true;
+  }
+
+  uint32_t Word(uint64_t addr) const {
+    auto it = words_.find(addr);
+    if (it == words_.end()) return 0x00000073u;  // ECALL
+    return it->second;
+  }
+
+  bool Has(uint64_t addr) const { return words_.find(addr) != words_.end(); }
+
+  void WriteWord(uint64_t addr, uint32_t word) { words_[addr] = word; }
+
+  uint64_t entry() const { return entry_; }
+  const std::vector<mosaic::Segment>& segments() const { return segments_; }
+  uint64_t lowest() const { return lo_; }
+  uint64_t highest() const { return hi_; }
+
+ private:
+  std::map<uint64_t, uint32_t> words_;
+  std::vector<mosaic::Segment> segments_;
+  uint64_t entry_ = 0;
+  uint64_t lo_ = 0;
+  uint64_t hi_ = 0;
+};
+
+// ============================================================================
+// The independent reference: an RV64IM interpreter
+// ============================================================================
+// Decoded from the same words the machine is fed, from the ISA text. It stops
+// where dispatch is documented to refuse a macro, so the length of its trace is
+// a prediction too. A word it does not implement stops the trace (dispatch
+// would refuse it); a word *it* implements that the decoder rejects would make
+// the DUT retire more than the reference and the comparison would say so.
+struct RefInsn {
+  uint64_t pc = 0;
+  uint32_t rd = 0;
+  bool reg_we = false;
+  uint64_t value = 0;
+  bool is_control = false;   // branch, JAL or JALR
+  bool taken = false;        // the control transfer redirects the front end
+  bool is_branch = false;
+  bool is_jal = false;
+  bool is_jalr = false;
+  bool back_edge = false;    // target <= pc
+  uint64_t next_pc = 0;
+};
+
+struct RefResult {
+  std::vector<RefInsn> trace;
+  uint32_t control_total = 0;
+  uint32_t taken_total = 0;
+  uint32_t branches = 0;
+  uint32_t branch_taken = 0;
+  uint32_t jal = 0;
+  uint32_t jalr = 0;
+  uint32_t back_edges = 0;
+  uint64_t stop_pc = 0;      // the first instruction dispatch refuses
+  uint32_t stop_word = 0;
+  bool stopped = false;
+};
+
+RefResult ReferenceRun(const ProgImage& img, uint64_t start) {
+  RefResult out;
+  uint64_t regs[32] = {};
+  uint64_t pc = start;
+  for (int step = 0; step < kMaxModelSteps; step++) {
+    const uint32_t w = img.Word(pc);
+    const uint32_t opcode = w & 0x7Fu;
+    const uint32_t rd = (w >> 7) & 0x1Fu;
+    const uint32_t f3 = (w >> 12) & 0x7u;
+    const uint32_t rs1 = (w >> 15) & 0x1Fu;
+    const uint32_t rs2 = (w >> 20) & 0x1Fu;
+    const uint32_t f7 = (w >> 25) & 0x7Fu;
+    const int32_t imm_i = static_cast<int32_t>(w) >> 20;
+    const int32_t imm_s =
+        (static_cast<int32_t>(w) >> 25 << 5) | static_cast<int32_t>((w >> 7) & 0x1Fu);
+    const int32_t imm_b =
+        ((static_cast<int32_t>(w) >> 31) << 12) |
+        (((w >> 7) & 1u) << 11) | (((w >> 25) & 0x3Fu) << 5) |
+        (((w >> 8) & 0xFu) << 1);
+    const uint32_t imm_u = w & 0xFFFFF000u;
+    const int32_t imm_j =
+        ((static_cast<int32_t>(w) >> 31) << 20) | (((w >> 12) & 0xFFu) << 12) |
+        (((w >> 20) & 1u) << 11) | (((w >> 21) & 0x3FFu) << 1);
+
+    RefInsn rec;
+    rec.pc = pc;
+    bool supported = true;
+    uint64_t value = 0;
+    bool reg_we = false;
+    uint64_t next = pc + 4;
+
+    switch (opcode) {
+      case 0x37u:  // LUI
+        value = static_cast<uint64_t>(static_cast<int64_t>(static_cast<int32_t>(imm_u)));
+        reg_we = true;
+        break;
+      case 0x17u:  // AUIPC
+        value = pc + static_cast<uint64_t>(
+                        static_cast<int64_t>(static_cast<int32_t>(imm_u)));
+        reg_we = true;
+        break;
+      case 0x6Fu: {  // JAL
+        value = pc + 4;
+        reg_we = true;
+        next = pc + static_cast<uint64_t>(static_cast<int64_t>(imm_j));
+        rec.is_control = true;
+        rec.taken = true;
+        rec.is_jal = true;
+        out.control_total++;
+        out.taken_total++;
+        out.jal++;
+        if (next <= pc) out.back_edges++;
+        break;
+      }
+      case 0x67u: {  // JALR
+        if (f3 != 0u) { supported = false; break; }
+        value = pc + 4;
+        reg_we = true;
+        next = (regs[rs1] + static_cast<uint64_t>(
+                                 static_cast<int64_t>(imm_i))) & ~UINT64_C(1);
+        rec.is_control = true;
+        rec.taken = true;
+        rec.is_jalr = true;
+        out.control_total++;
+        out.taken_total++;
+        out.jalr++;
+        if (next <= pc) out.back_edges++;
+        break;
+      }
+      case 0x63u: {  // the six conditional branches
+        const int64_t a = static_cast<int64_t>(regs[rs1]);
+        const int64_t b = static_cast<int64_t>(regs[rs2]);
+        const uint64_t ua = regs[rs1];
+        const uint64_t ub = regs[rs2];
+        bool take = false;
+        switch (f3) {
+          case 0x0u: take = (ua == ub); break;
+          case 0x1u: take = (ua != ub); break;
+          case 0x4u: take = (a < b); break;
+          case 0x5u: take = (a >= b); break;
+          case 0x6u: take = (ua < ub); break;
+          case 0x7u: take = (ua >= ub); break;
+          default: supported = false; break;
+        }
+        if (!supported) break;
+        reg_we = false;
+        next = take ? (pc + static_cast<uint64_t>(static_cast<int64_t>(imm_b)))
+                    : (pc + 4);
+        rec.is_control = true;
+        rec.taken = take;
+        rec.is_branch = true;
+        out.control_total++;
+        out.branches++;
+        if (take) {
+          out.taken_total++;
+          out.branch_taken++;
+          if (next <= pc) out.back_edges++;
+        }
+        break;
+      }
+      case 0x13u: {  // OP-IMM
+        const uint64_t a = regs[rs1];
+        switch (f3) {
+          case 0x0u: value = a + static_cast<uint64_t>(static_cast<int64_t>(imm_i)); break;
+          case 0x2u: value = static_cast<uint64_t>(static_cast<int64_t>(a) <
+                                                   static_cast<int64_t>(imm_i)); break;
+          case 0x3u: value = static_cast<uint64_t>(a < static_cast<uint64_t>(
+                                                          static_cast<int64_t>(imm_i))); break;
+          case 0x4u: value = a ^ static_cast<uint64_t>(static_cast<int64_t>(imm_i)); break;
+          case 0x6u: value = a | static_cast<uint64_t>(static_cast<int64_t>(imm_i)); break;
+          case 0x7u: value = a & static_cast<uint64_t>(static_cast<int64_t>(imm_i)); break;
+          case 0x1u:
+            if ((f7 & 0x3Fu) != 0u) { supported = false; break; }  // SLLI
+            value = a << ((w >> 20) & 0x3Fu);
+            break;
+          case 0x5u:
+            if (f7 == 0x00u) {
+              value = a >> ((w >> 20) & 0x3Fu);
+            } else if (f7 == 0x20u) {
+              value = static_cast<uint64_t>(
+                  static_cast<int64_t>(a) >> ((w >> 20) & 0x3Fu));
+            } else {
+              supported = false;
+            }
+            break;
+          default: supported = false; break;
+        }
+        reg_we = true;
+        break;
+      }
+      case 0x33u: {  // OP
+        const uint64_t a = regs[rs1];
+        const uint64_t b = regs[rs2];
+        if (f7 == 0x01u) { supported = false; break; }  // the M extension: not here
+        switch (f3) {
+          case 0x0u:
+            value = (f7 == 0x20u) ? (a - b) : (a + b);
+            break;
+          case 0x1u: value = a << (b & 0x3Fu); break;
+          case 0x2u: value = static_cast<uint64_t>(static_cast<int64_t>(a) <
+                                                   static_cast<int64_t>(b)); break;
+          case 0x3u: value = static_cast<uint64_t>(a < b); break;
+          case 0x4u: value = a ^ b; break;
+          case 0x5u:
+            value = (f7 == 0x20u) ? static_cast<uint64_t>(static_cast<int64_t>(a) >> (b & 0x3Fu))
+                                  : (a >> (b & 0x3Fu));
+            break;
+          case 0x6u: value = a | b; break;
+          case 0x7u: value = a & b; break;
+          default: supported = false; break;
+        }
+        if (supported && (f7 != 0x00u) && (f7 != 0x20u)) supported = false;
+        reg_we = true;
+        break;
+      }
+      default:
+        supported = false;
+        break;
+    }
+
+    if (!supported) {
+      out.stop_pc = pc;
+      out.stop_word = w;
+      out.stopped = true;
+      break;
+    }
+
+    rec.rd = reg_we ? rd : 0u;
+    rec.reg_we = reg_we && (rd != 0u);
+    rec.value = value;
+    rec.next_pc = next;
+    if (rec.reg_we) regs[rd] = value;
+    out.trace.push_back(rec);
+    pc = next;
+    if (out.trace.size() >= static_cast<size_t>(kMaxModelSteps - 2)) break;
+  }
+  return out;
+}
+
+// ============================================================================
+// The instruction memory
+// ============================================================================
+// A one-cycle handshake: a request is accepted when `req_valid && req_ready`, its
+// response is presented one cycle later, and it is held until the fetch unit
+// takes it. Every accepted request produces exactly one response, which is the
+// precondition the fetch unit's credit rule states.
+class Imem {
+ public:
+  struct Request {
+    uint64_t addr = 0;
+    uint32_t id = 0;
+    uint32_t epoch = 0;
+  };
+
+  explicit Imem(const ProgImage* img) : img_(img) {}
+
+  void Reset() {
+    inflight_.clear();
+    ready_.clear();
+    accepted_ = 0;
+  }
+
+  bool HasResponse() const { return !ready_.empty(); }
+  const Request& Response() const { return ready_.front(); }
+  uint64_t ResponseWord() const { return img_->Word(ready_.front().addr); }
+
+  void Accept(uint64_t addr, uint32_t id, uint32_t epoch) {
+    Request r;
+    r.addr = addr;
+    r.id = id;
+    r.epoch = epoch;
+    inflight_.push_back(Entry{r, 1});
+    accepted_++;
+  }
+
+  void PopResponse() { ready_.pop_front(); }
+
+  void Advance() {
+    for (size_t i = 0; i < inflight_.size();) {
+      if (--inflight_[i].left == 0) {
+        ready_.push_back(inflight_[i].req);
+        inflight_.erase(inflight_.begin() + static_cast<long>(i));
+      } else {
+        ++i;
+      }
+    }
+  }
+
+  uint64_t accepted() const { return accepted_; }
+
+ private:
+  struct Entry {
+    Request req;
+    int left = 0;
+  };
+  const ProgImage* img_;
+  std::deque<Entry> inflight_;
+  std::deque<Request> ready_;
+  uint64_t accepted_ = 0;
+};
+
+// ============================================================================
+// The harness
+// ============================================================================
+struct Geometry {
+  uint32_t xlen = 0;
+  uint32_t clusters = 0;
+  uint32_t retire_width = 0;
+  uint32_t rob_entries = 0;
+  uint32_t rob_index_w = 0;
+  uint32_t rob_gen_w = 0;
+  uint32_t uop_index_w = 0;
+  uint32_t uop_id_w = 0;
+  uint32_t prf_entries = 0;
+  uint32_t prf_tag_w = 0;
+  uint32_t int_gen_w = 0;
+  uint32_t iq_entries = 0;
+  uint32_t occ_w = 0;
+  uint32_t req_id_w = 0;
+  uint32_t epoch_w = 0;
+  uint32_t fetch_outstanding = 0;
+  uint32_t seq_w = 0;
+  uint32_t ret_id_w = 0;
+  uint64_t reset_vector = 0;
+};
+
+Geometry ReadGeometry(Vmosaic_core_tb* dut) {
+  Geometry g;
+  g.xlen = dut->o_geom_xlen_o;
+  g.clusters = dut->o_geom_clusters_o;
+  g.retire_width = dut->o_geom_retire_width_o;
+  g.rob_entries = dut->o_geom_rob_entries_o;
+  g.rob_index_w = dut->o_geom_rob_index_w_o;
+  g.rob_gen_w = dut->o_geom_rob_gen_w_o;
+  g.uop_index_w = dut->o_geom_uop_index_w_o;
+  g.uop_id_w = dut->o_geom_uop_id_w_o;
+  g.prf_entries = dut->o_geom_prf_entries_o;
+  g.prf_tag_w = dut->o_geom_prf_tag_w_o;
+  g.int_gen_w = dut->o_geom_int_gen_w_o;
+  g.iq_entries = dut->o_geom_iq_entries_o;
+  g.occ_w = dut->o_geom_occ_w_o;
+  g.req_id_w = dut->o_geom_req_id_w_o;
+  g.epoch_w = dut->o_geom_epoch_w_o;
+  g.fetch_outstanding = dut->o_geom_fetch_outstanding_o;
+  g.seq_w = dut->o_geom_seq_w_o;
+  g.ret_id_w = dut->o_geom_ret_id_w_o;
+  g.reset_vector = dut->o_geom_reset_vector_o;
+  return g;
+}
+
+// Verilator hands a wide port over as a `VlWide` indexed in 32-bit words,
+// two per 64-bit lane; narrow ports arrive as plain scalars.
+template <typename Wide>
+uint64_t PayloadLane(const Wide& wide, uint32_t lane) {
+  return static_cast<uint64_t>(wide[lane * 2]) |
+         (static_cast<uint64_t>(wide[lane * 2 + 1]) << 32);
+}
+inline uint64_t PayloadLane(uint64_t value, uint32_t /*lane*/) { return value; }
+
+uint64_t PackedLane(uint64_t packed, uint32_t lane, uint32_t width) {
+  const uint64_t mask = (width >= 64) ? ~0ull : ((1ull << width) - 1ull);
+  return (packed >> (lane * width)) & mask;
+}
+
+class Harness {
+ public:
+  Harness(Vmosaic_core_tb* dut, mosaic::Reporter* reporter, uint64_t max_cycles,
+          const ProgImage* img)
+      : dut_(dut), reporter_(reporter), max_cycles_(max_cycles), imem_(img) {}
+
+  void Configure(const Geometry& g) {
+    g_ = g;
+    ret_mask_ = (g.retire_width >= 32) ? 0xFFFFFFFFu : ((1u << g.retire_width) - 1u);
+  }
+
+  void Phase(const std::string& name) { phase_ = name; }
+  uint64_t cycles() const { return cycles_; }
+  uint64_t comparisons() const { return comparisons_; }
+  const std::string& phase() const { return phase_; }
+
+  void Check(const std::string& what, bool ok, const std::string& detail) {
+    reporter_->Check(ok, phase_ + ": " + what + (ok ? "" : " -- " + detail));
+    if (!ok) Fail(phase_ + " at cycle " + Dec(cycles_), what + ": " + detail);
+  }
+
+  void Compare(const std::string& what, bool ok, const std::string& detail) {
+    comparisons_++;
+    if (!ok) Fail(phase_ + " at cycle " + Dec(cycles_), what + ": " + detail);
+  }
+
+  // --------------------------------------------------------------- recording
+  struct Retire {
+    uint64_t pc = 0;
+    uint32_t rd = 0;
+    bool reg_we = false;
+    uint64_t value = 0;
+    uint32_t seq = 0;
+    uint64_t cycle = 0;
+  };
+  const std::vector<Retire>& retires() const { return retires_; }
+
+  // Redirect observations, off the core's redirect port.
+  struct Redirect {
+    uint64_t pc = 0;
+    uint64_t cycle = 0;
+  };
+  const std::vector<Redirect>& redirects() const { return redirects_; }
+  const std::vector<uint64_t>& squash_cycles() const { return squash_cycles_; }
+  const std::vector<uint64_t>& ckpt_cycles() const { return ckpt_cycles_; }
+
+  void ClearTrace() {
+    retires_.clear();
+    redirects_.clear();
+    squash_cycles_.clear();
+    ckpt_cycles_.clear();
+    last_progress_ = 0;
+    last_commit_ = 0;
+    imem_.Reset();
+  }
+
+  void Reset(int cycles) {
+    for (int i = 0; i < cycles; i++) Cycle(true);
+  }
+
+  void Cycle(bool rst) {
+    if (cycles_ >= max_cycles_) {
+      Fail(phase_ + " at cycle " + Dec(cycles_),
+           "max-cycles (" + Dec(max_cycles_) + ") exhausted: " + Diagnose());
+    }
+    dut_->rst = rst ? 1 : 0;
+    dut_->imem_req_ready_i = 1;
+    dut_->imem_rsp_valid_i = imem_.HasResponse() ? 1 : 0;
+    if (imem_.HasResponse()) {
+      const Imem::Request& r = imem_.Response();
+      dut_->imem_rsp_rdata_i = static_cast<uint32_t>(imem_.ResponseWord());
+      dut_->imem_rsp_fault_i = 0;
+      dut_->imem_rsp_id_i = r.id;
+      dut_->imem_rsp_epoch_i = r.epoch;
+      dut_->imem_rsp_len_i = 4;
+    } else {
+      dut_->imem_rsp_rdata_i = 0;
+      dut_->imem_rsp_fault_i = 0;
+      dut_->imem_rsp_id_i = 0;
+      dut_->imem_rsp_epoch_i = 0;
+      dut_->imem_rsp_len_i = 0;
+    }
+    dut_->arb_req_valid0_i = 0;
+    dut_->arb_req_valid1_i = 0;
+    dut_->arb_head_valid_i = 0;
+    dut_->arb_head_retire_i = 0;
+    dut_->eval();
+
+    if (!rst) Observe();
+
+    // The handshake is sampled after eval, and the memory advances at the edge.
+    if ((dut_->imem_req_valid_o != 0) && (dut_->imem_req_ready_i != 0)) {
+      imem_.Accept(dut_->imem_req_addr_o, dut_->imem_req_id_o, dut_->imem_req_epoch_o);
+    }
+    if ((dut_->imem_rsp_valid_i != 0) && (dut_->imem_rsp_ready_o != 0)) {
+      imem_.PopResponse();
+    }
+    imem_.Advance();
+
+    dut_->clk = 0;
+    dut_->eval();
+    dut_->clk = 1;
+    dut_->eval();
+    dut_->clk = 0;
+    dut_->eval();
+    ++cycles_;
+  }
+
+  bool Stopped() const { return stopped_; }
+  bool Occupied() const { return occupied_ != 0; }
+
+ private:
+  void Observe() {
+    Compare("the retire counter equals the event stream published so far",
+            dut_->o_commit_o == retires_.size(),
+            "counter=" + Dec(dut_->o_commit_o) + " events=" + Dec(retires_.size()));
+    Compare("ROB occupancy is within the ROB",
+            dut_->o_rob_occupied_o <= g_.rob_entries,
+            "occupied=" + Dec(dut_->o_rob_occupied_o));
+    Compare("the divergent-recovery counters stay zero",
+            dut_->o_squash_nc_o == 0 && dut_->o_squash_under_o == 0 &&
+                dut_->o_journal_ovf_o == 0,
+            "squash_nc=" + Dec(dut_->o_squash_nc_o) + " under=" + Dec(dut_->o_squash_under_o) +
+                " journal=" + Dec(dut_->o_journal_ovf_o));
+    if (dut_->o_rob_occupied_o == 0) {
+      Compare("an empty ROB is at a rename boundary",
+              dut_->o_rename_boundary_o != 0,
+              "occupied=0, o_rename_boundary=0 at commit=" + Dec(dut_->o_commit_o));
+    }
+
+    if (dut_->o_redirect_valid_o != 0) {
+      Redirect r;
+      r.pc = dut_->o_redirect_pc_o;
+      r.cycle = cycles_;
+      redirects_.push_back(r);
+      if (std::getenv("MOSAIC_CORPUS_TRACE") != nullptr) {
+        std::printf("  [trace] cycle=%5llu REDIRECT to %s\n",
+                    static_cast<unsigned long long>(cycles_), U64(r.pc).c_str());
+      }
+    }
+    if (dut_->o_squash_acc_o != 0) squash_cycles_.push_back(cycles_);
+    if (dut_->o_ckpt_o != 0) ckpt_cycles_.push_back(cycles_);
+
+    const uint32_t mask = static_cast<uint32_t>(dut_->ev_valid_o) & ret_mask_;
+    if (std::getenv("MOSAIC_CORPUS_TRACE") != nullptr) {
+      static uint64_t last = ~0ull;
+      const uint64_t b = dut_->o_dbg_redir_o;
+      if (b != last) {
+        last = b;
+        std::printf("  [redir] cycle=%5llu c0v=%llu c0t=%llu c0idx=%llu c0gen=%llu "
+                    "c1v=%llu c1t=%llu c1idx=%llu c1gen=%llu | hv=%llu hr=%llu "
+                    "hidx=%llu hgen=%llu occ=%llu act=%llu tak=%llu bar=%llu rec=%llu\n",
+                    static_cast<unsigned long long>(cycles_),
+                    (unsigned long long)(b >> 0 & 1), (unsigned long long)(b >> 2 & 1),
+                    (unsigned long long)(b >> 7 & 0x3F), (unsigned long long)(b >> 13 & 0x7F),
+                    (unsigned long long)(b >> 1 & 1), (unsigned long long)(b >> 3 & 1),
+                    (unsigned long long)(b >> 22 & 0x3F), (unsigned long long)(b >> 28 & 0x7F),
+                    (unsigned long long)(b >> 35 & 1), (unsigned long long)(b >> 36 & 1),
+                    (unsigned long long)(b >> 37 & 0x3F), (unsigned long long)(b >> 43 & 0x7F),
+                    (unsigned long long)(b >> 54 & 0xFF), (unsigned long long)(b >> 50 & 1),
+                    (unsigned long long)(b >> 51 & 1), (unsigned long long)(b >> 52 & 1),
+                    (unsigned long long)(b >> 53 & 1));
+      }
+    }
+    if (std::getenv("MOSAIC_CORPUS_FRONT") != nullptr) {
+      const auto& fb = dut_->o_dbg_front_o;
+      auto bit = [&](int n) -> int { return (fb[n / 32] >> (n % 32)) & 1u; };
+      auto bits = [&](int lo, int hi) -> uint64_t {
+        uint64_t v = 0;
+        for (int n = lo; n <= hi; n++) v |= static_cast<uint64_t>(bit(n)) << (n - lo);
+        return v;
+      };
+      const uint64_t fpc = fb[0] | (static_cast<uint64_t>(fb[1]) << 32);
+      const uint64_t opc = (static_cast<uint64_t>(fb[2]) | (static_cast<uint64_t>(fb[3]) << 32))
+                           << 32;
+      std::printf("  [front] cycle=%4llu fetch_pc=%s out_v=%d out_pc=%s out_rdy=%d "
+                  "dbuf=%d%d cnt=%llu take=%d push=%d alloc_idx=%llu rec=%d stop=%d "
+                  "flushbusy=%d%d occ=%llu\n",
+                  static_cast<unsigned long long>(cycles_), U64(fpc).c_str(), bit(96),
+                  U64(opc).c_str(), bit(97), bit(98), bit(99),
+                  static_cast<unsigned long long>(bits(100, 101)), bit(102), bit(103),
+                  static_cast<unsigned long long>(bits(104, 109)), bit(110), bit(111),
+                  bit(112), bit(113),
+                  static_cast<unsigned long long>(bits(116, 127)));
+    }
+    if (g_.retire_width >= 2) {
+      Compare("retire lane 1 is never set without lane 0",
+              ((mask & 2u) == 0) || ((mask & 1u) != 0), "ev_valid=" + Dec(mask));
+    }
+    for (uint32_t lane = 0; lane < g_.retire_width && lane < 32; lane++) {
+      if ((mask & (1u << lane)) == 0) continue;
+      Retire r;
+      r.pc = PayloadLane(dut_->ev_pc_o, lane);
+      r.value = PayloadLane(dut_->ev_value_o, lane);
+      r.rd = static_cast<uint32_t>(PackedLane(dut_->ev_rd_o, lane, 5));
+      r.seq = static_cast<uint32_t>(PackedLane(dut_->ev_seq_o, lane, g_.seq_w));
+      r.reg_we = PackedLane(dut_->ev_reg_we_o, lane, 1) != 0;
+      r.cycle = cycles_;
+      if (!retires_.empty()) {
+        const uint32_t prev = retires_.back().seq;
+        const uint32_t dist = (r.seq - prev) & ((1u << g_.seq_w) - 1u);
+        Compare("the retire sequence strictly increases",
+                dist != 0 && dist < (1u << (g_.seq_w - 1)),
+                "prev seq=" + Dec(prev) + " now=" + Dec(r.seq));
+      }
+      retires_.push_back(r);
+      if (std::getenv("MOSAIC_CORPUS_TRACE") != nullptr) {
+        std::printf("  [trace] cycle=%5llu retire pc=%s rd=%2u we=%u value=%s "
+                    "c0br=%s c1br=%s act=%s wait=%s\n",
+                    static_cast<unsigned long long>(cycles_), U64(r.pc).c_str(), r.rd,
+                    r.reg_we ? 1 : 0, U64(r.value).c_str(),
+                    Dec(dut_->o_c0_br_o).c_str(), Dec(dut_->o_c1_br_o).c_str(),
+                    Dec(dut_->o_redir_act_o).c_str(), Dec(dut_->o_redir_wait_o).c_str());
+      }
+    }
+
+    stopped_ = dut_->o_stopped_o != 0;
+    occupied_ = dut_->o_rob_occupied_o;
+    ProgressCheck();
+  }
+
+  void ProgressCheck() {
+    const bool progressed = (dut_->o_commit_o != last_commit_) ||
+                            (dut_->o_wb_pub_valid_o != 0) ||
+                            (dut_->o_dbg_alloc_ctr_o != last_alloc_);
+    last_commit_ = dut_->o_commit_o;
+    last_alloc_ = dut_->o_dbg_alloc_ctr_o;
+    if (progressed) {
+      last_progress_ = cycles_;
+      return;
+    }
+    if (cycles_ - last_progress_ > kStallCycles) {
+      Fail(phase_ + " at cycle " + Dec(cycles_), "stalled: " + Diagnose());
+    }
+  }
+
+  std::string Diagnose() {
+    return "head_pc=" + U64(dut_->o_dbg_head_pc_o) +
+           " head_valid=" + Dec(dut_->o_dbg_head_valid_o) +
+           " occupied=" + Dec(dut_->o_rob_occupied_o) +
+           " allocated=" + Dec(dut_->o_dbg_alloc_ctr_o) +
+           " retired=" + Dec(dut_->o_commit_o) +
+           " stopped=" + Dec(dut_->o_stopped_o) +
+           " redirects=" + Dec(dut_->o_redirect_o) +
+           " recovering=" + Dec(dut_->o_recovering_o);
+  }
+
+  Vmosaic_core_tb* dut_;
+  mosaic::Reporter* reporter_;
+  uint64_t max_cycles_;
+  Imem imem_;
+  Geometry g_;
+  uint32_t ret_mask_ = 0;
+  std::string phase_;
+  uint64_t cycles_ = 0;
+  uint64_t comparisons_ = 0;
+  std::vector<Retire> retires_;
+  std::vector<Redirect> redirects_;
+  std::vector<uint64_t> squash_cycles_;
+  std::vector<uint64_t> ckpt_cycles_;
+  uint64_t last_commit_ = 0;
+  uint64_t last_alloc_ = 0;
+  uint64_t last_progress_ = 0;
+  bool stopped_ = false;
+  uint64_t occupied_ = 0;
+};
+
+// ============================================================================
+// The harness brick at the reset vector
+// ============================================================================
+// rd = v, using `scratch` as a temporary. Everything here is a base RV64I
+// instruction the p0 core services.
+void EmitLi32(uint32_t rd, uint32_t v32, std::vector<uint32_t>* out) {
+  // sign_extend_64(v32): lui carries the top 20 bits, addi the low 12.
+  const uint32_t hi20 = (v32 + 0x800u) >> 12;
+  const int32_t lo12 = static_cast<int32_t>(v32 << 20) >> 20;
+  out->push_back(EncLui(rd, hi20 & 0xFFFFFu));
+  if (lo12 != 0) out->push_back(EncAddi(rd, rd, lo12));
+}
+
+void EmitLi64(uint32_t rd, uint32_t scratch, uint64_t v, std::vector<uint32_t>* out) {
+  if ((v >> 32) == 0) {
+    EmitLi32(rd, static_cast<uint32_t>(v), out);
+    return;
+  }
+  EmitLi32(rd, static_cast<uint32_t>(v >> 32), out);
+  out->push_back(EncSlli(rd, rd, 32));            // the sign extension shifts out
+  EmitLi32(scratch, static_cast<uint32_t>(v), out);
+  out->push_back(EncSlli(scratch, scratch, 32));  // zero-extend the low half
+  out->push_back(EncSrli(scratch, scratch, 32));
+  out->push_back(EncOr(rd, rd, scratch));
+}
+
+// Register names used by the brick. a0/a1/a2 are the corpus's three inputs
+// (platform.h); x31 is the scratch -- p02_branch never writes it, which the
+// driver checks against the reference trace.
+constexpr uint32_t kRegA0 = 10;
+constexpr uint32_t kRegA1 = 11;
+constexpr uint32_t kRegA2 = 12;
+constexpr uint32_t kRegScratch = 31;
+
+// The MOSAIC_LOAD_INPUTS pattern (platform.h): `la s2, mosaic_prog_inputs`
+// followed by the three loads from it. The driver finds the program's branch
+// region by matching it rather than by hard-coding a PC.
+struct InputPrologue {
+  bool found = false;
+  uint64_t at = 0;      // address of the `auipc s2, ...`
+  uint64_t after = 0;   // the first instruction of the program body
+};
+
+InputPrologue FindInputPrologue(const ProgImage& img, uint64_t from) {
+  InputPrologue out;
+  for (uint64_t pc = from; pc + 20 <= img.highest() + 4; pc += 4) {
+    const uint32_t w0 = img.Word(pc);
+    const uint32_t w1 = img.Word(pc + 4);
+    const uint32_t w2 = img.Word(pc + 8);
+    const uint32_t w3 = img.Word(pc + 12);
+    const uint32_t w4 = img.Word(pc + 16);
+    // auipc s2, ... ; addi s2, s2, ... ; ld a0,0(s2) ; ld a1,8(s2) ; ld a2,16(s2)
+    const bool is_auipc_s2 = ((w0 & 0x7Fu) == 0x17u) && (((w0 >> 7) & 0x1Fu) == 18u);
+    const bool is_addi_s2 = ((w1 & 0x7Fu) == 0x13u) && (((w1 >> 7) & 0x1Fu) == 18u) &&
+                            (((w1 >> 15) & 0x1Fu) == 18u) && (((w1 >> 12) & 0x7u) == 0u);
+    const bool is_ld_a0 = ((w2 & 0x7Fu) == 0x03u) && (((w2 >> 7) & 0x1Fu) == 10u) &&
+                          (((w2 >> 15) & 0x1Fu) == 18u) && (((w2 >> 12) & 0x7u) == 0x3u) &&
+                          (((w2 >> 20) & 0xFFFu) == 0u);
+    const bool is_ld_a1 = ((w3 & 0x7Fu) == 0x03u) && (((w3 >> 7) & 0x1Fu) == 11u) &&
+                          (((w3 >> 15) & 0x1Fu) == 18u) && (((w3 >> 12) & 0x7u) == 0x3u) &&
+                          (((w3 >> 20) & 0xFFFu) == 8u);
+    const bool is_ld_a2 = ((w4 & 0x7Fu) == 0x03u) && (((w4 >> 7) & 0x1Fu) == 12u) &&
+                          (((w4 >> 15) & 0x1Fu) == 18u) && (((w4 >> 12) & 0x7u) == 0x3u) &&
+                          (((w4 >> 20) & 0xFFFu) == 16u);
+    if (is_auipc_s2 && is_addi_s2 && is_ld_a0 && is_ld_a1 && is_ld_a2) {
+      out.found = true;
+      out.at = pc;
+      out.after = pc + 20;
+      return out;
+    }
+  }
+  return out;
+}
+
+// ============================================================================
+// One (program, input) run
+// ============================================================================
+struct RunResult {
+  RefResult reference;
+  uint64_t entry = 0;
+  uint64_t brick_words = 0;
+  uint64_t brick_end = 0;
+  uint64_t redirect_ctr = 0;
+  uint64_t act_ctr = 0;
+  uint64_t wait_ctr = 0;
+  uint64_t dead_ctr = 0;
+  uint64_t squash_acc = 0;
+  uint64_t ckpt = 0;
+  uint64_t unsupported_ctr = 0;
+  uint64_t stop_ctr = 0;
+  uint64_t cycles = 0;
+  uint64_t comparison_count = 0;
+};
+
+// ============================================================================
+// The repository root
+// ============================================================================
+// The directory that holds config/profiles/p0.json, found by walking up from the
+// working directory, so the case runs the same way whether it is started by
+// tools/run_unit.py or by hand.
+std::string FindRepoRoot() {
+  std::string dir = ".";
+  for (int depth = 0; depth < 8; ++depth) {
+    std::ifstream probe(dir + "/config/profiles/p0.json");
+    if (probe) {
+      char resolved[4096];
+      if (realpath(dir.c_str(), resolved) != nullptr) return std::string(resolved);
+      return dir;
+    }
+    dir += "/..";
+  }
+  Fail("setup", "cannot find the repository root: no config/profiles/p0.json above the "
+                "working directory");
+}
+
+// ============================================================================
+// The declared corpus inputs and their host-oracle signatures
+// ============================================================================
+// `python3 tools/host_oracle.py --program p02_branch`, run at the time this case
+// was written, prints exactly these rows (sig0..sig3 are the four words the
+// program's SIG0..SIG3 macros publish, and the registers that hold them at the
+// point the machine stops are t0, s3, t4 and t3). They are transcribed here so
+// the comparison is against the host oracle's arithmetic and not against this
+// driver's interpreter -- the two are independent, and a disagreement between
+// them fails the case rather than being averaged away.
+struct CorpusInput {
+  uint64_t a;
+  uint64_t b;
+  uint64_t c;
+  uint64_t sig0;  // t0  = x5
+  uint64_t sig1;  // s3  = x19
+  uint64_t sig2;  // t4  = x29
+  uint64_t sig3;  // t3  = x28
+};
+
+const CorpusInput kInputs[3] = {
+    {UINT64_C(0x0), UINT64_C(0x1), UINT64_C(0x3), UINT64_C(0x16), UINT64_C(0x3),
+     UINT64_C(0x4), UINT64_C(0x1)},
+    {UINT64_C(0x8000000000000000), UINT64_C(0x7fffffffffffffff), UINT64_C(0x5),
+     UINT64_C(0x26), UINT64_C(0x3), UINT64_C(0x6), UINT64_C(0x7fffffffffffffff)},
+    {UINT64_C(0xffffffffffffffff), UINT64_C(0xffffffffffffffff), UINT64_C(0x9),
+     UINT64_C(0x29), UINT64_C(0x3), UINT64_C(0x2), UINT64_C(0xffffffffffffffff)},
+};
+
+constexpr uint32_t kSigRegs[4] = {5, 19, 29, 28};  // t0, s3, t4, t3
+const char* const kSigNames[4] = {"sig0(t0)", "sig1(s3)", "sig2(t4)", "sig3(t3)"};
+
+// ============================================================================
+// One (program, input) run
+// ============================================================================
+RunResult RunOnce(Vmosaic_core_tb* dut, mosaic::Reporter* reporter, uint64_t max_cycles,
+                  const ProgImage& program, const InputPrologue& prologue,
+                  const Geometry& geometry, const CorpusInput& input, int index) {
+  RunResult result;
+  result.entry = prologue.after;
+
+  // ---- the harness brick: the three inputs, then a jump into the program ----
+  ProgImage image = program;
+  std::vector<uint32_t> brick;
+  EmitLi64(kRegA0, kRegScratch, input.a, &brick);
+  EmitLi64(kRegA1, kRegScratch, input.b, &brick);
+  EmitLi64(kRegA2, kRegScratch, input.c, &brick);
+  brick.push_back(EncJ(static_cast<int32_t>(prologue.after -
+                                             (geometry.reset_vector + 4 * brick.size())),
+                       0));
+  result.brick_words = brick.size();
+  for (size_t i = 0; i < brick.size(); i++) {
+    image.WriteWord(geometry.reset_vector + 4 * i, brick[i]);
+  }
+  result.brick_end = geometry.reset_vector + 4 * brick.size();
+
+  // The brick must not reach anything the program executes. main and the stub
+  // are thousands of bytes up; the corpus input table is the nearest thing below
+  // it, and the brick must stay under both.
+  if (result.brick_end > prologue.at) {
+    Fail("run", "the harness brick reaches the corpus program's input table");
+  }
+
+  // ---- the expectation: an independent RV64IM interpreter on the same words --
+  result.reference = ReferenceRun(image, geometry.reset_vector);
+
+  // ---- run ----
+  Harness harness(dut, reporter, max_cycles, &image);
+  harness.Configure(geometry);
+  harness.Phase("run-input" + Dec(index));
+
+  dut->clk = 0;
+  dut->rst = 1;
+  dut->eval();
+  harness.Reset(kResetCycles);
+  harness.ClearTrace();
+
+  int quiet = 0;
+  while (quiet < kQuiesceCycles) {
+    harness.Cycle(false);
+    if (harness.Stopped() && !harness.Occupied()) {
+      quiet++;
+    } else {
+      quiet = 0;
+    }
+    if (harness.cycles() > 20000) {
+      Fail("run-input" + Dec(index), "the machine did not quiesce after 20000 cycles");
+    }
+  }
+
+  result.cycles = harness.cycles();
+  result.comparison_count = harness.comparisons();
+  result.redirect_ctr = dut->o_redirect_o;
+  result.act_ctr = dut->o_redir_act_o;
+  result.wait_ctr = dut->o_redir_wait_o;
+  result.dead_ctr = dut->o_redir_dead_o;
+  result.squash_acc = dut->o_squash_acc_o;
+  result.ckpt = dut->o_ckpt_o;
+  result.unsupported_ctr = dut->o_unsupported_o;
+  result.stop_ctr = dut->o_stop_o;
+
+  const std::string ph = "run-input" + Dec(index);
+  const RefResult& ref = result.reference;
+  const std::vector<Harness::Retire>& got = harness.retires();
+
+  if (std::getenv("MOSAIC_CORPUS_TRACE") != nullptr) {
+    std::printf("  [trace] %zu retires, brick=%zu words at %s..%s, entry=%s, ref=%zu "
+                "instructions (control=%u taken=%u), act=%s wait=%s dead=%s redirects=%zu "
+                "ckpt=%s squash=%s\n",
+                got.size(), brick.size(), U64(geometry.reset_vector).c_str(),
+                U64(result.brick_end).c_str(), U64(prologue.after).c_str(),
+                ref.trace.size(), ref.control_total, ref.taken_total,
+                Dec(result.act_ctr).c_str(), Dec(result.wait_ctr).c_str(),
+                Dec(result.dead_ctr).c_str(), harness.redirects().size(),
+                Dec(result.ckpt).c_str(), Dec(result.squash_acc).c_str());
+    for (size_t i = 0; i < got.size(); i++) {
+      std::printf("  [trace] retire %3zu pc=%s rd=%2u we=%u value=%s\n", i,
+                  U64(got[i].pc).c_str(), got[i].rd, got[i].reg_we ? 1 : 0,
+                  U64(got[i].value).c_str());
+    }
+    for (size_t i = 0; i < ref.trace.size(); i++) {
+      std::printf("  [ref  ] insn   %3zu pc=%s rd=%2u we=%u value=%s%s%s\n", i,
+                  U64(ref.trace[i].pc).c_str(), ref.trace[i].rd,
+                  ref.trace[i].reg_we ? 1 : 0, U64(ref.trace[i].value).c_str(),
+                  ref.trace[i].is_control ? " control" : "",
+                  ref.trace[i].taken ? " taken" : "");
+    }
+  }
+
+  // ---- 1. the per-instruction architectural stream ----
+  if (!ref.stopped) {
+    Fail(ph, "the reference model never reached a refused macro");
+  }
+  if (got.size() != ref.trace.size()) {
+    std::string where = "?" ;
+    if (got.size() > ref.trace.size()) {
+      where = U64(got[ref.trace.size()].pc);
+    }
+    Fail(ph, "retired " + Dec(got.size()) + " instructions, the reference predicts " +
+                 Dec(ref.trace.size()) + (got.size() > ref.trace.size()
+                     ? " (first extra instruction at " + where + ")" : ""));
+  }
+  for (size_t i = 0; i < ref.trace.size(); i++) {
+    const RefInsn& e = ref.trace[i];
+    const Harness::Retire& r = got[i];
+    if (r.pc != e.pc) {
+      Fail(ph, "retire " + Dec(i) + " pc: expected " + U64(e.pc) + ", got " + U64(r.pc) +
+                   " -- the machine retired " + Dec(got.size()) +
+                   " instructions, the reference predicts " + Dec(ref.trace.size()));
+    }
+    if (r.rd != e.rd || r.reg_we != e.reg_we) {
+      Fail(ph, "retire " + Dec(i) + " at " + U64(e.pc) + " destination: expected rd=" +
+                   Dec(e.rd) + " we=" + Dec(e.reg_we) + ", got rd=" + Dec(r.rd) +
+                   " we=" + Dec(r.reg_we));
+    }
+    if (e.reg_we && r.value != e.value) {
+      Fail(ph, "retire " + Dec(i) + " at " + U64(e.pc) + " value for x" + Dec(e.rd) +
+                   ": expected " + U64(e.value) + ", got " + U64(r.value));
+    }
+  }
+  reporter->Check(true, ph + ": the per-instruction retire stream matches the "
+                             "independent RV64IM interpretation (" +
+                        Dec(ref.trace.size()) + " instructions)");
+
+  // ---- 2. every redirect goes to the resolved transfer's target ----
+  std::vector<uint64_t> expected_targets;
+  for (const RefInsn& insn : ref.trace) {
+    if (insn.is_control && insn.taken) expected_targets.push_back(insn.next_pc);
+  }
+  if (harness.redirects().size() != expected_targets.size()) {
+    Fail(ph, "the arbiter issued " + Dec(harness.redirects().size()) +
+                 " redirects, the reference executed " + Dec(expected_targets.size()) +
+                 " taken control transfers");
+  }
+  for (size_t i = 0; i < expected_targets.size(); i++) {
+    if (harness.redirects()[i].pc != expected_targets[i]) {
+      Fail(ph, "redirect " + Dec(i) + " pc: expected the taken transfer's target " +
+                   U64(expected_targets[i]) + ", got " + U64(harness.redirects()[i].pc));
+    }
+  }
+  reporter->Check(true, ph + ": every redirect names the taken transfer's target (" +
+                        Dec(expected_targets.size()) + " redirects)");
+
+  // ---- 3. the arbiter accounted for every resolution exactly once ----
+  if (result.act_ctr != ref.control_total) {
+    Fail(ph, "the arbiter acted on " + Dec(result.act_ctr) + " resolutions; the "
+                 "reference executed " + Dec(ref.control_total) + " control transfers");
+  }
+  if (result.redirect_ctr != ref.taken_total) {
+    Fail(ph, "the redirect counter is " + Dec(result.redirect_ctr) + ", the reference "
+                 "executed " + Dec(ref.taken_total) + " taken transfers");
+  }
+  reporter->Check(true, ph + ": all " + Dec(ref.control_total) +
+                        " control transfers were acted on, " + Dec(ref.taken_total) +
+                        " of them taken");
+
+  // ---- 4. the head gate was exercised ----
+  if (result.wait_ctr == 0) {
+    Fail(ph, "the redirect arbiter never waited for a branch to reach the ROB head "
+                 "(o_redir_wait_ctr=0), so the head gate was never exercised");
+  }
+  if (result.dead_ctr != 0) {
+    Fail(ph, "the arbiter dropped " + Dec(result.dead_ctr) +
+                 " requests as dead: a resolution named a slot the ROB no longer owns");
+  }
+  reporter->Check(true, ph + ": the arbiter waited " + Dec(result.wait_ctr) +
+                        " cycles for its macro to become the retiring head, and dropped "
+                        "no request as dead");
+
+  // ---- 5. the rename squash was taken at a committed boundary ----
+  if (result.ckpt != ref.taken_total) {
+    Fail(ph, "the core took " + Dec(result.ckpt) + " rename checkpoints for " +
+                 Dec(ref.taken_total) + " redirects");
+  }
+  if (result.squash_acc != ref.taken_total) {
+    Fail(ph, "rename accepted " + Dec(result.squash_acc) + " squashes for " +
+                 Dec(ref.taken_total) + " redirects (refused = " +
+                 Dec(dut->o_squash_nc_o) + ", underflow = " + Dec(dut->o_squash_under_o) + ")");
+  }
+  reporter->Check(true, ph + ": rename took " + Dec(result.ckpt) +
+                        " checkpoints and accepted " + Dec(result.squash_acc) +
+                        " squashes, all at a committed boundary");
+
+  // ---- 6. the machine stopped cleanly ----
+  if (dut->o_stopped_o == 0) {
+    Fail(ph, "the machine did not stop at the refused macro");
+  }
+  if (dut->o_rob_occupied_o != 0) {
+    Fail(ph, "the ROB is not empty after the run: occupied=" + Dec(dut->o_rob_occupied_o));
+  }
+  if (dut->o_rename_boundary_o == 0) {
+    Fail(ph, "the machine did not quiesce at a rename boundary");
+  }
+  if (dut->o_free_count_o != geometry.prf_entries) {
+    Fail(ph, "the free list did not return to full: " + Dec(dut->o_free_count_o) + " of " +
+                 Dec(geometry.prf_entries) + " tags free");
+  }
+  reporter->Check(true, ph + ": the machine stopped at the refused macro (" +
+                        U64(ref.stop_pc) + ") with an empty ROB at a rename boundary and "
+                        "a full free list");
+
+  // ---- 7. the host oracle's signature values ----
+  const uint64_t oracle[4] = {input.sig0, input.sig1, input.sig2, input.sig3};
+  for (int k = 0; k < 4; k++) {
+    uint64_t observed = 0;
+    bool found = false;
+    for (const Harness::Retire& r : got) {
+      if (r.reg_we && r.rd == kSigRegs[k]) {
+        observed = r.value;
+        found = true;
+      }
+    }
+    if (!found) {
+      Fail(ph, std::string("the program never retired a write to ") + kSigNames[k]);
+    }
+    if (observed != oracle[k]) {
+      Fail(ph, std::string(kSigNames[k]) + ": the host oracle computes " +
+                   U64(oracle[k]) + ", the machine retired " + U64(observed));
+    }
+  }
+  // The oracle's four values must be exactly the four registers' final values --
+  // and the reference interpreter must agree with the oracle on all four, which
+  // is what makes agreeing with the DUT meaningful.
+  for (int k = 0; k < 4; k++) {
+    uint64_t model = 0;
+    for (const RefInsn& insn : ref.trace) {
+      if (insn.reg_we && insn.rd == kSigRegs[k]) model = insn.value;
+    }
+    if (model != oracle[k]) {
+      Fail(ph, std::string("the reference interpreter disagrees with the host oracle on ") +
+                   kSigNames[k] + ": " + U64(model) + " vs " + U64(oracle[k]));
+    }
+  }
+  reporter->Check(true, ph + ": the four signature registers equal the host oracle's "
+                        "values (sig0=" + U64(oracle[0]) + " sig1=" + U64(oracle[1]) +
+                        " sig2=" + U64(oracle[2]) + " sig3=" + U64(oracle[3]) + ")");
+
+  std::printf("  [run %d] a=%s b=%s c=%s: %zu retires, %u control transfers (%u taken, "
+              "%u branches, %u jal, %u jalr, %u back edges), %zu redirects, act=%s "
+              "wait=%s, cycles=%s\n",
+              index, U64(input.a).c_str(), U64(input.b).c_str(), U64(input.c).c_str(),
+              got.size(), ref.control_total, ref.taken_total, ref.branches, ref.jal,
+              ref.jalr, ref.back_edges, harness.redirects().size(),
+              Dec(result.act_ctr).c_str(), Dec(result.wait_ctr).c_str(),
+              Dec(result.cycles).c_str());
+  return result;
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+  mosaic::Options options;
+  std::string error;
+  if (!mosaic::Options::Parse(argc, argv, &options, &error)) {
+    std::fprintf(stderr, "%s\n", error.c_str());
+    return mosaic::kExitUsage;
+  }
+  Verilated::commandArgs(argc, argv);
+
+  mosaic::Reporter reporter(options, std::string("Verilator ") + Verilated::productVersion());
+  Vmosaic_core_tb dut;
+
+  std::string detail;
+  bool passed = true;
+  try {
+    dut.clk = 0;
+    dut.rst = 0;
+    dut.eval();
+    const Geometry geometry = ReadGeometry(&dut);
+
+    const std::string repo = FindRepoRoot();
+    const std::string elf = repo + "/tests/programs/build/p02_branch.i0.elf";
+
+    ProgImage program;
+    std::string load_detail;
+    if (!program.Load(elf, &load_detail)) {
+      Fail("program", load_detail + " (build the corpus with "
+                                    "`make -C tests/programs all`)");
+    }
+
+    // The wrapper's reset vector is a constant of the elaborated core, and the
+    // image is linked at it. Everything below assumes the two agree.
+    if (geometry.reset_vector != program.entry()) {
+      Fail("geometry", "the core resets to " + U64(geometry.reset_vector) +
+                           ", the ELF entry is " + U64(program.entry()));
+    }
+
+    const InputPrologue prologue = FindInputPrologue(program, program.entry());
+    if (!prologue.found) {
+      Fail("program", "the MOSAIC_LOAD_INPUTS prologue was not found in " + elf);
+    }
+
+    // The first phase's checks go through the same named-check path as the rest.
+    reporter.Check(geometry.xlen == 64, "geometry: the profile is 64-bit");
+    reporter.Check(geometry.reset_vector == 0x80000000ull,
+                   "geometry: the reset vector is the corpus link base");
+    reporter.Check(prologue.after > prologue.at && prologue.after == prologue.at + 20,
+                   "program: the branch region follows the input prologue");
+    reporter.Check(program.Has(prologue.at + 16),
+                   "program: the input prologue's third load is in the image");
+
+    std::printf("core.corpus_branch: %s, entry=%s, branch region starts at %s, "
+                "reset-vector brick at %s\n",
+                elf.c_str(), U64(program.entry()).c_str(),
+                U64(prologue.after).c_str(), U64(geometry.reset_vector).c_str());
+
+    uint64_t total_cycles = 0;
+    uint64_t total_comparisons = 0;
+    uint32_t total_control = 0;
+    uint32_t total_taken = 0;
+    uint32_t total_branches = 0;
+    uint32_t total_branch_taken = 0;
+    uint32_t total_jal = 0;
+    uint32_t total_jalr = 0;
+    uint32_t total_back_edges = 0;
+    size_t total_retires = 0;
+    for (int i = 0; i < 3; i++) {
+      const RunResult r = RunOnce(&dut, &reporter, options.max_cycles, program,
+                                  prologue, geometry, kInputs[i], i);
+      total_cycles += r.cycles;
+      total_comparisons += r.comparison_count;
+      total_control += r.reference.control_total;
+      total_taken += r.reference.taken_total;
+      total_branches += r.reference.branches;
+      total_branch_taken += r.reference.branch_taken;
+      total_jal += r.reference.jal;
+      total_jalr += r.reference.jalr;
+      total_back_edges += r.reference.back_edges;
+      total_retires += r.reference.trace.size();
+    }
+
+    // The branch mix has to be a mix: a program that only ever branches one way
+    // would not be evidence about the control path.
+    reporter.Check(total_branch_taken > 0 &&
+                       total_branches > total_branch_taken,
+                   "the corpus program exercises taken and not-taken branches: " +
+                       Dec(total_branch_taken) + " of " + Dec(total_branches) + " taken");
+    reporter.Check(total_jal > 0 && total_jalr > 0,
+                   "the corpus program exercises JAL and JALR: " + Dec(total_jal) +
+                       " JAL, " + Dec(total_jalr) + " JALR");
+    reporter.Check(total_back_edges > 0,
+                   "the corpus program exercises back edges: " + Dec(total_back_edges));
+
+    detail = "checks=" + Dec(reporter.checks()) + " comparisons=" +
+             Dec(total_comparisons) + " cycles=" + Dec(total_cycles) + " retires=" +
+             Dec(total_retires) + " control=" + Dec(total_control) + " taken=" +
+             Dec(total_taken) + " branches=" + Dec(total_branches) + "(taken " +
+             Dec(total_branch_taken) + ") jal=" + Dec(total_jal) + " jalr=" +
+             Dec(total_jalr) + " back_edges=" + Dec(total_back_edges) + " inputs=" +
+             Dec(3) + " seed=" + Dec(options.seed);
+  } catch (const Failure& f) {
+    reporter.Mismatch(f.what, "the control path holds", "contract violated");
+    passed = false;
+    detail = "contract violated: " + f.what;
+  }
+
+  dut.final();
+  reporter.Check(passed, "no contract violation");
+  return reporter.Finish(passed ? "PASS" : "FAIL", detail);
+}

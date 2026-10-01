@@ -123,6 +123,12 @@ module mosaic_core_tb (
     output logic [31:0] o_redir_act_o,
     output logic [31:0] o_redir_wait_o,
     output logic [31:0] o_redir_dead_o,
+    output logic        o_redirect_valid_o,
+    output logic [TB_XLEN-1:0] o_redirect_pc_o,
+    output logic [31:0] o_squash_acc_o,
+    output logic [31:0] o_ckpt_o,
+    output logic [63:0] o_dbg_redir_o,
+    output logic [127:0] o_dbg_front_o,
 
     // ------------------------------- standalone redirect arbiter (directed test)
     input  logic        arb_req_valid0_i,
@@ -293,6 +299,12 @@ module mosaic_core_tb (
       .o_redir_act_ctr (o_redir_act_o),
       .o_redir_wait_ctr(o_redir_wait_o),
       .o_redir_dead_ctr(o_redir_dead_o),
+      .o_redirect_valid(o_redirect_valid_o),
+      .o_redirect_pc   (o_redirect_pc_o),
+      .o_squash_acc_ctr(o_squash_acc_o),
+      .o_ckpt_ctr      (o_ckpt_o),
+      .o_dbg_redir_bundle(o_dbg_redir_o),
+      .o_dbg_front_bundle(o_dbg_front_o),
       .o_dbg_deliver_valid(o_dbg_deliver_valid_o),
       .o_dbg_deliver_pc (o_dbg_deliver_pc_o),
       .o_dbg_deliver_bits(o_dbg_deliver_bits_o),
@@ -321,6 +333,15 @@ module mosaic_core_tb (
       .head_gen       (arb_head_gen_i),
       .head_occupied  (arb_head_occupied_i),
       .head_retire    (arb_head_retire_i),
+      // The standalone instance is the single-lane directed test: it is driven
+      // with one head view and ties the second low, so the properties it checks
+      // are the ones it always checked. The two-lane rule is exercised through
+      // the core, where a real two-wide retirement puts the branch in lane 1
+      // (CASE=core.corpus_branch).
+      .head1_valid    (1'b0),
+      .head1_index    ({TB_IDX_W{1'b0}}),
+      .head1_gen      ({TB_RGEN_W{1'b0}}),
+      .head1_retire   (1'b0),
       .redirect_valid (arb_redirect_valid_o),
       .redirect_pc    (arb_redirect_pc_o),
       .o_act_valid    (arb_act_valid_o),

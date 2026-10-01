@@ -32,7 +32,8 @@
     "I-013",
     "V-011",
     "V-009",
-    "I-023"
+    "I-023",
+    "I-034"
   ],
   "evidence": {
     "I-001": {
@@ -383,6 +384,17 @@
       "verdict": "PASS",
       "notes": "The integrated core runs end to end for the first time: fetch, decode, rename, dispatch, two clusters, WB/PRF, ROB, retire and recovery are one machine and the registered case passes from a clean build -- checks=59, comparisons=678, cycles=129, retires=17, c0_alu=8, c1_alu=8, muldiv=1, max_occupied=6. The card's two fail modes are covered by controls rather than argued: MOSAIC_DISPATCH_MUTANT_SINGLE_CLUSTER (the second cluster never used) exits 1 at cycle 129 with o_c1_alu_ctr=0, and the out-of-order claim is visible in the numbers rather than asserted -- uop index 13 completed at cycle 49 while index 12 completed at 114, with retirement still in program order. Two real integration defects were found by this driver and fixed in mosaic_core.sv, both left with a negative control: the 2-entry decode buffer wrote slot 0 whenever nothing was popped, overwriting a live entry left in slot 1 by a pop, so the machine retired two instructions out of program order (observed allocation order 0,2,1); and rename's committed map was fed the ROB entry generation instead of the physical tag's generation -- same width, different counter -- so 'speculative map == committed map' was false from the first commit onward, which is the boundary every redirect and the I-018 checkpoint path rests on. After both fixes retirement order is exact and o_rename_boundary is 1 at every quiescent point. Independently re-verified here: base PASS with the reported numbers, SINGLE_CLUSTER exiting 1 at cycle 129. NOT covered, and this is a first-integration case rather than a core-complete one: no branches in the program, so the branch barrier, the redirect arbiter inside the core, cluster purge and fetch redirect are unexercised; no load/store/CSR/trap/interrupt/fence/MMIO/cache/multi-hart (dispatch refuses them and the data port is never asserted); one MUL/DIV encoding; one seed; p0 only. Two gaps stated rather than claimed: a same-cycle grant offered by both clusters never occurs (dispatch allocates one macro per cycle and alternates affinity, so the streams are staggered by construction) and the decode buffer's vacated-slot invalidation is not reached by any stimulus the lane could build -- its mutant passed and was removed rather than left in the tree as a false control.",
       "report": "results/reports/I-023-core.md"
+    },
+    "I-034": {
+      "cases": [
+        "store.wrong_path_visibility"
+      ],
+      "commands": [
+        "python3 tools/run_unit.py --profile p0 --case store.wrong_path_visibility"
+      ],
+      "verdict": "PASS",
+      "notes": "Speculative store queue and store-commit authorisation. Case PASS from a clean build: 299262 checks over 3331 cycles, 112 stores allocated, 24 drained, 82 squashed, 1 faulted. The card's two fail modes are covered by controls: a store visible before commit (MOSAIC_SQ_MUTANT_VISIBLE_BEFORE_COMMIT, independently rebuilt here and observed exiting 1 after 548 checks with a wrong-path drain request) and a flush deleting an already-authorised store (FULL_FLUSH_DROPS_AUTHORISED). Seven mutants in total, each rebuilt from a deleted build directory, each with a distinct named first failure: visible-before-commit, authorised-store-dropped-on-squash, drain-duplicate, drain-out-of-order, allocation-dropped-when-full, early-visibility-before-address-and-data-ready, commit-out-of-order. The wrong-path requirement is checked against the memory side, not just the queue: the case counts memory transactions, and a squashed store produces zero. One contract change is recorded rather than hidden: the authorisation watermark was first adjusted arithmetically (+1 on commit, -1 on drain) and the soak produced the combination it cannot express -- a commit and a squash of the same entry in one cycle -- so the watermark is now derived from the cycle's survivors (the leading resident-and-authorised entries), which is the same statement as the prefix invariant; the header says so. Two testbench defects, both the same class (the lane convention describes the bus, not the memory: the memory model received the endpoint's lane-shifted payload shifted a second time, and the expected memory took the store's byte at the lane index instead of byte i at address+i), passed every directed phase because every directed store starts at lane 0 and were found by the soak's non-zero lanes; the DUT was right in both. The forward-query port is exercised every cycle against its stated rule but is consumed by nobody and carries no mutant -- it is a defined and tested rule, not a proven integration interface. NOT verified: no integration (nothing shows the ROB driving commit_valid_i with a per-store identity, or the identity/epoch wiring being right); the young-window bound is supplied by the testbench because mosaic_rob does not expose its allocation pointer, so the region rule is verified given a window, not the production source of that window; one outstanding memory transaction only; no caches/MMIO/coherence; p0 geometry only; simulation only.",
+      "report": "results/reports/I-034-sq.md"
     }
   }
 }

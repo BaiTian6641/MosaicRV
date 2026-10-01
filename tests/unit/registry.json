@@ -676,6 +676,25 @@
    ],
    "max_cycles": 4000000,
    "seed": 1
+  },
+  "lsu.byte_forwarding": {
+   "task": "I-035",
+   "top": "mosaic_load_queue_tb",
+   "rtl": [
+    "rtl/core/mosaic_pkg.sv",
+    "rtl/core/mosaic_uop_pkg.sv",
+    "rtl/core/mosaic_lsu_endpoint.sv",
+    "rtl/core/mosaic_store_queue.sv",
+    "rtl/core/mosaic_load_queue.sv"
+   ],
+   "sv": [
+    "sim/tb/mosaic_load_queue_tb.sv"
+   ],
+   "cpp": [
+    "sim/unit/tb_load.cpp"
+   ],
+   "max_cycles": 200000,
+   "seed": 1
   }
  }
 }

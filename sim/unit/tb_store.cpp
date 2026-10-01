@@ -174,15 +174,6 @@ struct Entry {
   }
 };
 
-std::string DescribeSeq(const std::vector<Entry>& v) {
-  std::string out = "[";
-  for (size_t i = 0; i < v.size(); i++) {
-    if (i != 0) out += ", ";
-    out += v[i].str();
-  }
-  return out + "]";
-}
-
 // ------------------------------------------------------------------ geometry
 struct Geom {
   uint32_t entries = 0;
@@ -296,6 +287,19 @@ class MemoryModel {
 
   void SetLatency(uint32_t cycles) { latency_ = cycles; }
   void SetNextFault(bool fault) { next_fault_ = fault; }
+  // A fresh memory: the pattern back, nothing in flight, and the counters the
+  // driver compares against back to zero (they are per phase, like the driver's
+  // own tallies).
+  void Reset() {
+    PatternFill();
+    pending_ = false;
+    delay_ = 0;
+    next_fault_ = false;
+    accepted_ = 0;
+    last_fault_ = false;
+    last_consume_cycle_ = 0;
+    request_log_.clear();
+  }
   void FlushPending() {
     pending_ = false;
     delay_ = 0;
@@ -360,7 +364,7 @@ class MemoryModel {
   }
 
   static constexpr uint64_t kRegionBase = 0x80000000ull;
-  static constexpr uint64_t kRegionBytes = 4096;
+  static constexpr uint64_t kRegionBytes = 0x10000;
 
   std::vector<uint8_t> mem_;
   bool pending_ = false;
@@ -730,6 +734,7 @@ class Bench {
   void Fresh() {
     shadow_.Reset();
     sent_.clear();
+    sent_mem_.clear();
     alloc_seen_ = 0;
     fill_seen_ = 0;
     fill_stale_seen_ = 0;
@@ -743,9 +748,8 @@ class Bench {
     ep_rsp_seen_ = 0;
     exp_mem_.assign(kShadowBytes, 0);
     for (uint64_t i = 0; i < kShadowBytes; i++) exp_mem_[i] = uint8_t((i * 0x9dull + 0x37ull) & 0xffull);
-    mem_.PatternFill();
+    mem_.Reset();
     mem_.SetLatency(0);
-    mem_.FlushPending();
     const Stim idle;
     for (int i = 0; i < 2; i++) Cycle(idle, true);
     for (int i = 0; i < 2; i++) Cycle(idle, false);
@@ -756,6 +760,7 @@ class Bench {
     Cycle(idle, false);
     Cycle(idle, false);
     Require(sent_.empty(), "phase-end", "a store is still in flight inside the endpoint");
+    Require(sent_mem_.empty(), "phase-end", "the in-flight store bookkeeping is not empty");
     run_allocs_ += alloc_seen_;
     run_drains_ += drain_seen_;
     run_squashes_ += squash_seen_;
@@ -788,10 +793,15 @@ class Bench {
         bad++;
       }
     }
+    // The message is built unconditionally, so its indices must be safe when
+    // there is no mismatch: a first_bad of zero would otherwise index the
+    // expectation at `0 - kShadowBase`.
+    const uint64_t shown = (bad == 0) ? kShadowBase : first_bad;
+    const uint64_t shown_idx = shown - kShadowBase;
     Require(bad == 0, "memory-bytes",
-            Dec(bad) + " byte(s) differ from the expected memory, first at 0x" + U64(first_bad) +
-                ": memory 0x" + mosaic::Hex(mem_.Peek(first_bad), 2) + ", expected 0x" +
-                mosaic::Hex(exp_mem_[first_bad - kShadowBase], 2));
+            Dec(bad) + " byte(s) differ from the expected memory, first at 0x" + U64(shown) +
+                ": memory 0x" + mosaic::Hex(mem_.Peek(shown), 2) + ", expected 0x" +
+                mosaic::Hex(exp_mem_[shown_idx], 2));
   }
 
   // The bytes the model should hold, restricted to what has been driven: used by
@@ -808,12 +818,14 @@ class Bench {
     for (int i = 0; i < n; i++) Cycle(Stim(), false);
   }
 
-  // Idle cycles with the memory refusing requests, so the endpoint stalls and a
-  // store that would otherwise leave stays where it is.
-  void RunIdleStalled(int n) {
+  // Idle cycles with the memory's response delayed, so the endpoint is busy and a
+  // store that would otherwise leave stays where it is. Stalling only the request
+  // side is not enough: the response the model already owes is still presented,
+  // and the endpoint finishes and frees itself.
+  void RunIdleSlow(int n, uint32_t latency) {
     for (int i = 0; i < n; i++) {
       Stim s;
-      s.mem_req_ready = false;
+      s.latency = latency;
       Cycle(s, false);
     }
   }
@@ -865,9 +877,14 @@ class Bench {
 
   void FillEntry(bool addr_valid, uint64_t base, uint64_t imm, bool data_valid, uint64_t data,
                  const Ident& id) {
+    FillEntryPacked(MakeId(id), addr_valid, base, imm, data_valid, data);
+  }
+
+  void FillEntryPacked(uint32_t packed, bool addr_valid, uint64_t base, uint64_t imm,
+                       bool data_valid, uint64_t data) {
     Stim s;
     s.fill_valid = true;
-    s.fill_id = MakeId(id);
+    s.fill_id = packed & geometry_.id_mask;
     s.fill_base = base;
     s.fill_imm = imm;
     s.fill_addr_valid = addr_valid;
@@ -879,13 +896,20 @@ class Bench {
   // One cycle with an authorisation. `expect_ok` is the driver's own prediction:
   // the per-cycle check compares the DUT against the shadow, and this states
   // what the phase requires.
-  void CommitStore(const Ident& id, bool expect_ok) {
+  // The commit port carries the packed identity word, which is what the caller
+  // has at hand (either from MakeId or from an observed entry).
+  // `latency` is the memory response delay driven in the same cycle. It matters
+  // because a store becomes offerable at this cycle's edge, and the endpoint can
+  // accept it in this very cycle: a phase that wants the endpoint busy from the
+  // start must make the cycle that authorises the store slow as well.
+  void CommitStore(uint32_t packed, bool expect_ok, uint32_t latency = 0) {
     Stim s;
     s.commit_valid = true;
-    s.commit_id = MakeId(id);
+    s.commit_id = packed & geometry_.id_mask;
+    s.latency = latency;
     Cycle(s, false);
     Require(seen().commit_ok == expect_ok, "commit-outcome",
-            "the authorisation of " + DescribeIdent(id) + " was " +
+            "the authorisation of " + U32(packed) + " was " +
                 (seen().commit_ok ? "accepted" : "refused") + ", expected " +
                 (expect_ok ? "accepted" : "refused"));
   }
@@ -955,6 +979,16 @@ class Bench {
     dut_->clk = 0;
     dut_->eval();
     last_ = Read();
+
+    // The squash this cycle, computed from the contract's region rule against
+    // the shadow's *pre-edge* contents. Both the checks and the update use it.
+    if (s.squash_valid) {
+      shadow_.SquashEffect(s.squash_all, s.squash_from, s.squash_tail, s.squash_gen, &cur_drop_,
+                           &cur_spared_);
+    } else {
+      cur_drop_.assign(shadow_.size(), false);
+      cur_spared_.assign(shadow_.size(), false);
+    }
 
     if (rst) {
       Commit(last_, s, true);
@@ -1041,18 +1075,24 @@ class Bench {
 
   // ------------------------------------------------------- the per-cycle check
   void CheckCycle(const DutOut& o, const Stim& s) {
-    // The squash this cycle, computed from the rule. Both the checks and the
-    // shadow update use this one computation.
-    std::vector<bool> drop;
-    std::vector<bool> spared;
-    if (s.squash_valid) {
-      // A full flush ignores the window; the shadow also ignores the generation
-      // for it, exactly as the RTL's predicate does.
-      shadow_.SquashEffect(s.squash_all, s.squash_from, s.squash_tail, s.squash_gen, &drop,
-                           &spared);
-    } else {
-      drop.assign(shadow_.size(), false);
-      spared.assign(shadow_.size(), false);
+    const std::vector<bool>& drop = cur_drop_;
+
+    // 0. the fault a misaligned store owed, one cycle after the endpoint
+    // composed it (the queue's own counter is registered on the following edge).
+    if (pending_fault_) {
+      Check(o.fault_ctr == fault_seen_, "endpoint-fault",
+            "a misaligned store did not raise a fault: o_fault_ctr=" + Dec(o.fault_ctr) +
+                ", expected " + Dec(fault_seen_));
+      Check(o.last_fault_cause == kExcStoreMisaligned || o.last_fault_cause == kExcStoreAccess,
+            "endpoint-fault-cause",
+            "expected a store exception cause (" + Dec(kExcStoreMisaligned) + "/" +
+                Dec(kExcStoreAccess) + "), got " + Dec(o.last_fault_cause));
+      Check(o.last_fault_tval == pending_fault_entry_.addr(), "endpoint-fault-tval",
+            "expected tval 0x" + U64(pending_fault_entry_.addr()) + ", got 0x" +
+                U64(o.last_fault_tval));
+      Check(o.last_fault_id == pending_fault_entry_.packed, "endpoint-fault-id",
+            "expected the faulting store " + U32(pending_fault_entry_.packed) + ", got " +
+                U32(o.last_fault_id));
     }
 
     // 1. allocation, fill and authorisation outcomes, against the shadow.
@@ -1209,10 +1249,6 @@ class Bench {
               "expected 0x" + U64(wdata) + ", got 0x" + U64(o.mem_req_wdata));
       }
     }
-    // The response side of the endpoint is tied to the queue's unconditional
-    // accept, so it is always ready while the endpoint has something to give.
-    Check(!(o.mem_rsp_ready == false && o.ep_busy == false), "memory-rsp-ready",
-          "the endpoint reports idle but does not accept a response");
   }
 
   // ------------------------------------------------------- shadow/edge update
@@ -1225,16 +1261,11 @@ class Bench {
       return;
     }
 
-    // The squash this cycle (the same computation the checks used).
-    std::vector<bool> drop;
-    std::vector<bool> spared;
-    if (s.squash_valid) {
-      shadow_.SquashEffect(s.squash_all, s.squash_from, s.squash_tail, s.squash_gen, &drop,
-                           &spared);
-    } else {
-      drop.assign(shadow_.size(), false);
-      spared.assign(shadow_.size(), false);
-    }
+    // A deferred fault report has just been checked (CheckCycle runs before
+    // this), so it is no longer pending.
+    pending_fault_ = false;
+
+    const std::vector<bool>& drop = cur_drop_;
 
     // 1. the fill, applied before the drain so a fill and a drain in one cycle
     // cannot disagree about what was captured.
@@ -1261,21 +1292,37 @@ class Bench {
     if (o.drain_valid && o.drain_ready) {
       Entry sent = shadow_.at(0);
       sent_.push_back(sent);
+      sent_mem_.push_back(false);
       shadow_.RemoveHead();
     }
 
     // 5. the memory model, driven by the *pre-edge* memory request, and the
     // expected bytes written from the specification rather than from the DUT.
+    // The model writes exactly what the endpoint presented: the payload is
+    // already in the lane convention (the byte at the address is the lane the
+    // address selects), and the per-cycle check above has already compared it --
+    // and the strobes, the address and the size -- against the specification for
+    // the store the shadow says is in flight. Shifting it again here would put a
+    // second lane convention in the model, which is how a store to a
+    // non-zero lane would land in the wrong bytes.
     const uint32_t size_bytes = o.mem_req_valid ? SizeBytes(uint32_t(o.mem_req_size)) : 0;
     MemoryModel::EdgeResult edge =
         mem_.Edge(cycle_, o.mem_req_valid, s.mem_req_ready, o.mem_req_we, o.mem_req_addr,
-                  size_bytes, SpecWdata(o.mem_req_wdata, o.mem_req_addr), o.mem_rsp_ready);
+                  size_bytes, o.mem_req_wdata, o.mem_rsp_ready);
+    Require(!edge.accepted || !sent_.empty(), "memory-accept",
+            "the memory accepted a transaction the queue never offered");
     if (edge.accepted && !sent_.empty()) {
+      sent_mem_[0] = true;
       const Entry& w = sent_.front();
       if (!SpecMisaligned(w.addr(), w.size)) {
+        // The store operand is a little-endian value: its byte i lands at
+        // address+i. The lane convention is how the *bus* carries that byte
+        // (byte at `addr` is lane `addr[2:0]`), and the endpoint's shift is what
+        // turns one into the other. Writing `data >> 8*lane` here would instead
+        // take the store's byte at the lane index, which is a different byte
+        // whenever the store does not start at lane 0.
         for (uint32_t i = 0; i < SizeBytes(w.size); i++) {
-          const uint32_t lane = uint32_t((w.addr() + i) & 7u);
-          const uint64_t byte = (w.data >> (8u * lane)) & 0xffull;
+          const uint64_t byte = (w.data >> (8u * i)) & 0xffull;
           const uint64_t addr = w.addr() + i;
           if (addr >= kShadowBase && (addr - kShadowBase) < kShadowBytes) {
             exp_mem_[addr - kShadowBase] = uint8_t(byte);
@@ -1291,20 +1338,28 @@ class Bench {
       Require(!sent_.empty(), "endpoint-response",
               "the endpoint completed a transaction the queue never offered");
       if (!sent_.empty()) {
-        const Entry& w = sent_.front();
+        const Entry w = sent_.front();
         const bool misaligned = SpecMisaligned(w.addr(), w.size);
-        Require(misaligned, "endpoint-response",
-                "a non-misaligned store completed without a memory transaction");
-        Require(o.fault_ctr == fault_seen_ + 1, "endpoint-response",
-                "a misaligned store did not raise a fault: o_fault_ctr=" + Dec(o.fault_ctr));
-        Require(o.last_fault_cause == kExcStoreMisaligned, "endpoint-fault-cause",
-                "expected the store-misaligned cause " + Dec(kExcStoreMisaligned) + ", got " +
-                    Dec(o.last_fault_cause));
-        Require(o.last_fault_tval == w.addr(), "endpoint-fault-tval",
-                "expected tval 0x" + U64(w.addr()) + ", got 0x" + U64(o.last_fault_tval));
-        Require(o.last_fault_id == w.packed, "endpoint-fault-id",
-                "expected the faulting store " + U32(w.packed) + ", got " + U32(o.last_fault_id));
+        const bool reached = sent_mem_[0];
+        Require(reached == !misaligned, "endpoint-response",
+                "a store completed " + std::string(reached ? "after" : "without") +
+                    " reaching the memory model, and is " +
+                    std::string(misaligned ? "misaligned" : "aligned"));
+        if (misaligned) {
+          // The endpoint composed the fault this cycle; the queue consumes it on
+          // the next edge and counts it there, so the driver's tally is advanced
+          // by the same rule (one per completing misaligned store) and the
+          // report itself is checked in the next cycle, when the queue's
+          // registered counters have caught up.
+          fault_seen_++;
+          pending_fault_ = true;
+          pending_fault_entry_ = w;
+        } else {
+          Require(o.fault_ctr == fault_seen_, "endpoint-response",
+                  "an aligned store raised a fault: o_fault_ctr=" + Dec(o.fault_ctr));
+        }
         sent_.erase(sent_.begin());
+        sent_mem_.erase(sent_mem_.begin());
       }
       ep_rsp_seen_ = o.ep_rsp;
     }
@@ -1319,9 +1374,14 @@ class Bench {
     if (o.commit_ok) commit_seen_++;
     if (o.commit_stale) commit_stale_seen_++;
     if (o.drain_valid && o.drain_ready) drain_seen_++;
-    if (o.fault_ctr != fault_seen_) fault_seen_ = o.fault_ctr;
-    squash_seen_ = o.squash_ctr;
-    squash_spared_seen_ = o.squash_spared_ctr;
+    // The squash tallies come from the rule, not from the DUT's counters, so the
+    // counter comparison above is a real comparison.
+    for (size_t i = 0; i < drop.size(); i++) {
+      if (drop[i]) squash_seen_++;
+    }
+    for (size_t i = 0; i < cur_spared_.size(); i++) {
+      if (cur_spared_[i]) squash_spared_seen_++;
+    }
   }
 
   Entry EntryOf(const Stim& s) const {
@@ -1355,6 +1415,21 @@ class Bench {
   // The stores the queue offered, in order. The front is the one the endpoint is
   // serving; a memory request must carry exactly it.
   std::vector<Entry> sent_;
+  // Whether the store in flight has actually been accepted by the memory model,
+  // per position of `sent_`. A store that completes without it is a store that
+  // never reached memory.
+  std::vector<bool> sent_mem_;
+
+  // This cycle's squash effect, computed from the rule once and used by both the
+  // per-cycle checks and the shadow update, so the two cannot disagree.
+  std::vector<bool> cur_drop_;
+  std::vector<bool> cur_spared_;
+
+  // A misaligned store's report is composed by the endpoint one cycle before the
+  // queue consumes it and counts it, so the assertion about the fault is made in
+  // the next cycle, when the registered counters have caught up.
+  bool pending_fault_ = false;
+  Entry pending_fault_entry_;
 
   uint64_t alloc_seen_ = 0;
   uint64_t fill_seen_ = 0;
@@ -1375,7 +1450,7 @@ class Bench {
 
   // The driver's own memory.
   static constexpr uint64_t kShadowBase = 0x80000000ull;
-  static constexpr uint64_t kShadowBytes = 4096;
+  static constexpr uint64_t kShadowBytes = 0x10000;
   std::vector<uint8_t> exp_mem_;
 
  public:
@@ -1384,6 +1459,657 @@ class Bench {
   uint64_t run_squashes() const { return run_squashes_; }
   uint64_t run_faults() const { return run_faults_; }
 };
+
+
+// ============================================================================
+// Phases
+// ============================================================================
+
+constexpr uint64_t kRamBase = 0x80000000ull;
+constexpr uint32_t kByte = 0;
+constexpr uint32_t kHalf = 1;
+constexpr uint32_t kWord = 2;
+constexpr uint32_t kDbl = 3;
+
+Ident IdentOf(uint32_t rob_index, uint32_t rob_gen, uint32_t uop_index = 0) {
+  Ident id;
+  id.hart = 0;
+  id.rob_index = rob_index;
+  id.rob_gen = rob_gen;
+  id.uop_index = uop_index;
+  return id;
+}
+
+// A store with both facts captured.
+Entry StoreAt(uint64_t addr, uint64_t data, uint32_t size) {
+  Entry e;
+  e.base = addr;
+  e.imm = 0;
+  e.data = data;
+  e.size = size;
+  e.addr_valid = true;
+  e.data_valid = true;
+  return e;
+}
+
+// ------------------------------------------------------- 1. the cold state
+void PhaseResetState(Bench* b) {
+  b->Phase("reset-state");
+  b->Fresh();
+  const DutOut& o = b->seen();
+  b->Require(o.count == 0, "reset", "o_count is " + Dec(o.count));
+  b->Require(o.auth_cnt == 0, "reset", "o_auth_cnt is " + Dec(o.auth_cnt));
+  b->Require(o.occ == 0, "reset", "the occupancy bitmap is not empty");
+  b->Require(o.entry_auth == 0, "reset", "the authorised bitmap is not empty");
+  b->Require(o.drain_valid == false, "reset", "the drain port offers a store after reset");
+  b->Require(o.alloc_ready == true, "reset", "the queue refuses an allocation after reset");
+  b->Require(o.alloc_ctr == 0 && o.fill_ctr == 0 && o.fill_stale_ctr == 0 && o.commit_ctr == 0 &&
+                  o.commit_stale_ctr == 0 && o.drain_ctr == 0 && o.fault_ctr == 0 &&
+                  o.squash_ctr == 0 && o.squash_spared_ctr == 0,
+              "reset", "a counter is not zero after reset");
+  b->Require(o.ep_txn == 0 && o.ep_rsp == 0, "reset", "the endpoint is not idle after reset");
+  b->RunIdle(4);
+  b->Require(b->mem().accepted() == 0, "reset", "the memory saw a transaction after reset");
+  b->CheckMemory();
+  b->EndPhase();
+}
+
+// --------------------------------------------- 2. the wrong-path store
+// The card's Pass criterion, first half: a store on a speculated path writes
+// nothing and produces no memory transaction, even though its address and data
+// are ready -- because execution-complete is not an authorisation.
+void PhaseWrongPath(Bench* b) {
+  b->Phase("wrong-path");
+  b->Fresh();
+
+  const Ident spec = IdentOf(10, 0);
+  const Entry spec_store = StoreAt(kRamBase + 0x1000, 0x1122334455667788ull, kDbl);
+  b->AllocStore(spec_store, spec);
+  b->Require(b->shadow().size() == 1, "wrong-path", "the speculated store is not resident");
+  b->Require(b->shadow().at(0).addr_valid && b->shadow().at(0).data_valid, "wrong-path",
+             "the speculated store is not execution-complete, so the phase proves nothing");
+  b->Require(b->shadow().AuthCount() == 0, "wrong-path", "an uncommitted store is authorised");
+
+  // Its address and data are ready and the memory is idle: nothing about the
+  // state of the world except the missing authorisation can hold it back.
+  b->RunIdle(8);
+  b->Require(b->seen().drain_valid == false, "wrong-path",
+             "an uncommitted store is being offered to the memory side");
+  b->Require(b->seen().ep_txn == 0, "wrong-path",
+             "an uncommitted store reached the endpoint's memory port");
+  b->Require(b->mem().accepted() == 0, "wrong-path",
+             "an uncommitted store reached the memory (" + Dec(b->mem().accepted()) +
+                 " transaction(s))");
+  b->Require(b->MemoryUntouched(), "wrong-path",
+             "the memory changed with no store authorised");
+  b->CheckMemory();
+
+  // The path it was speculated on turns out to be wrong.
+  b->SquashWindow(10, 12, 0);
+  b->RunIdle(1);
+  b->Require(b->seen().squash_ctr == 1, "wrong-path",
+             "the squash withdrew " + Dec(b->seen().squash_ctr) + " entr(y/ies), expected 1");
+  b->Require(b->shadow().size() == 0, "wrong-path", "the squashed store is still resident");
+
+  b->RunIdle(8);
+  b->Require(b->seen().ep_txn == 0, "wrong-path",
+             "a squashed store still reached the endpoint after the squash");
+  b->Require(b->mem().accepted() == 0, "wrong-path",
+             "a squashed store still reached memory after the squash");
+  b->CheckMemory();
+
+  // And the queue is not broken by having held a wrong-path store: a store that
+  // really is authorised leaves, with its bytes, exactly once.
+  const Ident good = IdentOf(11, 0);
+  const Entry good_store = StoreAt(kRamBase + 0x2000, 0xdeadbeefcafebabeull, kDbl);
+  b->AllocStore(good_store, good);
+  b->CommitStore(b->MakeId(good), true);
+  b->Settle(64);
+  b->Require(b->mem().accepted() == 1, "wrong-path",
+             "the memory saw " + Dec(b->mem().accepted()) + " transaction(s), expected 1");
+  b->Require(b->seen().ep_txn == 1, "wrong-path",
+             "the endpoint counted " + Dec(b->seen().ep_txn) + " transaction(s), expected 1");
+  b->CheckMemory();
+
+  // The other half of the visibility rule, and the other half of the card's
+  // Pass criterion: a store that IS authorised still writes nothing when it is
+  // not non-faulting. A misaligned store is trapped by mosaic_lsu_endpoint
+  // before the memory sees it, so the queue drains it (it retired), the fault is
+  // reported with its identity and address, and not one byte lands.
+  const Ident mis = IdentOf(12, 0);
+  Entry mis_store = StoreAt(kRamBase + 0x2010 + 4, 0xffffffffffffffffull, kDbl);
+  b->AllocStore(mis_store, mis);
+  b->CommitStore(b->MakeId(mis), true);
+  b->Settle(64);
+  // The queue consumes the endpoint's response on the edge *after* the endpoint
+  // composes it, so its registered fault counter is one cycle behind `Settle`'s
+  // exit condition.
+  b->RunIdle(2);
+  b->Require(b->seen().fault_ctr == 1, "wrong-path",
+             "the misaligned store did not report a fault (" + Dec(b->seen().fault_ctr) + ")");
+  b->Require(b->seen().ep_misaligned == 1, "wrong-path",
+             "the endpoint's misaligned counter is " + Dec(b->seen().ep_misaligned));
+  b->Require(b->seen().ep_txn == 1, "wrong-path",
+             "the misaligned store reached the memory port (" + Dec(b->seen().ep_txn) +
+                 " transaction(s))");
+  b->Require(b->mem().accepted() == 1, "wrong-path",
+             "the misaligned store reached the memory (" + Dec(b->mem().accepted()) + ")");
+  b->Require(b->seen().last_fault_cause == kExcStoreMisaligned, "wrong-path",
+             "the fault cause is " + Dec(b->seen().last_fault_cause) + ", expected " +
+                 Dec(kExcStoreMisaligned));
+  b->Require(b->seen().last_fault_tval == mis_store.base, "wrong-path",
+             "the fault address is 0x" + U64(b->seen().last_fault_tval) + ", expected 0x" +
+                 U64(mis_store.base));
+  b->Require(b->seen().last_fault_id == b->MakeId(mis), "wrong-path",
+             "the fault names " + U32(b->seen().last_fault_id) + ", expected " +
+                 U32(b->MakeId(mis)));
+  b->CheckMemory();
+  b->EndPhase();
+}
+
+// ------------------------------- 3. an authorised store survives a flush
+// The card's Pass criterion, second half, and the failure the RTL header names:
+// a flush must not delete a store that already retired. The store has to be
+// *resident and authorised* when the flush arrives, so the memory is held so its
+// predecessor cannot leave the endpoint and it cannot leave the queue.
+void PhaseFlushSafety(Bench* b) {
+  b->Phase("flush-safety");
+  b->Fresh();
+
+  const Ident a0 = IdentOf(20, 0);
+  const Ident a1 = IdentOf(21, 0);
+  const Ident a2 = IdentOf(22, 0);
+  const Entry s0 = StoreAt(kRamBase + 0x3000, 0x0f0e0d0c0b0a0908ull, kDbl);
+  const Entry s1 = StoreAt(kRamBase + 0x3008, 0x0706050403020100ull, kDbl);
+  const Entry s2 = StoreAt(kRamBase + 0x3010, 0x8877665544332211ull, kDbl);
+  b->AllocStore(s0, a0);
+  b->AllocStore(s1, a1);
+  b->AllocStore(s2, a2);
+
+  b->CommitStore(b->MakeId(a0), true, 20);
+  b->CommitStore(b->MakeId(a1), true, 20);
+  // a2 stays uncommitted: it is the younger speculative work the flush kills.
+
+  // Let a0 leave the queue into the endpoint, then hold the memory so it stays
+  // there and a1 -- which is authorised and next -- cannot drain either.
+  b->RunIdleSlow(8, 20);
+  b->Require(b->shadow().size() == 2, "flush",
+             "the expected two stores are not resident (" + Dec(b->shadow().size()) + " held, " +
+                 Dec(b->mem().accepted()) + " transaction(s) so far)");
+  b->Require(b->shadow().AuthCount() == 1, "flush",
+             "the resident stores' authorisation mask is not the expected {a1} (" +
+                 Dec(b->shadow().AuthCount()) + " leading authorised)");
+  b->Require(b->mem().accepted() == 1, "flush",
+             "the memory accepted " + Dec(b->mem().accepted()) +
+                 " transaction(s); expected the first store to be inside the endpoint");
+
+  // The whole speculative region dies. a1 has retired and is spared; a2 has not
+  // and is withdrawn.
+  b->SquashAll(0);
+  b->RunIdle(1);
+  b->Require(b->seen().squash_ctr == 1, "flush",
+             "the flush withdrew " + Dec(b->seen().squash_ctr) + " entries, expected 1 (a2)");
+  b->Require(b->seen().squash_spared_ctr == 1, "flush",
+             "the flush spared " + Dec(b->seen().squash_spared_ctr) +
+                 " authorised entries, expected 1 (a1)");
+  b->Require(b->shadow().size() == 1, "flush",
+             "the authorised store did not survive the flush");
+  b->Require(b->shadow().at(0).packed == b->MakeId(a1), "flush",
+             "the survivor is not the authorised store a1");
+
+  // Release the memory: a0 completes and a1 follows it, exactly once each.
+  b->Settle(200);
+  b->Require(b->shadow().size() == 0, "flush", "the authorised store never drained");
+  b->Require(b->mem().accepted() == 2, "flush",
+             "the memory saw " + Dec(b->mem().accepted()) + " transaction(s), expected 2");
+  b->CheckMemory();
+
+  // A second flush must not re-issue anything.
+  b->SquashAll(1);
+  b->RunIdle(8);
+  b->Require(b->seen().drain_ctr == 2, "flush",
+             "the queue drained " + Dec(b->seen().drain_ctr) + " stores, expected 2");
+  b->Require(b->mem().accepted() == 2, "flush",
+             "a second flush re-issued a store (" + Dec(b->mem().accepted()) + " transactions)");
+  b->CheckMemory();
+  b->EndPhase();
+}
+
+// ------------------------------------------------- 4. in-order drain
+void PhaseInOrder(Bench* b) {
+  b->Phase("in-order");
+  b->Fresh();
+
+  const Ident s0 = IdentOf(30, 0);
+  const Ident s1 = IdentOf(31, 0);
+  const Entry e0 = StoreAt(kRamBase + 0x4000, 0x0123456789abcdefull, kDbl);
+  const Entry e1 = StoreAt(kRamBase + 0x4008, 0xfedcba9876543210ull, kDbl);
+  b->AllocStore(e0, s0);
+  b->AllocStore(e1, s1);
+
+  // The younger store cannot be authorised while the older one is not.
+  b->CommitStore(b->MakeId(s1), false);
+  b->Require(b->seen().commit_stale, "in-order", "an out-of-order authorisation was accepted");
+  b->RunIdle(4);
+  b->Require(b->seen().drain_valid == false, "in-order",
+             "a store was offered while its older sibling is unauthorised");
+  b->Require(b->mem().accepted() == 0, "in-order",
+             "a store reached memory behind an unauthorised head");
+
+  // The older one commits; it drains first, and the younger one still waits.
+  b->CommitStore(b->MakeId(s0), true);
+  b->RunIdle(6);
+  b->Require(b->shadow().size() == 1, "in-order",
+             "expected exactly the younger store to still be resident");
+  b->Require(b->shadow().at(0).packed == b->MakeId(s1), "in-order",
+             "the store that drained was not the older one");
+  b->Require(b->seen().drain_valid == false, "in-order",
+             "the unauthorised younger store is being offered");
+  b->Require(b->mem().accepted() == 1, "in-order",
+             "the memory saw " + Dec(b->mem().accepted()) + " transaction(s), expected 1");
+
+  b->CommitStore(b->MakeId(s1), true);
+  b->Settle(64);
+  b->Require(b->mem().accepted() == 2, "in-order",
+             "the memory saw " + Dec(b->mem().accepted()) + " transaction(s), expected 2");
+  const std::vector<uint64_t>& log = b->mem().request_log();
+  b->Require(log.size() == 2 && log[0] == e0.base && log[1] == e1.base, "in-order",
+             "the memory saw the stores out of program order");
+  b->CheckMemory();
+
+  // A committed offer is held, unchanged, while the endpoint is busy.
+  b->Fresh();
+  const Ident h0 = IdentOf(40, 0);
+  const Ident h1 = IdentOf(41, 0);
+  b->AllocStore(StoreAt(kRamBase + 0x4100, 0x1111111111111111ull, kDbl), h0);
+  b->AllocStore(StoreAt(kRamBase + 0x4108, 0x2222222222222222ull, kDbl), h1);
+  b->CommitStore(b->MakeId(h0), true, 20);
+  b->CommitStore(b->MakeId(h1), true, 20);
+  b->RunIdleSlow(10, 20);
+  b->Require(b->seen().drain_valid, "in-order",
+             "the authorised head stopped being offered while the endpoint was busy");
+  b->Require(b->seen().drain_base == kRamBase + 0x4108, "in-order",
+             "the held offer is not the next authorised store (0x" +
+                 U64(b->seen().drain_base) + ")");
+  b->RunIdleSlow(4, 20);
+  b->Settle(200);
+  b->CheckMemory();
+  b->EndPhase();
+}
+
+// -------------------------------------------- 5. capacity and backpressure
+void PhaseCapacity(Bench* b) {
+  b->Phase("capacity");
+  b->Fresh();
+
+  const uint32_t depth = b->geom().entries;
+  std::vector<Ident> ids;
+  for (uint32_t i = 0; i < depth; i++) {
+    Ident id = IdentOf(50 + i, 0);
+    ids.push_back(id);
+    b->AllocStore(StoreAt(kRamBase + 0x5000 + 8 * i, 0x1000ull + i, kDbl), id);
+  }
+  b->Require(b->shadow().size() == depth, "capacity", "the queue did not fill");
+  // One more cycle so the observation is of the state *after* the last
+  // allocation's edge: `seen()` is the pre-edge snapshot, and comparing it with
+  // the shadow (already past that edge) would mix two states. Nothing can drain
+  // here, so the extra cycle changes nothing but the snapshot.
+  b->RunIdle(1);
+  b->Require(b->seen().alloc_ready == false, "capacity", "the queue reports room at capacity");
+  const uint32_t allocs_at_capacity = b->seen().alloc_ctr;
+
+  // Keep offering: every offer must be refused, and refused means not stored.
+  const Entry extra = StoreAt(kRamBase + 0x5800, 0x9999999999999999ull, kDbl);
+  for (int i = 0; i < 6; i++) {
+    Stim s;
+    s.alloc_valid = true;
+    s.alloc_id = b->MakeId(IdentOf(200, 0));
+    s.alloc_ident = IdentOf(200, 0);
+    s.alloc_base = extra.base;
+    s.alloc_imm = extra.imm;
+    s.alloc_size = extra.size;
+    s.alloc_addr_valid = true;
+    s.alloc_data = extra.data;
+    s.alloc_data_valid = true;
+    b->Cycle(s, false);
+    b->Require(b->seen().alloc_ready == false, "capacity",
+               "the full queue accepted an offer (alloc_ready_o high)");
+    b->Require(b->shadow().size() == depth, "capacity",
+               "a refused allocation entered the shadow");
+  }
+  b->Require(b->seen().alloc_ctr == allocs_at_capacity, "capacity",
+             "a refused allocation was counted as accepted");
+  b->RunIdle(4);
+  b->Require(b->mem().accepted() == 0, "capacity",
+             "an unauthorised full queue reached memory");
+
+  // One commit drains one store, one slot appears, and the refused store is
+  // then accepted -- nothing was lost while it was refused.
+  b->CommitStore(b->MakeId(ids[0]), true);
+  b->RunIdle(6);
+  b->Require(b->shadow().size() == depth - 1, "capacity", "the committed store did not drain");
+  b->Require(b->seen().alloc_ready == true, "capacity", "the freed slot is not offered");
+  b->AllocStore(extra, IdentOf(200, 0));
+  b->Require(b->shadow().size() == depth, "capacity", "the refused store was not admitted later");
+
+  // The conservation identity, stated once more against the driver's own tally.
+  const DutOut& o = b->seen();
+  b->Require(o.alloc_ctr == o.drain_ctr + o.squash_ctr + o.count, "capacity",
+             "conservation broken: " + Dec(o.alloc_ctr) + " != " + Dec(o.drain_ctr) + " + " +
+                 Dec(o.squash_ctr) + " + " + Dec(o.count));
+
+  // Everything unauthorised dies with a full flush; the one committed store has
+  // already drained, so the queue empties.
+  b->CommitStore(o.entries[0].packed, true);
+  b->RunIdle(4);
+  b->SquashAll(1);
+  b->RunIdle(1);
+  b->Settle(64);
+  b->Require(b->shadow().size() == 0, "capacity", "the flush did not empty the queue");
+  b->CheckMemory();
+  b->EndPhase();
+}
+
+// -------------------------------------- 6. address and data readiness
+void PhaseReadiness(Bench* b) {
+  b->Phase("readiness");
+  b->Fresh();
+
+  // (a) data ready, address not: it must be held even once authorised.
+  const Ident p = IdentOf(60, 0);
+  const uint64_t p_addr = kRamBase + 0x6000;
+  const uint64_t p_data = 0xa1a2a3a4a5a6a7a8ull;
+  Entry pe = StoreAt(p_addr, p_data, kDbl);
+  pe.addr_valid = false;
+  b->AllocStore(pe, p);
+  b->CommitStore(b->MakeId(p), true);
+  b->RunIdle(6);
+  b->Require(b->seen().drain_valid == false, "readiness",
+             "a store with no captured address was offered to memory");
+  b->Require(b->mem().accepted() == 0, "readiness",
+             "a store with no captured address reached memory");
+  b->FillEntry(true, p_addr, 0, false, 0, p);
+  b->Require(b->seen().fill_hit, "readiness", "the address fill did not find its entry");
+  b->Settle(32);
+  b->Require(b->mem().accepted() == 1, "readiness",
+             "the store did not drain after its address arrived");
+  b->CheckMemory();
+
+  // (b) address ready, data not.
+  const Ident q = IdentOf(61, 0);
+  const uint64_t q_addr = kRamBase + 0x6010;
+  const uint64_t q_data = 0xb1b2b3b4b5b6b7b8ull;
+  Entry qe = StoreAt(q_addr, 0, kDbl);
+  qe.data_valid = false;
+  b->AllocStore(qe, q);
+  b->CommitStore(b->MakeId(q), true);
+  b->RunIdle(6);
+  b->Require(b->seen().drain_valid == false, "readiness",
+             "a store with no captured data was offered to memory");
+  b->Require(b->mem().accepted() == 1, "readiness",
+             "a store with no captured data reached memory");
+  b->FillEntry(false, 0, 0, true, q_data, q);
+  b->Require(b->seen().fill_hit, "readiness", "the data fill did not find its entry");
+  b->Settle(32);
+  b->Require(b->mem().accepted() == 2, "readiness",
+             "the store did not drain after its data arrived");
+  b->CheckMemory();
+
+  // (c) neither fact yet: allocated, committed, and still invisible.
+  const Ident r = IdentOf(62, 0);
+  Entry re = StoreAt(kRamBase + 0x6020, 0xc1c2c3c4c5c6c7c8ull, kDbl);
+  re.addr_valid = false;
+  re.data_valid = false;
+  b->AllocStore(re, r);
+  b->CommitStore(b->MakeId(r), true);
+  b->RunIdle(6);
+  b->Require(b->mem().accepted() == 2, "readiness",
+             "a store with neither fact captured reached memory");
+  b->FillEntry(false, 0, 0, true, re.data, r);
+  b->RunIdle(4);
+  b->Require(b->mem().accepted() == 2, "readiness",
+             "a store with only its data arrived early");
+  b->FillEntry(true, re.base, 0, false, 0, r);
+  b->Settle(32);
+  b->Require(b->mem().accepted() == 3, "readiness", "the store never completed");
+  b->CheckMemory();
+
+  // (d) a fill that names no resident entry is stale, and a fill in the
+  // allocation cycle is stale too: the fill port serves entries that are already
+  // resident.
+  const Ident g = IdentOf(70, 0);
+  b->FillEntry(true, kRamBase, 0, false, 0, g);
+  b->Require(b->seen().fill_stale, "readiness", "a fill for a non-resident entry was not stale");
+  b->Require(b->seen().fill_hit == false, "readiness", "a stale fill reported a hit");
+
+  const Ident same = IdentOf(71, 0);
+  Stim both;
+  both.alloc_valid = true;
+  both.alloc_id = b->MakeId(same);
+  both.alloc_ident = same;
+  both.alloc_base = kRamBase + 0x7000;
+  both.alloc_size = kDbl;
+  both.alloc_addr_valid = true;
+  both.alloc_data = 0x5a5a5a5a5a5a5a5aull;
+  both.alloc_data_valid = false;
+  both.fill_valid = true;
+  both.fill_id = b->MakeId(same);
+  both.fill_data = 0x5a5a5a5a5a5a5a5aull;
+  both.fill_data_valid = true;
+  b->Cycle(both, false);
+  b->Require(b->seen().fill_stale, "readiness",
+             "a fill in the allocation cycle was accepted as if the entry were resident");
+  b->Require(b->seen().alloc_ready, "readiness", "the allocation in that cycle was refused");
+  b->RunIdle(4);
+  b->Require(b->shadow().at(0).data_valid == false, "readiness",
+             "the same-cycle fill reached the entry");
+  b->Require(b->seen().drain_valid == false, "readiness",
+             "the partially captured store is being offered");
+  // The queue is not stuck: a real fill completes it and it never drains.
+  b->FillEntry(false, 0, 0, true, both.alloc_data, same);
+  b->RunIdle(4);
+  b->Require(b->mem().accepted() == 3, "readiness",
+             "an uncommitted store drained after its fill");
+  b->EndPhase();
+}
+
+// ------------------------------- 7. the I-035 forwarding query (rule only)
+// The port is this package's interface decision for I-035 and is not wired to
+// anything yet; this phase exercises the rule directly so it is not shipped
+// untried. It carries no mutant: the visibility contract is the case.
+void PhaseForward(Bench* b) {
+  b->Phase("forward");
+  b->Fresh();
+
+  const Ident f0 = IdentOf(80, 0);
+  const Ident f1 = IdentOf(81, 0);
+  const uint64_t d0 = 0x0011223344556677ull;
+  const uint64_t d1 = 0x8899aabbccddeeffull;
+  b->AllocStore(StoreAt(kRamBase + 0x8000, d0, kDbl), f0);
+  b->AllocStore(StoreAt(kRamBase + 0x8008, d1, kDbl), f1);
+  // Deliberately uncommitted: forwarding must not need an authorisation.
+
+  auto query = [&](uint64_t addr, uint32_t size, bool want_valid, bool want_blocked,
+                   uint64_t want_data) {
+    Stim s;
+    s.fwd_addr = addr;
+    s.fwd_size = size;
+    b->Cycle(s, false);
+    b->Require(b->seen().fwd_valid == want_valid, "forward",
+               "query 0x" + U64(addr) + "/" + Dec(size) + ": fwd_valid_o=" +
+                   Bool(b->seen().fwd_valid) + ", expected " + Bool(want_valid));
+    b->Require(b->seen().fwd_blocked == want_blocked, "forward",
+               "query 0x" + U64(addr) + "/" + Dec(size) + ": fwd_blocked_o=" +
+                   Bool(b->seen().fwd_blocked) + ", expected " + Bool(want_blocked));
+    if (want_valid) {
+      b->Require(b->seen().fwd_data == want_data, "forward",
+                 "query 0x" + U64(addr) + "/" + Dec(size) + ": data 0x" +
+                     U64(b->seen().fwd_data) + ", expected 0x" + U64(want_data));
+    }
+  };
+
+  // A whole doubleword from the store that owns it.
+  query(kRamBase + 0x8008, kDbl, true, false, d1 << 0);
+  // A byte inside that store. The payload comes back in the memory lane
+  // convention -- aligned to the *store's* address, which is lane 0 here -- so
+  // the value is the store's data unchanged and the load takes byte 1 of it.
+  query(kRamBase + 0x8009, kByte, true, false, d1);
+  // A word that the store covers.
+  query(kRamBase + 0x8008, kWord, true, false, d1 << 0);
+  // A halfword inside the same doubleword, an unaligned start inside it.
+  query(kRamBase + 0x800a, kHalf, true, false, d1 << 0);
+  // A query that crosses the doubleword boundary is not covered by any one
+  // store, so the answer is "no".
+  query(kRamBase + 0x8004, kDbl, false, false, 0);
+  // Partial coverage is not answered either.
+  b->AllocStore(StoreAt(kRamBase + 0x8018, 0x77ull, kByte), IdentOf(82, 0));
+  query(kRamBase + 0x8018, kDbl, false, false, 0);
+  query(kRamBase + 0x8018, kByte, true, false, 0x77ull);
+
+  // An entry whose address is not captured blocks any answer.
+  const Ident f3 = IdentOf(83, 0);
+  Entry unknown = StoreAt(kRamBase + 0x8020, 0x1234ull, kByte);
+  unknown.addr_valid = false;
+  b->AllocStore(unknown, f3);
+  query(kRamBase + 0x8008, kDbl, true, true, d1 << 0);
+
+  // The youngest store wins when two overlap.
+  const uint64_t d4 = 0x0102030405060708ull;
+  b->AllocStore(StoreAt(kRamBase + 0x8008, d4, kDbl), IdentOf(84, 0));
+  query(kRamBase + 0x8008, kDbl, true, true, d4);
+  b->EndPhase();
+}
+
+// ---------------------------------------------------------------- 8. soak
+void PhaseSoak(Bench* b, uint64_t seed, int cycles) {
+  b->Phase("soak");
+  b->Fresh();
+  mosaic::Rng rng(seed);
+
+  uint32_t alloc_ptr = 100;
+  uint32_t gen = 0;
+  uint64_t data_src = 0x51ed270b;
+  bool alloc_pending = false;
+  Ident pending_ident;
+  Entry pending_entry;
+  std::vector<Ident> incomplete;
+
+  for (int i = 0; i < cycles; i++) {
+    Stim s;
+
+    // A new allocation is offered until it is accepted.
+    if (!alloc_pending && rng.Chance(70)) {
+      alloc_pending = true;
+      pending_ident = IdentOf(alloc_ptr & b->geom().rob_index_mask, gen);
+      alloc_ptr++;
+      data_src = data_src * 6364136223846793005ull + 1442695040888963407ull;
+      const uint32_t size = rng.Below(4);
+      uint64_t addr = kRamBase + 0x900 + 8 * rng.Below(48);
+      if (rng.Chance(10)) addr += 1 + rng.Below(7);  // sometimes misaligned
+      pending_entry = StoreAt(addr, data_src, size);
+      if (rng.Chance(20)) pending_entry.addr_valid = false;
+      if (rng.Chance(20)) pending_entry.data_valid = false;
+    }
+    if (alloc_pending) {
+      s.alloc_valid = true;
+      s.alloc_id = b->MakeId(pending_ident);
+      s.alloc_ident = pending_ident;
+      s.alloc_base = pending_entry.base;
+      s.alloc_imm = pending_entry.imm;
+      s.alloc_size = pending_entry.size;
+      s.alloc_addr_valid = pending_entry.addr_valid;
+      s.alloc_data = pending_entry.data_valid ? pending_entry.data : 0;
+      s.alloc_data_valid = pending_entry.data_valid;
+    }
+
+    // A late fact arrives for something allocated earlier.
+    if (!incomplete.empty() && rng.Chance(35)) {
+      const size_t pick = rng.Below(uint32_t(incomplete.size()));
+      s.fill_valid = true;
+      s.fill_id = b->MakeId(incomplete[pick]);
+      if (rng.Chance(50)) {
+        s.fill_addr_valid = true;
+        s.fill_base = kRamBase + 0x900 + 8 * rng.Below(48);
+        s.fill_imm = 0;
+      } else {
+        s.fill_data_valid = true;
+        s.fill_data = data_src ^ uint64_t(rng.Next());
+      }
+      incomplete.erase(incomplete.begin() + long(pick));
+    }
+
+    // An authorisation: usually the head, which must be accepted, and sometimes a
+    // younger entry, which must be refused. Both are part of the contract, and a
+    // soak that only ever named the head would never exercise the refusal.
+    if (rng.Chance(45) && b->shadow().size() > 0) {
+      const size_t pick = rng.Chance(70) ? 0 : rng.Below(uint32_t(b->shadow().size()));
+      s.commit_valid = true;
+      s.commit_id = b->shadow().at(pick).packed;
+    }
+
+    // A squash: a whole-window flush, or a region starting at some resident
+    // store and running to the allocation pointer.
+    if (rng.Chance(8) && b->shadow().size() > 0) {
+      s.squash_valid = true;
+      if (rng.Chance(40)) {
+        s.squash_all = true;
+        s.squash_gen = gen;
+        gen++;
+      } else {
+        const size_t pick = rng.Below(uint32_t(b->shadow().size()));
+        s.squash_from = b->shadow().at(pick).id.rob_index;
+        s.squash_tail = alloc_ptr & b->geom().rob_index_mask;
+        s.squash_gen = b->shadow().at(pick).id.rob_gen;
+      }
+    }
+
+    // Memory back-pressure and latency.
+    s.mem_req_ready = rng.Chance(75);
+    s.latency = rng.Below(3);
+    s.fwd_addr = kRamBase + 0x900 + 8 * rng.Below(48);
+    s.fwd_size = rng.Below(4);
+
+    b->Cycle(s, false);
+    if (alloc_pending && b->seen().alloc_ready && s.alloc_valid) {
+      alloc_pending = false;
+      if (!(pending_entry.addr_valid && pending_entry.data_valid)) {
+        incomplete.push_back(pending_ident);
+      }
+    }
+  }
+
+  // Drain what the soak left. A store can be short of a fact and unable to drain
+  // at all, so first hand every such entry both facts (a fill can carry both at
+  // once), then flush: the flush withdraws the unauthorised work and spares
+  // everything that retired, so what remains reaches the memory path rather than
+  // being abandoned.
+  // The list is read out of the shadow first: a fill can make an authorised entry
+  // drainable, and draining removes it from the list the loop would be walking.
+  b->RunIdle(16);
+  std::vector<uint32_t> short_of_a_fact;
+  for (size_t i = 0; i < b->shadow().size(); i++) {
+    const Entry& e = b->shadow().at(i);
+    if (!(e.addr_valid && e.data_valid)) short_of_a_fact.push_back(e.packed);
+  }
+  for (size_t i = 0; i < short_of_a_fact.size(); i++) {
+    b->FillEntryPacked(short_of_a_fact[i], true, kRamBase + 0x900 + 8 * uint64_t(i % 48u), 0,
+                       true, (uint64_t(i) + 1) * 0x0101010101010101ull);
+  }
+  b->SquashAll(gen);
+  b->RunIdle(1);
+  std::fprintf(stderr, "DBG after flush: held=%zu auth=%zu dut_squash=%u spared=%u drains=%llu\n",
+               b->shadow().size(), b->shadow().AuthCount(), b->seen().squash_ctr,
+               b->seen().squash_spared_ctr, (unsigned long long)b->accepted_drains());
+  b->Settle(512);
+  b->Require(b->shadow().size() == 0, "soak", "the queue did not empty");
+  b->CheckMemory();
+
+  b->Require(b->run_allocs() > 0 && b->accepted_allocs() > 0, "soak",
+             "the soak never allocated a store");
+  b->Require(b->accepted_drains() > 0, "soak", "the soak never drained a store");
+  b->Require(b->squashed() > 0, "soak", "the soak never squashed a store");
+  b->EndPhase();
+}
 
 }  // namespace
 
@@ -1403,21 +2129,44 @@ int main(int argc, char** argv) {
 
   std::string detail;
   bool passed = true;
+  Bench bench(&dut, &clk, options.max_cycles);
 
   try {
     dut.clk = 0;
     dut.rst = 0;
     dut.eval();
 
-    Bench bench(&dut, &clk, options.max_cycles);
     bench.ReadGeometry();
-    (void)bench;
+
+    PhaseResetState(&bench);
+    PhaseWrongPath(&bench);
+    PhaseFlushSafety(&bench);
+    PhaseInOrder(&bench);
+    PhaseCapacity(&bench);
+    PhaseReadiness(&bench);
+    PhaseForward(&bench);
+    PhaseSoak(&bench, options.seed, 3000);
+
+    Require(bench.run_allocs() > 0, "coverage", "no store was ever allocated");
+    Require(bench.run_drains() > 0, "coverage", "no store was ever drained");
+    Require(bench.run_squashes() > 0, "coverage", "no store was ever squashed");
+    Require(bench.run_faults() > 0, "coverage", "no faulting store was ever drained");
+
+    detail = "store queue contract holds: " + std::to_string(bench.checks()) +
+             " checks over " + std::to_string(clk.cycle()) + " cycles; " +
+             std::to_string(bench.run_allocs()) + " stores allocated, " +
+             std::to_string(bench.run_drains()) + " drained, " +
+             std::to_string(bench.run_squashes()) + " squashed, " +
+             std::to_string(bench.run_faults()) + " faulted; seed " +
+             std::to_string(options.seed);
   } catch (const Failure& f) {
-    std::fprintf(stderr, "setup failed: %s\n", f.what.c_str());
-    dut.final();
-    return mosaic::kExitFail;
+    reporter.Mismatch(f.what, "contract holds", "contract violated");
+    passed = false;
+    detail = "contract violated after " + std::to_string(bench.checks()) + " checks: " + f.what;
+    std::printf("FAILED AFTER %llu CHECKS\n", static_cast<unsigned long long>(bench.checks()));
   }
 
   dut.final();
-  return mosaic::kExitFail;
+  reporter.Check(passed, "no contract violation in any phase");
+  return reporter.Finish(passed ? "PASS" : "FAIL", detail);
 }
