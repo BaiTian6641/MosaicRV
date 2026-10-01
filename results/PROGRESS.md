@@ -715,3 +715,48 @@ wrong, and the DUT is not privileged by default.
 Handed back with that observation and an instruction to locate that single failure
 before re-deriving anything else. 23M failures is one bad check counted on every
 subsequent cycle, not 23M independent defects.
+
+---
+
+## 2026-10-01 — I-013 delivered and verified; I-022's blocker found by reading the stimulus
+
+**I-013 (RAT / free-list) delivered.** Case PASS, 5,646 shadow comparisons over 5,686
+cycles, 96 entries across 4 banks. I rebuilt and ran four of its six mutants
+myself — `NO_GEN_CHECK`, `X0_ALLOC`, `NO_FREE_RESTORE`, `NO_EXHAUST_CHECK` — each
+failing with exit 1.
+
+**A real RTL defect the shadow model caught and review would not:** the reset free
+set was all-ones while the committed and speculative maps already own tags 0..31 —
+**two owners for one physical register from cycle zero**. Fixed, and it makes the
+geometry close: 96 entries − 32 architectural = 64 allocatable, which is exactly
+`MOSAIC_ROB_ENTRIES`, the bound that justifies the undo-journal depth. A number that
+should have been checked on the first line of the module was wrong.
+
+Two design decisions worth keeping. The free list is a **bitmap, not a stack**,
+because a stack head pointer is not a valid recovery snapshot: a push below the
+checkpoint clobbers a slot a later pop would read. That is a real leak and the cost
+is an O(entries) rotating scan instead of an O(1) pop — stated as a trade rather
+than discovered later. And a checkpoint **empties** the undo window rather than
+marking a position in it, so the bound means "allocations since the last
+checkpoint", which is the quantity the ROB size actually justifies.
+
+**I-022 (issue queue) still incomplete — but its blocker is now identified.** The
+agent could not see what six assertions compared. Reading the stimulus shows why:
+the `kill_younger` phase inserts five fully-ready entries with `grant_ready` at its
+default, so each is granted out the cycle after insertion and the queue never fills.
+`count() == 5` therefore fails first, and the assertions after it fail on a queue
+that was never populated.
+
+This is the **same defect the agent had already found and fixed** in the fill phase
+by adding `Bench::Hold()` — `kill_younger` and `dst-conflict` were simply not updated.
+Not a new class of mistake; one instance fixed once and not propagated.
+
+Worth recording how it was found: the agent refused to claim an unverified
+hypothesis ("my read is that they are the same 'read after the edge' mistake... that
+is a hypothesis and not claimed as a finding"). The claim was wrong — the cause was
+simpler and already known elsewhere in the same file — but declining to state it as
+fact is exactly what left it findable in minutes. A confident wrong guess would have
+sent someone hunting in the wrong direction.
+
+Also noted: `tools/lint_rtl.py` reports 13 files clean, so the lint half of I-022's
+acceptance stands.

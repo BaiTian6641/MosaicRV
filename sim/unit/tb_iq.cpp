@@ -182,6 +182,17 @@ struct Stimulus {
   bool grant_ready = true;
 };
 
+// Mask a value to a port width. A driver that offers a number wider than the
+// port it drives is testing something the hardware cannot express: the DUT sees
+// the truncated value and any reference model that does not will disagree with
+// it for a reason that has nothing to do with the queue. Every stimulus the
+// driver builds is put through this once, so the shadow and the DUT are always
+// looking at the same number.
+template <unsigned W>
+constexpr uint32_t Port(uint32_t value) {
+  return (W >= 32) ? value : (value & ((1u << W) - 1u));
+}
+
 // Per-cluster coverage, asserted at the end.
 struct Coverage {
   uint64_t cycles = 0;
@@ -204,7 +215,6 @@ struct Coverage {
   uint64_t lowest_index_wrong = 0;  // cycles where oldest != lowest eligible index
   uint64_t kills_of_blocked = 0;  // killed an entry that was not ready
   bool saw_generation_advance = false;  // a tag was recycled with a new generation
-  bool dst_dbg_done = false;             // one-shot diagnostic latch
 };
 
 // Verilator exposes every top-level port as a member, typed by the port's own
@@ -689,8 +699,14 @@ class Bench {
   // `st` is applied to cluster 0; cluster 1 gets `st1` when the phase wants them
   // to differ and `st` otherwise.
   void Step(const Stimulus& st, const Stimulus* st1 = nullptr) {
-    const Stimulus& a = st;
-    const Stimulus& b = st1 ? *st1 : st;
+    // Every field is brought to the width of the port it drives, once, here. The
+    // shadow is then driven from the same clamped values as the hardware, so a
+    // disagreement can only mean the queue is wrong -- never that the driver
+    // offered something the pins cannot carry.
+    Stimulus a = st;
+    Stimulus b = st1 ? *st1 : st;
+    Clamp(a);
+    Clamp(b);
     for (unsigned c = 0; c < inst_.size(); c++) {
       Drive(inst_[c].pins, (c == 0) ? a : b);
     }
@@ -712,6 +728,36 @@ class Bench {
   void Idle() {
     Stimulus s;
     Step(s);
+  }
+
+  // Empty cluster 0's queue for real.
+  //
+  // `Idle` cannot do this: a *blocked* entry is never granted, so a run of idle
+  // cycles leaves every blocked entry sitting in the queue, and a phase that
+  // assumes a clean start is then asserting about a queue it did not build. So
+  // the entries are killed one at a time, oldest first, naming the macro the
+  // shadow says is there. This is a driver convenience, not a check: the
+  // per-cycle shadow comparison is still what validates every one of those
+  // cycles.
+  void DrainQueue() {
+    Shadow* sh = shadow(0);
+    for (int guard = 0; guard < 4 * static_cast<int>(kEntries) && sh->count() > 0; guard++) {
+      const int oldest = sh->oldest_live();
+      if (oldest < 0) break;
+      const uint32_t uop = sh->slot(static_cast<unsigned>(oldest)).uop;
+      Stimulus k = Kill(UopRobIndex(uop), UopRobGen(uop), /*younger=*/false);
+      k.grant_ready = true;
+      Step(k);
+    }
+  }
+
+  // A stimulus with the functional unit refusing, so an inserted uop stays
+  // queued. Phases that are building a state rather than exercising the accept
+  // path use this; a phase that forgets it gets a queue that never fills, which
+  // is a silent way to test nothing.
+  static Stimulus Hold(Stimulus s) {
+    s.grant_ready = false;
+    return s;
   }
 
   // Convenience: a stimulus that is nothing but an insert.
@@ -774,6 +820,9 @@ class Bench {
   uint32_t seen_grant_uop(unsigned c) const { return inst_[c].seen_grant_uop; }
   uint64_t seen_grant_a(unsigned c) const { return inst_[c].seen_grant_a; }
   bool seen_ins_valid(unsigned c) const { return inst_[c].seen_ins_valid; }
+  bool seen_dst_conflict(unsigned c) const { return inst_[c].seen_dst_conflict; }
+  uint32_t seen_grant_dst_tag(unsigned c) const { return inst_[c].seen_grant_dst_tag; }
+  uint32_t seen_wu_stale(unsigned c) const { return inst_[c].seen_wu_stale; }
   uint32_t seen_ins_uop(unsigned c) const { return inst_[c].seen_ins_uop; }
   const ExpectedGrant& last_expected(unsigned c) const { return inst_[c].expected; }
   int last_lowest_index(unsigned c) const { return inst_[c].last_lowest_index; }
@@ -784,23 +833,6 @@ class Bench {
   mosaic::Rng& RngFor(unsigned c) { return inst_[c].rng; }
 
   Vmosaic_iq_tb* top() { return top_; }
-
-  // Dump one cluster's observation port, for diagnosing a phase.
-  void DumpObs(unsigned c) {
-    Pins& p = inst_[c].pins;
-    for (unsigned i = 0; i < kEntries; i++) {
-      *p.obs_index = static_cast<uint8_t>(i);
-      top_->eval();
-      if (!*p.obs_valid) continue;
-      std::fprintf(stderr,
-                   "  DUMP %s slot %u: uop=%u age=%u t1=%u g1=%u r1=%d r2=%d granted=%d\n",
-                   inst_[c].shadow->name(), i, *p.obs_uop, *p.obs_age, *p.obs_src1_tag,
-                   *p.obs_src1_gen, (int)*p.obs_src1_ready, (int)*p.obs_src2_ready,
-                   (int)*p.obs_granted);
-    }
-    *p.obs_index = 0;
-    top_->eval();
-  }
 
   // Walk cluster 0's allocation pointer round to slot 0.
   //
@@ -813,7 +845,7 @@ class Bench {
   // throwaway entry once per step until the pointer reads 0.
   void AlignAllocPtr() {
     Shadow* sh = shadow(0);
-    for (int i = 0; i < 32 && sh->count() > 0; i++) Idle();
+    DrainQueue();
     // The ROB index field is 6 bits wide, so the throwaway macros are numbered
     // from 48 upwards -- clear of every macro the directed phases use, and clear
     // of the wrap because there are at most DEPTH+1 of them.
@@ -882,6 +914,9 @@ class Bench {
     bool seen_grant_valid = false;
     bool seen_ins_valid = false;
     uint32_t seen_ins_uop = 0;
+    bool seen_dst_conflict = false;
+    uint32_t seen_grant_dst_tag = 0;
+    uint32_t seen_wu_stale = 0;
     uint32_t last_age_ctr = 0;
     // The resident the shadow picked this cycle, and the lowest-index eligible
     // one, both computed at check time against the state the DUT was in. A
@@ -892,6 +927,23 @@ class Bench {
   };
 
   void Drive(const Pins& p, const Stimulus& s);
+
+  // Bring every stimulus field to the width of the port it drives: 7 bits for a
+  // PRF tag, 7 for a generation, 7 for a kill's ROB generation, 6 for a kill's
+  // ROB index and 16 for the uop identity.
+  static void Clamp(Stimulus& s) {
+    s.uop = Port<kUopIdW>(s.uop);
+    s.s1.tag = Port<kTagW>(s.s1.tag);
+    s.s1.gen = Port<kTagW>(s.s1.gen);
+    s.s2.tag = Port<kTagW>(s.s2.tag);
+    s.s2.gen = Port<kTagW>(s.s2.gen);
+    s.dst_tag = Port<kTagW>(s.dst_tag);
+    s.dst_gen = Port<kTagW>(s.dst_gen);
+    s.wu_tag = Port<kTagW>(s.wu_tag);
+    s.wu_gen = Port<kTagW>(s.wu_gen);
+    s.kill_rob_index = Port<kRobIndexW>(s.kill_rob_index);
+    s.kill_rob_gen = Port<kTagW>(s.kill_rob_gen);
+  }
   void Settle();
   void Edge();
   void CheckOne(Instance& inst, const Stimulus& s);
@@ -1150,24 +1202,6 @@ void Bench::CheckOne(Instance& inst, const Stimulus& s) {
   }
 
   // ---- exactly-once destination ----
-  {
-    const bool want = sh->expected_dst_conflict(s, s.ins_valid);
-    const bool got = (*p.dst_conflict != 0);
-    if (want != got && !inst.cov.dst_dbg_done) {
-      inst.cov.dst_dbg_done = true;
-      std::fprintf(stderr, "DSTDBG %s cycle=%llu dut=%d shadow=%d count=%u ins=%d ins_fire=%d "
-                           "ins_dst=%u/%u\n",
-                   who.c_str(), (unsigned long long)inst.cov.cycles, (int)got, (int)want,
-                   sh->count(), (int)s.ins_valid,
-                   (int)(s.ins_valid && sh->expected_ins_ready()), s.dst_tag, s.dst_gen);
-      for (unsigned i = 0; i < kEntries; i++) {
-        if (!sh->slot(i).valid) continue;
-        std::fprintf(stderr, "   slot %u uop=%u dst=%u/%u age=%llu\n", i, sh->slot(i).uop,
-                     sh->slot(i).dst_tag, sh->slot(i).dst_gen,
-                     (unsigned long long)sh->age_of(i));
-      }
-    }
-  }
   rep_.Check((*p.dst_conflict != 0) == sh->expected_dst_conflict(s, s.ins_valid),
              who + ": o_dst_conflict matches the shadow's duplicate-destination search");
   if (*p.dst_conflict) inst.cov.dst_conflicts++;
@@ -1227,7 +1261,11 @@ void Bench::CheckOne(Instance& inst, const Stimulus& s) {
              who + ": ins_total == grant_total + kill_total + count");
 
   // ---- the back-pressure invariant, against last cycle ----
-  CheckGrantStability(inst);
+  // Not on a cycle that issues a kill: a kill naming the presented entry
+  // withdraws the grant, which is the one documented exception to "the grant
+  // holds until the FU accepts it". The withdrawal itself is checked against the
+  // shadow, because the shadow knows which entry the kill names.
+  if (!s.kill_valid) CheckGrantStability(inst);
 
   // ---- every slot, field by field ----
   CheckSlots(inst.cluster);
@@ -1238,6 +1276,9 @@ void Bench::CheckOne(Instance& inst, const Stimulus& s) {
   inst.seen_grant_b = *p.grant_b;
   inst.seen_ins_valid = s.ins_valid;
   inst.seen_ins_uop = s.uop;
+  inst.seen_dst_conflict = (*p.dst_conflict != 0);
+  inst.seen_grant_dst_tag = *p.grant_dst_tag;
+  inst.seen_wu_stale = *p.wu_stale;
 
   // Record for the next cycle's stability check and for the age-wrap counter.
   inst.last_grant_valid = grant_valid;
@@ -1487,7 +1528,7 @@ void PhaseOldestReady(Bench& bench, mosaic::Reporter& rep) {
 // must carry the broadcast's value rather than the value on the insert bus.
 void PhaseSameCycle(Bench& bench, mosaic::Reporter& rep) {
   Shadow* sh = bench.shadow(0);
-  for (int i = 0; i < 32 && sh->count() > 0; i++) bench.Idle();
+  bench.DrainQueue();
 
   const uint32_t tag = bench.fresh_tag();
   Stimulus ins = bench.Blocked(MakeUop(12, 0, 0), tag, 5, /*dst*/ 0x50, 2);
@@ -1531,7 +1572,7 @@ void PhaseSameCycle(Bench& bench, mosaic::Reporter& rep) {
 // phase asserts the producer is the entry granted.
 void PhaseProducerOrder(Bench& bench, mosaic::Reporter& rep) {
   Shadow* sh = bench.shadow(0);
-  for (int i = 0; i < 32 && sh->count() > 0; i++) bench.Idle();
+  bench.DrainQueue();
 
   const uint32_t tag = bench.fresh_tag();
   // The producer: older, blocked, waiting for the broadcast.
@@ -1578,7 +1619,7 @@ void PhaseProducerOrder(Bench& bench, mosaic::Reporter& rep) {
 // that the window is still contiguous afterwards.
 void PhaseAgeWrap(Bench& bench, mosaic::Reporter& rep) {
   Shadow* sh = bench.shadow(0);
-  for (int i = 0; i < 32 && sh->count() > 0; i++) bench.Idle();
+  bench.DrainQueue();
 
   // Fill the queue with *blocked* entries, so nothing issues while filling and
   // the queue reaches capacity. Then enable the oldest one each cycle.
@@ -1627,21 +1668,23 @@ void PhaseAgeWrap(Bench& bench, mosaic::Reporter& rep) {
 // checks the entry does become ready, so the rejection is discriminating rather
 // than a broadcast port that never works.
 void PhaseStaleWakeup(Bench& bench, mosaic::Reporter& rep) {
-  for (int i = 0; i < 32 && bench.shadow(0)->count() > 0; i++) bench.Idle();
+  Shadow* sh = bench.shadow(0);
+  bench.DrainQueue();
 
   const uint32_t tag = bench.fresh_tag();
   Stimulus ins = bench.Blocked(MakeUop(24, 0, 0), tag, 0x11, /*dst*/ 0x80, 3);
   ins.grant_ready = false;
   bench.Step(ins);
-  rep.Check(!bench.shadow(0)->s1_ready(0), "stale: the entry is blocked before the broadcast");
+  rep.Check(!bench.shadow(0)->s1_ready(static_cast<unsigned>(sh->slot_of(MakeUop(24, 0, 0)))),
+            "stale: the entry is blocked before the broadcast");
 
   // Stale: same tag, generation one below.
   Stimulus stale = bench.Wakeup(tag, 0x10, 0xaaaa0000bbbb0000ull);
   stale.grant_ready = false;
   bench.Step(stale);
-  rep.Check(!bench.shadow(0)->s1_ready(0),
+  rep.Check(!bench.shadow(0)->s1_ready(static_cast<unsigned>(sh->slot_of(MakeUop(24, 0, 0)))),
             "stale: a matching tag with a stale generation did NOT make the entry ready");
-  rep.Check(bench.shadow(0)->s1_value(0) == 0,
+  rep.Check(bench.shadow(0)->s1_value(static_cast<unsigned>(sh->slot_of(MakeUop(24, 0, 0)))) == 0,
             "stale: no value was written into the blocked operand");
   rep.Check(bench.top()->c0_wu_stale == bench.shadow(0)->wu_stale(),
             "stale: the rejection is counted");
@@ -1652,7 +1695,7 @@ void PhaseStaleWakeup(Bench& bench, mosaic::Reporter& rep) {
   Stimulus good = bench.Wakeup(tag, 0x11, 0x5555666677778888ull);
   good.grant_ready = false;
   bench.Step(good);
-  rep.Check(bench.shadow(0)->s1_ready(0),
+  rep.Check(bench.shadow(0)->s1_ready(static_cast<unsigned>(sh->slot_of(MakeUop(24, 0, 0)))),
             "stale: the correct generation does enable the entry");
 
   // A tag nobody is waiting for: a miss, counted as its own outcome.
@@ -1667,7 +1710,8 @@ void PhaseStaleWakeup(Bench& bench, mosaic::Reporter& rep) {
 // rather than absorbed silently -- this is the "a duplicate producer for one
 // destination" rule at the operand level.
 void PhaseDuplicateWakeup(Bench& bench, mosaic::Reporter& rep) {
-  for (int i = 0; i < 32 && bench.shadow(0)->count() > 0; i++) bench.Idle();
+  Shadow* sh = bench.shadow(0);
+  bench.DrainQueue();
 
   const uint32_t tag = bench.fresh_tag();
   Stimulus ins = bench.Blocked(MakeUop(26, 0, 0), tag, 2, /*dst*/ 0x90, 1);
@@ -1676,14 +1720,16 @@ void PhaseDuplicateWakeup(Bench& bench, mosaic::Reporter& rep) {
   Stimulus first = bench.Wakeup(tag, 2, 0x1111222233334444ull);
   first.grant_ready = false;
   bench.Step(first);
-  rep.Check(bench.shadow(0)->s1_ready(0), "duplicate: the first broadcast took");
+  rep.Check(bench.shadow(0)->s1_ready(static_cast<unsigned>(sh->slot_of(MakeUop(26, 0, 0)))),
+            "duplicate: the first broadcast took");
 
   // A second broadcast for the same (tag, generation), carrying a *different*
   // value. It must be refused: the operand already holds its final value.
   Stimulus again = bench.Wakeup(tag, 2, 0x9999888877776666ull);
   again.grant_ready = false;
   bench.Step(again);
-  rep.Check(bench.shadow(0)->s1_value(0) == 0x1111222233334444ull,
+  rep.Check(bench.shadow(0)->s1_value(static_cast<unsigned>(sh->slot_of(MakeUop(26, 0, 0)))) ==
+                0x1111222233334444ull,
             "duplicate: a second broadcast did not overwrite the stored value");
   rep.Check(bench.coverage(0).dup_rejects >= 1, "duplicate: the second broadcast was refused");
   rep.Check(bench.top()->c0_grant_a == 0x1111222233334444ull,
@@ -1696,7 +1742,7 @@ void PhaseDuplicateWakeup(Bench& bench, mosaic::Reporter& rep) {
 // per-cycle path does the field-by-field check; the phase adds the "a different
 // entry was not offered" assertion and the final accept.
 void PhaseBackPressure(Bench& bench, mosaic::Reporter& rep) {
-  for (int i = 0; i < 32 && bench.shadow(0)->count() > 0; i++) bench.Idle();
+  bench.DrainQueue();
 
   Stimulus first = bench.InsertOnly(MakeUop(28, 0, 0), true, true, 0, 0, 0, 0, 0xa0, 1);
   first.grant_ready = false;
@@ -1745,13 +1791,13 @@ void PhaseBackPressure(Bench& bench, mosaic::Reporter& rep) {
 //     -- and the older entries survive untouched, which is the "flush keeps the
 //     necessary entries" half of the card.
 void PhaseKill(Bench& bench, mosaic::Reporter& rep) {
-  for (int i = 0; i < 32 && bench.shadow(0)->count() > 0; i++) bench.Idle();
+  bench.DrainQueue();
 
   // (a) one blocked entry in the middle of the queue.
-  bench.Step(bench.Blocked(MakeUop(30, 1, 0), 0x91, 1, 0xb0, 1));
-  bench.Step(bench.InsertOnly(MakeUop(30, 0, 0), true, true, 0, 0, 0, 0, 0xb1, 1));
-  bench.Step(bench.Blocked(MakeUop(30, 1, 1), 0x92, 1, 0xb2, 1));
-  bench.Step(bench.InsertOnly(MakeUop(30, 0, 1), true, true, 0, 0, 0, 0, 0xb3, 1));
+  bench.Step(bench.Hold(bench.Blocked(MakeUop(30, 1, 0), 0x91, 1, 0xb0, 1)));
+  bench.Step(bench.Hold(bench.InsertOnly(MakeUop(30, 0, 0), true, true, 0, 0, 0, 0, 0xb1, 1)));
+  bench.Step(bench.Hold(bench.Blocked(MakeUop(30, 1, 1), 0x92, 1, 0xb2, 1)));
+  bench.Step(bench.Hold(bench.InsertOnly(MakeUop(30, 0, 1), true, true, 0, 0, 0, 0, 0xb3, 1)));
   rep.Check(bench.shadow(0)->count() == 4, "kill: four entries queued");
   const long long span_before = bench.shadow(0)->age_span();
   rep.Check(span_before == 3, "kill: the four live ages span 3 before the kill");
@@ -1766,14 +1812,14 @@ void PhaseKill(Bench& bench, mosaic::Reporter& rep) {
   rep.Check(bench.coverage(0).kills_of_blocked >= 1,
             "kill: a not-ready entry was killed");
 
-  for (int i = 0; i < 32 && bench.shadow(0)->count() > 0; i++) bench.Idle();
+  bench.DrainQueue();
 
   // (b) the suffix case. Three older entries, then a two-uop macro. The macro
   // is killed with `kill_younger`, so the macro's own two uops go *and* so does
   // anything younger -- here nothing is, so exactly the macro goes. The three
   // older entries must survive: that is the card's "flush keeps the necessary
   // entries".
-  for (int i = 0; i < 32 && bench.shadow(0)->count() > 0; i++) bench.Idle();
+  bench.DrainQueue();
   for (int i = 0; i < 3; i++) {
     bench.Step(bench.InsertOnly(MakeUop(40, 0, static_cast<uint32_t>(i)), true, true,
                                 0, 0, 0, 0, 0xd0 + i, 1));
@@ -1792,25 +1838,25 @@ void PhaseKill(Bench& bench, mosaic::Reporter& rep) {
   // (c) a suffix that really is a suffix: the named macro has something younger
   // than it, and that younger entry must go too. Without this the previous case
   // would pass on a queue that ignored `kill_younger` entirely.
-  for (int i = 0; i < 32 && bench.shadow(0)->count() > 0; i++) bench.Idle();
-  bench.Step(bench.InsertOnly(MakeUop(50, 0, 0), true, true, 0, 0, 0, 0, 0xe0, 1));
-  bench.Step(bench.InsertOnly(MakeUop(51, 0, 0), true, true, 0, 0, 0, 0, 0xe1, 1));
-  bench.Step(bench.InsertOnly(MakeUop(52, 0, 0), true, true, 0, 0, 0, 0, 0xe2, 1));
+  bench.DrainQueue();
+  bench.Step(bench.Hold(bench.InsertOnly(MakeUop(50, 0, 0), true, true, 0, 0, 0, 0, 0xe0, 1)));
+  bench.Step(bench.Hold(bench.InsertOnly(MakeUop(51, 0, 0), true, true, 0, 0, 0, 0, 0xe1, 1)));
+  bench.Step(bench.Hold(bench.InsertOnly(MakeUop(52, 0, 0), true, true, 0, 0, 0, 0, 0xe2, 1)));
   rep.Check(bench.shadow(0)->count() == 3, "kill_younger: three macros queued in age order");
   Stimulus mid = bench.Kill(51, 0, /*younger=*/true);
   mid.grant_ready = false;
   bench.Step(mid);
   rep.Check(bench.shadow(0)->count() == 1,
             "kill_younger: the named macro and everything younger than it went");
-  for (int i = 0; i < 32 && bench.shadow(0)->count() > 0; i++) bench.Idle();
+  bench.DrainQueue();
 }
 
 // Phase 11: exactly-once ownership. Two live uops naming one destination is a
 // second producer for a destination, and it must be *reported*, not merged.
 void PhaseDstConflict(Bench& bench, mosaic::Reporter& rep) {
-  for (int i = 0; i < 32 && bench.shadow(0)->count() > 0; i++) bench.Idle();
+  bench.DrainQueue();
 
-  bench.Step(bench.InsertOnly(MakeUop(50, 0, 0), true, true, 0, 0, 0, 0, 0xe0, 7));
+  bench.Step(bench.Hold(bench.InsertOnly(MakeUop(50, 0, 0), true, true, 0, 0, 0, 0, 0xe0, 7)));
   rep.Check(!bench.top()->c0_dst_conflict, "dst-conflict: a single destination is not a conflict");
   // A second uop naming the same (tag, generation).
   Stimulus dup = bench.InsertOnly(MakeUop(50, 0, 1), true, true, 0, 0, 0, 0, 0xe0, 7);
@@ -1821,8 +1867,8 @@ void PhaseDstConflict(Bench& bench, mosaic::Reporter& rep) {
   rep.Check(bench.coverage(0).dst_conflicts >= 1, "dst-conflict: the report was observed");
   // The same tag with a different generation is a *different* physical register
   // version, so it is not a conflict -- the generation is what makes it so.
-  for (int i = 0; i < 32 && bench.shadow(0)->count() > 0; i++) bench.Idle();
-  bench.Step(bench.InsertOnly(MakeUop(50, 0, 0), true, true, 0, 0, 0, 0, 0xe1, 7));
+  bench.DrainQueue();
+  bench.Step(bench.Hold(bench.InsertOnly(MakeUop(50, 0, 0), true, true, 0, 0, 0, 0, 0xe1, 7)));
   Stimulus other_gen = bench.InsertOnly(MakeUop(50, 0, 1), true, true, 0, 0, 0, 0, 0xe1, 8);
   other_gen.grant_ready = false;
   bench.Step(other_gen);
@@ -1834,11 +1880,11 @@ void PhaseDstConflict(Bench& bench, mosaic::Reporter& rep) {
 // order with no gaps. The per-cycle shadow check does the ordering; the phase
 // asserts the refusal and the drain.
 void PhaseFullAndOrder(Bench& bench, mosaic::Reporter& rep) {
-  for (int i = 0; i < 32 && bench.shadow(0)->count() > 0; i++) bench.Idle();
+  bench.DrainQueue();
 
   for (int i = 0; i < static_cast<int>(kEntries); i++) {
-    bench.Step(bench.InsertOnly(MakeUop(60, 0, static_cast<uint32_t>(i)), true, true,
-                                0, 0, 0, 0, 0xf0 + i, 1));
+    bench.Step(bench.Hold(bench.InsertOnly(MakeUop(60, 0, static_cast<uint32_t>(i)), true, true,
+                                           0, 0, 0, 0, 0xf0 + i, 1)));
   }
   rep.Check(bench.shadow(0)->count() == kEntries, "full: the queue is at capacity");
   rep.Check(bench.top()->c0_full, "full: o_full is high");

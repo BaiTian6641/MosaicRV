@@ -572,15 +572,11 @@ class Harness {
   // shadow without the harness exposing it for mutation.
   uint32_t shadow_gen_w() const { return shadow_->gen_w(); }
   uint32_t shadow_gen_mask() const { return shadow_->gen_mask(); }
-  uint32_t shadow_entries() const { return shadow_->entries(); }
-  const std::vector<Dest>& shadow_spec_map() const { return shadow_->spec_map(); }
-  uint32_t shadow_journal_len() const { return shadow_->journal_length(); }
 
   // The live state as read back from the DUT's observation ports, which is what
   // the phase-level assertions use. Reading the DUT rather than the shadow is
   // the point: a phase assertion that only compared shadow to shadow would pass
   // no matter what the hardware did.
-  const std::vector<bool>& shadow_free_set() const { return shadow_->free_set(); }
   bool shadow_is_free(uint32_t tag) const { return shadow_->free_set()[tag]; }
   bool shadow_gen_valid(uint32_t tag) const { return shadow_->gen_valid()[tag]; }
   uint32_t shadow_gen_of(uint32_t tag) const { return shadow_->gen()[tag]; }
@@ -709,7 +705,6 @@ class Harness {
   }
 
   void CompareOutputs(const Stim& s, const std::string& where) {
-    last_stim_ = s.str();
     CaptureObserved(s);
     const Outputs e = shadow_->Eval(s);
     const std::string stim = " " + s.str();
@@ -906,7 +901,6 @@ class Harness {
     return static_cast<uint32_t>(n);
   }
 
-  std::string last_stim_;
   Vmosaic_rename_tb* dut_;
   mosaic::ClockDriver* clk_;
   uint64_t max_cycles_;
@@ -1546,8 +1540,7 @@ void PhaseX0(Harness* h, mosaic::Reporter* reporter, uint32_t entries, uint32_t 
 }
 
 // Phase 6: squash.
-void PhaseSquash(Harness* h, mosaic::Reporter* reporter, uint32_t arch_regs,
-                 uint32_t journal) {
+void PhaseSquash(Harness* h, mosaic::Reporter* reporter, uint32_t arch_regs) {
   // Build some committed state: three instructions that allocate, write back and
   // commit. x5, x6 and x7 move off their reset mappings, which is what makes the
   // committed map non-trivial for the restore to be checked against.
@@ -1724,7 +1717,7 @@ void PhaseSquash(Harness* h, mosaic::Reporter* reporter, uint32_t arch_regs,
 
 // Phase 7: exhaustion.
 void PhaseExhaustion(Harness* h, mosaic::Reporter* reporter, uint32_t entries,
-                     uint32_t arch_regs, uint32_t journal) {
+                     uint32_t arch_regs) {
   // Fill the free set without releasing anything. A checkpoint goes in at the start
   // of each iteration: the undo window holds one entry per allocation since the
   // last checkpoint and is sized for a full register file of them, and this
@@ -1957,8 +1950,6 @@ void PhaseRandom(Harness* h, mosaic::Reporter* reporter, uint32_t entries, uint3
                       " exhaustion reports over " + Dec(cycles) + " cycles");
 }
 
-// Small accessors the phases need, kept here so the phases read as prose.
-uint32_t dut_alloc_tag(Harness* h) { return h->observed().alloc_new.tag; }
 
 }  // namespace
 
@@ -2045,11 +2036,11 @@ int main(int argc, char** argv) {
 
     fresh();
     harness.Phase("squash");
-    PhaseSquash(&harness, &reporter, arch_regs, journal);
+    PhaseSquash(&harness, &reporter, arch_regs);
 
     fresh();
     harness.Phase("exhaustion");
-    PhaseExhaustion(&harness, &reporter, entries, arch_regs, journal);
+    PhaseExhaustion(&harness, &reporter, entries, arch_regs);
 
     fresh();
     harness.Phase("random");

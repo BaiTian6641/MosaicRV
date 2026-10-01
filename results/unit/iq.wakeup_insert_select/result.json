@@ -2,15 +2,15 @@
   "schema_version": 1,
   "case": "iq.wakeup_insert_select",
   "verdict": "FAIL",
-  "detail": "23323747 failed of 59382130 checks over 199800 cycles",
+  "detail": "34752447 failed of 57388175 checks over 199800 cycles",
   "seed": 1,
   "max_cycles": 200000,
-  "checks": 59382130,
-  "failures": 23323747,
+  "checks": 57388175,
+  "failures": 34752447,
   "image": "",
   "expect": "",
   "tool": "Verilator 5.052 2026-09-05",
-  "timestamp": "2026-10-01T07:16:06Z",
-  "first_mismatch": "",
-  "failed_checks": ["same-cycle: the entry left after being accepted", "c0: o_dst_conflict matches the shadow's duplicate-destination search", "c1: o_dst_conflict matches the shadow's duplicate-destination search", "c0: o_dst_conflict matches the shadow's duplicate-destination search", "c1: o_dst_conflict matches the shadow's duplicate-destination search", "c0: o_dst_conflict matches the shadow's duplicate-destination search", "c1: o_dst_conflict matches the shadow's duplicate-destination search", "c0: o_dst_conflict matches the shadow's duplicate-destination search", "c1: o_dst_conflict matches the shadow's duplicate-destination search", "c0: o_dst_conflict matches the shadow's duplicate-destination search", "c1: o_dst_conflict matches the shadow's duplicate-destination search", "c0: o_dst_conflict matches the shadow's duplicate-destination search", "c1: o_dst_conflict matches the shadow's duplicate-destination search", "c0: o_dst_conflict matches the shadow's duplicate-destination search", "c1: o_dst_conflict matches the shadow's duplicate-destination search", "c0: o_dst_conflict matches the shadow's duplicate-destination search", "c1: o_dst_conflict matches the shadow's duplicate-destination search", "c0: o_dst_conflict matches the shadow's duplicate-destination search", "c1: o_dst_conflict matches the shadow's duplicate-destination search", "c0: granted uop identity", "c0: granted immediate", "c0: granted operand b", "c0: granted dst tag", "c0: grant_index names the slot presented", "c1: granted uop identity", "c1: granted immediate", "c1: granted operand b", "c1: granted dst tag", "c1: grant_index names the slot presented", "c0: alloc_index is the first free slot from the pointer", "c0: the valid vector is exactly the shadow's live slots", "c0: o_age_ctr is the shadow's absolute counter reduced modulo the age width"]
+  "timestamp": "2026-10-01T07:19:37Z",
+  "first_mismatch": "c0 back-pressure: expected grant_valid still high, got grant_valid dropped",
+  "failed_checks": ["kill_younger: three older entries plus a two-uop macro", "kill_younger: only the named macro went; the three older entries survived", "kill_younger: the suffix kill was exercised", "dst-conflict: a single destination is not a conflict", "dst-conflict: the same tag with a new generation is a new destination", "full: entries issue in age order", "full: entries issue in age order", "full: entries issue in age order", "full: entries issue in age order", "full: entries issue in age order", "full: entries issue in age order", "full: entries issue in age order", "c0: grant_valid matches the shadow's prediction", "c0: granted uop identity", "c0: granted alu_op", "c0: granted immediate", "c0: granted operand a", "c0: granted operand b", "c0: granted dst tag", "c0: granted dst generation", "c0: o_grant_total", "c0: o_grant_total", "c0: grant_valid matches the shadow's prediction", "c0: granted uop identity", "c0: granted alu_op", "c0: granted immediate", "c0: granted operand a", "c0: granted operand b", "c0: granted dst tag", "c0: granted dst generation", "c0: o_grant_total", "c0: o_grant_total"]
 }
