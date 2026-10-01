@@ -11,6 +11,10 @@ Produces, under ``build/<profile>/``:
                         quote, so they cannot drift apart.
 * ``rtl/mosaic_cfg_pkg.svh`` — synthesisable ``localparam`` constants derived
                         from exactly the same inputs.
+* ``rtl/mosaic_csr_pkg.svh`` — the CSR implementation table: one address, reset
+                        value, write mask and write-legality flag per CSR, decoded
+                        from config/csr/mode_m.json. The CSR file includes it and
+                        carries no second copy of any of those numbers.
 * ``rtl/filelist.f``         — the ordered source list handed to Verilator/Yosys.
 
 If the configuration does not check out, **no** manifest is written and the exit
@@ -258,6 +262,211 @@ def render_sv_id_package(bundle: config_check.Bundle) -> str:
     return "\n".join(lines)
 
 
+def _bit_mask(specs, width: int, where: str) -> int:
+    """Turn the table's "msb:lsb" / "bit" strings into one integer mask.
+
+    The table is the only place these numbers live; this function is a decoder,
+    not a second copy. A range that does not fit the declared width is a hard
+    error rather than a silent truncation, because a truncated mask would make
+    the RTL accept a write it should refuse.
+    """
+    mask = 0
+    for spec in specs or []:
+        if ":" in spec:
+            msb_text, lsb_text = spec.split(":", 1)
+            msb, lsb = int(msb_text), int(lsb_text)
+        else:
+            msb = lsb = int(spec)
+        if not (0 <= lsb <= msb < width):
+            raise SystemExit(
+                "csr %s: bit range %r does not fit a %d-bit register" % (where, spec, width)
+            )
+        for bit in range(lsb, msb + 1):
+            mask |= 1 << bit
+    return mask
+
+
+# Registers whose only legal value is zero because this profile implements no
+# privilege mode for the value to name. The clause is in each row's spec_clause:
+# "p0 is M-only ... so no synchronous exception can occur in a less privileged
+# mode and every bit is WARL whose only legal value is 0" (medeleg) and "With no
+# S or U mode there is no delegation target, so every bit is WARL whose only
+# legal value is 0" (mideleg). The rule is keyed on the *profile*, not on a
+# hand-edited mask, so a profile that adds S or U gets the writable register back
+# from the same table without anyone editing this file.
+NO_TARGET_WITHOUT_LESS_PRIVILEGE = ("medeleg", "mideleg")
+
+
+def render_sv_csr_package(bundle: config_check.Bundle) -> str:
+    """Emit the CSR implementation table as a synthesisable package.
+
+    Every address, reset value, writable-bit mask and write-legality flag the CSR
+    file needs comes from ``config/csr/mode_m.json`` -- the same file
+    tools/check_profile.py validates -- so the RTL and the configuration checker
+    cannot disagree about which CSRs exist or which bits of them software may
+    change. The RTL names these constants; it does not repeat one of the numbers.
+
+    Access modes map to a mask and a legality flag, and nothing else is derived
+    here:
+
+      * ``ro`` / ``fixed``      -> write mask 0, write illegal
+      * ``rw`` / ``rwr``        -> write mask = writable_fields, write legal
+      * ``wpri_fields``         -> never writable and read back zero, so they are
+                                   absent from the write mask by construction.
+
+    The one rule that is not a mask projection is the delegation registers: with
+    no S or U mode there is no delegation target, so the table's "the whole
+    register is a WARL field" collapses to "the only legal value is 0". That is
+    applied here, from the profile's own privilege list, rather than being
+    written into the RTL as a second opinion.
+    """
+    profile = bundle.profile
+    less_privileged = [mode for mode in profile["privilege_modes"] if mode in ("S", "U")]
+
+    csrs = []
+    for table in bundle.csr_tables:
+        for block in table["modes"]:
+            for csr in block["csrs"]:
+                csrs.append(csr)
+    csrs.sort(key=lambda csr: csr["address"])
+
+    seen = {}
+    for csr in csrs:
+        if csr["address"] in seen:
+            raise SystemExit(
+                "csr %s: address 0x%03x already emitted for %s; the generated package "
+                "cannot hold two registers at one number"
+                % (csr["name"], csr["address"], seen[csr["address"]])
+            )
+        seen[csr["address"]] = csr["name"]
+
+    lines = []
+    add = lines.append
+    add("// GENERATED FILE - do not edit.")
+    add("// Produced by tools/gen_manifest.py --profile %s from config/csr/mode_m.json." % bundle.name)
+    add("//")
+    add("// One address, one reset value and one write mask per CSR, decoded from the")
+    add("// implementation table that tools/check_profile.py validates. The CSR file")
+    add("// names these constants and carries no second copy of any of them.")
+    add("//")
+    add("//   MOSAIC_CSR_WMASK_<NAME>        bits software may change (writable_fields)")
+    add("//   MOSAIC_CSR_WRITE_LEGAL_<NAME>  whether a write to the register is legal")
+    add("//                                  at all (access mode != ro)")
+    add("//")
+    add("// Bits in a WARL/WPRI register that are neither listed as writable nor as")
+    add("// write-preserve-zero are reset-only: they read back their reset value.")
+    add("")
+    add("`ifndef MOSAIC_CSR_PKG_SV_")
+    add("`define MOSAIC_CSR_PKG_SV_")
+    add("")
+    add("package mosaic_csr_pkg;")
+    add("")
+    add("  localparam int unsigned MOSAIC_CSR_COUNT = %d;" % len(csrs))
+    add("")
+
+    for csr in csrs:
+        name = csr["name"].upper()
+        width = csr["width"]
+        access = csr["access"]
+        write_legal = access != "ro"
+        if write_legal:
+            wmask = _bit_mask(csr.get("writable_fields", []), width,
+                              "csr %s writable_fields" % csr["name"])
+        else:
+            wmask = 0
+        note = ""
+        if csr["name"] in NO_TARGET_WITHOUT_LESS_PRIVILEGE and not less_privileged:
+            if wmask != 0:
+                note = ("  // %s: no S or U mode in profile %s, so there is no delegation\n"
+                        "  // target and every bit is WARL whose only legal value is 0;\n"
+                        "  // writes are accepted and canonicalise to 0."
+                        % (csr["name"], bundle.name))
+            wmask = 0
+        add("  // ---------------------------------------------------------------- %s" % csr["name"])
+        add("  // 0x%03X, %d-bit, access %s, %s, reset 0x%X"
+            % (csr["address"], width, access, csr["behavior"], csr["reset"]))
+        if note:
+            add(note)
+        add("  localparam logic [11:0] MOSAIC_CSR_ADDR_%-11s = 12'h%03x;"
+            % (name, csr["address"]))
+        add("  localparam logic [63:0] MOSAIC_CSR_RESET_%-10s = %s;"
+            % (name, _hex64(csr["reset"])))
+        add("  localparam logic [63:0] MOSAIC_CSR_WMASK_%-10s = %s;"
+            % (name, _hex64(wmask)))
+        add("  localparam logic        MOSAIC_CSR_WRITE_LEGAL_%-2s = 1'b%d;"
+            % (name, 1 if write_legal else 0))
+        add("")
+
+    add("endpackage : mosaic_csr_pkg")
+    add("")
+    add("`endif  // MOSAIC_CSR_PKG_SV_")
+    add("")
+    return "\n".join(lines)
+
+
+def render_csr_header(bundle: config_check.Bundle) -> str:
+    """Emit the CSR implementation table for the C++ testbench.
+
+    The unit test's independent model needs the same addresses, reset values and
+    write masks the RTL uses. Hand-copying them into sim/unit/tb_csr.cpp would be
+    a second copy of a configured number -- the thing this project refuses -- so
+    they arrive from the same decode of the same table. What stays independent is
+    the model's *behaviour*: the WARL canonicalisation, the trap/MRET field
+    transitions, the boundary priority and the counter arithmetic are written
+    from the contract prose in rtl/core/mosaic_csr.sv and share no code with it.
+    """
+    profile = bundle.profile
+    less_privileged = [mode for mode in profile["privilege_modes"] if mode in ("S", "U")]
+
+    csrs = []
+    for table in bundle.csr_tables:
+        for block in table["modes"]:
+            for csr in block["csrs"]:
+                csrs.append(csr)
+    csrs.sort(key=lambda csr: csr["address"])
+
+    lines = []
+    add = lines.append
+    add("// GENERATED FILE - do not edit.")
+    add("// Produced by tools/gen_manifest.py --profile %s from config/csr/mode_m.json." % bundle.name)
+    add("//")
+    add("// The unit test's shadow model reads its table from here so there is exactly")
+    add("// one copy of every CSR address, reset value and write mask in the tree; the")
+    add("// model's behaviour is written independently from the RTL's contract.")
+    add("")
+    add("#ifndef MOSAIC_CSR_TABLE_H_")
+    add("#define MOSAIC_CSR_TABLE_H_")
+    add("")
+    add("#include <stdint.h>")
+    add("")
+    add("#define MOSAIC_CSR_COUNT %d" % len(csrs))
+    add("")
+    add("typedef struct {")
+    add("  const char *name;")
+    add("  uint16_t    addr;         /* 12-bit CSR number */")
+    add("  uint64_t    reset;        /* reset value */")
+    add("  uint64_t    wmask;        /* bits software may change */")
+    add("  uint8_t     write_legal;  /* 0 = a write is an illegal CSR access */")
+    add("} mosaic_csr_desc_t;")
+    add("")
+    add("static const mosaic_csr_desc_t MOSAIC_CSR_TABLE[MOSAIC_CSR_COUNT] = {")
+    for csr in csrs:
+        width = csr["width"]
+        access = csr["access"]
+        write_legal = access != "ro"
+        wmask = _bit_mask(csr.get("writable_fields", []), width,
+                          "csr %s writable_fields" % csr["name"]) if write_legal else 0
+        if csr["name"] in NO_TARGET_WITHOUT_LESS_PRIVILEGE and not less_privileged:
+            wmask = 0
+        add('  { "%-11s", 0x%03x, UINT64_C(0x%016x), UINT64_C(0x%016x), %d },'
+            % (csr["name"], csr["address"], csr["reset"], wmask, 1 if write_legal else 0))
+    add("};")
+    add("")
+    add("#endif  // MOSAIC_CSR_TABLE_H_")
+    add("")
+    return "\n".join(lines)
+
+
 def render_platform_header(bundle: config_check.Bundle) -> str:
     """Emit the C-visible platform contract for the simulation harness.
 
@@ -382,10 +591,17 @@ def main() -> int:
     with open(id_path, "w") as handle:
         handle.write(render_sv_id_package(bundle))
 
+    csr_path = os.path.join(rtl_out, "mosaic_csr_pkg.svh")
+    with open(csr_path, "w") as handle:
+        handle.write(render_sv_csr_package(bundle))
+
     sim_out = os.path.join(out_dir, "sim")
     os.makedirs(sim_out, exist_ok=True)
     with open(os.path.join(sim_out, "mosaic_platform.h"), "w") as handle:
         handle.write(render_platform_header(bundle))
+
+    with open(os.path.join(sim_out, "mosaic_csr_table.h"), "w") as handle:
+        handle.write(render_csr_header(bundle))
 
     sources = _collect_filelist()
     list_path = os.path.join(rtl_out, "filelist.f")

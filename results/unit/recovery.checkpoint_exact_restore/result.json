@@ -2,7 +2,7 @@
   "schema_version": 1,
   "case": "recovery.checkpoint_exact_restore",
   "verdict": "FAIL",
-  "detail": "contract violated: exact-restore: cycle 52: dbg_gen_valid: word 0: expected 0xffffdfff00000000, got 0x00001fff00000000[alloc v=1 rd=7 gen=40 | ckpt v=0 gen=0 | commit v=0 rd=0 tag=0 gen=0 retire=0 | wb v=0 tag=0 gen=0 | free v=0 tag=0 gen=0 | rdr0 v=0 gen=0 pc=0x0000000000000000 fault=0 | rdr1 v=0 gen=0 pc=0x0000000000000000 fault=0 | cred v=0 id=0 | rsp v=0 id=0 ep=0]",
+  "detail": "contract violated: nested-ckpt: cycle 57: alloc_gen_regress: expected 0, got 1[alloc v=1 rd=3 gen=1 | ckpt v=0 gen=0 | commit v=0 rd=0 tag=0 gen=0 retire=0 | wb v=0 tag=0 gen=0 | free v=0 tag=0 gen=0 | rdr0 v=0 gen=0 pc=0x0000000000000000 fault=0 | rdr1 v=0 gen=0 pc=0x0000000000000000 fault=0 | cred v=0 id=0 | rsp v=0 id=0 ep=0]",
   "seed": 1,
   "max_cycles": 200000,
   "checks": 1,
@@ -10,7 +10,7 @@
   "image": "",
   "expect": "",
   "tool": "Verilator 5.052 2026-09-05",
-  "timestamp": "2026-10-01T18:50:40Z",
-  "first_mismatch": "exact-restore: cycle 52: dbg_gen_valid: word 0: expected 0xffffdfff00000000, got 0x00001fff00000000[alloc v=1 rd=7 gen=40 | ckpt v=0 gen=0 | commit v=0 rd=0 tag=0 gen=0 retire=0 | wb v=0 tag=0 gen=0 | free v=0 tag=0 gen=0 | rdr0 v=0 gen=0 pc=0x0000000000000000 fault=0 | rdr1 v=0 gen=0 pc=0x0000000000000000 fault=0 | cred v=0 id=0 | rsp v=0 id=0 ep=0]: expected contract holds, got contract violated",
+  "timestamp": "2026-10-01T18:54:42Z",
+  "first_mismatch": "nested-ckpt: cycle 57: alloc_gen_regress: expected 0, got 1[alloc v=1 rd=3 gen=1 | ckpt v=0 gen=0 | commit v=0 rd=0 tag=0 gen=0 retire=0 | wb v=0 tag=0 gen=0 | free v=0 tag=0 gen=0 | rdr0 v=0 gen=0 pc=0x0000000000000000 fault=0 | rdr1 v=0 gen=0 pc=0x0000000000000000 fault=0 | cred v=0 id=0 | rsp v=0 id=0 ep=0]: expected contract holds, got contract violated",
   "failed_checks": ["no contract violation in any phase"]
 }

@@ -782,6 +782,15 @@ class ShadowRecovery {
     pre_edge.tag_prev_valid = gen_valid_[scan];
     pre_edge.tag_prev_gen  = gen_[scan];
 
+    // The generation-validity bit the *journal* records for this allocation: the
+    // tag's state before this cycle's allocation, which is the value the undo
+    // restores. It is captured here, before step 1 below clears and re-sets
+    // `gen_valid_[scan]`, because capturing it after the allocation stores `true`
+    // for every entry and the undo then marks a never-allocated tag valid again
+    // -- a late writeback for that tag would be accepted by the restored machine.
+    // The RTL reads its register (pre-edge value) for the same reason.
+    const bool journal_prev_valid = gen_valid_[scan];
+
     // 1. Allocation.
     if (v.alloc_new_valid) {
       free_.Set(scan, false);
@@ -840,7 +849,7 @@ class ShadowRecovery {
     // ---- the journal
     if (v.alloc_new_valid && !ckpt_push) {
       j_tag_[j_len_] = scan;
-      j_prev_[j_len_] = gen_valid_[scan];
+      j_prev_[j_len_] = journal_prev_valid;
       j_len_++;
       journal_entries_++;
     }

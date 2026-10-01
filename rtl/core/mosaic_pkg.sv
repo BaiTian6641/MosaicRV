@@ -26,6 +26,9 @@ package mosaic_pkg;
   localparam logic [6:0] OP_JALR      = 7'b1100111;
   localparam logic [6:0] OP_JAL       = 7'b1101111;
   localparam logic [6:0] OP_MUL_DIV   = 7'b0110011;  // mul div rem + *u variants
+  localparam logic [6:0] OP_32        = 7'b0111011;  // 32-bit result forms; on
+                                                     // RV64 only mulw divw divuw
+                                                     // remw remuw (funct7 0000001)
   localparam logic [6:0] OP_SYSTEM    = 7'b1110011;  // ecall ebreak mret csr*
 
   // funct3
@@ -145,6 +148,9 @@ package mosaic_pkg;
     logic        is_muldiv;
     md_op_e      md_op;
     logic        md_signed;
+    logic        md_w;          // 1 = 32-bit W form (OP-32, funct7 0000001):
+                                // operands are the low 32 bits, result is
+                                // sign-extended to 64 bits
 
     logic        is_system;
     logic        is_ecall;

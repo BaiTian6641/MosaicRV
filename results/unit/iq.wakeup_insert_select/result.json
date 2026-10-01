@@ -2,14 +2,14 @@
   "schema_version": 1,
   "case": "iq.wakeup_insert_select",
   "verdict": "PASS",
-  "detail": "56850460 checks over 199800 cycles, 4 reset cycles, 2 clusters",
+  "detail": "56848546 checks over 199800 cycles, 4 reset cycles, 2 clusters",
   "seed": 1,
   "max_cycles": 200000,
-  "checks": 56850460,
+  "checks": 56848546,
   "failures": 0,
   "image": "",
   "expect": "",
   "tool": "Verilator 5.052 2026-09-05",
-  "timestamp": "2026-10-01T18:47:19Z",
+  "timestamp": "2026-10-01T18:53:15Z",
   "first_mismatch": ""
 }

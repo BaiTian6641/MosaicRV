@@ -954,3 +954,68 @@ failed when it was proof the opposite. And the concatenation fix I sent as
 "verified against both tools" compiled but had the field order wrong for the actual
 layout — I had verified that it compiled, not that it was correct, and said
 something stronger than I had checked.
+
+
+---
+
+## 2026-10-01 — Stage 1 closed out in parallel; baseline measured before any change
+
+**Baseline, measured first, so every later claim has something to be compared with.**
+`python3 tools/run_unit.py --profile p0 --all` on the unmodified tree: **14 PASS, 2 FAIL**.
+
+| case | task | baseline |
+|---|---|---|
+| alu.boundaries | I-011 | PASS |
+| core.bringup_vs_reference | I-008 | PASS |
+| decode.rv64im_reserved | I-010 | PASS |
+| fetch.redirect_late_response | I-009 | PASS |
+| fifo.backpressure | I-005 | PASS |
+| harness.{reset_load_exit,bad_image,timeout,injected_mismatch} | I-004 | PASS |
+| iq.wakeup_insert_select | I-022 | PASS (56,850,460 checks / 199,800 cycles) |
+| predictor.btb_aliasing | I-021 | PASS |
+| ram.collision_matrix | I-006 | PASS |
+| rename.single_width_ownership | I-013 | PASS |
+| rob.out_of_order_children | I-016 | PASS |
+| recovery.checkpoint_exact_restore | I-018 | **FAIL** cycle 52, `dbg_gen_valid` |
+| retire.head_block_and_dual | I-017 | **FAIL** cycle 695, `rob_squashed_total` expected 2 got 0 |
+
+**I-022 passes now, and that is a change from the record.** The previous entry left the
+randomised phase diverging on cluster 1 and the refused-insert pointer undiagnosed. The
+case now reports a full-budget randomised soak with per-cycle comparison. Whether that
+pass is *real coverage* is being audited rather than assumed: a case that consumes its
+whole cycle budget can also be a case that stopped comparing, and the difference is
+invisible from the RESULT line alone.
+
+**Sixteen cases became twenty-three, none of them by weakening an existing one.**
+Registered, with the card's own CASE name, the seven packages whose modules did not exist
+or whose card name was not runnable: `muldiv.kill_and_edges` (I-012),
+`rename.same_cycle_chain` (I-014), `prf.read_bank_collision` (I-015),
+`csr.precise_trap_mret` (I-019), `interrupt.boundary_replay` (I-020), plus the card-named
+aliases `commit.head_block_and_dual` (I-017) and `recovery.nested_branch_full_queues`
+(I-018) for the two failing cases, so the card's own CASE string is executable instead of
+being a name in a document that nothing runs.
+
+Two interface decisions were made before any module was written, because both are places
+where a second source of truth would otherwise appear:
+
+- **`mip` is owned by `mosaic_interrupt`, not by `mosaic_csr`.** The CSR file forwards
+  software writes to 0x344 and *reads* the interrupt unit's view. The alternative — split
+  ownership of one architectural register across two modules — is how a CSR read and a
+  pending bit drift apart.
+- **The core's memory port is valid/ready, not ack-based**, for both instruction and data
+  sides, so a request may be offered before the memory endpoint is ready and a response may
+  take as long as it takes. The bring-up core's one-cycle model is a testbench of that core,
+  not the contract the out-of-order core will be held to.
+
+**What is running in parallel, and the discipline that governs it.** Eleven packages are
+in flight, each owning a disjoint set of files; `tests/unit/registry.json` was written here,
+before dispatch, so no two agents can race on it. Every agent is held to the same evidence
+rules that the earlier packages had to earn: mutants must be rebuilt and observed to FAIL
+with a printed delta, a disagreement between shadow and DUT is adjudicated from the
+specification rather than from the DUT's output, and a partial result reported honestly
+outranks a green line produced by a weakened check.
+
+Stage 0 remains 11 of 239 work packages. Stage 1 has eight packages in flight or under
+repair; Stage 2's leaf modules (lease allocator, per-cluster result FIFO, remote link) are
+being built in parallel because none of them has a consumer yet, and their interfaces are
+frozen by the integrator rather than discovered during integration.

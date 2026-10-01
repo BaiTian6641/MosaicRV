@@ -14,6 +14,12 @@
 //   * M extension: mul mulh mulhsu mulhu div divu rem remu, classified into
 //     `is_muldiv` / `md_op` / `md_signed` for the muldiv unit (I-012), which
 //     owns the datapath and is not instantiated here.
+//   * M extension word forms: mulw divw divuw remw remuw, on OP-32 (0111011)
+//     with funct7 0000001, classified the same way plus `md_w`. The five
+//     encodings the ISA defines are legal; funct3 001/010/011 are reserved
+//     because there is no mulhw/mulhsuw/mulhuw, and the RV32-only I word forms
+//     (addw subw sllw srlw sraw, funct7 0000000/0100000 on the same opcode) are
+//     reserved on RV64.
 //   * mret, classified but not executed: the trap unit (I-019) consumes it.
 //   * Everything else is illegal. There is no partial decode. An instruction is
 //     either legal -- in which case `ctl` is CTL_ILLEGAL with the fields this
@@ -46,6 +52,12 @@
 //                      remu -- exactly the three funct3 patterns 011/101/111.
 //                      mulhsu's mixed signedness is carried by MD_MULHSU
 //                      itself, not by this bit.
+//   md_w               the word forms carry the same md_op/md_signed encoding
+//                      as their 64-bit counterparts and additionally set md_w,
+//                      because the datapath has to know to work on the low 32
+//                      bits and sign-extend the 32-bit result. Every 64-bit
+//                      form leaves it 0, so a consumer that ignores md_w gets
+//                      the 64-bit behaviour rather than a half-word one.
 //   csr_reads/writes   the architectural intent after the x0 rules: csrrw
 //                      with rd == x0 does not read, csrrs/csrrc with rs1 == x0
 //                      do not write. `uses_rs1` is 1 for every CSR form -- in
@@ -63,6 +75,12 @@
 // The illegal set is enumerated and asserted by CASE=decode.rv64im_reserved,
 // not left to fall out of a default arm.
 // results/reports/I-010-011-decode-alu.md explains each reserved class.
+//
+// OP-32 has two reserved classes of its own and both stay illegal here: the
+// three high-half M word encodings (funct3 001/010/011 with funct7 0000001,
+// which would name mulhw/mulhsuw/mulhuw -- the ISA defines no such
+// instructions) and every RV32-only I word form (funct7 0000000/0100000 on the
+// same opcode).
 //
 // Mutation hooks
 // --------------
@@ -100,11 +118,10 @@ module mosaic_decoder (
   localparam bit MutSImmAsI    = 1'b0;
 `endif
 `ifdef MOSAIC_DECODER_MUTANT_RV32_WORD_LEGAL
-  // The mutation arm is `ifdef'd directly in the case statement below; there
-  // is no localparam for it, because the whole arm *is* the mutation.
+  localparam bit MutRv32Word  = 1'b1;   // RV32-only I word forms accepted on RV64
 `else
-  // The shipping build decodes no OP-32 arm at all: addw/subw/sllw/srlw/sraw
-  // are RV32-only and reserved on RV64.
+  localparam bit MutRv32Word  = 1'b0;   // the shipping build: funct7 0000000
+                                        // and 0100000 on OP-32 are reserved
 `endif
 `ifdef MOSAIC_DECODER_MUTANT_RESERVED_F3_LEGAL
   localparam bit MutReservedF3 = 1'b1;   // LOAD funct3 111 accepted
@@ -590,50 +607,72 @@ module mosaic_decoder (
         endcase
       end
 
-`ifdef MOSAIC_DECODER_MUTANT_RV32_WORD_LEGAL
-      // ------------------------------------------------------ OP-32 (RV32)
-      // Mutation only. The RV32-only word forms decode as if this were an RV32
-      // core; on RV64 they are reserved and must raise an illegal instruction.
-      7'b0111011: begin
+      // ------------------------------------------------------ OP-32 (W forms)
+      // Opcode 0111011. On RV64 only the M extension's word forms live here:
+      // mulw, divw, divuw, remw and remuw, all selected by funct7 = 0000001 and
+      // separated by funct3 exactly as the 64-bit forms are. They are classified
+      // into the same md_op / md_signed pair as their 64-bit counterparts and
+      // additionally set md_w, so the muldiv unit (I-012) learns the width from
+      // one bit rather than from a second opcode.
+      //
+      // funct3 001/010/011 stay reserved: they would name mulhw, mulhsuw and
+      // mulhuw, and the ISA defines no high-half word multiply. So do funct7
+      // 0000000 and 0100000 on this opcode -- addw subw sllw srlw sraw are the
+      // RV32-only I word forms and are reserved on RV64. Accepting them is the
+      // mutation MOSAIC_DECODER_MUTANT_RV32_WORD_LEGAL exists to prove the test
+      // catches.
+      mosaic_pkg::OP_32: begin
         ctl.uses_rs1  = 1'b1;
         ctl.uses_rs2  = 1'b1;
-        ctl.uses_imm  = 1'b1;
         ctl.rs1       = rs1_f;
         ctl.rs2       = rs2_f;
         ctl.rd        = rd_f;
         ctl.reg_write = (rd_f != 5'd0);
-        ctl.imm       = imm_i;
-        ctl.uses_alu  = 1'b1;
-        legal         = 1'b1;
-        case (funct3)
-          mosaic_pkg::F3_ADD_SUB: begin
-            if (funct7 == F7_BASE)     ctl.alu_op = mosaic_pkg::ALU_ADDW;
-            else if (funct7 == F7_ALT) ctl.alu_op = mosaic_pkg::ALU_SUBW;
-            else                          legal = 1'b0;
-          end
-          mosaic_pkg::F3_SLL: begin
-            if (funct7 == F7_BASE)     ctl.alu_op = mosaic_pkg::ALU_SLLW;
-            else                          legal = 1'b0;
-          end
-          mosaic_pkg::F3_SRL_SRA: begin
-            if (funct7 == F7_BASE)     ctl.alu_op = mosaic_pkg::ALU_SRLW;
-            else if (funct7 == F7_ALT) ctl.alu_op = mosaic_pkg::ALU_SRAW;
-            else                          legal = 1'b0;
-          end
-          default: legal = 1'b0;
-        endcase
+        if (funct7 == F7_M) begin
+          ctl.is_muldiv = 1'b1;
+          ctl.md_op     = mosaic_pkg::md_op_e'(funct3);
+          ctl.md_signed = md_is_signed;
+          ctl.md_w      = 1'b1;
+          // The three high-half funct3 values are reserved, not "mulh with a
+          // word result": there is no such instruction, and a reserved encoding
+          // that half-works is a reserved encoding that becomes a bug.
+          legal = (funct3 != 3'b001) && (funct3 != 3'b010) && (funct3 != 3'b011);
+        end else if (MutRv32Word) begin
+          // Mutation only. The RV32-only I word forms decode as if this were an
+          // RV32 core; on RV64 every one of them must raise an illegal
+          // instruction.
+          ctl.uses_imm = 1'b1;
+          ctl.imm      = imm_i;
+          ctl.uses_alu = 1'b1;
+          legal        = 1'b1;
+          case (funct3)
+            mosaic_pkg::F3_ADD_SUB: begin
+              if (funct7 == F7_BASE)     ctl.alu_op = mosaic_pkg::ALU_ADDW;
+              else if (funct7 == F7_ALT) ctl.alu_op = mosaic_pkg::ALU_SUBW;
+              else                          legal = 1'b0;
+            end
+            mosaic_pkg::F3_SLL: begin
+              if (funct7 == F7_BASE)     ctl.alu_op = mosaic_pkg::ALU_SLLW;
+              else                          legal = 1'b0;
+            end
+            mosaic_pkg::F3_SRL_SRA: begin
+              if (funct7 == F7_BASE)     ctl.alu_op = mosaic_pkg::ALU_SRLW;
+              else if (funct7 == F7_ALT) ctl.alu_op = mosaic_pkg::ALU_SRAW;
+              else                          legal = 1'b0;
+            end
+            default: legal = 1'b0;
+          endcase
+        end
       end
-`endif
 
       // --------------------------------------------------- everything else
       // Opcodes not listed above are not RV64IM: the custom-0 and custom-1
-      // spaces, the A extension (0100000-0101111), OP-32 (0111011, the RV32-only
-      // word forms), the F/D/Q opcodes, the OP-32 float space, the other
-      // privileged instructions (1110100-1110111, 1111000-1111011) and
-      // everything unassigned. None of them is a compressed instruction either:
-      // a 16-bit compressed instruction reaches the decoder with insn[1:0] !=
-      // 11 and lands on one of these opcodes, which is exactly why I-041
-      // decompresses before here rather than after.
+      // spaces, the A extension (0100000-0101111), the F/D/Q opcodes, the OP-32
+      // float space, the other privileged instructions (1110100-1110111,
+      // 1111000-1111011) and everything unassigned. None of them is a
+      // compressed instruction either: a 16-bit compressed instruction reaches
+      // the decoder with insn[1:0] != 11 and lands on one of these opcodes,
+      // which is exactly why I-041 decompresses before here rather than after.
       default: legal = 1'b0;
     endcase
 

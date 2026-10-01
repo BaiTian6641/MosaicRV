@@ -2147,6 +2147,13 @@ void PhaseRefusedInsert(Bench& bench, mosaic::Reporter& rep) {
             "refused: the conservation counters match the shadow");
   rep.Check(sh->kill_total() == before_kills + 1,
             "refused: exactly the one injected kill was counted");
+
+  // Leave the queue empty for the randomised phase. The entries this phase
+  // built are permanently blocked -- their source tags are never broadcast --
+  // so an undrained queue would sit full for the whole randomised run and
+  // silently starve it of the insert/select traffic it exists to generate.
+  bench.DrainQueue();
+  rep.Check(sh->count() == 0, "refused: the phase left the queue empty");
 }
 
 // Phase 14: randomised traffic against both shadows. Each cluster has its own

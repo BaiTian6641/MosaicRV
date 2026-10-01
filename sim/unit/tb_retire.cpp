@@ -1266,7 +1266,10 @@ class Harness {
           Mask(tgt->gen, shadow_->gen_mask()) == Mask(s.cmp_gen, shadow_->gen_mask());
       if (shadow_live && !dut_->rob_cmp_accepted_o && !dut_->rob_cmp_duplicate_o) {
         Fail(where, "completion filed as stale: the buffer accepted nothing for "
-                     "an entry the shadow may still mark done" + Describe(s));
+                     "an entry the shadow may still mark done acc=" +
+                     std::to_string(dut_->rob_cmp_accepted_o) + " dup=" +
+                     std::to_string(dut_->rob_cmp_duplicate_o) + " stale=" +
+                     std::to_string(dut_->rob_cmp_stale_o) + Describe(s));
       }
     }
     // The allocation cross-check: the shadow takes an allocation iff the buffer
@@ -1910,28 +1913,53 @@ void PhaseHeadBlock(Harness* h) {
   }
 
   // (c) exceptional head.
+  //
+  // The fault is raised by the older instruction's own completion, *after* both
+  // entries are in the buffer and the younger one is fully complete. That is
+  // the only construction that reaches the case the card names: a head that
+  // would be retirable -- complete and closed -- except for the exception, with
+  // a complete younger entry behind it. Raising the exception at allocation
+  // instead makes the entry exceptional the moment it is the head, so the trap
+  // fires on the very next cycle (the module contract decides a trap on the head
+  // alone: `head_trap = rob_valid[0] && rob_exc[0]`, not gated on completeness,
+  // because a macro whose one child faults may never complete its siblings) and
+  // no younger entry can ever exist behind it.
   {
     h->Fresh();
-    const Harness::Identity older = h->Alloc(104, 1, /*exc=*/true);
+    const Harness::Identity older = h->Alloc(104);   // clean and incomplete
     const Harness::Identity younger = h->Alloc(105);
-    h->Complete(older);
-    h->Complete(younger);
+    h->Complete(younger);                            // the younger entry is done
     Stim s;
     s.pay_valid = 0x3;
     s.pay_reg_we = 0x3;
     s.pay_rd = (9u) | (10ull << 32);
     s.pay_exc_cause[0] = 2;   // illegal instruction, from mosaic_pkg
     s.pay_exc_tval[0] = 0xdeadbeefull;
-    h->Cycle(s);
 
-    Require(h->Events() == 0x1, At("head-block", 4),
+    // The head is not complete yet, so the complete younger entry still must
+    // not retire -- that is the head-block rule, and lane 1 being complete is
+    // what makes the block meaningful.
+    h->Cycle(s);
+    Require(h->Events() == 0, At("head-block", 4),
+            "a complete younger entry retired behind an incomplete head: mask " +
+                std::to_string(h->Events()));
+
+    // The older instruction faults: its single child reports with an exception,
+    // which makes the head complete *and* exceptional. Nothing else blocks it.
+    h->Complete(older, 0, /*exc=*/true);
+
+    // The next cycle is the trap cycle, and it carries the fault's cause and
+    // tval. The complete younger entry must not retire over the pending fault.
+    h->Cycle(s);
+    Require(h->Events() == 0x1, At("head-block", 5),
             "an exceptional head produced mask " + std::to_string(h->Events()) +
-                "; expected only the trap event in lane 0");
-    Require(h->Traps() == 0x1, At("head-block", 4),
+                "; expected only the trap event in lane 0, with no younger "
+                "instruction retiring over the pending fault");
+    Require(h->Traps() == 0x1, At("head-block", 5),
             "an exceptional head did not produce a trap event");
-    Require(h->TrapFlush(), At("head-block", 4),
+    Require(h->TrapFlush(), At("head-block", 5),
             "an exceptional head did not request the buffer be dropped");
-    Require(h->ObservedOccupied() == 0, At("head-block", 4),
+    Require(h->ObservedOccupied() == 0, At("head-block", 5),
             "the buffer was not emptied by the trap: " +
                 std::to_string(h->ObservedOccupied()) + " entries left");
   }
@@ -2196,9 +2224,13 @@ void PhaseMinstret(Harness* h) {
           "minstret moved to " + std::to_string(h->ObservedMinstret()) +
               " across a squash of two in-flight instructions");
 
-  // A trap counts: the trapping instruction is architecturally final.
-  const Harness::Identity trap = h->Alloc(510, 1, /*exc=*/true);
-  h->Complete(trap);
+  // A trap counts: the trapping instruction is architecturally final. The
+  // fault is raised by the entry's own child completion: an entry allocated
+  // with the exception already set traps the instant it becomes the head
+  // (`head_trap = rob_valid[0] && rob_exc[0]`), which is the cycle right after
+  // the allocation -- not the cycle that carries the fault payload.
+  const Harness::Identity trap = h->Alloc(510);
+  h->Complete(trap, 0, /*exc=*/true);
   Stim ts;
   ts.pay_valid = 0x1;
   ts.pay_exc_cause[0] = 2;
@@ -2218,8 +2250,12 @@ void PhaseTrap(Harness* h) {
   // A trap is emitted as a trap, not as an ordinary retire, and it carries the
   // cause and the faulting value.
   h->Fresh();
-  const Harness::Identity id = h->Alloc(600, 1, /*exc=*/true);
-  h->Complete(id);
+  // The fault is raised by the instruction's own completion, so the trap cycle
+  // below is the one that carries the fault's cause and tval. Allocating with
+  // the exception already set would trap on the allocation's next cycle instead
+  // (`head_trap = rob_valid[0] && rob_exc[0]`), before the payload is presented.
+  const Harness::Identity id = h->Alloc(600);
+  h->Complete(id, 0, /*exc=*/true);
 
   Stim s;
   s.pay_valid = 0x1;

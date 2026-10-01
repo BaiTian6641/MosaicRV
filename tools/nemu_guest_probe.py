@@ -99,12 +99,12 @@ def main():
 
     # -- state round-trip: independent values in, same values back ------------
     state = bytearray(reg_size)
+    put(state, "mode", 3)  # MODE_M: PMP default-deny faults M-mode fetches at mode 0
     put(state, "gpr1", 0x0123456789ABCDEF)
     put(state, "gpr2", 0xFEDCBA9876543210)
     put(state, "gpr5", 0x80001000)
     put(state, "pc", MBASE)
     put(state, "mtvec", 0x80000100)
-    so.difftest_regcpy((ctypes.c_char * reg_size).from_buffer(state), DIFFTEST_TO_REF)
     back = bytearray(reg_size)
     so.difftest_regcpy((ctypes.c_char * reg_size).from_buffer(back), DIFFTEST_TO_DUT)
     for field, want in (("gpr1", 0x0123456789ABCDEF), ("gpr2", 0xFEDCBA9876543210),
@@ -115,8 +115,11 @@ def main():
     if get(back, "gpr0") != 0:
         return fail(out, "x0 is not zero after round-trip")
     out["checks"]["state_roundtrip"] = "ok:gpr/pc/mtvec"
-
-    # -- reference stepping: ADD, ADDI, SD ------------------------------------
+    so.difftest_regcpy((ctypes.c_char * reg_size).from_buffer(state), DIFFTEST_TO_REF)
+    # CONFIG_SHARE builds assert n<=1 in cpu_exec: one architectural step per
+    # call, which is also the granularity the card wants verified.
+    for _ in range(3):
+        so.difftest_exec(1)
     # ADD x3,x1,x2 = 0x002081b3 ; ADDI x4,x0,42 = 0x02a00213 ;
     # SD x3,0(x5) with x5 = 0x80001000 = 0x0032b023.
     code = bytes([0xB3, 0x81, 0x20, 0x00, 0x13, 0x02, 0xA0, 0x02,
@@ -124,12 +127,14 @@ def main():
     cbuf = (ctypes.c_char * len(code)).from_buffer_copy(code)
     so.difftest_memcpy(MBASE, cbuf, len(code), DIFFTEST_TO_REF)
     state = bytearray(reg_size)
+    put(state, "mode", 3)  # MODE_M (see above)
     put(state, "gpr1", 5)
     put(state, "gpr2", 7)
     put(state, "gpr5", 0x80001000)
     put(state, "pc", MBASE)
     so.difftest_regcpy((ctypes.c_char * reg_size).from_buffer(state), DIFFTEST_TO_REF)
-    so.difftest_exec(3)
+    for _ in range(3):
+        so.difftest_exec(1)
     got = bytearray(reg_size)
     so.difftest_regcpy((ctypes.c_char * reg_size).from_buffer(got), DIFFTEST_TO_DUT)
     if get(got, "gpr3") != 12:

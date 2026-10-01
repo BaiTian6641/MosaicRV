@@ -388,18 +388,23 @@ def main():
         else:
             log("N2 wrong-layout library refused (exit %d): %s"
                 % (n2_code, n2_out.strip().splitlines()[-1][:160]))
-        # N3: the 3-argument regcpy arity must not bind.
-        n3 = guest(args.guest, "python3", "-c",
-                   "import ctypes;"
-                   "so=ctypes.CDLL('%s');"
-                   "so.difftest_regcpy.restype=None;"
-                   "so.difftest_regcpy.argtypes=[ctypes.c_void_p,ctypes.c_bool,ctypes.c_bool];"
-                   "try:\n"
-                   " so.difftest_regcpy(None,True,True)\n"
-                   "except ctypes.ArgumentError as e:\n"
-                   " print('arity-rejected')\n"
-                   "else:\n"
-                   " raise SystemExit('3-arg regcpy call was accepted')" % GUEST_SO).strip()
+        # N3: the 3-argument regcpy arity must not bind. Written to a file
+        # first: `python3 -c` cannot carry newlines through the guest shell.
+        n3_py = ("import ctypes\n"
+                 "so=ctypes.CDLL('" + GUEST_SO + "')\n"
+                 "so.difftest_regcpy.restype=None\n"
+                 "so.difftest_regcpy.argtypes=[ctypes.c_void_p,ctypes.c_bool,ctypes.c_bool]\n"
+                 "try:\n"
+                 "    so.difftest_regcpy(None,True,True)\n"
+                 "except ctypes.ArgumentError:\n"
+                 "    print('arity-rejected')\n"
+                 "else:\n"
+                 "    raise SystemExit('3-arg regcpy call was accepted')\n")
+        with open(os.path.join(args.out, "n3_arity.py"), "w") as handle:
+            handle.write(n3_py)
+        sh(["limactl", "copy", os.path.join(args.out, "n3_arity.py"),
+            "%s:/tmp/n3_arity.py" % args.guest])
+        n3 = guest(args.guest, "python3", "/tmp/n3_arity.py").strip()
         log("N3 three-parameter regcpy arity rejected: %s" % n3)
     except Blocked as exc:
         verdict = "BLOCKED"

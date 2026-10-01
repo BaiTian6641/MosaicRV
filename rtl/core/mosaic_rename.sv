@@ -1,5 +1,5 @@
 // ============================================================================
-// mosaic_rename -- work package I-013.
+// mosaic_rename -- work packages I-013 and I-014.
 //
 // Register Allocation Table (committed + speculative), an explicit free list,
 // the x0 rule, and the generation that makes a recycled physical tag safe.
@@ -164,9 +164,10 @@
 // (`*_accepted`, `*_stale`, ...) visible in cycle N and its effect visible in
 // cycle N+1.
 //
-//   * Allocation is **single width**: one destination per cycle. `alloc_req`
-//     with `alloc_rd != 0` needs one free tag; there is no partial allocation,
-//     because a half-allocated instruction has a mapping with no destination.
+//   * Allocation is a **group of up to two macros**, one per lane, in program
+//     order; see "two-wide allocation groups" below. A group is accepted whole
+//     or refused whole: a half-allocated group would have a mapping with no
+//     destination on one lane and a tag nobody owns on the other.
 //   * A cycle in which `squash` is high **refuses allocation**. Restore and
 //     allocate are mutually exclusive, and the ordering is therefore total
 //     rather than "restore wins, mostly". The core is squashing in that cycle
@@ -181,11 +182,89 @@
 //     tag that cycles free/allocate/free keeps counting up and a stale write
 //     from any earlier incarnation is rejected.
 //
+// -------------------------------------------------- two-wide allocation groups
+//
+// I-014 widens *allocation* to two macros per cycle, in program order. The
+// single-width port set is unchanged and now means "a group of one": `alloc_req`
+// is lane 0's valid bit, `alloc2_req` is lane 1's, and a group with `alloc2_req`
+// low behaves exactly as it did before this card -- the same scan, the same
+// journal, the same answers.
+//
+// The group is **atomic**. Both lanes are accepted with one combined update of
+// the speculative map, the free list and the undo journal, or neither is. A
+// partially allocated group -- lane 0 holding a tag while lane 1 is refused --
+// would leave the mapping, the free list and the ROB disagreeing about what was
+// allocated, which is the failure the card names. The number of tags a group
+// needs is therefore the number of its lanes that write a non-x0 destination
+// (0, 1 or 2), and the acceptance test is `free_count >= need`, never
+// `free_count >= 1`:
+//
+//   * a group whose two macros both write a real destination and finds one free
+//     tag stalls *as a group*, and a later single-width allocation of that same
+//     tag succeeds -- the tag was never taken;
+//   * a group whose lane 0 writes x0 needs only lane 1's tag, and a group whose
+//     two lanes are both x0 needs none at all, so x0 writes never turn tag
+//     pressure into a dispatch stall.
+//
+// The two tags a two-wide group takes are the two tags two consecutive
+// single-width allocations would have taken, in the same order: lane 1's scan
+// starts one past lane 0's tag and excludes it. That equivalence is what makes
+// the group's effect on the free list and on the rotation point describable
+// without a second rule.
+//
+// Lane 1 reads the speculative map as of the start of the cycle with one
+// addition: a source that names lane 0's destination resolves to lane 0's *new*
+// (tag, generation), and is reported not-ready. That is the same-cycle bypass.
+// The map itself is only written at the edge, so the bypass is generated in the
+// read path; and because lane 0's producer is in flight rather than in the PRF,
+// the bypassed source's readiness bit is 0 by construction -- not by the
+// `wb_done` lookup every other source uses. Without the bypass, lane 1 would
+// read the tag of the mapping lane 0 is superseding: a register whose producing
+// instruction has been renamed away and which nobody will ever write.
+//
+// The bypass is defined only in a cycle in which lane 0 really allocates. When
+// the group is refused there is no new destination to bypass to, and when lane 0
+// writes x0 there is none either; in both cases lane 1's sources are exactly the
+// map's, and the shadow model and this module have to agree about which of those
+// two situations is in force -- hence "the bypass follows the allocation, not the
+// request".
+//
+// WAW inside one group: lane 1 lands on the map after lane 0, so a pair writing
+// the same rd leaves lane 1's mapping in the map -- the younger instruction wins,
+// as it must -- and the two lanes hold *distinct* tags (lane 1's scan excludes
+// lane 0's tag), so no physical register is handed out twice. Lane 1's
+// *displaced* mapping is reported as lane 0's new mapping, which is the mapping
+// lane 1 actually supersedes; it is not the start-of-cycle mapping, and the
+// difference is exactly what makes the two release events come out right. They
+// happen through the two commit lanes: lane 0's commit releases the
+// start-of-cycle mapping, the `commit2_*` lane releases lane 0's tag, and never
+// both at one lane, never the mapping being installed, never the same tag twice.
+
 // ------------------------------------------------------------- mutants
 //
 // -DMOSAIC_RENAME_MUTANT_<n> injects exactly one defect to prove the unit test
 // can detect it. The shipping build defines none of them; the table with real
-// output is in results/reports/I-013-rename.md.
+// output is in results/reports/I-013-rename.md for the single-width ones and in
+// results/reports/I-014-rename2w.md for the two-wide ones.
+//
+// The two-wide controls (I-014) are:
+//
+//   NO_BYPASS        lane 1 reads the map as of the start of the cycle and never
+//                    sees lane 0's new destination.
+//   NONATOMIC_GROUP  lane 0 allocates on the single-lane requirement, so a group
+//                    that needs two tags and finds one half-allocates.
+//   SAME_TAG_LANE1   lane 1 reuses lane 0's tag instead of the second scan: one
+//                    physical register with two owners.
+//   WAW_OLD_FROM_MAP lane 1 reports the start-of-cycle mapping as the one it
+//                    displaces, so both lanes of a WAW pair claim the same
+//                    superseded mapping.
+//   WAW_COMMIT2_PRE_MAP
+//                    the second commit lane compares against the pre-lane-0
+//                    committed map, so a WAW pair releases one old mapping twice
+//                    and leaks the other.
+//
+// X0_ALLOC (from I-013) covers both lanes: a write to x0 on either lane
+// allocates a physical tag.
 // ============================================================================
 
 `default_nettype none
@@ -208,19 +287,37 @@ localparam int unsigned REN_BANKS     = mosaic_cfg_pkg::MOSAIC_PRF_BANKS;       
 localparam int unsigned REN_BANK_W    = mosaic_cfg_pkg::MOSAIC_PRF_BANK_W;        // 2
 localparam int unsigned REN_ARCH_REGS = mosaic_cfg_pkg::MOSAIC_ARCH_INT_REGS;     // 32
 localparam int unsigned REN_ROB       = mosaic_cfg_pkg::MOSAIC_ROB_ENTRIES;       // 64
+// The undo window is one entry per allocation since the last checkpoint, bounded
+// by the ROB, so its length has to be able to say "full" as well as name every
+// index. It is declared here rather than in the module body because `dbg_j_len`
+// -- the observation port the unit test compares the window depth through -- is a
+// port, and a port's width cannot see a declaration that comes after the port
+// list.
+localparam int unsigned REN_JLEN_W    = $clog2(REN_ROB + 1);
 
 module mosaic_rename (
     input  logic                                  clk,
     input  logic                                  rst,
 
     // ---------------------------------------------------------- allocation
-    // Single width: one architectural destination per cycle, allocated from the
-    // free list. `alloc_req` with `alloc_rd == 0` is a write to x0 and is
-    // accepted without allocating anything.
+    // A group of up to two macros, one per lane, in program order. `alloc_req`
+    // is lane 0's valid bit and `alloc2_req` lane 1's; lane 1 without lane 0 is
+    // not a group the core can present (program order admits no second macro
+    // without a first), and this module refuses it rather than inventing lane 0.
+    //
+    // The whole group is accepted or the whole group is refused; see "two-wide
+    // allocation groups" in the header. `alloc_accepted` is the *group's*
+    // answer, and `alloc2_accepted` is the same answer gated on lane 1 being
+    // present, so a caller that checks one lane's accept can always see the
+    // other's.
+    //
+    // `alloc_rd == 0` is a write to x0 and is accepted without allocating
+    // anything -- on either lane, and independently: a group of two x0 writes
+    // needs no tags at all.
     input  logic                                  alloc_req,
     input  logic [4:0]                            alloc_rd,
     output logic                                  alloc_accepted,
-    output logic                                  alloc_exhausted,  // refused: free list empty
+    output logic                                  alloc_exhausted,  // refused: the group's tags are not there
     output logic                                  alloc_squashed,   // refused: squash owns the cycle
     output logic                                  alloc_is_x0,      // accepted, and it was a write to x0
     output logic                                  alloc_new_valid,  // a physical tag was allocated
@@ -230,19 +327,57 @@ module mosaic_rename (
     output logic [REN_TAG_W-1:0]                  alloc_old_tag,
     output logic [REN_GEN_W-1:0]                  alloc_old_gen,
 
+    // Lane 1 of the same group. Its `old` mapping is lane 0's *new* mapping when
+    // both lanes write the same rd, because that is the mapping lane 1 really
+    // supersedes; the release of the two happens through the two commit lanes,
+    // one each.
+    input  logic                                  alloc2_req,
+    input  logic [4:0]                            alloc2_rd,
+    output logic                                  alloc2_accepted,
+    output logic                                  alloc2_exhausted,  // refused: the group's tags are not there
+    output logic                                  alloc2_squashed,   // refused: squash owns the cycle
+    output logic                                  alloc2_is_x0,
+    output logic                                  alloc2_new_valid,
+    output logic [REN_TAG_W-1:0]                  alloc2_new_tag,
+    output logic [REN_GEN_W-1:0]                  alloc2_new_gen,
+    output logic                                  alloc2_old_valid,
+    output logic [REN_TAG_W-1:0]                  alloc2_old_tag,
+    output logic [REN_GEN_W-1:0]                  alloc2_old_gen,
+
     // ------------------------------------------------------- source reads
     // Combinational, zero latency: the address presented in cycle N yields the
-    // tag in cycle N. Two read ports because an instruction needs two sources;
-    // the *allocation* is what is single width. I-014 adds the same-cycle
-    // bypass on top of these.
+    // tag in cycle N. Four read ports, because a two-wide group renames two
+    // instructions and each reads two sources; they are numbered as one flat
+    // list in (macro, source) order -- rs1/rs2 belong to lane 0, rs3/rs4 to
+    // lane 1.
+    //
+    // `rs*_ready` is this module's readiness view: the source's producer has
+    // written its result back, so the value is in the PRF. A source that is x0
+    // is ready (there is nothing to read) and a source resolved by the
+    // same-cycle bypass is *not* -- lane 0's producer is in flight by
+    // construction, which is exactly what `rs*_bypass` reports.
     input  logic [4:0]                            rs1_addr,
     input  logic [4:0]                            rs2_addr,
     output logic                                  rs1_is_x0,
     output logic                                  rs2_is_x0,
+    output logic                                  rs1_ready,
+    output logic                                  rs2_ready,
     output logic [REN_TAG_W-1:0]                  rs1_tag,
     output logic [REN_TAG_W-1:0]                  rs2_tag,
     output logic [REN_GEN_W-1:0]                  rs1_gen,
     output logic [REN_GEN_W-1:0]                  rs2_gen,
+    input  logic [4:0]                            rs3_addr,
+    input  logic [4:0]                            rs4_addr,
+    output logic                                  rs3_is_x0,
+    output logic                                  rs4_is_x0,
+    output logic                                  rs3_ready,
+    output logic                                  rs4_ready,
+    output logic                                  rs3_bypass,   // resolved from lane 0's new destination
+    output logic                                  rs4_bypass,
+    output logic [REN_TAG_W-1:0]                  rs3_tag,
+    output logic [REN_TAG_W-1:0]                  rs4_tag,
+    output logic [REN_GEN_W-1:0]                  rs3_gen,
+    output logic [REN_GEN_W-1:0]                  rs4_gen,
 
     // ------------------------------------------------------- writeback
     // The result of an instruction lands on the destination identity its
@@ -323,7 +458,11 @@ module mosaic_rename (
     output logic [REN_ENTRIES-1:0]                dbg_wb_done,
     output logic [REN_ENTRIES*REN_GEN_W-1:0]      dbg_tag_gen,
     output logic [REN_ARCH_REGS*(REN_TAG_W+REN_GEN_W)-1:0] dbg_spec_map,
-    output logic [REN_ARCH_REGS*(REN_TAG_W+REN_GEN_W)-1:0] dbg_cmt_map
+    output logic [REN_ARCH_REGS*(REN_TAG_W+REN_GEN_W)-1:0] dbg_cmt_map,
+    // The undo window depth. Without it, "the group was journalled as a group"
+    // could only be inferred from the free set one squash later; the depth is what
+    // says a two-wide group pushed exactly two entries, in the cycle it did so.
+    output logic [REN_JLEN_W-1:0]                 dbg_j_len
 );
 
   // ---------------------------------------------------------- geometry rules
@@ -335,7 +474,6 @@ module mosaic_rename (
   localparam int unsigned REN_ARCH_W    = (REN_ARCH_REGS <= 1) ? 1 : $clog2(REN_ARCH_REGS);
   localparam int unsigned REN_MAP_W     = REN_TAG_W + REN_GEN_W;
   localparam int unsigned REN_SCAN_W    = REN_TAG_W + 1;  // address into the doubled mask
-  localparam int unsigned REN_JLEN_W    = $clog2(REN_ROB + 1);
   localparam int unsigned REN_FCNT_W    = REN_TAG_W + 1;  // must represent ENTRIES itself
   localparam int unsigned REN_BANK_ROWS = REN_ENTRIES / REN_BANKS;
 
@@ -444,27 +582,77 @@ module mosaic_rename (
   logic [REN_GEN_W-1:0] cmt_gen_q  [REN_ARCH_REGS];
 
 
-  // --------------------------------------------------------- source read port
-  always_comb begin
-    if (rs1_addr == 5'd0) begin
-      rs1_is_x0 = 1'b1;
-      rs1_tag   = {REN_TAG_W{1'b0}};
-      rs1_gen   = {REN_GEN_W{1'b0}};
-    end else begin
-      rs1_is_x0 = 1'b0;
-      rs1_tag   = spec_map[rs1_addr];
-      rs1_gen   = spec_gen[rs1_addr];
+  // ------------------------------------------------------- allocation scan
+  // A rotating priority scan over the free set: the first free tag at or after
+  // the rotation point, wrapping once. Rotating is what makes a tag wrap its own
+  // index reachable in a bounded number of cycles, so the wrap is testable rather
+  // than something a campaign has to run for a million cycles to find.
+  //
+  // The scan is one function called twice rather than two copies of the loop. The
+  // second call belongs to lane 1 and must be the *same* scan: two copies that
+  // could drift would let lane 1 take a tag lane 0 is holding, and that duplicate
+  // would surface as a physical register with two owners rather than as a failure
+  // here. `mask` is doubled inside the function so that the wrapped candidate at
+  // offset ENTRIES+k reads the same bit as the unwrapped offset k -- which is what
+  // makes the whole wrap one conditional subtract instead of a second loop.
+  function automatic logic [REN_TAG_W-1:0] scan_free(input logic [REN_ENTRIES-1:0] mask,
+                                                     input logic [REN_TAG_W-1:0] ptr,
+                                                     output logic found);
+    logic [2*REN_ENTRIES-1:0] dup;
+    dup        = {mask, mask};
+    found      = 1'b0;
+    scan_free  = {REN_TAG_W{1'b0}};
+    for (int unsigned i = 0; i < REN_ENTRIES; i++) begin
+      // The candidate at offset i is (rotation point + i) mod ENTRIES. The sum
+      // is at most 2*ENTRIES-2, so one conditional subtract is the whole
+      // modulus and no general division is elaborated. Both operands are
+      // widened to the scan width first, so neither the add nor the compare can
+      // silently truncate the tag.
+      logic [REN_SCAN_W-1:0] off;
+      logic [REN_TAG_W-1:0]  idx;
+      off = REN_SCAN_W'(ptr) + REN_SCAN_W'(i);
+      idx = REN_TAG_W'((off >= REN_SCAN_W'(REN_ENTRIES)) ? (off - REN_SCAN_W'(REN_ENTRIES)) : off);
+      if (!found && dup[off]) begin
+        found     = 1'b1;
+        scan_free = REN_TAG_W'(idx);
+      end
     end
+  endfunction
 
-    if (rs2_addr == 5'd0) begin
-      rs2_is_x0 = 1'b1;
-      rs2_tag   = {REN_TAG_W{1'b0}};
-      rs2_gen   = {REN_GEN_W{1'b0}};
-    end else begin
-      rs2_is_x0 = 1'b0;
-      rs2_tag   = spec_map[rs2_addr];
-      rs2_gen   = spec_gen[rs2_addr];
-    end
+  logic                 scan_found;    // lane 0's scan matched a free tag
+  logic                 scan2_found;   // lane 1's ditto
+  logic [REN_TAG_W-1:0] scan_tag;      // lane 0's tag
+  logic [REN_TAG_W-1:0] scan_tag2;     // lane 1's tag
+
+  // Whether lane 0's request wants a tag at all. This is a pure function of the
+  // request -- not of the group's acceptance -- and lane 1's scan is steered by
+  // it, because "which tag lane 1 takes" must have one answer per cycle whether
+  // or not the group is finally accepted.
+  logic                   lane0_wants_tag;
+  logic [REN_ENTRIES-1:0] lane1_scan_mask;
+  logic [REN_TAG_W-1:0]   lane1_scan_ptr;
+
+  assign lane0_wants_tag = alloc_req && (alloc_rd != 5'd0);
+
+  // Lane 1's scan is the one two consecutive single-width allocations would
+  // produce: it starts one past lane 0's tag and cannot see that tag. When lane 0
+  // takes no tag (an x0 lane, or a group of one) lane 1 *is* the first
+  // allocation, so it takes lane 0's scan unchanged.
+  //
+  // The mask clears lane 0's tag from the full 96-bit vector, so a tag of 95
+  // lands in bit 95 and nothing is truncated. The pointer wraps to zero at the
+  // end of the file exactly as the post-allocation rotation does.
+  assign lane1_scan_mask = lane0_wants_tag
+                           ? (free_bits & ~(REN_ENTRIES'(1) << scan_tag))
+                           : free_bits;
+  assign lane1_scan_ptr  = lane0_wants_tag
+                           ? ((scan_tag == REN_TAG_W'(REN_ENTRIES - 1))
+                                ? {REN_TAG_W{1'b0}} : (scan_tag + REN_TAG_W'(1)))
+                           : alloc_ptr;
+
+  always_comb begin
+    scan_tag  = scan_free(free_bits,       alloc_ptr,      scan_found);
+    scan_tag2 = scan_free(lane1_scan_mask, lane1_scan_ptr, scan2_found);
   end
 
   // ------------------------------------------------------- allocation scan

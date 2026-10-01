@@ -10,7 +10,7 @@
   "image": "",
   "expect": "",
   "tool": "Verilator 5.052 2026-09-05",
-  "timestamp": "2026-10-01T18:51:08Z",
+  "timestamp": "2026-10-01T18:53:32Z",
   "first_mismatch": "head-block: cycle 4: an exceptional head produced mask 0; expected only the trap event in lane 0: expected contract holds, got contract violated",
   "failed_checks": ["no contract violation in any phase"]
 }

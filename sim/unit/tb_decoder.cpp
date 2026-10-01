@@ -33,7 +33,7 @@
 //                  - every rd x rs1 pair and every rs1 x rs2 pair
 //                  - every immediate bit, field by field, exhaustively
 //   4. Random    a seeded campaign: half uniform 32-bit words, half words
-//                biased onto the eleven RV64IM opcodes so the legal side gets
+//                biased onto the twelve RV64IM opcodes so the legal side gets
 //                as much coverage as the illegal side.
 //
 // Every instruction presented is compared field by field. The first mismatch
@@ -93,7 +93,7 @@ struct Ref {
   uint8_t mem_kind, mem_size, mem_signed;
   uint8_t is_branch, branch_funct, is_jal, is_jalr, is_auipc, writes_link;
   uint8_t is_miscmem, is_fence_i;
-  uint8_t is_muldiv, md_op, md_signed;
+  uint8_t is_muldiv, md_op, md_signed, md_w;
   uint8_t is_system, is_ecall, is_ebreak, is_mret;
   uint8_t csr_op;
   uint16_t csr_addr;
@@ -350,6 +350,26 @@ Decoded DecodeFields(uint32_t insn) {
           return {r, true};
       }
     }
+    case OP_OP32: {
+      // The M extension's word forms. On RV64 only funct7 0000001 is defined,
+      // and only funct3 000/100/101/110/111 are: the high-half multiplies have
+      // no word form, so 001/010/011 are reserved. Every other funct7 on this
+      // opcode is the RV32-only I word forms (addw subw sllw srlw sraw) and is
+      // reserved on RV64 -- which is exactly what this core is.
+      if (f7 != 1) return {Illegal(), false};
+      if (f3 == 1 || f3 == 2 || f3 == 3) return {Illegal(), false};
+      r.uses_rs1 = 1;
+      r.uses_rs2 = 1;
+      r.rs1 = static_cast<uint8_t>(rs1);
+      r.rs2 = static_cast<uint8_t>(rs2);
+      r.rd = static_cast<uint8_t>(rd);
+      r.reg_write = rd != 0;
+      r.is_muldiv = 1;
+      r.md_op = static_cast<uint8_t>(f3);
+      r.md_signed = !(f3 == 3 || f3 == 5 || f3 == 7);
+      r.md_w = 1;
+      return {r, true};
+    }
     case OP_BRANCH: {
       // beq 000, bne 001, blt 100, bge 101, bltu 110, bgeu 111; 010 and 011
       // are the reserved pair.
@@ -417,7 +437,7 @@ Decoded DecodeFields(uint32_t insn) {
       }
     }
     default:
-      return {Illegal(), false};          // every other opcode, including OP-32
+      return {Illegal(), false};          // every opcode this profile does not decode
   }
 }
 
@@ -540,6 +560,7 @@ class Bench {
     ok &= Field(where, "is_muldiv", want.is_muldiv, got.is_muldiv);
     ok &= Field(where, "md_op", want.md_op, got.md_op);
     ok &= Field(where, "md_signed", want.md_signed, got.md_signed);
+    ok &= Field(where, "md_w", want.md_w, got.md_w);
     ok &= Field(where, "is_system", want.is_system, got.is_system);
     ok &= Field(where, "is_ecall", want.is_ecall, got.is_ecall);
     ok &= Field(where, "is_ebreak", want.is_ebreak, got.is_ebreak);
@@ -760,7 +781,43 @@ class Bench {
                    std::string("M classification of ") + c.name);
         rep_.Check(!r.uses_alu && r.uses_rs1 && r.uses_rs2 && r.reg_write,
                    std::string(c.name) + " reads rs1 and rs2 and writes rd");
+        rep_.Check(!r.md_w, std::string(c.name) + " (64-bit) leaves md_w clear");
       }
+    }
+
+    // M extension WORD forms: OP-32 with funct7 0000001. The five encodings the
+    // ISA defines decode with md_w set and the same md_op/md_signed as their
+    // 64-bit counterparts. All eight funct3 values are walked here, so the
+    // three that are reserved (001/010/011 -- there is no mulhw/mulhsuw/mulhuw)
+    // are pinned as reserved next to the five that are legal, and the RV32-only
+    // I word forms on the same opcode are the negative neighbour.
+    {
+      struct { const char* name; uint32_t f3; uint8_t op; uint8_t sign; } w[] = {
+          {"mulw", 0, MD_MUL, 1},   {"divw", 4, MD_DIV, 1},
+          {"divuw", 5, MD_DIVU, 0}, {"remw", 6, MD_REM, 1},
+          {"remuw", 7, MD_REMU, 0},
+      };
+      for (const auto& c : w) {
+        if (!Apply(EncR(OP_OP32, c.f3, 4, 5, 6, 0x01))) return;
+        r = Observe();
+        rep_.Check(r.is_muldiv && r.md_w && r.md_op == c.op &&
+                       r.md_signed == c.sign,
+                   std::string("W classification of ") + c.name);
+        rep_.Check(!r.uses_alu && r.uses_rs1 && r.uses_rs2 && r.reg_write,
+                   std::string(c.name) + " reads rs1 and rs2 and writes rd");
+      }
+      // The high-half word encodings the ISA does not define.
+      for (uint32_t f3 : {1u, 2u, 3u}) {
+        if (!Apply(EncR(OP_OP32, f3, 4, 5, 6, 0x01))) return;
+        ExpectIllegalState("reserved: no MULH*W form (OP-32 funct3 " +
+                           std::to_string(f3) + " with funct7 0000001)");
+      }
+      // The negative neighbour: addw and subw are the RV32-only I word forms
+      // and are reserved on RV64, on the very opcode the W forms live on.
+      if (!Apply(EncR(OP_OP32, 0, 4, 5, 6, 0x00))) return;
+      ExpectIllegalState("reserved on RV64: addw");
+      if (!Apply(EncR(OP_OP32, 0, 4, 5, 6, 0x20))) return;
+      ExpectIllegalState("reserved on RV64: subw");
     }
 
     // CSR x0 rules: the two rules a decoder most often gets wrong, because both
@@ -904,9 +961,12 @@ class Bench {
       if (!Apply(Word(OP_JALR, f3, 1, 2, 0, 0x00))) return;
       ExpectIllegalState("reserved: JALR funct3 " + std::to_string(f3));
     }
-    // The RV32-only word forms addw subw sllw srlw sraw on opcode 0111011, and
-    // every other encoding of that opcode.
+    // OP-32. Three reserved classes live on this opcode and each is pinned by
+    // name; the five legal encodings are the M word forms.
     {
+      // (a) The RV32-only I word forms: reserved on RV64, on the very opcode
+      // the M word forms live on. This is the negative neighbour for the
+      // mulw/divw/... family.
       struct { const char* name; uint32_t f3; uint32_t f7; } w[] = {
           {"addw", 0, 0x00}, {"subw", 0, 0x20}, {"sllw", 1, 0x00},
           {"srlw", 5, 0x00}, {"sraw", 5, 0x20},
@@ -915,11 +975,25 @@ class Bench {
         if (!Apply(Word(OP_OP32, c.f3, 1, 2, 3, c.f7))) return;
         ExpectIllegalState(std::string("reserved on RV64: ") + c.name);
       }
+      // (b) The high-half word multiplies: there is no MULHW/MULHSUW/MULHUW, so
+      // these three funct3 values under funct7 0000001 are reserved even though
+      // the opcode and funct7 are otherwise the M word forms.
+      for (uint32_t f3 : {1u, 2u, 3u}) {
+        if (!Apply(Word(OP_OP32, f3, 1, 2, 3, 0x01))) return;
+        ExpectIllegalState("reserved: no MULH*W (OP-32 funct3 " +
+                           std::to_string(f3) + " with funct7 0000001)");
+      }
+      // (c) The completeness sweep over all 1024 encodings, counting the legal
+      // ones rather than assuming how many there are.
+      uint32_t legal_op32 = 0;
       for (uint32_t f3 = 0; f3 < 8; ++f3) {
         for (uint32_t f7 = 0; f7 < 128; ++f7) {
           if (!Apply(Word(OP_OP32, f3, 1, 2, 3, f7))) return;
+          if (Observe().valid) ++legal_op32;
         }
       }
+      rep_.Check(legal_op32 == 5,
+                 "exactly five OP-32 encodings are legal: the five M word forms");
     }
     // SYSTEM funct3 100 is reserved.
     if (!Apply(Word(OP_SYSTEM, 4, 1, 2, 3, 0x300))) return;
@@ -942,13 +1016,14 @@ class Bench {
                          " with rs1 != x0");
     }
     // Every opcode this profile does not decode. The twelve it does decode are
-    // skipped -- OP-32 is not one of them: it is reserved on RV64, and all 1024
-    // of its encodings were swept above -- so the remaining 116 must be illegal.
+    // skipped -- OP-32 is one of them now (the M word forms), and all 1024 of
+    // its encodings were swept above -- so the remaining 115 must be illegal.
     for (uint32_t op = 0; op < 128; ++op) {
       if (op == OP_LOAD || op == OP_MISC_MEM || op == OP_IMM ||
           op == OP_LUI || op == OP_AUIPC || op == OP_STORE ||
-          op == OP_IMM_32 || op == OP_MUL_DIV || op == OP_BRANCH ||
-          op == OP_JALR || op == OP_JAL || op == OP_SYSTEM) {
+          op == OP_IMM_32 || op == OP_MUL_DIV || op == OP_OP32 ||
+          op == OP_BRANCH || op == OP_JALR || op == OP_JAL ||
+          op == OP_SYSTEM) {
         continue;
       }
       for (uint32_t f3 = 0; f3 < 8; ++f3) {
@@ -956,8 +1031,8 @@ class Bench {
       }
       ++reserved_opcodes_;
     }
-    rep_.Check(reserved_opcodes_ == 116,
-               "116 opcodes are outside RV64IM and all decode as illegal");
+    rep_.Check(reserved_opcodes_ == 115,
+               "115 opcodes are outside RV64IM and all decode as illegal");
   }
 
   // ---- structural sweeps ----------------------------------------------------
@@ -1090,11 +1165,11 @@ class Bench {
     if (aborted_) return;
     static const uint32_t kOps[] = {
         OP_LOAD, OP_MISC_MEM, OP_IMM, OP_LUI, OP_AUIPC, OP_STORE,
-        OP_IMM_32, OP_MUL_DIV, OP_BRANCH, OP_JALR, OP_JAL, OP_SYSTEM};
+        OP_IMM_32, OP_MUL_DIV, OP_OP32, OP_BRANCH, OP_JALR, OP_JAL, OP_SYSTEM};
     const uint32_t iterations = opt_.max_cycles / 4;
     for (uint32_t i = 0; i < iterations; ++i) {
       if (!Apply(static_cast<uint32_t>(rng_.Next() >> 32))) return;
-      uint32_t word = kOps[rng_.Below(12)];
+      uint32_t word = kOps[rng_.Below(13)];
       word |= rng_.Below(8) << 12;
       word |= rng_.Below(32) << 7;
       word |= rng_.Below(32) << 15;
@@ -1173,6 +1248,7 @@ class Bench {
     r.is_muldiv = static_cast<uint8_t>(top_->o_is_muldiv);
     r.md_op = static_cast<uint8_t>(top_->o_md_op);
     r.md_signed = static_cast<uint8_t>(top_->o_md_signed);
+    r.md_w = static_cast<uint8_t>(top_->o_md_w);
     r.is_system = static_cast<uint8_t>(top_->o_is_system);
     r.is_ecall = static_cast<uint8_t>(top_->o_is_ecall);
     r.is_ebreak = static_cast<uint8_t>(top_->o_is_ebreak);
@@ -1196,10 +1272,10 @@ class Bench {
   // Without this, a typo in one of the break-out assignments would either hide
   // a decoder bug or invent one.
   bool CheckBreakout(const Ref& r, const std::string& where) {
-    // 133 bits: 2 + 3 + 15 + 64 + 6 + 7 + 8 + 2 + 5 + 4 + 12 + 3. The first
+    // 134 bits: 2 + 3 + 15 + 64 + 6 + 7 + 8 + 2 + 5 + 4 + 12 + 3. The first
     // field pushed lands at the most significant end, because that is how a
     // packed struct is laid out.
-    const int kTotalBits = 133;
+    const int kTotalBits = 134;
     uint64_t chunk[3] = {0, 0, 0};
     int nbits = 0;
     // Fields are laid out MSB first, and inside a field the value's bit 0 sits
@@ -1223,6 +1299,7 @@ class Bench {
     push(r.writes_link, 1);
     push(r.is_miscmem, 1);  push(r.is_fence_i, 1);
     push(r.is_muldiv, 1);   push(r.md_op, 3);      push(r.md_signed, 1);
+    push(r.md_w, 1);
     push(r.is_system, 1);   push(r.is_ecall, 1);   push(r.is_ebreak, 1);
     push(r.is_mret, 1);
     push(r.csr_op, 2);      push(r.csr_addr, 12);
@@ -1231,16 +1308,16 @@ class Bench {
                "decode_ctl_t is " + std::to_string(kTotalBits) +
                    " bits wide and every one is accounted for");
 
-    // 133 bits is five 32-bit Verilator words, not three 64-bit ones.
+    // 134 bits is five 32-bit Verilator words, not three 64-bit ones.
     const uint64_t w0 = top_->o_ctl_bits[0], w1 = top_->o_ctl_bits[1];
     const uint64_t w2 = top_->o_ctl_bits[2], w3 = top_->o_ctl_bits[3];
     const uint64_t w4 = top_->o_ctl_bits[4];
     const uint64_t dut_lo = w0 | (w1 << 32);
     const uint64_t dut_mid = w2 | (w3 << 32);
-    const uint64_t dut_top = w4 & 0x1Full;
+    const uint64_t dut_top = w4 & 0x3Full;
     const uint64_t my_lo = chunk[0];
     const uint64_t my_mid = chunk[1];
-    const uint64_t my_top = chunk[2] & 0x1Full;
+    const uint64_t my_top = chunk[2] & 0x3Full;
     if (my_lo == dut_lo && my_mid == dut_mid && my_top == dut_top) return true;
     rep_.Mismatch(where + " (testbench break-out vs decode_ctl_t)",
                   mosaic::Hex(my_lo) + "|" + mosaic::Hex(my_mid) + "|" +
@@ -1267,7 +1344,7 @@ class Bench {
         r.is_branch == 0 && r.branch_funct == 0 && r.is_jal == 0 &&
         r.is_jalr == 0 && r.is_auipc == 0 && r.writes_link == 0 &&
         r.is_miscmem == 0 && r.is_fence_i == 0 && r.is_muldiv == 0 &&
-        r.md_op == z.md_op && r.md_signed == 0 && r.is_system == 0 &&
+        r.md_op == z.md_op && r.md_signed == 0 && r.md_w == 0 && r.is_system == 0 &&
         r.is_ecall == 0 && r.is_ebreak == 0 && r.is_mret == 0 &&
         r.csr_op == CSR_NONE && r.csr_addr == 0 && r.csr_writes == 0 &&
         r.csr_reads == 0 && r.csr_imm_form == 0;
