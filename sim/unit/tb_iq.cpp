@@ -2158,7 +2158,11 @@ void PhaseRefusedInsert(Bench& bench, mosaic::Reporter& rep) {
 
 // Phase 14: randomised traffic against both shadows. Each cluster has its own
 // seed, so the two disagree with each other as well as with their own models.
-void PhaseRandom(Bench& bench, mosaic::Reporter& rep, int cycles) {
+// `cap` is the absolute cycle budget: the loop stops if it is reached, so an
+// overrun is attributed to this phase rather than left to the runner's timeout.
+// The caller's `cycles` budget is always smaller, so this never shortens a
+// normal run.
+void PhaseRandom(Bench& bench, mosaic::Reporter& rep, int cycles, uint64_t cap) {
   // Tags the driver believes are live, so a randomised wakeup sometimes names a
   // real waiter and is a genuine hit rather than a miss every time.
   struct Live {
@@ -2173,6 +2177,7 @@ void PhaseRandom(Bench& bench, mosaic::Reporter& rep, int cycles) {
   uint32_t rob_index = 100;
 
   for (int i = 0; i < cycles; i++) {
+    if (bench.cycles() >= cap) break;
     Stimulus s[2];
     for (unsigned c = 0; c < kClusters; c++) {
       mosaic::Rng& rng = bench.RngFor(c);
@@ -2243,19 +2248,31 @@ int main(int argc, char** argv) {
   Bench bench(opt, rep, top);
   bool aborted = false;
   std::string abort_reason;
+  const char* phase_name = "startup";
 
+  // The hard cycle budget. Called after every phase and once per randomised
+  // iteration; the reason names the phase that was executing, so an overrun is
+  // attributed instead of surfacing as a bare runner timeout.
   auto out_of_cycles = [&]() {
     if (!aborted && bench.cycles() >= opt.max_cycles) {
       aborted = true;
-      abort_reason = "exceeded --max-cycles=" + std::to_string(opt.max_cycles);
+      abort_reason = "exceeded --max-cycles=" + std::to_string(opt.max_cycles) +
+                     " while running phase '" + phase_name + "'";
     }
     return aborted;
   };
+  auto phase = [&](const char* name, void (*fn)(Bench&, mosaic::Reporter&)) {
+    if (aborted) return;
+    phase_name = name;
+    fn(bench, rep);
+    out_of_cycles();
+  };
 
   // ---- phase 0: geometry, before anything is driven -----------------------
-  PhaseGeometry(bench, rep);
+  phase("geometry", PhaseGeometry);
 
   // ---- phase 1: reset ------------------------------------------------------
+  phase_name = "reset";
   // rst is asserted for the reset schedule, then released. The first settled
   // cycle after the final reset edge is the one the checks are made on: nothing
   // may be valid, nothing granted, every counter zero, and no transfer reported
@@ -2280,26 +2297,32 @@ int main(int argc, char** argv) {
   rep.Check(top->c0_age_ctr == 0, "reset: the age counter is zero");
   // Both clusters clean, not just cluster 0.
   rep.Check(top->c1_count == 0 && top->c1_occupied == 0, "reset: cluster 1 is clean too");
+  out_of_cycles();
 
-  // ---- phases 2..12 --------------------------------------------------------
-  if (!aborted) PhaseInsertBasic(bench, rep);
-  if (!aborted) PhaseOldestReady(bench, rep);
-  if (!aborted) PhaseSameCycle(bench, rep);
-  if (!aborted) PhaseProducerOrder(bench, rep);
-  if (!aborted) PhaseAgeWrap(bench, rep);
-  if (!aborted) PhaseStaleWakeup(bench, rep);
-  if (!aborted) PhaseDuplicateWakeup(bench, rep);
-  if (!aborted) PhaseBackPressure(bench, rep);
-  if (!aborted) PhaseKill(bench, rep);
-  if (!aborted) PhaseDstConflict(bench, rep);
-  if (!aborted) PhaseFullAndOrder(bench, rep);
-  if (!aborted) PhaseRefusedInsert(bench, rep);
+  // ---- phases 2..13 --------------------------------------------------------
+  phase("insert-basic", PhaseInsertBasic);
+  phase("oldest-ready", PhaseOldestReady);
+  phase("same-cycle", PhaseSameCycle);
+  phase("producer-order", PhaseProducerOrder);
+  phase("age-wrap", PhaseAgeWrap);
+  phase("stale-wakeup", PhaseStaleWakeup);
+  phase("duplicate-wakeup", PhaseDuplicateWakeup);
+  phase("back-pressure", PhaseBackPressure);
+  phase("kill", PhaseKill);
+  phase("dst-conflict", PhaseDstConflict);
+  // Before full-and-order: both reach a refused insert, and the named check of
+  // *this* phase is the one that must carry a refused-insert mutant, so it runs
+  // first and its failure is the first one reported.
+  phase("refused-insert", PhaseRefusedInsert);
+  phase("full-and-order", PhaseFullAndOrder);
 
   // ---- phase 14: randomised ------------------------------------------------
   if (!aborted) {
+    phase_name = "randomised";
     const int budget = static_cast<int>(
         opt.max_cycles > bench.cycles() + 200 ? opt.max_cycles - bench.cycles() - 200 : 2000);
-    PhaseRandom(bench, rep, budget);
+    PhaseRandom(bench, rep, budget, opt.max_cycles);
+    out_of_cycles();
   }
 
   bench.ReportCoverage();

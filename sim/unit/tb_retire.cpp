@@ -1315,9 +1315,29 @@ class Harness {
       const bool shadow_live =
           tgt != nullptr && tgt->live &&
           Mask(tgt->gen, shadow_->gen_mask()) == Mask(s.cmp_gen, shadow_->gen_mask());
-      if (shadow_live && !dut_->rob_cmp_accepted_o && !dut_->rob_cmp_duplicate_o) {
-        Fail(where, "completion filed as stale: the buffer accepted nothing for "
-                     "an entry the shadow may still mark done acc=" +
+      // Would the shadow file this completion as a newly-done child? A
+      // completion whose child index is outside the macro, or whose bit is
+      // already set, is ignored on both sides (the buffer reports `bad_uop` or
+      // `duplicate`), so only the case the shadow *accepts* must be accepted by
+      // the buffer.
+      bool shadow_accepts = false;
+      if (shadow_live) {
+        const uint32_t uop_w = (shadow_->max_uops() <= 1) ? 1u : Clog2(shadow_->max_uops());
+        const uint32_t uop = s.cmp_uop & ((uop_w == 0) ? 0u : ((1u << uop_w) - 1u));
+        const bool already = (tgt->done_mask >> uop) & 1u;
+        shadow_accepts = (uop < tgt->num_uops) && !already;
+      }
+      // A cycle in which the buffer is flushing refuses every completion on
+      // both sides: the buffer because `cmp_*` is gated on `!flush_valid` (and
+      // `flush_valid` includes the trap flush), the shadow because `Apply`
+      // drops the whole queue. Only a non-flushing cycle can show a divergence.
+      const Entry* sh_head = shadow_->head();
+      const bool buffer_flush = s.rob_flush || s.flush_valid ||
+                                (sh_head != nullptr && sh_head->exc);
+      if (shadow_accepts && !buffer_flush &&
+          !dut_->rob_cmp_accepted_o && !dut_->rob_cmp_duplicate_o) {
+        Fail(where, "completion refused: the buffer accepted nothing for an "
+                     "entry the shadow marks done acc=" +
                      std::to_string(dut_->rob_cmp_accepted_o) + " dup=" +
                      std::to_string(dut_->rob_cmp_duplicate_o) + " stale=" +
                      std::to_string(dut_->rob_cmp_stale_o) + Describe(s));
@@ -1425,10 +1445,22 @@ class Harness {
              (static_cast<uint64_t>(LaneField(dut_->commit_tag_o, 1, width_)) << 32), commit_tag);
     CMP_U64_LANES((LaneField(dut_->commit_gen_o, 0, width_) & 0xFFu) |
              (static_cast<uint64_t>(LaneField(dut_->commit_gen_o, 1, width_)) << 32), commit_gen);
+    // `ev_valid` and `ev_trap` are the event stream itself: the card's Pass
+    // criterion is "events matching a reference", so every lane of them is
+    // compared on every cycle. Every other event field is gated on the event
+    // being valid, so a phantom event carrying nothing would otherwise pass.
+    CMP_U32(Lanes32(dut_->ev_valid_o, width_), ev_valid);
+    CMP_U32(Lanes32(dut_->ev_trap_o, width_), ev_trap);
     CMP_U32(dut_->o_event_count_o, event_count);
-    CMP_U32(dut_->o_pay_missing_o, pay_missing);
-    CMP_U32(dut_->o_csr_unsupported_o, csr_unsupported);
-    CMP_U32(dut_->o_exc_queued_o, exc_queued);
+    // `o_pay_missing`, `o_csr_unsupported` and `o_exc_queued` are packed one
+    // 32-bit word per lane (sim/tb/mosaic_retire_tb.sv), so they are lane masks
+    // and must be read lane by lane. Reading the packed port as a scalar takes
+    // lane 0's word alone: a lane-1-only report then reads as "not reported",
+    // which is the same mask-3-reads-as-1 mistake this file warns about for the
+    // event vectors.
+    CMP_U32(Lanes32(dut_->o_pay_missing_o, width_), pay_missing);
+    CMP_U32(Lanes32(dut_->o_csr_unsupported_o, width_), csr_unsupported);
+    CMP_U32(Lanes32(dut_->o_exc_queued_o, width_), exc_queued);
  #undef CMP_U32
  #undef CMP_U64_LANES
 
@@ -2291,9 +2323,12 @@ void PhaseMinstret(Harness* h) {
           "from " + std::to_string(start));
 
   // A cycle in which nothing retires: the counter must not move, even though
-  // two instructions are still in the buffer.
+  // two instructions are still in the buffer. The payload bus stays empty --
+  // presenting lane 0's payload would *retire* lane 0 (a retirable entry with a
+  // visible payload retires whether or not it writes a register), so an idle
+  // cycle is one with no payload offered, not one with a payload that carries
+  // no architectural effect.
   Stim idle;
-  idle.pay_valid = 0x1;
   h->Cycle(idle);
   Require(h->ObservedMinstret() == after_two, At("minstret", 2),
           "minstret moved to " + std::to_string(h->ObservedMinstret()) +

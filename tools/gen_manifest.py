@@ -95,6 +95,13 @@ def render_sv_package(bundle: config_check.Bundle, advertised) -> str:
     add("")
     add("package mosaic_cfg_pkg;")
     add("")
+    add("  // This package is compiled into every file that includes it, and a warning is")
+    add("  // a failure in this project. No consumer names every constant -- the RAM base")
+    add("  // is unused in the frontend, the fetch depth in the CSR file -- so the")
+    add("  // unused-parameter check is silenced here, once, rather than by a workaround")
+    add("  // in every including module.")
+    add("  /* verilator lint_off UNUSEDPARAM */")
+    add("")
     add("  localparam int unsigned MOSAIC_PROFILE_INDEX = %d;" % config_check.PROFILE_ORDER.index(bundle.name))
     add("  localparam int unsigned MOSAIC_XLEN           = %d;" % xlen)
     add("  localparam int unsigned MOSAIC_HARTS          = %d;" % profile["harts"])
@@ -157,6 +164,8 @@ def render_sv_package(bundle: config_check.Bundle, advertised) -> str:
         add("  localparam logic [63:0] %-34s = %s;" % (base_name, _hex64(region["base"])))
         add("  localparam logic [63:0] %-34s = %s;" % (size_name, _hex64(region["size"])))
     add("")
+    add("  /* verilator lint_on UNUSEDPARAM */")
+    add("")
     add("endpackage : mosaic_cfg_pkg")
     add("")
     add("`endif  // MOSAIC_CFG_PKG_SV_")
@@ -205,6 +214,20 @@ def render_sv_id_package(bundle: config_check.Bundle) -> str:
     add("// Produced by tools/gen_manifest.py --profile %s from config/contracts/." % bundle.name)
     add("// Widths are evaluated from the profile geometry; tools/check_contracts.py")
     add("// proves every counter modulus exceeds twice the maximum compare distance.")
+    add("//")
+    add("// Several RTL files include this header in one compilation unit, so it needs an")
+    add("// include guard. Without one the package is defined once per including file;")
+    add("// the simulator dedupes packages and tolerates it, while slang reports a")
+    add("// duplicate definition, and both tools read this source precisely because")
+    add("// they disagree.")
+    # Note for whoever edits these lines: a comment line whose first word is
+    # `Verilator` (or `verilator`) is a *metacomment* to Verilator and is parsed
+    # as a pragma, so `// Verilator dedupes ...` in generated RTL is a hard
+    # error (BADVLTPRAGMA) in every file that includes this header. The word may
+    # appear mid-line; it may not begin the comment.
+    add("")
+    add("`ifndef MOSAIC_ID_PKG_SV_")
+    add("`define MOSAIC_ID_PKG_SV_")
     add("")
     add("package mosaic_id_pkg;")
     add("")
@@ -269,6 +292,8 @@ def render_sv_id_package(bundle: config_check.Bundle) -> str:
     add("  /* verilator lint_on UNUSEDSIGNAL */")
     add("")
     add("endpackage : mosaic_id_pkg")
+    add("")
+    add("`endif  // MOSAIC_ID_PKG_SV_")
     add("")
     return "\n".join(lines)
 

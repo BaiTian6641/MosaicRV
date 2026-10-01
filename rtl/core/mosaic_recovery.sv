@@ -551,9 +551,12 @@ module mosaic_recovery #(
   // never sees it, and the free count drifts down by one per such branch until
   // the machine stalls with an empty free list it believes is full.
   //
-  // The restore therefore applies the journal's own inverse step to this tag
-  // explicitly, using the same rule as every other entry, so there is one undo
-  // rule in the design rather than two.
+  // It follows that a restore has to apply the inverse step to the recorded
+  // destination of **every checkpoint it consumes**, not only its own: a squash
+  // kills the younger branches too, and each of those owns a destination that no
+  // other undo covers. The rule is stated once -- the journal's own inverse step,
+  // the same one every journalled allocation gets -- so there is one undo rule in
+  // the design rather than two.
   logic                   ck_tag_valid  [CKPT_DEPTH];
   logic [REC_TAG_W-1:0]   ck_tag        [CKPT_DEPTH];
   logic                   ck_tag_prev_valid [CKPT_DEPTH];
@@ -1234,18 +1237,27 @@ module mosaic_recovery #(
       end
     end
 
-    // 3b. The checkpointing instruction's own destination, undone by the same
-    //     rule as every journal entry. It is not in the journal because the
-    //     checkpoint precedes the branch, so without this step a mispredicting
-    //     call leaks one tag per mispredict -- a leak that only shows up as
-    //     spurious exhaustion dozens of instructions later, where nothing points
-    //     back at the branches that caused it.
-    if (tail_do_restore && ck_tag_valid[restore_ck]) begin
-      free_q[ck_tag[restore_ck]] = 1'b1;
-      gen_q[ck_tag[restore_ck]]  = ck_tag_prev_valid[restore_ck]
-                                       ? ck_tag_prev_gen[restore_ck]
-                                       : {REC_GEN_W{1'b0}};
-      genv_q[ck_tag[restore_ck]] = ck_tag_prev_valid[restore_ck];
+    // 3b. Every consumed checkpoint owns a destination of its own: the restored
+    //     branch, and every younger branch whose checkpoint the same squash
+    //     kills. None of those allocations is in the journal -- a checkpoint push
+    //     deliberately does not journal its own instruction -- so each is undone
+    //     here, by the journal's own inverse rule, or a mispredicting call leaks
+    //     one tag per *killed* branch in addition to the one it leaks per
+    //     mispredict. The leak surfaces dozens of instructions later as spurious
+    //     exhaustion with nothing pointing back at the branches that caused it.
+    //     The tags are distinct allocations, so the order of this loop cannot
+    //     matter, exactly as the free set's set semantics guarantee for the undo
+    //     window itself.
+    if (tail_do_restore) begin
+      for (int unsigned c = 0; c < CKPT_DEPTH; c++) begin
+        if (ck_valid[c] && (c >= restore_ck) && ck_tag_valid[c]) begin
+          free_q[ck_tag[c]] = 1'b1;
+          gen_q[ck_tag[c]]  = ck_tag_prev_valid[c]
+                                  ? ck_tag_prev_gen[c]
+                                  : {REC_GEN_W{1'b0}};
+          genv_q[ck_tag[c]] = ck_tag_prev_valid[c];
+        end
+      end
     end
 
     // 4. The owner that made it back writes.

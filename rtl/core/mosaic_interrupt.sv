@@ -377,8 +377,12 @@ module mosaic_interrupt (
   assign any_take = take_mei | take_msi | take_mti;
 
   // MEI > MSI > MTI, per the privileged spec's standard priority order. The
-  // cause is zero when nothing is taken, so a consumer that reads irq_cause_o
-  // while irq_valid_o is low is not reading a stale winner.
+  // cause is the winning *candidate* -- zero when no enabled, non-delegated
+  // pending bit exists at all -- and it deliberately does not depend on
+  // mstatus.MIE or on core_can_trap_i. Those two are the gates that decide
+  // whether a trap may be taken now (`irq_valid_o`), while the cause stays
+  // stable across a blocked window, so a core that latches the cause when the
+  // boundary opens cannot latch a value that was invalidated by the wait.
   always_comb begin
     irq_cause_o = 64'd0;
 `ifdef MOSAIC_INTERRUPT_MUTANT_PRIORITY_REVERSED

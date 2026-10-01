@@ -48,7 +48,7 @@
 // and it is written as a divisor so that a profile change cannot silently pick a
 // different mapping. For p0 the *bank* selection happens to coincide with the
 // low two bits of the tag; the *row* selection does not, which is what the
-// bit-slice mutant in the table below exercises.
+// row-slice mutant in the table below exercises.
 //
 // Rows per bank are `ceil(ENTRIES / BANKS)`, so a profile whose entry count is
 // not a multiple of its bank count leaves the last row of the last bank
@@ -157,12 +157,14 @@
 // output is in results/reports/I-015-prf.md:
 //
 //   NO_BANK_CONFLICT      two demands to one bank are both granted
-//   DROP_BANK0_WRITE      banker 0's write port never applies
+//   DROP_BANK0_WRITE      bank 0's write port never applies
 //   IGNORE_STORED_GEN     a read reports the requested generation and never a
 //                         generation mismatch
 //   NEVER_WRITTEN_VALID   an entry with no value since reset is reported valid
 //   NO_WRITE_THROUGH      a same-cycle write is not visible to a same-cycle read
-//   BITSLICE_ROW          the row is decoded as a bit slice instead of tag/BANKS
+//   SLICE_ROW             the row is decoded from the tag's low bits instead of
+//                         tag/BANKS (masked into range, so the defect is a wrong
+//                         entry rather than an out-of-bounds array read)
 // ============================================================================
 
 `default_nettype none
@@ -309,11 +311,14 @@ module mosaic_prf (
     int unsigned t;
     begin
       t = int'(tag);
-`ifdef MOSAIC_PRF_MUTANT_BITSLICE_ROW
+`ifdef MOSAIC_PRF_MUTANT_SLICE_ROW
       // MUTANT: the row taken from the low bits of the tag, which is the
       // field-split decode the header rejects. Invisible for tags below
-      // BANKS*BANKS; wrong for every tag at or above it.
-      row_of = PRF_ROW_W'(t & ((1 << PRF_ROW_W) - 1));
+      // ROWS == BANKS*BANKS; wrong for every tag at or above it. The mask into
+      // range keeps the mutant a *behavioural* defect -- a wrong entry -- rather
+      // than an out-of-bounds array read, which would be undefined behaviour in
+      // the simulator and would prove nothing about the decode.
+      row_of = PRF_ROW_W'((t & ((1 << PRF_ROW_W) - 1)) % PRF_ROWS);
 `else
       row_of = PRF_ROW_W'(t / PRF_BANKS);
 `endif

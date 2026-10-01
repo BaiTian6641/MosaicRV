@@ -388,6 +388,7 @@ class ShadowRecovery {
 
   // ------------------------------------------------------------------ geometry
   uint32_t entries() const { return entries_; }
+  uint32_t arch() const { return arch_; }
   uint32_t rob() const { return rob_; }
   uint32_t tag_w() const { return tag_w_; }
   uint32_t id_w() const { return id_w_; }
@@ -838,17 +839,25 @@ class ShadowRecovery {
       }
     }
 
-    // 3a. The checkpointing instruction's own destination, undone by the same
-    //     rule as every journal entry. A branch that writes a link register
-    //     allocates in the same cycle it checkpoints, and that allocation is not
-    //     journalled because the checkpoint precedes the branch -- so without this
-    //     step a mispredicting call leaks one tag, and the leak only surfaces as
-    //     spurious exhaustion dozens of instructions later.
-    if (restore && ck_tag_valid_[p.ck]) {
-      free_.Set(ck_tag_[p.ck], true);
-      gen_[ck_tag_[p.ck]] =
-          ck_tag_prev_valid_[p.ck] ? ck_tag_prev_gen_[p.ck] : 0;
-      gen_valid_[ck_tag_[p.ck]] = ck_tag_prev_valid_[p.ck];
+    // 3a. The destination of every checkpoint the squash consumes -- the
+    //     restored branch's, and every younger branch's whose checkpoint the same
+    //     restore kills -- undone by the same rule as every journal entry. A
+    //     branch that writes a link register allocates in the same cycle it
+    //     checkpoints, and that allocation is not journalled because the
+    //     checkpoint precedes the branch; a restore that undid only the restored
+    //     checkpoint's destination would leak one tag per *killed* branch as well
+    //     as the one it leaks per mispredict, and the leak only surfaces as
+    //     spurious exhaustion dozens of instructions later. Validity is read
+    //     before the stack block below clears it: the killed set is defined
+    //     against the pre-edge stack, which is the stack this restore is acting
+    //     on.
+    if (restore) {
+      for (uint32_t c = 0; c < ckpt_depth_; c++) {
+        if (!ck_valid_[c] || c < p.ck || !ck_tag_valid_[c]) continue;
+        free_.Set(ck_tag_[c], true);
+        gen_[ck_tag_[c]] = ck_tag_prev_valid_[c] ? ck_tag_prev_gen_[c] : 0;
+        gen_valid_[ck_tag_[c]] = ck_tag_prev_valid_[c];
+      }
     }
 
     // 3. The undo, oldest entry first, starting at the checkpoint's own mark.
@@ -1500,6 +1509,32 @@ class Harness {
     Cycle(s);
   }
 
+  // Reserve a credit *for a stated owner generation* and return the slot the
+  // unit granted (read back from the shadow's table, because the unit grants the
+  // lowest free slot and not the preferred one; `cred_entries()` means refused).
+  //
+  // The phases that test the age-bounded kill cannot use `NextGen()`, which is
+  // the generation of a *new* instruction: every reservation would then be
+  // younger than the branch under test, and the rule "an older instruction's
+  // result still completes" would be untestable because no reservation would be
+  // older. Handing the generation in explicitly is what lets a phase put a
+  // reservation on either side of the boundary.
+  uint32_t ReserveCreditFor(uint32_t rob_gen) {
+    std::vector<bool> before(shadow_->cred_entries(), false);
+    for (uint32_t c = 0; c < shadow_->cred_entries(); c++) {
+      before[c] = shadow_->CreditBusy(c);
+    }
+    Stim s;
+    s.cred_req_valid = true;
+    s.cred_req_id = 0;
+    s.cred_req_rob_gen = rob_gen;
+    Cycle(s);
+    for (uint32_t c = 0; c < shadow_->cred_entries(); c++) {
+      if (!before[c] && shadow_->CreditBusy(c)) return c;
+    }
+    return shadow_->cred_entries();
+  }
+
   void Respond(uint32_t id, uint32_t epoch) {
     Stim s;
     s.rsp_valid = true;
@@ -1528,7 +1563,12 @@ class Harness {
   bool JournalOverflow() const { return report_.journal_overflow; }
   bool AllocJournalFull() const { return report_.alloc_journal_full; }
   bool AllocAccepted() const { return report_.alloc_accepted; }
+  bool AllocSquashed() const { return report_.alloc_squashed; }
   bool AllocExhausted() const { return report_.alloc_exhausted; }
+  bool RedirectTakenIsFault() const { return report_.redirect_taken_is_fault; }
+  bool WbAccepted() const { return report_.wb_accepted; }
+  bool WbStale() const { return report_.wb_stale; }
+  bool WbDuplicate() const { return report_.wb_duplicate; }
   bool CkptAccepted() const { return report_.ckpt_accepted; }
   bool CkptRefused() const { return report_.ckpt_refused; }
   bool RedirectStale() const { return report_.redirect_stale; }

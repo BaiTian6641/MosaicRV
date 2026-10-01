@@ -335,6 +335,7 @@ class Harness {
     post_ = ReadNow();
 
     if (!rst) {
+      CheckSpuriousWakeCounter();
       CompareComb(s, post_, "post-edge");
       CompareState();
       CheckInvariants(s);
@@ -378,6 +379,7 @@ class Harness {
     ++cycles_;
     post_ = ReadNow();
 
+    CheckSpuriousWakeCounter();
     CompareComb(s, post_, "post-edge");
     CompareState();
     CheckInvariants(s);
@@ -444,6 +446,19 @@ class Harness {
     return o;
   }
 
+  // The module's own spurious-wake counter, checked before anything else in the
+  // cycle. It is a *detector*, not a statistic that is compared to the shadow
+  // and then never used: a halt that ends without an enabled pending interrupt
+  // is exactly the classic WFI bug, and this counter is the DUT's own statement
+  // that it happened. Checking it first means the first failure of that class
+  // names the counter rather than the halt output it also disturbed.
+  void CheckSpuriousWakeCounter() const {
+    Require(post_.spurious_wake_ctr == 0,
+            phase_ + ": cycle " + Dec(clk_->cycle()) + " o_spurious_wake_ctr",
+            "a halt ended without an enabled pending interrupt (DUT count " +
+                Dec(post_.spurious_wake_ctr) + ")");
+  }
+
   void CompareComb(const Stim& s, const Outputs& actual, const std::string& snapshot) {
     Outputs expected;
     shadow_->Comb(s, &expected);
@@ -503,13 +518,6 @@ class Harness {
     Require(!(post_.halt && !pre_.halt && (pre_.mip & s.mie) != 0),
             where + " WFI: halted with an enabled interrupt already pending",
             "wfi_halt_o rose while mie & mip was non-zero");
-    // The spurious-wake counter must not move. This is the classic WFI bug's
-    // detector; it is checked on the DUT's own output every cycle, so a wake
-    // that the shadow would also have produced for the wrong reason is caught.
-    Require(pre_.spurious_wake_ctr == 0,
-            where + " o_spurious_wake_ctr",
-            "a wake occurred without an enabled pending interrupt (count " +
-                Dec(pre_.spurious_wake_ctr) + ")");
   }
 
   void CountCoverage(const Stim& s) {
@@ -732,8 +740,12 @@ void PhaseMasking(Harness* h) {
     h->Cycle(m);
     Require(!h->pre().irq_valid, "masking: mstatus.MIE=0",
             "a trap was offered while the global enable was clear");
-    Require(h->pre().irq_cause == 0, "masking: cause with mstatus.MIE=0",
-            "irq_cause_o was non-zero while no trap was offered");
+    // The cause is a candidate report, not an offer: it still names the winner
+    // among the enabled, non-delegated pending bits while the global enable
+    // blocks the trap, and it is the same cause the un-masked cycle uses below.
+    Require(h->pre().irq_cause == kCauseMti, "masking: cause with mstatus.MIE=0",
+            "expected the masked candidate " + mosaic::Hex(kCauseMti) + ", got " +
+                mosaic::Hex(h->pre().irq_cause));
     Require(h->pre().mip == (1ull << kBitMtip), "masking: pending while masked",
             "the pending bit was dropped by masking, not delayed");
     h->Cycle(m);
@@ -1433,7 +1445,11 @@ int main(int argc, char** argv) {
   } catch (const Failure& f) {
     reporter.Mismatch(f.what, "contract holds", "contract violated");
     passed = false;
-    detail = "contract violated: " + f.what;
+    // The comparison count is part of the evidence: a mutant that dies early
+    // after a handful of comparisons has changed behaviour in a way this run
+    // can quantify, not merely in a way it reports as a failure.
+    detail = "contract violated after " + std::to_string(harness.comparisons()) +
+             " comparisons: " + f.what;
   }
 
   dut.final();

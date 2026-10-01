@@ -197,7 +197,14 @@ module mosaic_lsu_endpoint (
   endfunction
 
   logic misaligned_c;
+`ifndef MOSAIC_LSU_MUTANT_NO_MISALIGN_CHECK
   assign misaligned_c = is_misaligned(req_i.size, addr_c[2:0]);
+`else
+  // Mutant: the misalignment check never fires, so a misaligned access is
+  // forwarded to memory and silently served. This is exactly the failure the
+  // profile's trap policy exists to prevent, and the case must catch it.
+  assign misaligned_c = 1'b0;
+`endif
 
   // -------------------------------------------------------- request accept
   // A request is taken only from IDLE: one transaction at a time, so the
@@ -212,7 +219,13 @@ module mosaic_lsu_endpoint (
   // strobes and the lane shift is the *latched* address, not the incoming
   // `req_i`'s: after acceptance the request port may carry the next uop.
   logic [XLEN-1:0] shifted_store_c;
+`ifndef MOSAIC_LSU_MUTANT_NO_STORE_SHIFT
   assign shifted_store_c = req_q.store_data << {addr_q[2:0], 3'b000};
+`else
+  // Mutant: store data is placed at lane 0 instead of at the addressed lane, so
+  // a byte store to an odd address writes the wrong byte.
+  assign shifted_store_c = req_q.store_data;
+`endif
 
   assign mem_req_valid_o = (state_q == ST_REQ);
   assign mem_req_o.we    = req_q.we;
@@ -233,6 +246,7 @@ module mosaic_lsu_endpoint (
 
   assign lane_shifted_c = mem_rsp_i.rdata >> {addr_q[2:0], 3'b000};
 
+`ifndef MOSAIC_LSU_MUTANT_NO_SIGN_EXTEND
   always_comb begin
     case (req_q.size)
       mosaic_pkg::SZ_BYTE: begin
@@ -252,6 +266,18 @@ module mosaic_lsu_endpoint (
       end
     endcase
   end
+`else
+  // Mutant: a load zero-extends regardless of the instruction, so `lb`/`lh`/`lw`
+  // differ from the architectural value exactly when the sign bit is set.
+  always_comb begin
+    case (req_q.size)
+      mosaic_pkg::SZ_BYTE: extracted_c = {56'd0, lane_shifted_c[7:0]};
+      mosaic_pkg::SZ_HALF: extracted_c = {48'd0, lane_shifted_c[15:0]};
+      mosaic_pkg::SZ_WORD: extracted_c = {32'd0, lane_shifted_c[31:0]};
+      default:             extracted_c = lane_shifted_c;
+    endcase
+  end
+`endif
 
   // ---------------------------------------------------------------- outputs
   assign rsp_valid_o     = rsp_valid_q;
@@ -343,7 +369,13 @@ module mosaic_lsu_endpoint (
         ST_WAIT: begin
           if (mem_rsp_valid_i) begin
             rsp_q.id    <= req_q.id;
+`ifndef MOSAIC_LSU_MUTANT_FAULT_AS_ZERO
             rsp_q.fault <= mem_rsp_i.fault;
+`else
+            // Mutant: a memory access fault is reported as a successful read of
+            // zero -- the "out-of-range read defaults to zero" blocker.
+            rsp_q.fault <= 1'b0;
+`endif
             rsp_q.tval  <= addr_q;
             rsp_q.cause <= req_q.we ? EXC_STORE_ACCESS : EXC_LOAD_ACCESS;
             rsp_q.data  <= req_q.we ? 64'd0 : extracted_c;
@@ -373,45 +405,6 @@ module mosaic_lsu_endpoint (
       endcase
     end
   end
-
-`ifdef MOSAIC_LSU_MUTANT_NO_MISALIGN_CHECK
-  // Mutant: the misalignment check never fires, so a misaligned access is
-  // forwarded to memory and silently served. This is exactly the failure the
-  // profile's trap policy exists to prevent, and the case must catch it.
-  assign misaligned_c = 1'b0;
-`endif
-
-`ifdef MOSAIC_LSU_MUTANT_NO_SIGN_EXTEND
-  // Mutant: a load zero-extends regardless of the instruction, so `lb`/`lh`/`lw`
-  // return a value that differs from the architectural one exactly when the
-  // sign bit is set.
-  always_comb begin
-    case (req_q.size)
-      mosaic_pkg::SZ_BYTE: extracted_c = {56'd0, lane_shifted_c[7:0]};
-      mosaic_pkg::SZ_HALF: extracted_c = {48'd0, lane_shifted_c[15:0]};
-      mosaic_pkg::SZ_WORD: extracted_c = {32'd0, lane_shifted_c[31:0]};
-      default:             extracted_c = lane_shifted_c;
-    endcase
-  end
-`endif
-
-`ifdef MOSAIC_LSU_MUTANT_NO_STORE_SHIFT
-  // Mutant: store data is placed at lane 0 instead of at the addressed lane, so
-  // a byte store to an odd address writes the wrong byte.
-  assign shifted_store_c = req_q.store_data;
-`endif
-
-`ifdef MOSAIC_LSU_MUTANT_FAULT_AS_ZERO
-  // Mutant: a memory access fault is reported as a successful read of zero --
-  // the "out-of-range read defaults to zero" blocker the stage guide names.
-  always_ff @(posedge clk) begin
-    if (!rst && (state_q == ST_WAIT) && mem_rsp_valid_i) begin
-      rsp_q.fault <= 1'b0;
-      rsp_q.cause <= req_q.we ? EXC_STORE_ACCESS : EXC_LOAD_ACCESS;
-      rsp_q.data  <= 64'd0;
-    end
-  end
-`endif
 
 endmodule
 

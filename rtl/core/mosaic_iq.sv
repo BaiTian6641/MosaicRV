@@ -896,8 +896,20 @@ module mosaic_iq #(
   // resident is eligible.
   logic [AGE_W-1:0] ins_age;
   logic [AGE_W-1:0] age_ctr_next;
+  // Whether the insertion path advances the allocator and takes an age.
+  // Shipping: only a real insertion that became resident. The mutant also
+  // advances on a *refused* insert -- `ins_valid` with `ins_ready` low, i.e. a
+  // full queue -- which is exactly the "does a refused insert advance the
+  // allocation pointer?" defect this work package set out to rule out. It is a
+  // separate net so the defect is stated once and both update sites use it.
+  logic ins_adv;
+`ifdef MOSAIC_IQ_MUTANT_REFUSED_INSERT_ADVANCES
+  assign ins_adv = (ins_fire && !ins_taken) || (ins_valid && !ins_ready);
+`else
+  assign ins_adv = (ins_fire && !ins_taken);
+`endif
   assign ins_age      = age_ctr - AGE_W'(rm_count) + AGE_W'(base_removed);
-  assign age_ctr_next = ins_age + AGE_W'((ins_fire && !ins_taken) ? 1 : 0);
+  assign age_ctr_next = ins_age + AGE_W'(ins_adv ? 1 : 0);
 
   // ---------------------------------------------------------- grant payload
   always_comb begin
@@ -1067,7 +1079,10 @@ module mosaic_iq #(
         occ_cnt <= occ_cnt - rm_count;
       end
 
-      if (ins_fire && !ins_taken) begin
+      // `ins_adv`, not `ins_fire && !ins_taken`: see the declaration above. In
+      // the shipping build the two are the same expression, so this is the one
+      // place the mutant's defect reaches the allocation pointer.
+      if (ins_adv) begin
         alloc_ptr <= (alloc_slot == IDX_W'(DEPTH - 1)) ? {IDX_W{1'b0}}
                                                         : (alloc_slot + IDX_W'(1));
       end

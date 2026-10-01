@@ -78,6 +78,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <string>
@@ -135,9 +136,9 @@ inline void PortZero(uint8_t& port) { port = 0; }
 inline void PortZero(uint16_t& port) { port = 0; }
 inline void PortZero(uint32_t& port) { port = 0; }
 inline void PortZero(uint64_t& port) { port = 0; }
-template <int N>
+template <std::size_t N>
 inline void PortZero(VlWide<N>& port) {
-  for (int i = 0; i < N; i++) port[i] = 0;
+  for (std::size_t i = 0; i < N; i++) port[i] = 0;
 }
 
 inline void PortSet(uint8_t& port, uint32_t bit, uint32_t width, uint64_t value) {
@@ -162,7 +163,7 @@ inline void PortSet(uint64_t& port, uint32_t bit, uint32_t width, uint64_t value
   const uint64_t mask = FieldMask(width) << bit;
   port = (port & ~mask) | ((value & FieldMask(width)) << bit);
 }
-template <int N>
+template <std::size_t N>
 inline void PortSet(VlWide<N>& port, uint32_t bit, uint32_t width, uint64_t value) {
   for (uint32_t b = 0; b < width; b++) {
     const uint32_t index = bit + b;
@@ -185,7 +186,7 @@ inline uint64_t PortGet(uint32_t port, uint32_t bit, uint32_t width) {
 inline uint64_t PortGet(uint64_t port, uint32_t bit, uint32_t width) {
   return (port >> bit) & FieldMask(width);
 }
-template <int N>
+template <std::size_t N>
 inline uint64_t PortGet(const VlWide<N>& port, uint32_t bit, uint32_t width) {
   uint64_t value = 0;
   for (uint32_t b = 0; b < width; b++) {
@@ -1539,7 +1540,8 @@ int main(int argc, char** argv) {
   } catch (const Failure& f) {
     reporter.Mismatch(f.what, "contract holds", "contract violated");
     passed = false;
-    detail = "contract violated: " + f.what;
+    detail = "contract violated after " + std::to_string(harness.comparisons()) +
+             " shadow comparisons: " + f.what;
   }
 
   dut.final();

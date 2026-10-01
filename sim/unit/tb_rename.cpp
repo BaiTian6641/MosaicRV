@@ -727,6 +727,12 @@ class Harness {
   bool shadow_gen_valid(uint32_t tag) const { return shadow_->gen_valid()[tag]; }
   uint32_t shadow_gen_of(uint32_t tag) const { return shadow_->gen()[tag]; }
   const std::vector<Dest>& shadow_cmt_map() const { return shadow_->cmt_map(); }
+  const std::vector<Dest>& shadow_spec_map() const { return shadow_->spec_map(); }
+
+  // The DUT's undo-window depth, read from the register itself. A phase that
+  // checked the shadow's depth here instead would be asserting about the model.
+  uint32_t dut_j_len() const { return dut_->dbg_j_len; }
+  const std::vector<uint32_t> dut_gens() const { return DutGens(); }
 
   std::vector<bool> DutFreeMask() const {
     std::vector<bool> out;
@@ -2191,6 +2197,703 @@ void PhaseRandom(Harness* h, mosaic::Reporter* reporter, uint32_t entries, uint3
 }
 
 
+// ============================================================================
+// Two-wide phases (I-014)
+//
+// Every phase below drives the group ports that the single-width phases leave
+// inactive, and asserts about what the DUT *presented* (through `observed()`),
+// not about the shadow's prediction of it. They run only for
+// CASE=rename.same_cycle_chain; the single-width phases run for both cases, so a
+// two-wide change that broke the single-width path fails in the same run.
+// ============================================================================
+
+// Phase 9: the same-cycle RAW chain, and the WAR direction, in one group.
+void PhaseTwoWideRaw(Harness* h, mosaic::Reporter* reporter, uint32_t arch_regs) {
+  // Establish a source whose producer has written back. Without this, every source
+  // in the phase would be uniformly not-ready and the readiness assertions would
+  // only ever test one direction.
+  Stim a;
+  a.alloc_req = true;
+  a.alloc_rd = 9;
+  Outputs ao = h->Cycle(a);
+  Require(ao.alloc_new_valid, "twowide-raw", "the setup allocation of x9 was refused");
+  const Dest map9 = ao.alloc_new;
+  Stim w;
+  w.wb_valid = true;
+  w.wb = map9;
+  Require(h->Cycle(w).wb_accepted, "twowide-raw", "the setup writeback of x9 was refused");
+  const Dest map20 = h->DutSpecMap()[20];
+  const uint32_t free_before = h->free_count();
+
+  // One group: lane 0 writes x5, lane 1 writes x6 and reads x5 -- its producer, in
+  // the same cycle -- and x9, whose producer has already written back.
+  Stim s;
+  s.alloc_req = true;
+  s.alloc_rd = 5;
+  s.alloc2_req = true;
+  s.alloc2_rd = 6;
+  s.rs1_addr = 9;
+  s.rs2_addr = 20;
+  s.rs3_addr = 5;
+  s.rs4_addr = 9;
+  Outputs o = h->Cycle(s);
+
+  Require(o.alloc_accepted && o.alloc2_accepted, "twowide-raw",
+          "a two-wide group was refused with the whole register file free");
+  Require(o.alloc_new_valid && o.alloc2_new_valid, "twowide-raw",
+          "a group with two real destinations allocated fewer than two tags");
+  Require(o.alloc_new.tag != o.alloc2_new.tag, "twowide-raw",
+          "the two lanes of one group took tag " + Dec(o.alloc_new.tag) + " twice");
+
+  // The chain itself.
+  Require(o.rs3_bypass, "twowide-raw",
+          "lane 1's source x5 did not take the same-cycle bypass from lane 0's "
+          "allocation");
+  Require(o.rs3 == o.alloc_new, "twowide-raw",
+          "lane 1's source x5 resolved to " + o.rs3.str() + ", expected lane 0's new " +
+              o.alloc_new.str());
+  Require(!o.rs3_ready, "twowide-raw",
+          "a source resolved by the same-cycle bypass was reported ready: lane 0's "
+          "producer has not written back, so there is no PRF value to read yet");
+
+  // The contrast: a source that is not lane 0's destination is the map's, and its
+  // readiness is the producer's writeback.
+  Require(!o.rs4_bypass && o.rs4 == map9, "twowide-raw",
+          "lane 1's source x9 resolved to " + o.rs4.str() + ", expected the map's " +
+              map9.str());
+  Require(o.rs4_ready, "twowide-raw",
+          "a source whose producer has written back was reported not-ready");
+  Require(o.rs2 == map20, "twowide-raw",
+          "lane 0's second source resolved to " + o.rs2.str() + ", expected the map's " +
+              map20.str());
+  Require(!o.rs2_ready, "twowide-raw", "a source with no writeback was reported ready");
+  Require(o.rs1 == map9 && o.rs1_ready, "twowide-raw",
+          "lane 0's own source x9 was disturbed by the group: " + o.rs1.str());
+
+  Require(h->free_count() == free_before - 2, "twowide-raw",
+          "a two-tag group moved the free count by " +
+              Dec(free_before - h->free_count()) + ", expected 2");
+  Require(!h->shadow_is_free(o.alloc_new.tag) && !h->shadow_is_free(o.alloc2_new.tag),
+          "twowide-raw", "an allocated tag is still in the free set");
+  const std::vector<Dest> spec = h->DutSpecMap();
+  Require(spec[5] == o.alloc_new, "twowide-raw",
+          "x5 does not map to lane 0's allocation");
+  Require(spec[6] == o.alloc2_new, "twowide-raw",
+          "x6 does not map to lane 1's allocation");
+
+  reporter->Check(true,
+                  "twowide-raw: lane 1's source x5 resolved to lane 0's in-flight "
+                  "destination " + o.alloc_new.str() +
+                      " and was reported not-ready, while the other three sources came "
+                      "from the map with writeback-derived readiness");
+}
+
+// Phase 9b: WAR inside one group. Lane 0 reads a register lane 1 writes in the same
+// group, so the macro ahead must read the start-of-cycle mapping -- lane 1's new tag
+// is allocated for an instruction that has not even been renamed yet, and waiting on
+// it would be waiting forever.
+void PhaseTwoWideWar(Harness* h, mosaic::Reporter* reporter) {
+  const Dest old6 = h->DutSpecMap()[6];
+  const uint32_t free_before = h->free_count();
+
+  Stim war;
+  war.alloc_req = true;
+  war.alloc_rd = 11;
+  war.alloc2_req = true;
+  war.alloc2_rd = 6;
+  war.rs1_addr = 6;   // lane 0 reads what lane 1 writes
+  war.rs2_addr = 0;
+  war.rs3_addr = 0;   // lane 1's sources are x0: ready, and the zero identity
+  war.rs4_addr = 0;
+  Outputs wo = h->Cycle(war);
+
+  Require(wo.alloc_accepted && wo.alloc2_accepted, "twowide-war",
+          "the WAR group was refused with tags available");
+  Require(wo.alloc_new_valid && wo.alloc2_new_valid, "twowide-war",
+          "the WAR group allocated fewer than two tags");
+  Require(wo.alloc2_old_valid && wo.alloc2_old == old6, "twowide-war",
+          "lane 1's displaced mapping for x6 was " + wo.alloc2_old.str() +
+              ", expected the start-of-cycle " + old6.str() +
+              " (the two lanes write different registers, so lane 1 does not displace "
+              "lane 0's allocation)");
+  Require(wo.rs1 == old6, "twowide-war",
+          "lane 0's source x6 resolved to " + wo.rs1.str() +
+              ": a macro must not read the destination of the macro behind it");
+  Require(wo.alloc_new.tag != wo.alloc2_new.tag, "twowide-war",
+          "the two lanes of the WAR group took one tag");
+  Require(h->free_count() == free_before - 2, "twowide-war",
+          "the WAR group did not take exactly two tags");
+  Require(wo.rs3_is_x0 && wo.rs3_ready && wo.rs3 == Dest{0, 0}, "twowide-war",
+          "a lane 1 source of x0 must be ready and return the zero identity");
+  Require(wo.rs4_is_x0 && wo.rs4_ready && wo.rs4 == Dest{0, 0}, "twowide-war",
+          "a lane 1 source of x0 must be ready and return the zero identity");
+
+  // After the edge lane 0's source would resolve to lane 1's mapping -- the pair
+  // has been renamed, and the ordering only holds *within* a cycle.
+  Require(h->DutSpecMap()[6] == wo.alloc2_new, "twowide-war",
+          "x6 does not map to lane 1's allocation after the group");
+
+  reporter->Check(true,
+                  "twowide-war: lane 0's source x6 stayed on the start-of-cycle mapping " +
+                      old6.str() + " while lane 1 allocated " + wo.alloc2_new.str() +
+                      " for x6 in the same group");
+}
+
+// Phase 10: WAW inside one group, and the release of the two old mappings through
+// the two commit lanes -- sequenced, and in one cycle.
+void PhaseTwoWideWaw(Harness* h, mosaic::Reporter* reporter, uint32_t arch_regs) {
+  const uint32_t rd = 7;
+  const Dest old7 = h->DutSpecMap()[rd];
+  const uint32_t free_before = h->free_count();
+
+  // One group, both lanes writing x7.
+  Stim s;
+  s.alloc_req = true;
+  s.alloc_rd = rd;
+  s.alloc2_req = true;
+  s.alloc2_rd = rd;
+  s.rs1_addr = rd;
+  s.rs2_addr = rd;
+  s.rs3_addr = rd;
+  s.rs4_addr = rd;
+  Outputs o = h->Cycle(s);
+
+  Require(o.alloc_accepted && o.alloc2_accepted, "twowide-waw",
+          "the WAW group was refused with tags available");
+  Require(o.alloc_new_valid && o.alloc2_new_valid, "twowide-waw",
+          "the WAW group allocated fewer than two tags");
+  Require(o.alloc_new.tag != o.alloc2_new.tag, "twowide-waw",
+          "the two macros writing one rd were given the same tag " +
+              Dec(o.alloc_new.tag) + ": one physical register, two owners");
+
+  // Each lane's displaced mapping. Macro 0 displaces the start-of-cycle mapping;
+  // macro 1 displaces macro 0's new one, because that is the mapping it really
+  // supersedes and the one its own commit must release.
+  Require(o.alloc_old_valid && o.alloc_old == old7, "twowide-waw",
+          "lane 0's displaced mapping was " + o.alloc_old.str() + ", expected " +
+              old7.str());
+  Require(o.alloc2_old_valid && o.alloc2_old == o.alloc_new, "twowide-waw",
+          "lane 1's displaced mapping was " + o.alloc2_old.str() + ", expected lane 0's "
+          "new " + o.alloc_new.str() + ": the two macros must not claim one superseded "
+          "mapping");
+
+  // The younger macro wins the architectural register, and reads x7 through the
+  // bypass while doing so.
+  Require(h->DutSpecMap()[rd] == o.alloc2_new, "twowide-waw",
+          "x7 maps to " + h->DutSpecMap()[rd].str() + " after the WAW group, expected "
+          "lane 1's " + o.alloc2_new.str());
+  Require(o.rs3_bypass && o.rs3 == o.alloc_new && !o.rs3_ready, "twowide-waw",
+          "lane 1's in-group read of x7 must resolve to lane 0's allocation and be "
+          "not-ready");
+  // Lane 0's own source is the start-of-cycle mapping: the macro that writes x7
+  // reads it before it writes, and only lane 1 gets the bypass.
+  Require(o.rs1 == old7, "twowide-waw",
+          "lane 0's own read of x7 resolved to " + o.rs1.str() + ", expected the "
+          "start-of-cycle " + old7.str() + ": the bypass belongs to lane 1 only");
+  Require(h->free_count() == free_before - 2, "twowide-waw",
+          "the WAW group did not take exactly two tags");
+
+  // Order 1: the two macros commit in successive cycles, lane 0 first. Each commit
+  // releases exactly one mapping -- its own predecessor -- and never the mapping it
+  // installs.
+  const uint32_t after_alloc = h->free_count();
+  Stim c1;
+  c1.commit_valid = true;
+  c1.commit_rd = rd;
+  c1.commit = o.alloc_new;
+  Outputs c1o = h->Cycle(c1);
+  Require(c1o.commit_accepted, "twowide-waw", "macro 0's commit was refused");
+  Require(h->free_count() == after_alloc + 1, "twowide-waw",
+          "macro 0's commit released " + Dec(h->free_count() - after_alloc) +
+              " mappings, expected exactly 1 (its own predecessor " + old7.str() + ")");
+  Require(h->shadow_is_free(old7.tag), "twowide-waw",
+          "macro 0's commit did not release the mapping it superseded");
+  Require(!h->shadow_is_free(o.alloc_new.tag), "twowide-waw",
+          "macro 0's commit released the mapping it installed: the architectural "
+          "register now points at a free physical register");
+  Require(h->DutCmtMap()[rd] == o.alloc_new, "twowide-waw",
+          "macro 0's commit did not install its mapping");
+
+  Stim c2;
+  c2.commit_valid = true;
+  c2.commit_rd = rd;
+  c2.commit = o.alloc2_new;
+  Outputs c2o = h->Cycle(c2);
+  Require(c2o.commit_accepted, "twowide-waw", "macro 1's commit was refused");
+  Require(h->free_count() == after_alloc + 2, "twowide-waw",
+          "macro 1's commit released " + Dec(h->free_count() - after_alloc - 1) +
+              " mappings, expected exactly 1 (macro 0's tag " + o.alloc_new.str() + ")");
+  Require(h->shadow_is_free(o.alloc_new.tag), "twowide-waw",
+          "macro 1's commit did not release macro 0's mapping: the tag is leaked");
+  Require(!h->shadow_is_free(o.alloc2_new.tag), "twowide-waw",
+          "the architectural mapping " + o.alloc2_new.str() + " was released");
+  Require(h->DutCmtMap()[rd] == o.alloc2_new, "twowide-waw",
+          "macro 1's commit did not install the younger mapping");
+  Require(h->free_count() == free_before, "twowide-waw",
+          "after both macros of the WAW pair committed, the free count is " +
+              Dec(h->free_count()) + ", expected the pre-group " + Dec(free_before) +
+              ": exactly two mappings were released and none was leaked or doubly "
+              "released");
+
+  // Order 2: the same pair commits in one cycle through the two commit lanes. Each
+  // lane releases its own predecessor, so the cycle releases two mappings -- and
+  // still never the one being installed.
+  const uint32_t rd2 = 8;
+  const Dest old8 = h->DutSpecMap()[rd2];
+  Stim g;
+  g.alloc_req = true;
+  g.alloc_rd = rd2;
+  g.alloc2_req = true;
+  g.alloc2_rd = rd2;
+  Outputs go = h->Cycle(g);
+  Require(go.alloc_new_valid && go.alloc2_new_valid, "twowide-waw",
+          "the second WAW group allocated fewer than two tags");
+  const uint32_t before_dual = h->free_count();
+
+  Stim d;
+  d.commit_valid = true;
+  d.commit_rd = rd2;
+  d.commit = go.alloc_new;
+  d.commit2_valid = true;
+  d.commit2_rd = rd2;
+  d.commit2 = go.alloc2_new;
+  Outputs doc = h->Cycle(d);
+  Require(doc.commit_accepted && doc.commit2_accepted, "twowide-waw",
+          "a same-cycle WAW retirement was refused");
+  Require(h->free_count() == before_dual + 2, "twowide-waw",
+          "a same-cycle WAW retirement released " + Dec(h->free_count() - before_dual) +
+              " mappings, expected 2 (one per lane)");
+  Require(h->shadow_is_free(old8.tag), "twowide-waw",
+          "the start-of-cycle mapping of x8 was not released");
+  Require(h->shadow_is_free(go.alloc_new.tag), "twowide-waw",
+          "macro 0's tag was not released by the pair's retirement");
+  Require(!h->shadow_is_free(go.alloc2_new.tag), "twowide-waw",
+          "the younger mapping was released: the architectural register points at a "
+          "free physical register");
+  Require(h->DutCmtMap()[rd2] == go.alloc2_new, "twowide-waw",
+          "the younger mapping did not win the architectural register");
+
+  reporter->Check(true,
+                  "twowide-waw: both macros of a WAW pair got distinct tags (" +
+                      o.alloc_new.str() + " and " + o.alloc2_new.str() +
+                      "), each commit released exactly its own predecessor, and a "
+                      "same-cycle pair retirement released exactly two mappings");
+}
+
+// Phase 11: x0 on either lane.
+void PhaseTwoWideX0(Harness* h, mosaic::Reporter* reporter, uint32_t arch_regs) {
+  const uint32_t free_before = h->free_count();
+
+  // {x0, x5}: the group needs one tag, not two and not zero.
+  Stim s;
+  s.alloc_req = true;
+  s.alloc_rd = 0;
+  s.alloc2_req = true;
+  s.alloc2_rd = 5;
+  s.rs1_addr = 0;
+  s.rs3_addr = 0;
+  Outputs o = h->Cycle(s);
+  Require(o.alloc_accepted && o.alloc2_accepted, "twowide-x0",
+          "a group of {x0, x5} was refused");
+  Require(o.alloc_is_x0 && !o.alloc_new_valid && !o.alloc_old_valid, "twowide-x0",
+          "lane 0's write to x0 allocated a tag");
+  Require(o.alloc2_new_valid && !o.alloc2_is_x0, "twowide-x0",
+          "lane 1's write to x5 allocated nothing");
+  Require(h->free_count() == free_before - 1, "twowide-x0",
+          "the group {x0, x5} moved the free count by " +
+              Dec(free_before - h->free_count()) + ", expected 1");
+  Require(o.rs1_is_x0 && o.rs1_ready && o.rs1 == Dest{0, 0}, "twowide-x0",
+          "a lane 0 source of x0 must be ready and return the zero identity");
+
+  // {x5, x0}: one tag, on lane 0.
+  const uint32_t free_mid = h->free_count();
+  Stim r;
+  r.alloc_req = true;
+  r.alloc_rd = 6;
+  r.alloc2_req = true;
+  r.alloc2_rd = 0;
+  Outputs ro = h->Cycle(r);
+  Require(ro.alloc_accepted && ro.alloc2_accepted, "twowide-x0",
+          "a group of {x6, x0} was refused");
+  Require(ro.alloc_new_valid && ro.alloc2_is_x0 && !ro.alloc2_new_valid, "twowide-x0",
+          "the group {x6, x0} allocated the wrong number of tags");
+  Require(h->free_count() == free_mid - 1, "twowide-x0",
+          "the group {x6, x0} did not take exactly one tag");
+
+  // {x0, x0}: no tag at all.
+  const uint32_t free_two = h->free_count();
+  Stim t;
+  t.alloc_req = true;
+  t.alloc_rd = 0;
+  t.alloc2_req = true;
+  t.alloc2_rd = 0;
+  Outputs to = h->Cycle(t);
+  Require(to.alloc_accepted && to.alloc2_accepted, "twowide-x0",
+          "a group of two x0 writes was refused");
+  Require(to.alloc_is_x0 && to.alloc2_is_x0, "twowide-x0",
+          "a group of two x0 writes was not reported as such on both lanes");
+  Require(!to.alloc_new_valid && !to.alloc2_new_valid, "twowide-x0",
+          "a group of two x0 writes allocated a tag");
+  Require(!to.alloc_exhausted && !to.alloc2_exhausted, "twowide-x0",
+          "a group of two x0 writes was reported exhausted: x0 needs no tag");
+  Require(h->free_count() == free_two, "twowide-x0",
+          "a group of two x0 writes changed the free count");
+  Require(h->DutSpecMap()[0] == Dest{0, 0}, "twowide-x0",
+          "a write to x0 changed x0's mapping");
+
+  reporter->Check(true,
+                  "twowide-x0: a group's tag requirement was 1 for {x0, rd} and {rd, x0} "
+                  "and 0 for {x0, x0}, and x0 never consumed a tag on either lane");
+}
+
+// Phase 12: the atomicity failure the card names. A group that needs two tags with
+// one free must stall whole, leave the mapping/free list/journal agreeing with the
+// ROB, and not consume the tag a later single-width allocation needs.
+void PhaseTwoWideStall(Harness* h, mosaic::Reporter* reporter, uint32_t entries,
+                       uint32_t arch_regs) {
+  // Fill the register file down to exactly one free tag. No checkpoint is taken:
+  // the undo window is sized for the ROB, and this campaign makes fewer allocations
+  // than that, so the window stays inside its bound without one.
+  uint32_t guard = 0;
+  while (h->free_count() > 1 && guard < entries + 8) {
+    Stim a;
+    a.alloc_req = true;
+    a.alloc_rd = 1 + (guard % (arch_regs - 1));
+    Outputs o = h->Cycle(a);
+    Require(o.alloc_new_valid, "twowide-stall",
+            "the fill allocation was refused while more than one tag was free");
+    guard++;
+  }
+  Require(h->free_count() == 1, "twowide-stall",
+          "the campaign could not bring the free set down to exactly one tag");
+
+  const std::vector<bool> free_before = h->DutFreeMask();
+  const std::vector<Dest> spec_before = h->DutSpecMap();
+  const std::vector<Dest> cmt_before = h->DutCmtMap();
+  const uint32_t depth_before = h->dut_j_len();
+
+  // A group needing two tags.
+  Stim g;
+  g.alloc_req = true;
+  g.alloc_rd = 20;
+  g.alloc2_req = true;
+  g.alloc2_rd = 21;
+  Outputs o = h->Cycle(g);
+  Require(!o.alloc_accepted, "twowide-stall",
+          "a group needing two tags was accepted with one tag free: the group is not "
+          "atomic");
+  Require(o.alloc_exhausted, "twowide-stall",
+          "the group was refused without reporting exhaustion");
+  Require(!o.alloc2_accepted && o.alloc2_exhausted, "twowide-stall",
+          "lane 1 did not report the group's refusal");
+  Require(!o.alloc_new_valid && !o.alloc2_new_valid, "twowide-stall",
+          "a refused group still produced a destination");
+  Require(!o.alloc_squashed && !o.alloc2_squashed, "twowide-stall",
+          "the group reported a squash refusal that did not happen");
+
+  // The card's Fail criterion: after the partial-group stall the mapping, the free
+  // list and the undo window must still agree with the ROB. Nothing allocated that
+  // no macro owns, nothing leaked, nothing allocated twice.
+  h->Cycle(Stim{});
+  Require(h->DutFreeMask() == free_before, "twowide-stall",
+          "a stalled group changed the free set: a tag was allocated that no macro "
+          "owns, or one was leaked");
+  Require(h->DutSpecMap() == spec_before, "twowide-stall",
+          "a stalled group changed the speculative map");
+  Require(h->DutCmtMap() == cmt_before, "twowide-stall",
+          "a stalled group changed the committed map");
+  Require(h->dut_j_len() == depth_before, "twowide-stall",
+          "a stalled group pushed undo entries for allocations it did not make");
+  Require(h->free_count() == 1, "twowide-stall",
+          "a stalled group consumed the one free tag");
+
+  // The tag the group did not take is still there for a *single-width* allocation,
+  // which is the other half of the criterion: the group stall must not have made
+  // the tag unusable.
+  Stim one;
+  one.alloc_req = true;
+  one.alloc_rd = 21;
+  Outputs oo = h->Cycle(one);
+  Require(oo.alloc_accepted && oo.alloc_new_valid, "twowide-stall",
+          "the single-width allocation after the stalled group was refused: the group "
+          "stall consumed the tag");
+  Require(h->free_count() == 0, "twowide-stall",
+          "the single-width allocation after the stalled group did not take exactly the "
+          "one free tag");
+  Require(h->DutSpecMap()[21] == oo.alloc_new, "twowide-stall",
+          "the single-width allocation did not land in the map");
+
+  // With the free set empty: a group of two x0 writes still needs nothing, while a
+  // group with a real destination on *either* lane is refused whole.
+  Stim x;
+  x.alloc_req = true;
+  x.alloc_rd = 0;
+  x.alloc2_req = true;
+  x.alloc2_rd = 0;
+  Outputs xo = h->Cycle(x);
+  Require(xo.alloc_accepted && xo.alloc2_accepted, "twowide-stall",
+          "a group of two x0 writes was refused with an empty free set");
+  Require(!xo.alloc_new_valid && !xo.alloc2_new_valid, "twowide-stall",
+          "a group of two x0 writes allocated a tag from an empty free set");
+
+  Stim y;
+  y.alloc_req = true;
+  y.alloc_rd = 0;
+  y.alloc2_req = true;
+  y.alloc2_rd = 12;
+  Outputs yo = h->Cycle(y);
+  Require(!yo.alloc_accepted && yo.alloc_exhausted, "twowide-stall",
+          "a group with an x0 lane 0 and a real lane 1 was accepted with an empty free "
+          "set");
+
+  Stim z;
+  z.alloc_req = true;
+  z.alloc_rd = 12;
+  z.alloc2_req = true;
+  z.alloc2_rd = 0;
+  Outputs zo = h->Cycle(z);
+  Require(!zo.alloc_accepted && zo.alloc_exhausted, "twowide-stall",
+          "a group with a real lane 0 and an x0 lane 1 was accepted with an empty free "
+          "set: the group is checking lane 0's requirement instead of the group's");
+
+  reporter->Check(true,
+                  "twowide-stall: a two-tag group with one free tag stalled whole (" +
+                      Dec(depth_before) + " undo entries before and after), changed "
+                      "nothing, and left the tag for the next single-width allocation");
+}
+
+// Phase 13: checkpoint and squash across a two-wide group.
+void PhaseTwoWideCkpt(Harness* h, mosaic::Reporter* reporter, uint32_t arch_regs) {
+  // Committed state, so the restore has something to restore to.
+  for (uint32_t rd : {5u, 6u, 7u}) {
+    Stim a;
+    a.alloc_req = true;
+    a.alloc_rd = rd;
+    Outputs ao = h->Cycle(a);
+    Require(ao.alloc_new_valid, "twowide-ckpt", "the setup allocation was refused");
+    Stim w;
+    w.wb_valid = true;
+    w.wb = ao.alloc_new;
+    Require(h->Cycle(w).wb_accepted, "twowide-ckpt", "the setup writeback was refused");
+    Stim c;
+    c.commit_valid = true;
+    c.commit_rd = rd;
+    c.commit = ao.alloc_new;
+    Require(h->Cycle(c).commit_accepted, "twowide-ckpt", "the setup commit was refused");
+  }
+
+  const std::vector<Dest> cmt_at_ckpt = h->DutCmtMap();
+  const std::vector<bool> free_at_ckpt = h->DutFreeMask();
+  const std::vector<uint32_t> gens_at_ckpt = h->dut_gens();
+  const std::vector<bool> genv_at_ckpt = h->DutGenValid();
+  const uint32_t count_at_ckpt = h->free_count();
+
+  Stim ck;
+  ck.ckpt_valid = true;
+  h->Cycle(ck);
+  Require(h->dut_j_len() == 0, "twowide-ckpt",
+          "a checkpoint did not empty the undo window");
+
+  // A two-wide group, both lanes real: two allocations in one cycle, which must be
+  // two journal entries in one cycle.
+  Stim g;
+  g.alloc_req = true;
+  g.alloc_rd = 8;
+  g.alloc2_req = true;
+  g.alloc2_rd = 9;
+  Outputs go = h->Cycle(g);
+  Require(go.alloc_new_valid && go.alloc2_new_valid, "twowide-ckpt",
+          "the two-wide group allocated fewer than two tags");
+  Require(h->dut_j_len() == 2, "twowide-ckpt",
+          "a two-wide group left the undo window at " + Dec(h->dut_j_len()) +
+              " entries, expected 2: a group of two macros is two allocations");
+
+  // More speculative work, so the window holds more than the group's own entries.
+  for (uint32_t i = 0; i < 4; i++) {
+    Stim a;
+    a.alloc_req = true;
+    a.alloc_rd = 12 + i;
+    Outputs ao = h->Cycle(a);
+    Require(ao.alloc_new_valid, "twowide-ckpt", "a speculative allocation was refused");
+    Stim w;
+    w.wb_valid = true;
+    w.wb = ao.alloc_new;
+    h->Cycle(w);
+  }
+  Require(h->dut_j_len() == 6, "twowide-ckpt",
+          "the window holds " + Dec(h->dut_j_len()) + " entries, expected 6 (a "
+          "two-wide group plus four single-width allocations)");
+
+  Stim sq;
+  sq.squash = true;
+  Outputs so = h->Cycle(sq);
+  Require(so.squash_accepted, "twowide-ckpt",
+          "the squash was refused although a checkpoint had been taken");
+  h->Cycle(Stim{});
+
+  // Both allocations of the group must come back, and the generations must step
+  // back -- the whole point of "the group is journalled as a group".
+  Require(h->DutFreeMask() == free_at_ckpt, "twowide-ckpt",
+          "the free set after the squash differs from the checkpoint's: an allocation "
+          "of the squashed group was not returned");
+  Require(h->free_count() == count_at_ckpt, "twowide-ckpt",
+          "the free count after the squash is " + Dec(h->free_count()) + ", expected " +
+              Dec(count_at_ckpt));
+  Require(h->DutCmtMap() == cmt_at_ckpt, "twowide-ckpt",
+          "the committed map did not survive the squash");
+  Require(h->DutSpecMap() == cmt_at_ckpt, "twowide-ckpt",
+          "the speculative map was not restored from the committed map");
+  Require(h->dut_j_len() == 0, "twowide-ckpt", "the squash did not empty the window");
+  Require(h->DutGenValid() == genv_at_ckpt, "twowide-ckpt",
+          "gen_valid after the squash differs from the checkpoint's: an allocation's "
+          "generation was not stepped back");
+  const std::vector<uint32_t> gens_after = h->dut_gens();
+  for (uint32_t t = 0; t < gens_after.size(); t++) {
+    if (!genv_at_ckpt[t]) continue;
+    Require(gens_after[t] == gens_at_ckpt[t], "twowide-ckpt",
+            "tag " + Dec(t) + " is at generation " + Dec(gens_after[t]) +
+                " after the squash, expected " + Dec(gens_at_ckpt[t]) +
+                ": the group's allocations were not undone exactly");
+  }
+
+  // A writeback escaping from the squashed group is stale: its tag went back to the
+  // free list, so nothing names it as a current owner any more.
+  for (const Dest& d : {go.alloc_new, go.alloc2_new}) {
+    Stim esc;
+    esc.wb_valid = true;
+    esc.wb = d;
+    Outputs eo = h->Cycle(esc);
+    Require(!eo.wb_accepted && eo.wb_stale, "twowide-ckpt",
+            "a writeback escaping the squashed group (" + d.str() +
+                ") was not refused as stale");
+  }
+
+  reporter->Check(true,
+                  "twowide-ckpt: a two-wide group pushed two undo entries, and the "
+                  "squash returned both tags, stepped both generations back and "
+                  "restored the maps exactly");
+}
+
+// Phase 14: a randomized two-wide soak, shadow-compared on every cycle.
+void PhaseTwoWideRandom(Harness* h, mosaic::Reporter* reporter, uint32_t entries,
+                        uint32_t arch_regs, uint32_t seed, uint32_t cycles) {
+  mosaic::Rng rng(seed * 2654435761u + 12345u);
+
+  uint32_t two_tag_groups = 0;
+  uint32_t bypasses = 0;
+  uint32_t group_stalls = 0;
+  uint32_t dual_commits = 0;
+  uint32_t x0_lanes = 0;
+  uint32_t accepted_groups = 0;
+
+  for (uint32_t i = 0; i < cycles; i++) {
+    Stim s;
+    // A checkpoint most cycles would keep the window trivially short; a checkpoint
+    // every so often is what a real machine does at branches, and it is what makes
+    // a squash meaningful.
+    if (rng.Chance(6)) s.ckpt_valid = true;
+    if (rng.Chance(4)) s.squash = true;
+
+    // A group of one or two macros. Both lanes get a real destination most of the
+    // time, because a group of two is what this phase exists to exercise; x0 lanes
+    // are drawn often enough to keep the 0/1/2 tag counts all reachable.
+    if (rng.Chance(80) && !s.squash) {
+      s.alloc_req = true;
+      s.alloc_rd = rng.Chance(10) ? 0u : rng.Below(arch_regs);
+      if (rng.Chance(65)) {
+        s.alloc2_req = true;
+        // One time in four the two lanes write the same register: the WAW case.
+        s.alloc2_rd = rng.Chance(25) ? s.alloc_rd : (rng.Chance(10) ? 0u : rng.Below(arch_regs));
+      }
+    }
+
+    // Sources. Half of lane 1's reads are aimed at lane 0's destination, so the
+    // same-cycle bypass fires often: a bypass that is never taken is a bypass that
+    // is never tested.
+    if (s.alloc_req && rng.Chance(50)) {
+      s.rs3_addr = s.alloc_rd;
+    } else {
+      s.rs3_addr = rng.Below(arch_regs);
+    }
+    if (s.alloc_req && rng.Chance(40)) {
+      s.rs4_addr = s.alloc_rd;
+    } else {
+      s.rs4_addr = rng.Below(arch_regs);
+    }
+    s.rs1_addr = rng.Below(arch_regs);
+    s.rs2_addr = rng.Below(arch_regs);
+
+    // Writebacks of identities the campaign has actually been handed, sometimes
+    // deliberately stale.
+    if (rng.Chance(35)) {
+      const std::vector<Dest>& spec = h->shadow_spec_map();
+      s.wb_valid = true;
+      s.wb = spec[rng.Below(arch_regs)];
+      if (rng.Chance(35)) s.wb.gen = (s.wb.gen + 1 + rng.Below(3)) & h->shadow_gen_mask();
+    }
+
+    // Retire: install the speculative mapping of a register, as a real retire unit
+    // would, and sometimes retire two macros in one cycle through both lanes.
+    if (rng.Chance(30)) {
+      const std::vector<Dest>& spec = h->shadow_spec_map();
+      s.commit_valid = true;
+      s.commit_rd = rng.Below(arch_regs);
+      s.commit = spec[s.commit_rd];
+      if (rng.Chance(40)) {
+        s.commit2_valid = true;
+        s.commit2_rd = rng.Below(arch_regs);
+        s.commit2 = spec[s.commit2_rd];
+      }
+    }
+
+    // A release aimed at a superseded identity. Releasing a *current* identity is a
+    // caller bug -- it would put a live register on the free list -- and the
+    // standing ownership invariant rejects it, so the campaign never drives one.
+    if (rng.Chance(8)) {
+      const std::vector<Dest>& spec = h->shadow_spec_map();
+      s.free_valid = true;
+      s.free_ = spec[rng.Below(arch_regs)];
+      s.free_.gen = (s.free_.gen + 1 + rng.Below(3)) & h->shadow_gen_mask();
+    }
+
+    Outputs o = h->Cycle(s);
+
+    if (s.alloc_req && o.alloc_accepted) accepted_groups++;
+    if (o.alloc_new_valid && o.alloc2_new_valid) two_tag_groups++;
+    if (o.rs3_bypass || o.rs4_bypass) bypasses++;
+    if (s.alloc2_req && !o.alloc_accepted && !o.alloc_squashed) group_stalls++;
+    if (o.commit_accepted && o.commit2_accepted) dual_commits++;
+    if (o.alloc_is_x0 || o.alloc2_is_x0) x0_lanes++;
+  }
+
+  // Anti-vacuity. These are demands on the campaign, not floors that happen to
+  // pass: a soak in which the bypass never fires or a two-tag group never appears
+  // proves nothing about either.
+  Require(accepted_groups > 0, "twowide-random", "no group was ever accepted");
+  Require(two_tag_groups > cycles / 40, "twowide-random",
+          "only " + Dec(two_tag_groups) + " groups allocated two tags over " +
+              Dec(cycles) + " cycles: two-wide allocation barely happened");
+  Require(bypasses > cycles / 20, "twowide-random",
+          "the same-cycle bypass fired only " + Dec(bypasses) + " times over " +
+              Dec(cycles) + " cycles: the phase did not exercise it");
+  Require(group_stalls > 0, "twowide-random",
+          "the campaign never made a group stall for tags, so the atomicity of a "
+          "refusal was not exercised");
+  Require(dual_commits > 0, "twowide-random",
+          "the campaign never retired two macros in one cycle, so the two commit "
+          "lanes were never driven together");
+  Require(x0_lanes > 0, "twowide-random", "no group lane ever wrote x0");
+
+  reporter->Check(true,
+                  "twowide-random: " + Dec(accepted_groups) + " accepted groups (" +
+                      Dec(two_tag_groups) + " of them two-tag), " + Dec(bypasses) +
+                      " bypasses, " + Dec(group_stalls) + " group tag stalls, " +
+                      Dec(dual_commits) + " same-cycle pair retirements, " +
+                      Dec(x0_lanes) + " x0 lanes, over " + Dec(cycles) +
+                      " shadow-compared cycles");
+}
+
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -2285,6 +2988,50 @@ int main(int argc, char** argv) {
     fresh();
     harness.Phase("random");
     PhaseRandom(&harness, &reporter, entries, arch_regs, static_cast<uint32_t>(options.seed), 4000);
+
+    // The two-wide phases (I-014) run only for their own case, and they run *after*
+    // the single-width ones so that a two-wide change which broke the single-width
+    // path is caught by the phase that owns that path rather than by a soak. The
+    // case id decides, and an unknown id is refused instead of silently running a
+    // subset: a case that ran the wrong phases and printed PASS would be worse than
+    // a failure.
+    const bool two_wide = options.case_id == "rename.same_cycle_chain";
+    if (!two_wide && options.case_id != "rename.single_width_ownership") {
+      Fail("case", "unknown case id '" + options.case_id +
+                       "': expected rename.single_width_ownership or "
+                       "rename.same_cycle_chain");
+    }
+
+    if (two_wide) {
+      fresh();
+      harness.Phase("twowide-raw");
+      PhaseTwoWideRaw(&harness, &reporter, arch_regs);
+
+      fresh();
+      harness.Phase("twowide-war");
+      PhaseTwoWideWar(&harness, &reporter);
+
+      fresh();
+      harness.Phase("twowide-waw");
+      PhaseTwoWideWaw(&harness, &reporter, arch_regs);
+
+      fresh();
+      harness.Phase("twowide-x0");
+      PhaseTwoWideX0(&harness, &reporter, arch_regs);
+
+      fresh();
+      harness.Phase("twowide-stall");
+      PhaseTwoWideStall(&harness, &reporter, entries, arch_regs);
+
+      fresh();
+      harness.Phase("twowide-ckpt");
+      PhaseTwoWideCkpt(&harness, &reporter, arch_regs);
+
+      fresh();
+      harness.Phase("twowide-random");
+      PhaseTwoWideRandom(&harness, &reporter, entries, arch_regs,
+                         static_cast<uint32_t>(options.seed), 4000);
+    }
 
     detail = "rename contract holds: " + std::to_string(harness.comparisons()) +
              " shadow comparisons over " + std::to_string(harness.cycles()) + " cycles, " +

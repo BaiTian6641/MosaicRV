@@ -402,9 +402,15 @@ module mosaic_muldiv (
   // dividend bit shifted in, and `rem_sub` is that value minus the divisor; a
   // combinational signal each, so the compare, the subtract and the stored
   // remainder below all read the same value rather than three copies of it.
-  logic [64:0] rem_next, rem_sub;
+  logic [64:0] rem_next;
+  // The subtraction only stores when `rem_next >= divisor`, and in that case
+  // the difference is below the divisor and fits in 64 bits (for divisor zero
+  // the "difference" is the accumulated dividend, which is also inside 64 bits
+  // by the last iteration), so the borrow out of bit 64 is never needed and
+  // `rem_sub` is 64 bits wide.
+  logic [63:0] rem_sub;
   assign rem_next = {rem_r[63:0], dsh_r[63]};
-  assign rem_sub  = rem_next - {1'b0, divisor_r};
+  assign rem_sub  = rem_next[63:0] - divisor_r;
 
   // ----------------------------------------------------------- the machine
   always_ff @(posedge clk_i) begin : md_state
@@ -455,7 +461,7 @@ module mosaic_muldiv (
               acc_r     <= 128'd0;
               mcand_r   <= acc_mcand;
               mplier_r  <= acc_b_eff;
-              rem_r     <= 65'd0;
+              rem_r     <= 64'd0;
               dsh_r     <= acc_dsh;
               divisor_r <= acc_b_mag;
               quot_r    <= 64'd0;
@@ -489,7 +495,7 @@ module mosaic_muldiv (
           // 63:32 and are consumed first.
           ST_DIV: begin
             if (rem_next >= {1'b0, divisor_r}) begin
-              rem_r  <= rem_sub[63:0];
+              rem_r  <= rem_sub;
               quot_r <= {quot_r[62:0], 1'b1};
             end else begin
               rem_r  <= rem_next[63:0];

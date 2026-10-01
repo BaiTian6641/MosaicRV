@@ -201,11 +201,15 @@ module mosaic_lease_alloc #(
   localparam int unsigned MAX_SZ    = (M_WIDTH  > N_WIDTH)  ? M_WIDTH   : N_WIDTH,
 
   localparam int unsigned SLOT_W    = $clog2(MAX_SZ),
-  // One spare encoding, so the index field can name a record that does not
-  // exist. Without it a range check would be a tautology for a power-of-two
-  // ledger and the "unknown lease id" report would be unreachable, which is a
-  // report that cannot be proven to work.
-  localparam int unsigned IDX_W     = $clog2(LEASES + 1),
+
+  // The ledger index has two widths, and they are different questions. `ROW_W`
+  // addresses a record and is what indexes the arrays. `IDX_W` is the width of
+  // the index *field* in a lease id, and it is one bit wider on purpose: the id
+  // can then name a record that does not exist. Without the spare encoding a
+  // range check would be a tautology for a power-of-two ledger and the "unknown
+  // lease id" report would be unreachable -- a report nothing could prove works.
+  localparam int unsigned ROW_W     = $clog2(LEASES),
+  localparam int unsigned IDX_W     = ROW_W + 1,
   localparam int unsigned LEASE_W   = IDX_W + GEN_W,
   localparam int unsigned RR_W      = $clog2(REQ_COUNT)
 ) (
@@ -251,7 +255,10 @@ module mosaic_lease_alloc #(
   // maintained* count per pool, so comparing it against the population of
   // `o_occ` checks the accounting rather than restating it.
   output logic [POOLS*MAX_SZ-1:0]                o_occ,
-  output logic [POOLS*32-1:0]                    o_occ_count,
+  output logic [31:0]                            o_occ_count_alu,
+  output logic [31:0]                            o_occ_count_md,
+  output logic [31:0]                            o_occ_count_wb,
+  output logic [31:0]                            o_occ_count_net,
   output logic [LEASES-1:0]                      o_lease_live,
   output logic [LEASES-1:0]                      o_lease_used,
   output logic [LEASES-1:0]                      o_lease_end_kind,   // 0 = released, 1 = cancelled
@@ -280,7 +287,10 @@ module mosaic_lease_alloc #(
   output logic [31:0]                            o_gen_w,
   output logic [31:0]                            o_slot_w,
   output logic [31:0]                            o_lease_w,
-  output logic [POOLS*32-1:0]                    o_pool_size
+  output logic [31:0]                            o_size_alu,
+  output logic [31:0]                            o_size_md,
+  output logic [31:0]                            o_size_wb,
+  output logic [31:0]                            o_size_net
 );
 
   // ------------------------------------------------------------- the ledger
@@ -323,7 +333,7 @@ module mosaic_lease_alloc #(
   logic [MAX_SZ-1:0]            occ_wb;
   logic [MAX_SZ-1:0]            occ_net;
 
-  always_comb begin
+  always_comb begin : occ_derive
     occ_alu = {MAX_SZ{1'b0}};
     occ_md  = {MAX_SZ{1'b0}};
     occ_wb  = {MAX_SZ{1'b0}};
@@ -343,7 +353,6 @@ module mosaic_lease_alloc #(
   end
 
   assign o_occ = {occ_net, occ_wb, occ_md, occ_alu};
-  assign o_occ_count = {occ_count_net, occ_count_wb, occ_count_md, occ_count_alu};
 
   // ------------------------------------------------------ terminal handling
   // The working view of the ledger that the classification and the arbitration
@@ -358,8 +367,8 @@ module mosaic_lease_alloc #(
   logic [GEN_W-1:0]             rel_gen_f;
   logic [IDX_W-1:0]             can_idx_f;
   logic [GEN_W-1:0]             can_gen_f;
-  logic [IDX_W-1:0]             rel_idx;
-  logic [IDX_W-1:0]             can_idx;
+  logic [ROW_W-1:0]             rel_idx;
+  logic [ROW_W-1:0]             can_idx;
 
   // Frees the slots a dying lease held, in the working availability bitmaps.
   // One place, so "a terminal returns every resource it holds and nothing else"
@@ -377,18 +386,6 @@ module mosaic_lease_alloc #(
   logic [REQ_COUNT*GEN_W-1:0]   grant_gen_c;
   logic [REQ_COUNT*POOLS*SLOT_W-1:0] slot_c;
   logic [RR_W-1:0]              rr_c;
-
-  logic [SLOT_W:0]              pick_alu;
-  logic [SLOT_W:0]              pick_md;
-  logic [SLOT_W:0]              pick_wb;
-  logic [SLOT_W:0]              pick_net;
-  logic [IDX_W:0]               pick_rec;
-  logic                         need_alu;
-  logic                         need_md;
-  logic                         need_wb;
-  logic                         need_net;
-  logic                         satisfied;
-  logic [31:0]                  cand;
 
   // Delta counters, computed combinationally so that the registers below are
   // each written once per cycle. Writing them inside the grant loop would make
@@ -423,22 +420,37 @@ module mosaic_lease_alloc #(
 
   // The first record with no live lease, as `{found, index}`. Separate from the
   // pool scan only because the index is a different width.
-  function automatic logic [IDX_W:0] lowest_free_record(input logic [LEASES-1:0] live);
+  function automatic logic [ROW_W:0] lowest_free_record(input logic [LEASES-1:0] live);
     logic found;
     begin
       found = 1'b0;
-      lowest_free_record = {(IDX_W+1){1'b0}};
+      lowest_free_record = {(ROW_W+1){1'b0}};
       for (int unsigned r = 0; r < LEASES; r++) begin
         if (!live[r] && !found) begin
           found = 1'b1;
-          lowest_free_record[IDX_W-1:0] = r[IDX_W-1:0];
+          lowest_free_record[ROW_W-1:0] = r[ROW_W-1:0];
         end
       end
-      lowest_free_record[IDX_W] = found;
+      lowest_free_record[ROW_W] = found;
     end
   endfunction
 
-  always_comb begin
+  always_comb begin : arb
+    // Block-local: these describe the candidate under consideration and are
+    // meaningless outside the loop, and a module-level signal would infer a
+    // latch for every cycle in which no requester is valid.
+    logic [31:0]     cand;
+    logic            need_alu;
+    logic            need_md;
+    logic            need_wb;
+    logic            need_net;
+    logic            satisfied;
+    logic [SLOT_W:0] pick_alu;
+    logic [SLOT_W:0] pick_md;
+    logic [SLOT_W:0] pick_wb;
+    logic [SLOT_W:0] pick_net;
+    logic [ROW_W:0]  pick_rec;
+
     // ---------------------------------------------------------- defaults
     rel_ok_c    = 1'b0;
     rel_stale_c = 1'b0;
@@ -448,8 +460,8 @@ module mosaic_lease_alloc #(
     can_stale_c = 1'b0;
     can_repeat_c = 1'b0;
     can_cross_c = 1'b0;
-    rel_idx     = {IDX_W{1'b0}};
-    can_idx     = {IDX_W{1'b0}};
+    rel_idx     = {ROW_W{1'b0}};
+    can_idx     = {ROW_W{1'b0}};
 
     rel_idx_f   = rel_id[LEASE_W-1 -: IDX_W];
     rel_gen_f   = rel_id[GEN_W-1:0];
@@ -471,36 +483,36 @@ module mosaic_lease_alloc #(
     if (rel_valid) begin
       if (rel_idx_f >= IDX_W'(LEASES)) begin
         rel_stale_c = 1'b1;
-      end else if (!used_w[rel_idx_f]) begin
+      end else if (!used_w[rel_idx_f[ROW_W-1:0]]) begin
         rel_stale_c = 1'b1;
-      end else if (rel_gen_f != gen_w[rel_idx_f*GEN_W +: GEN_W]) begin
+      end else if (rel_gen_f != gen_w[rel_idx_f[ROW_W-1:0]*GEN_W +: GEN_W]) begin
         rel_stale_c = 1'b1;
-      end else if (!live_w[rel_idx_f]) begin
-        if (end_w[rel_idx_f]) rel_cross_c = 1'b1;
-        else                  rel_repeat_c = 1'b1;
+      end else if (!live_w[rel_idx_f[ROW_W-1:0]]) begin
+        if (end_w[rel_idx_f[ROW_W-1:0]]) rel_cross_c = 1'b1;
+        else                             rel_repeat_c = 1'b1;
       end else begin
         rel_ok_c      = 1'b1;
-        rel_idx       = rel_idx_f;
-        live_w[rel_idx_f] = 1'b0;
-        end_w[rel_idx_f]  = 1'b0;
+        rel_idx       = rel_idx_f[ROW_W-1:0];
+        live_w[rel_idx_f[ROW_W-1:0]] = 1'b0;
+        end_w[rel_idx_f[ROW_W-1:0]]  = 1'b0;
       end
     end
 
     if (can_valid) begin
       if (can_idx_f >= IDX_W'(LEASES)) begin
         can_stale_c = 1'b1;
-      end else if (!used_w[can_idx_f]) begin
+      end else if (!used_w[can_idx_f[ROW_W-1:0]]) begin
         can_stale_c = 1'b1;
-      end else if (can_gen_f != gen_w[can_idx_f*GEN_W +: GEN_W]) begin
+      end else if (can_gen_f != gen_w[can_idx_f[ROW_W-1:0]*GEN_W +: GEN_W]) begin
         can_stale_c = 1'b1;
-      end else if (!live_w[can_idx_f]) begin
-        if (end_w[can_idx_f]) can_repeat_c = 1'b1;
-        else                  can_cross_c  = 1'b1;
+      end else if (!live_w[can_idx_f[ROW_W-1:0]]) begin
+        if (end_w[can_idx_f[ROW_W-1:0]]) can_repeat_c = 1'b1;
+        else                             can_cross_c  = 1'b1;
       end else begin
         can_ok_c      = 1'b1;
-        can_idx       = can_idx_f;
-        live_w[can_idx_f] = 1'b0;
-        end_w[can_idx_f]  = 1'b1;
+        can_idx       = can_idx_f[ROW_W-1:0];
+        live_w[can_idx_f[ROW_W-1:0]] = 1'b0;
+        end_w[can_idx_f[ROW_W-1:0]]  = 1'b1;
       end
     end
 
@@ -554,13 +566,28 @@ module mosaic_lease_alloc #(
     slot_c       = {(REQ_COUNT*POOLS*SLOT_W){1'b0}};
     rr_c         = rr;
     grant_n      = 32'd0;
+    // Defaults for the per-candidate values, so no path through the block
+    // leaves one unassigned: they are only *used* under `req_valid`, but a
+    // combinational block that does not assign them on every path infers
+    // storage, and a latch here would remember the previous candidate.
+    need_alu     = 1'b0;
+    need_md      = 1'b0;
+    need_wb      = 1'b0;
+    need_net     = 1'b0;
+    satisfied    = 1'b0;
+    pick_alu     = {(SLOT_W+1){1'b0}};
+    pick_md      = {(SLOT_W+1){1'b0}};
+    pick_wb      = {(SLOT_W+1){1'b0}};
+    pick_net     = {(SLOT_W+1){1'b0}};
+    pick_rec     = {(ROW_W+1){1'b0}};
     occ_delta_alu = 32'd0;
     occ_delta_md  = 32'd0;
     occ_delta_wb  = 32'd0;
     occ_delta_net = 32'd0;
 
     for (int unsigned k = 0; k < REQ_COUNT; k++) begin
-      cand = rr + k;
+      cand = {{(32-RR_W){1'b0}}, rr};
+      cand = cand + k;
       if (cand >= REQ_COUNT) cand = cand - REQ_COUNT;
 
       pick_alu = lowest_free(free_alu, SIZE_ALU);
@@ -592,13 +619,13 @@ module mosaic_lease_alloc #(
                     (!need_net || pick_net[SLOT_W]);
 `endif
 
-        if (satisfied && pick_rec[IDX_W]) begin
+        if (satisfied && pick_rec[ROW_W]) begin
           ready_c[cand] = 1'b1;
-          grant_rec_c[cand*IDX_W +: IDX_W] = pick_rec[IDX_W-1:0];
+          grant_rec_c[cand*IDX_W +: IDX_W] = {{(IDX_W-ROW_W){1'b0}}, pick_rec[ROW_W-1:0]};
           // The epoch this grant creates: the record's current generation plus
           // one. The record is free, so its generation is the one its last epoch
           // ended with, and no other grant can take this record in this cycle.
-          grant_gen_c[cand*GEN_W +: GEN_W] = gen_w[pick_rec[IDX_W-1:0]*GEN_W +: GEN_W] + 1'b1;
+          grant_gen_c[cand*GEN_W +: GEN_W] = gen_w[pick_rec[ROW_W-1:0]*GEN_W +: GEN_W] + 1'b1;
 
           if (need_alu) begin
             slot_c[(cand*POOLS + 0)*SLOT_W +: SLOT_W] = pick_alu[SLOT_W-1:0];
@@ -621,9 +648,9 @@ module mosaic_lease_alloc #(
             occ_delta_net = occ_delta_net + 32'd1;
           end
 
-          live_w[pick_rec[IDX_W-1:0]] = 1'b1;
+          live_w[pick_rec[ROW_W-1:0]] = 1'b1;
           grant_n = grant_n + 32'd1;
-          rr_c = (cand + 32'd1 >= REQ_COUNT) ? {RR_W{1'b0}} : cand[RR_W-1:0] + 1'b1;
+          rr_c = (cand == (REQ_COUNT - 1)) ? {RR_W{1'b0}} : cand[RR_W-1:0] + 1'b1;
         end
 `ifdef MOSAIC_LEASE_MUTANT_REFUSAL_CONSUMES
         else begin
@@ -631,7 +658,7 @@ module mosaic_lease_alloc #(
           // refused for. The refusal now has a side effect, so the next cycle's
           // availability depends on a request that was never granted -- and the
           // slot is held by nobody, because no lease id was handed out.
-          live_w[pick_rec[IDX_W-1:0]] = 1'b1;
+          live_w[pick_rec[ROW_W-1:0]] = 1'b1;
         end
 `endif
       end
@@ -640,6 +667,18 @@ module mosaic_lease_alloc #(
 
   // ------------------------------------------------------------- registers
   assign req_ready = ready_c;
+
+  // The terminal reports are combinational in this cycle's ids and the pre-edge
+  // ledger: they describe the edge about to happen, so a test compares them in
+  // the cycle under test, before the clock, exactly like `req_ready`.
+  assign rel_ok           = rel_ok_c;
+  assign rel_stale        = rel_stale_c;
+  assign rel_repeat       = rel_repeat_c;
+  assign rel_after_cancel = rel_cross_c;
+  assign can_ok           = can_ok_c;
+  assign can_stale        = can_stale_c;
+  assign can_repeat       = can_repeat_c;
+  assign can_after_release = can_cross_c;
 
   always_comb begin
     for (int unsigned i = 0; i < REQ_COUNT; i++) begin
@@ -689,13 +728,13 @@ module mosaic_lease_alloc #(
 
       for (int unsigned i = 0; i < REQ_COUNT; i++) begin
         if (ready_c[i]) begin
-          lease_live[grant_rec_c[i*IDX_W +: IDX_W]]     <= 1'b1;
-          lease_used[grant_rec_c[i*IDX_W +: IDX_W]]     <= 1'b1;
-          lease_gen[(grant_rec_c[i*IDX_W +: IDX_W]*GEN_W) +: GEN_W]
+          lease_live[grant_rec_c[i*IDX_W +: ROW_W]]     <= 1'b1;
+          lease_used[grant_rec_c[i*IDX_W +: ROW_W]]     <= 1'b1;
+          lease_gen[(grant_rec_c[i*IDX_W +: ROW_W]*GEN_W) +: GEN_W]
                                                         <= grant_gen_c[i*GEN_W +: GEN_W];
-          lease_mask[(grant_rec_c[i*IDX_W +: IDX_W]*POOLS) +: POOLS]
+          lease_mask[(grant_rec_c[i*IDX_W +: ROW_W]*POOLS) +: POOLS]
                                                         <= req_mask[i*POOLS +: POOLS];
-          lease_slot[(grant_rec_c[i*IDX_W +: IDX_W]*POOLS*SLOT_W) +: POOLS*SLOT_W]
+          lease_slot[(grant_rec_c[i*IDX_W +: ROW_W]*POOLS*SLOT_W) +: POOLS*SLOT_W]
                                                         <= slot_c[i*POOLS*SLOT_W +: POOLS*SLOT_W];
         end
       end
@@ -749,6 +788,10 @@ module mosaic_lease_alloc #(
   assign o_rel_after_cancel_count = rel_after_cancel_count;
   assign o_can_after_release_count = can_after_release_count;
   assign o_live_count             = live_count;
+  assign o_occ_count_alu          = occ_count_alu;
+  assign o_occ_count_md           = occ_count_md;
+  assign o_occ_count_wb           = occ_count_wb;
+  assign o_occ_count_net          = occ_count_net;
 
   assign o_req_count = 32'(REQ_COUNT);
   assign o_pools     = 32'(POOLS);
@@ -757,7 +800,10 @@ module mosaic_lease_alloc #(
   assign o_gen_w     = 32'(GEN_W);
   assign o_slot_w    = 32'(SLOT_W);
   assign o_lease_w   = 32'(LEASE_W);
-  assign o_pool_size = {32'(SIZE_NET), 32'(SIZE_WB), 32'(SIZE_MD), 32'(SIZE_ALU)};
+  assign o_size_alu = 32'(SIZE_ALU);
+  assign o_size_md  = 32'(SIZE_MD);
+  assign o_size_wb  = 32'(SIZE_WB);
+  assign o_size_net = 32'(SIZE_NET);
 
   // ---------------------------------------------------------------- guards
   // The geometry rules this module's arithmetic depends on, as build errors
@@ -766,7 +812,7 @@ module mosaic_lease_alloc #(
   // comment that says it must not happen.
   localparam bit POOL_TOO_SMALL = (MAX_SZ < 2);        // SLOT_W would be 0
   localparam bit GEN_MOD_TOO_SMALL = ((1 << GEN_W) <= LEASES);
-  localparam bit LEASES_TOO_SMALL = (LEASES < 1);
+  localparam bit LEASES_TOO_SMALL = (LEASES < 2);      // ROW_W would be 0
   localparam bit NO_ISSUE_PORT = (REQ_COUNT < 1);
 
   generate
