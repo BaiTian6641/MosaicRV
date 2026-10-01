@@ -1,4 +1,4 @@
-/* tests/programs/exit/src/x07_pending_store.S -- V-012 scenario
+/* tests/programs/termination/src/x07_pending_store.S -- V-012 scenario
  * "ends with a store still pending (not drained)".
  *
  * The program signals completion and *then* performs the last signature store:

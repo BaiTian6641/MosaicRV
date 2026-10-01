@@ -2,14 +2,14 @@
   "schema_version": 1,
   "case": "exit.protocol_termination",
   "verdict": "PASS",
-  "detail": "10/10 scenarios matched their documented status, 8 distinct exit classes, checks=27 cycles=40738 budget=20000 drain=32",
+  "detail": "11/11 scenarios matched their documented status, 8 distinct exit classes, checks=28 cycles=40744 budget=20000 drain=32",
   "seed": 1,
   "max_cycles": 4000000,
-  "checks": 27,
+  "checks": 28,
   "failures": 0,
   "image": "",
   "expect": "",
   "tool": "Verilator 5.052 2026-09-05",
-  "timestamp": "2026-10-01T20:35:13Z",
+  "timestamp": "2026-10-01T21:39:06Z",
   "first_mismatch": ""
 }

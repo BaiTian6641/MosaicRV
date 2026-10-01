@@ -50,7 +50,9 @@
 //     1  PROGRAM_FAIL           TOHOST written, but the word was not exactly 1
 //                               (the frozen rule: PASS is 1, anything else is a
 //                               FAIL whose code is bits [63:1])
-//     2  TIMEOUT                the cycle budget ran out with no exit and no WFI
+//     2  TIMEOUT                the protocol never completed: either the cycle
+//                               budget ran out with no exit and no WFI, or the
+//                               PC left RAM (a runaway, named RUN/PC_ESCAPED)
 //     3  WFI_STALL              WFI was executed and p0 has no wake source
 //     4  SIGNATURE_MISMATCH     the four signature words disagree with the model
 //     5  SIGNATURE_OVERRUN      a store wrote past the frozen four-word window
@@ -74,11 +76,12 @@
 //   x05_signature_mismatch  PASS word, one wrong signature bit     -> SIGNATURE_MISMATCH
 //   x06_signature_overrun   a fifth signature word past the window  -> SIGNATURE_OVERRUN
 //   x07_pending_store       exit signalled before the last store    -> UNDRAINED_STORE
+//   x08_runaway             jumps into boot_rom and never returns    -> TIMEOUT (PC escaped)
 //   corrupt magic           loader must refuse the image            -> IMAGE_REJECTED
 //   wrong entry point       image must be refused before it runs    -> IMAGE_REJECTED
 //
-// The programs are in tests/programs/exit/ (see exit.h) and are built by
-// `make -C tests/programs exit`.  They are deliberately NOT part of the
+// The programs are in tests/programs/termination/ (see exit.h) and are built by
+// `make -C tests/programs termination`.  They are deliberately NOT part of the
 // p01..p13 firmware corpus: they are not in corpus.json, tools/host_oracle.py
 // does not see them, and tests/programs/golden.json is untouched by them.
 //
@@ -300,7 +303,7 @@ uint64_t RegionField(const std::string& text, const char* region, const char* ke
 // The expected signature -- the model this case compares against
 // ===========================================================================
 //
-// Four expressions, written from the comment in tests/programs/exit/exit.h.
+// Four expressions, written from the comment in tests/programs/termination/exit.h.
 // Kept deliberately trivial so that the model cannot itself be the thing under
 // test: what is under test is the harness's *decision* to compare, not the
 // arithmetic.  The programs compute the same four expressions in RISC-V
@@ -481,7 +484,6 @@ struct ScenarioResult {
   uint8_t state_at_drain_end = 0;
   bool wfi_seen = false;
   bool pc_escaped = false;
-  bool drain_skipped = false;
   uint64_t signature[4] = {0, 0, 0, 0};
   uint64_t expected_signature[4] = {0, 0, 0, 0};
   std::vector<Event> stream;
@@ -618,7 +620,9 @@ ScenarioResult RunScenario(Dut* dut, const Protocol& proto, const mosaic::Image&
   }
   result.state_at_drain_end = dut->state();
 #else
-  result.drain_skipped = true;
+  // MOSAIC_EXIT_MUTANT_NO_DRAIN: the window is skipped entirely and the
+  // signature is read at the pulse, which is the defect the mutant exists to
+  // demonstrate.
   result.state_at_drain_end = dut->state();
 #endif
   result.cycles = cycle;
@@ -761,7 +765,7 @@ ScenarioResult RunScenario(Dut* dut, const Protocol& proto, const mosaic::Image&
 
 struct Scenario {
   const char* name;
-  const char* elf;      // built into tests/programs/build/exit/
+  const char* elf;      // built into tests/programs/build/termination/
   uint64_t a, b, c;
   ExitStatus expected;
   uint64_t expected_code;
@@ -785,6 +789,8 @@ const Scenario kScenarios[] = {
      UINT64_C(0x33), kExitSignatureOverrun, 0, false},
     {"x07_pending_store", "x07_pending_store.elf", UINT64_C(0xAAAAAAAAAAAAAAAA),
      UINT64_C(0x5555555555555555), UINT64_C(0x1F), kExitUndrainedStore, 0, false},
+    {"x08_runaway", "x08_runaway.elf", UINT64_C(0x0000000000000001),
+     UINT64_C(0x0000000000000002), UINT64_C(0x03), kExitTimeout, 0, false},
 };
 
 // The same program with a different operand triple: the signature must change
@@ -908,12 +914,12 @@ int main(int argc, char** argv) {
                    "the operand area lies inside RAM");
 
     // ---- 2. the exit programs -------------------------------------------
-    const std::string exit_dir = repo + "/tests/programs/build/exit";
+    const std::string exit_dir = repo + "/tests/programs/build/termination";
     for (const Scenario& scenario : kScenarios) {
       std::ifstream probe(exit_dir + "/" + scenario.elf);
       if (!probe) {
         Fail("no " + std::string(scenario.elf) + " in " + exit_dir +
-             "; build the exit programs first with `make -C tests/programs exit`");
+             "; build the exit programs first with `make -C tests/programs termination`");
       }
     }
 
@@ -1133,9 +1139,11 @@ int main(int argc, char** argv) {
     summary << "MosaicRV V-012 exit.protocol_termination\n"
             << "profile " << MOSAIC_PROFILE_NAME << ", DUT mosaic_bringup_tb\n"
             << "reset_vector " << Hex(proto.reset_vector) << ", TOHOST "
-            << Hex(proto.tohost) << ", signature " << Hex(proto.signature) << " x "
-            << proto.signature_words << " words, guard band ends "
-            << Hex(proto.guard_end()) << "\n"
+            << Hex(proto.tohost) << "\n"
+            << "signature window [" << Hex(proto.signature) << ", "
+            << Hex(proto.signature + proto.signature_bytes()) << "), guard band ["
+            << Hex(proto.signature + proto.signature_bytes()) << ", "
+            << Hex(proto.guard_end()) << ")\n"
             << "budget " << budget << " cycles/scenario, drain window "
             << kDrainWindow << " cycles\n"
             << "operands " << Hex(kOperandBase) << " (written by the harness)\n";

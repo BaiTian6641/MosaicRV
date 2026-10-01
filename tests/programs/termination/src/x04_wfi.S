@@ -1,4 +1,4 @@
-/* tests/programs/exit/src/x04_wfi.S -- V-012 scenario "executes WFI and never wakes".
+/* tests/programs/termination/src/x04_wfi.S -- V-012 scenario "executes WFI and never wakes".
  *
  * p0 is M-mode only and has no interrupt controller and no wake source: a WFI
  * that waits can never be woken.  The scenario is therefore a stall, not a

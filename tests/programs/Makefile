@@ -141,3 +141,17 @@ audit: $(ELFS)
 
 clean:
 	rm -rf $(BUILDDIR)
+
+# ---------------------------------------------------------------------
+# termination: the V-012 exit-protocol programs (tests/programs/termination/, case
+# exit.protocol_termination).  Deliberately NOT part of `all`: they are not
+# corpus programs, they are not in corpus.json, and tools/host_oracle.py and
+# tests/programs/golden.json are untouched by them.  They are their own reset
+# path (no crt0.S, no trap.S) and are built into build/termination/.
+# ---------------------------------------------------------------------
+.PHONY: termination termination-clean
+termination:
+	$(MAKE) -C termination all
+
+termination-clean:
+	$(MAKE) -C termination clean

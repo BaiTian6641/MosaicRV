@@ -1,4 +1,4 @@
-/* tests/programs/exit/src/x01_normal.S -- V-012 scenario "completes normally".
+/* tests/programs/termination/src/x01_normal.S -- V-012 scenario "completes normally".
  *
  * The reference behaviour of the frozen exit protocol: compute the four
  * signature words from the harness-supplied operands, publish them in the

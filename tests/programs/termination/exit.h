@@ -1,4 +1,4 @@
-/* tests/programs/exit/exit.h
+/* tests/programs/termination/exit.h
  *
  * Constants for the V-012 exit-protocol programs
  * (docs/validation-plan.md section 5 V-012, case exit.protocol_termination).
@@ -15,8 +15,8 @@
  * Because they are not corpus programs they are not built by
  * `make -C tests/programs all`, they are not counted by tools/host_oracle.py,
  * and the golden signatures in tests/programs/golden.json are untouched by
- * them.  They are built by `make -C tests/programs exit` into
- * tests/programs/build/exit/.
+ * them.  They are built by `make -C tests/programs termination` into
+ * tests/programs/build/termination/.
  *
  * Every address below is transcribed from frozen configuration via
  * src/platform.h, which is the corpus's single source of truth for the map and
@@ -55,18 +55,27 @@
  * (code << 1) | 0. */
 #define MOSAIC_EXIT_FAIL_CODE      0x2A
 
-/* The end of the signature area of interest.
+/* The signature window and its guard band.
  *
  * config/profiles/p0.json freezes the signature at 0x80000400 with exactly
- * four words, so the window is [0x80000400, 0x80000420).  The 512-byte page
- * that holds it is otherwise unassigned RAM in the frozen map (.scratch starts
- * at 0x80001080, .bss at 0x80001100), and the harness reserves the remainder
- * of that page as the signature guard band: a store that lands beyond the
- * frozen window but inside the page is a signature write that ran past the
- * region, and is refused rather than silently ignored.  x06_signature_overrun.S
- * stores at MOSAIC_EXIT_SIGNATURE_GUARD_WORD to produce exactly that. */
-#define MOSAIC_EXIT_SIGNATURE_GUARD_END   0x80000500UL
-#define MOSAIC_EXIT_SIGNATURE_GUARD_WORD  (MOSAIC_SIGNATURE_BASE + 8 * MOSAIC_SIGNATURE_WORDS)
+ * four words, so the window is [0x80000400, 0x80000420).  The harness reserves
+ * the rest of the aligned 512-byte block that contains it -- [0x80000420,
+ * 0x80000600) -- as the signature guard band: the block is bounded and aligned,
+ * it is entirely unassigned RAM in the frozen layout (the next firmware-owned
+ * area, .scratch, begins at 0x80001080), and a store that lands in it is
+ * unambiguously a signature write that ran past the frozen window rather than a
+ * program writing its own data.
+ *
+ * This is the case's own conformance rule, not an ISA rule and not a line in
+ * config/: the ISA has nothing to say about where a program puts its signature.
+ * It exists because a fifth signature word would otherwise be invisible to a
+ * harness that reads exactly four, and the run would look perfect.
+ *
+ * x06_signature_overrun.S stores at MOSAIC_EXIT_SIGNATURE_GUARD_WORD, the first
+ * word of that band, to produce exactly the violation. */
+#define MOSAIC_EXIT_SIGNATURE_BLOCK     0x200UL   /* aligned block size */
+#define MOSAIC_EXIT_SIGNATURE_GUARD_WORD  \
+    (MOSAIC_SIGNATURE_BASE + 8 * MOSAIC_SIGNATURE_WORDS)
 
 /* The WFI encoding (SYSTEM, funct12 = 0x105, rd = rs1 = 0).  p0 has no
  * interrupt controller and no wake source, so a WFI that waits can never

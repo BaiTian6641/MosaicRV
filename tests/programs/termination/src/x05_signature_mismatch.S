@@ -1,4 +1,4 @@
-/* tests/programs/exit/src/x05_signature_mismatch.S -- V-012 scenario
+/* tests/programs/termination/src/x05_signature_mismatch.S -- V-012 scenario
  * "writes PASS and then produces a mismatching signature".
  *
  * The one instruction that differs from x01_normal.S is the `xori` below: word

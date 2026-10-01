@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "case": "lsu.byte_forwarding",
+  "verdict": "PASS",
+  "detail": "load queue and store-to-load forwarding contract holds: 109928 checks over 3502 cycles; 447 loads, 1516 stores, 191 replays, 129 forwarded bytes, 1418 memory bytes, seed 1",
+  "seed": 1,
+  "max_cycles": 200000,
+  "checks": 1,
+  "failures": 0,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-01T21:39:53Z",
+  "first_mismatch": ""
+}

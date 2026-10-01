@@ -33,7 +33,8 @@
     "V-011",
     "V-009",
     "I-023",
-    "I-034"
+    "I-034",
+    "V-012"
   ],
   "evidence": {
     "I-001": {
@@ -399,6 +400,18 @@
       "verdict": "PASS",
       "notes": "Speculative store queue and store-commit authorisation. Case PASS from a clean build: 299262 checks over 3331 cycles, 112 stores allocated, 24 drained, 82 squashed, 1 faulted. The card's two fail modes are covered by controls: a store visible before commit (MOSAIC_SQ_MUTANT_VISIBLE_BEFORE_COMMIT, independently rebuilt here and observed exiting 1 after 548 checks with a wrong-path drain request) and a flush deleting an already-authorised store (FULL_FLUSH_DROPS_AUTHORISED). Seven mutants in total, each rebuilt from a deleted build directory, each with a distinct named first failure: visible-before-commit, authorised-store-dropped-on-squash, drain-duplicate, drain-out-of-order, allocation-dropped-when-full, early-visibility-before-address-and-data-ready, commit-out-of-order. The wrong-path requirement is checked against the memory side, not just the queue: the case counts memory transactions, and a squashed store produces zero. One contract change is recorded rather than hidden: the authorisation watermark was first adjusted arithmetically (+1 on commit, -1 on drain) and the soak produced the combination it cannot express -- a commit and a squash of the same entry in one cycle -- so the watermark is now derived from the cycle's survivors (the leading resident-and-authorised entries), which is the same statement as the prefix invariant; the header says so. Two testbench defects, both the same class (the lane convention describes the bus, not the memory: the memory model received the endpoint's lane-shifted payload shifted a second time, and the expected memory took the store's byte at the lane index instead of byte i at address+i), passed every directed phase because every directed store starts at lane 0 and were found by the soak's non-zero lanes; the DUT was right in both. The forward-query port is exercised every cycle against its stated rule but is consumed by nobody and carries no mutant -- it is a defined and tested rule, not a proven integration interface. NOT verified: no integration (nothing shows the ROB driving commit_valid_i with a per-store identity, or the identity/epoch wiring being right); the young-window bound is supplied by the testbench because mosaic_rob does not expose its allocation pointer, so the region rule is verified given a window, not the production source of that window; one outstanding memory transaction only; no caches/MMIO/coherence; p0 geometry only; simulation only.",
       "report": "results/reports/I-034-sq.md"
+    },
+    "V-012": {
+      "cases": [
+        "exit.protocol_termination"
+      ],
+      "commands": [
+        "python3 tools/run_unit.py --profile p0 --case exit.protocol_termination",
+        "python3 tools/host_oracle.py --check-golden-only"
+      ],
+      "verdict": "PASS",
+      "notes": "Fixed signature and termination decision. Case PASS from a clean build. Eight termination statuses are documented and every one is observed: PASS=0, PROGRAM_FAIL=1 (code 0x2A carried out through TOHOST), TIMEOUT=2 (a spinning program, TOHOST never written, its signature still intact), WFI_STALL=3, SIGNATURE_MISMATCH=4 (a program that self-reports PASS while word 2 disagrees with the model -- the case's own point that the self-report is not the verdict), SIGNATURE_OVERRUN=5 (an 8-byte store one word past the frozen window), UNDRAINED_STORE=6 (a store to signature word 3 five cycles after the exit pulse), IMAGE_REJECTED=7 (corrupt magic and a wrong entry point, both refused before any instruction executes). Six harness mutants each exit 1 naming its first wrong classification (TIMEOUT_IS_PASS, WFI_AS_TIMEOUT, FAIL_IS_PASS, NO_SIGNATURE_CHECK, NO_OVERRUN_CHECK, NO_DRAIN); the last one is the most instructive -- reading the signature at the exit pulse instead of after the drain fabricates a mismatch rather than reporting an undrained store. Two drain sub-rules are reported as REDUNDANCY PROBES, not evidence: this core has no store buffer, so 'the exit store retired at or after the pulse' and 'the hart is out of the data-request states' cannot fail and were never observed to. The ISA audit of all seven non-WFI programs is clean (155 instructions). A tool defect reported by this package was fixed here: tests/programs/audit/check_p0_isa.py matched forbidden symbol names as substrings of the whole objdump output, whose first line contains the image's path, so any image under a path containing 'exit' (or printf, memcpy...) was rejected for a symbol it did not contain. It now matches the symbol-name field of each symbol line (stripping -T version suffixes), and both directions were verified: an image at /tmp/exit_path_test/exit_image.elf now audits clean, while the same image with _start renamed to printf is rejected with 'symbol printf -- libgcc/libc leaked in' and exit 1; the 39-image corpus still audits clean. The package's directory workaround (tests/programs/termination/ instead of .../exit/) is left in place -- it is no longer needed but renaming it back would churn a passing case for nothing. NOT verified: the DUT here is the in-order bring-up core, so nothing in this package is evidence about the out-of-order fabric; RUN/PC_ESCAPED is a harness convention (executing from boot_rom is reported as a runaway); the signature guard band is this case's own conformance rule, not an ISA rule and not a line in config/; the six mutants are C++ harness defines, not RTL fault injection; no UART/MMIO/interrupt path exists in p0 to exercise.",
+      "report": "results/reports/V-012-exit.md"
     }
   }
 }

@@ -1,4 +1,4 @@
-/* tests/programs/exit/src/x02_fail.S -- V-012 scenario "reports an explicit FAIL".
+/* tests/programs/termination/src/x02_fail.S -- V-012 scenario "reports an explicit FAIL".
  *
  * Identical to x01 up to the exit word, except that the value written to
  * TOHOST has its PASS bit clear: bits [63:1] carry MOSAIC_EXIT_FAIL_CODE.

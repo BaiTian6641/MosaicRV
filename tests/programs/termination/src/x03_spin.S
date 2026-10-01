@@ -1,4 +1,4 @@
-/* tests/programs/exit/src/x03_spin.S -- V-012 scenario "never exits".
+/* tests/programs/termination/src/x03_spin.S -- V-012 scenario "never exits".
  *
  * Writes a complete signature and then spins forever without ever writing
  * TOHOST.  The protocol has not completed, so the run must be stopped by the

@@ -1,4 +1,4 @@
-/* tests/programs/exit/src/x06_signature_overrun.S -- V-012 scenario
+/* tests/programs/termination/src/x06_signature_overrun.S -- V-012 scenario
  * "the signature write runs past the signature region".
  *
  * Writes the four frozen signature words correctly, then writes one more word

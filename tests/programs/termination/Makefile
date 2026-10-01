@@ -1,15 +1,15 @@
-# tests/programs/exit/Makefile
+# tests/programs/termination/Makefile
 #
 # V-012 exit-protocol programs (see exit.h).  These are NOT the p01..p13
 # firmware corpus: they are not in corpus.json, they are not built by
 # `make -C tests/programs all`, and they do not affect
 # tests/programs/golden.json or tools/host_oracle.py.
 #
-#   make -C tests/programs/exit        build all seven ELFs + print the map
-#   make -C tests/programs/exit dis    disassemble every program
-#   make -C tests/programs/exit audit  ISA audit of the six programs that do
+#   make -C tests/programs termination        build all seven ELFs + print the map
+#   make -C tests/programs termination dis    disassemble every program
+#   make -C tests/programs termination audit  ISA audit of the six programs that do
 #                                      not deliberately execute WFI
-#   make -C tests/programs/exit clean
+#   make -C tests/programs termination clean
 #
 # The toolchain, the p0 ISA string and the linker script are the same frozen
 # ones the corpus uses; the only difference is that these programs are their
@@ -34,17 +34,17 @@ LDFLAGS  := $(ARCHFLAGS) -nostdlib -nostartfiles \
             -Wl,-T,$(LDSCRIPT) -Wl,--fatal-warnings -Wl,--no-warn-rwx-segments
 
 SRCDIR   := src
-BUILDDIR := ../build/exit
+BUILDDIR := ../build/termination
 
 PROGRAMS := x01_normal x02_fail x03_spin x04_wfi x05_signature_mismatch \
-            x06_signature_overrun x07_pending_store
+            x06_signature_overrun x07_pending_store x08_runaway
 
 # The six programs that stay inside the p0 ISA string's audited set.  x04_wfi
 # deliberately executes WFI, which tests/programs/audit/check_p0_isa.py's
 # M-mode allow-list (currently {"mret"}) does not contain; the audit target
 # below names that exclusion rather than hiding it.
 AUDITABLE := x01_normal x02_fail x03_spin x05_signature_mismatch \
-             x06_signature_overrun x07_pending_store
+             x06_signature_overrun x07_pending_store x08_runaway
 
 ELFS := $(addprefix $(BUILDDIR)/,$(addsuffix .elf,$(PROGRAMS)))
 AUDIT_ELFS := $(addprefix $(BUILDDIR)/,$(addsuffix .elf,$(AUDITABLE)))

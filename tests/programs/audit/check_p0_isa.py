@@ -184,12 +184,36 @@ def run_optional(cmd: list) -> str:
     return proc.stdout.decode("utf-8", "replace")
 
 
+def symbol_names(objdump_text: str) -> list:
+    """The *name field* of every symbol line in `objdump -t` / `-T` output.
+
+    A substring search over the whole dump is wrong, and was wrong here: the
+    first line objdump prints is "<path>:     file format <fmt>", so any image
+    whose path contained a forbidden name -- a program under tests/programs/exit/
+    and the symbol "exit" -- was rejected for a symbol it did not contain. Only
+    the last field of a real symbol line is a name; `-T` prints a version suffix
+    ("printf@@GLIBC_2.2.5"), which is stripped before the comparison.
+    """
+    names = []
+    for line in objdump_text.splitlines():
+        if "file format" in line or not line.strip():
+            continue
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        name = parts[-1].split("@")[0]
+        if name:
+            names.append(name)
+    return names
+
+
 def check_no_runtime_helper(objdump: str, path: str) -> None:
     dynsyms = run_optional([objdump, "-t", path])
     dynsyms += run_optional([objdump, "-T", path])
+    present = set(symbol_names(dynsyms))
     for name in FORBIDDEN_SYMBOLS:
-        if name in dynsyms:
-            raise AuditError("%s: dynamic symbol %s -- libc/libgcc leaked in"
+        if name in present:
+            raise AuditError("%s: symbol %s -- libc/libgcc leaked in"
                              % (path, name))
 
     headers = run([objdump, "-p", path])
