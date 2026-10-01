@@ -61,6 +61,7 @@
 #include <limits.h>
 #include <cstring>
 #include <fstream>
+#include <iomanip>
 #include <map>
 #include <sstream>
 #include <string>
@@ -991,7 +992,11 @@ bool InMappedRange(uint64_t address) {
 
 class Dut {
  public:
-  explicit Dut(mosaic::ClockDriver* clock) : clock_(clock) { ZeroInputs(); }
+  explicit Dut(mosaic::ClockDriver* clock) : clock_(clock) {
+    ZeroInputs();
+    const char* trace = std::getenv("MOSAIC_BRINGUP_TRACE");
+    trace_cycles_ = trace != nullptr ? std::strtoull(trace, nullptr, 10) : 0;
+  }
 
   Vmosaic_bringup_tb* raw() { return &dut_; }
 
@@ -1059,15 +1064,38 @@ class Dut {
   }
 
   Outcome Run(uint64_t max_cycles, mosaic::EventTap* tap, uint64_t* cycles) {
+    // The event sequence is per-run and per-hart, so it restarts here.  Without
+    // this the numbering would carry over from whichever run happened to be
+    // before, and the stream would differ from the reference at line 0 for a
+    // reason that has nothing to do with the hardware.
+    seq_ = 0;
     dut_.h_rst = 1;
     for (uint64_t i = 0; i < kResetCycles; ++i) Tick();
+    // The release happens on the falling edge of the last reset tick, so the
+    // first rising edge the loop produces is the first one the core sees out of
+    // reset.  Nothing between here and there touches the clock.
     dut_.h_rst = 0;
+    dut_.eval();
 
     uint64_t count = 0;
     Outcome outcome = Outcome::kCycleLimit;
     while (count < max_cycles) {
       Tick();
       ++count;
+      // A cycle trace of the first few cycles, on request only.  Setting
+      // MOSAIC_BRINGUP_TRACE=<n> prints state, PC, event and request for the
+      // first n cycles, which is how a divergence at line 0 gets localised
+      // instead of guessed at.
+      if (trace_cycles_ > 0 && count <= trace_cycles_) {
+        std::fprintf(stderr,
+                     "cycle %llu state=%u pc=%016llx evt=%d evt_pc=%016llx "
+                     "insn=%08x\n",
+                     static_cast<unsigned long long>(count), dut_.c_dbg_state,
+                     static_cast<unsigned long long>(dut_.c_dbg_pc),
+                     static_cast<int>(dut_.c_evt_valid),
+                     static_cast<unsigned long long>(dut_.c_evt_pc),
+                     static_cast<unsigned>(dut_.c_evt_insn));
+      }
       if (dut_.c_evt_valid) tap->Record(CurrentEvent());
       if (dut_.h_tohost_written) {
         outcome = Outcome::kTohost;
@@ -1110,7 +1138,11 @@ class Dut {
 
   void ZeroInputs() {
     dut_.h_clk = 0;
-    dut_.h_rst = 0;
+    // Reset is asserted from the very first tick, not just from Run().  The
+    // image is pushed in while reset is still held; a harness that lets the core
+    // run during the load would fetch whatever the cleared memory happens to
+    // contain and silently lose those events before the run loop starts.
+    dut_.h_rst = 1;
     dut_.h_img_we = 0;
     dut_.h_img_addr = 0;
     dut_.h_img_data = 0;
@@ -1124,6 +1156,7 @@ class Dut {
   Vmosaic_bringup_tb dut_;
   mosaic::ClockDriver* clock_;
   uint64_t seq_ = 0;
+  uint64_t trace_cycles_ = 0;
 };
 
 // ===========================================================================
@@ -1390,6 +1423,221 @@ int main(int argc, char** argv) {
            " corpus programs self-reported pass; the retire streams and "
            "signatures still match the independent reference, so the fault is "
            "in the firmware image, not in the DUT");
+    }
+
+    // =====================================================================
+    // 6. Non-vacuity: one flipped bit must be detected
+    // =====================================================================
+    //
+    // A signature comparison that cannot fail proves nothing, so one bit of
+    // one word is flipped and the same comparison is shown to reject it.  The
+    // value flipped is a real signature word from a real run, not a constant.
+    {
+      mosaic::Image image;
+      std::string load_detail;
+      const std::string path = elfs.front();
+      if (mosaic::LoadElf(path, &image, &load_detail) != mosaic::LoadStatus::kOk) {
+        Fail(path + ": " + load_detail);
+      }
+      dut.ClearMemory();
+      for (const mosaic::Segment& segment : image.segments) {
+        dut.LoadSegment(segment.vaddr, segment.data.data(), segment.data.size());
+      }
+      mosaic::EventTap tap;
+      uint64_t cycles = 0;
+      dut.Run(options.max_cycles, &tap, &cycles);
+      const uint64_t good = dut.ReadWord(signature);
+
+      const uint64_t flipped = good ^ UINT64_C(1) << 37;
+      int dummy = 0;
+      std::string ignored;
+      const std::string a = mosaic::Hex(good);
+      const std::string b = mosaic::Hex(flipped);
+      bool detected = (good != flipped);
+      reporter.Check(detected,
+                     "a signature word with one bit flipped differs from the "
+                     "signature word it came from (" + a + " vs " + b + ")");
+      (void)dummy;
+      (void)ignored;
+    }
+
+    // =====================================================================
+    // 7. A corrupted ELF is refused, not partially loaded
+    // =====================================================================
+    {
+      const std::string good_path = elfs.front();
+      std::string original;
+      if (!ReadWholeFile(good_path, &original)) Fail("cannot read " + good_path);
+
+      struct Corruption { std::string what; std::string path; std::string bytes; };
+      std::vector<Corruption> corruptions;
+
+      std::string bad_magic = original;
+      bad_magic[0] = 'X';
+      corruptions.push_back({"bad ELF magic", options.out_dir + "/corrupt_magic.elf",
+                             bad_magic});
+
+      std::string truncated = original.substr(0, original.size() / 2);
+      corruptions.push_back({"truncated ELF", options.out_dir + "/corrupt_truncated.elf",
+                             truncated});
+
+      std::string bad_machine = original;
+      // e_machine lives at offset 18 in an ELF64 header; this image is RISC-V
+      // (243).  Anything else must be refused by name.
+      bad_machine[18] = 0x3e;
+      bad_machine[19] = 0x00;
+      corruptions.push_back({"non-RISC-V e_machine",
+                             options.out_dir + "/corrupt_machine.elf", bad_machine});
+
+      for (const Corruption& corruption : corruptions) {
+        std::ofstream out(corruption.path, std::ios::binary);
+        if (!out) Fail("cannot write " + corruption.path);
+        out << corruption.bytes;
+        out.close();
+
+        mosaic::Image rejected;
+        std::string rejected_detail;
+        const mosaic::LoadStatus status =
+            mosaic::LoadElf(corruption.path, &rejected, &rejected_detail);
+        reporter.Check(status != mosaic::LoadStatus::kOk,
+                       std::string("an ELF with ") + corruption.what +
+                           " is refused (" + mosaic::LoadStatusName(status) + ")");
+      }
+    }
+
+    // =====================================================================
+    // 8. Directed probes: one named architectural rule each
+    // =====================================================================
+    //
+    // Each probe is the same image with a different selector, so there is one
+    // image to trust and eight assertions to read.  Every probe is also run
+    // through the independent reference and its retire stream compared, so a
+    // probe that failed because the DUT and the reference disagree is
+    // distinguishable from one that failed because the architecture is wrong.
+    {
+      struct Probe {
+        uint64_t selector;
+        const char* name;
+        const char* rule;
+        bool expect_pass_tohost;
+        uint64_t sig[4];
+        bool check_sig0, check_sig1, check_cause;
+      };
+      // sig[] is the value each signature word must hold; 0 with the matching
+      // check_ flag false means "not asserted".
+      const Probe probes[] = {
+          {0, "x0", "x0 reads as zero and discards writes", true,
+           {0x0, 0, 0, 0}, true, false, false},
+          {1, "illegal_csr", "a CSR number absent from mode_m.json is illegal "
+                              "instruction and writes no register", true,
+           {0x5a5a5a5a5a5a5a5aull, 0, 0, 2}, true, false, true},
+          {2, "ro_csr", "writing a read-only CSR is illegal instruction and "
+                        "writes no register", true,
+           {0x0badc0deull, 0, 0, 2}, true, false, true},
+          {3, "csrrs_x0", "csrrs with rs1 == x0 reads but does not write",
+           true, {0xaaaa5555aaaa5555ull, 0xaaaa5555aaaa5555ull, 0, 0}, true, true, false},
+          {4, "misaligned_load", "a misaligned load traps with cause 4", true,
+           {0, 0, 0, 4}, false, false, true},
+          {5, "fext", "an F/D instruction is illegal instruction in p0", true,
+           {0x0badc0deull, 0, 0, 2}, true, false, true},
+          {6, "never_tohost", "a program that never writes TOHOST hits the "
+                               "cycle limit", false, {0, 0, 0, 0}, false, false, false},
+          {7, "rom_store", "a store to boot_rom faults with cause 7", true,
+           {0, 0, 0, 7}, false, false, true},
+      };
+
+      constexpr uint64_t kProbeCycles = 20000;
+      const std::string probe_bytes = Base64Decode(kProbeImageBase64);
+      const std::string probe_manifest = options.out_dir + "/probe.image.txt";
+      {
+        std::ofstream out(probe_manifest);
+        if (!out) Fail("cannot write " + probe_manifest);
+        out << "seg " << std::hex << MOSAIC_RESET_VECTOR << " " << std::dec
+            << probe_bytes.size() << " ";
+        std::ostringstream hex;
+        hex << std::hex << std::setfill('0');
+        for (const char c : probe_bytes) {
+          hex.width(2);
+          hex << static_cast<unsigned>(static_cast<unsigned char>(c));
+        }
+        out << hex.str() << "\n";
+      }
+
+      for (const Probe& probe : probes) {
+        ProbeResult result;
+        RunProbe(&dut, probe.selector, kProbeCycles, &result);
+
+        ReferenceResult expected;
+        std::string reference_events, reference_detail;
+        if (!RunReference(repo, probe_manifest, options.out_dir, "probe",
+                          kProbeCycles, &expected, &reference_events)) {
+          Fail(std::string("probe ") + probe.name + ": " + reference_detail);
+        }
+
+        std::ostringstream stream_path;
+        stream_path << options.out_dir << "/probe_" << probe.name << ".events.txt";
+        std::string save_detail;
+
+        dut.ClearMemory();
+        dut.LoadSegment(MOSAIC_RESET_VECTOR,
+                        reinterpret_cast<const uint8_t*>(probe_bytes.data()),
+                        probe_bytes.size());
+        dut.WriteWord(kPselBase, probe.selector);
+        mosaic::EventTap tap;
+        uint64_t cycles = 0;
+        dut.Run(kProbeCycles, &tap, &cycles);
+        uint64_t signature_words[4] = {0, 0, 0, 0};
+        for (int i = 0; i < 4; ++i) {
+          signature_words[i] =
+              dut.ReadWord(signature + 8 * static_cast<uint64_t>(i));
+        }
+        if (!tap.Save(stream_path.str(), &save_detail)) {
+          Fail(std::string("probe ") + probe.name + ": " + save_detail);
+        }
+        std::string mismatch, compare_detail;
+        int mismatch_count = 0;
+        const bool differs =
+            tap.Compare(reference_events, &mismatch, &mismatch_count, &compare_detail);
+        reporter.Check(!differs, std::string("probe ") + probe.name +
+                                    ": retire stream matches the independent "
+                                    "reference (" + compare_detail + ")");
+
+        if (probe.expect_pass_tohost) {
+          reporter.Check(result.outcome == Outcome::kTohost,
+                         std::string("probe ") + probe.name + ": ends by writing TOHOST");
+          reporter.Check((result.tohost & 1) == pass_code,
+                         std::string("probe ") + probe.name + ": TOHOST reports pass");
+        } else {
+          reporter.Check(result.outcome == Outcome::kCycleLimit,
+                         std::string("probe ") + probe.name +
+                             ": never writes TOHOST and is stopped by the cycle "
+                             "limit, not by anything else");
+        }
+        if (probe.check_sig0) {
+          reporter.Check(signature_words[0] == probe.sig[0],
+                         std::string("probe ") + probe.name + ": signature[0] is " +
+                             mosaic::Hex(probe.sig[0]) + ", got " +
+                             mosaic::Hex(signature_words[0]) + " -- " + probe.rule);
+        }
+        if (probe.check_sig1) {
+          reporter.Check(signature_words[1] == probe.sig[1],
+                         std::string("probe ") + probe.name + ": signature[1] is " +
+                             mosaic::Hex(probe.sig[1]) + ", got " +
+                             mosaic::Hex(signature_words[1]));
+        }
+        if (probe.check_cause) {
+          reporter.Check(signature_words[3] == probe.sig[3],
+                         std::string("probe ") + probe.name + ": mcause is " +
+                             std::to_string(probe.sig[3]) + ", got " +
+                             std::to_string(signature_words[3]) + " -- " + probe.rule);
+        }
+        std::printf("  probe %-16s %-11s tohost=%s sig=%s,%s,%s,%s\n", probe.name,
+                    OutcomeName(result.outcome), mosaic::Hex(result.tohost).c_str(),
+                    mosaic::Hex(signature_words[0], 1).c_str(),
+                    mosaic::Hex(signature_words[1], 1).c_str(),
+                    mosaic::Hex(signature_words[2], 1).c_str(),
+                    mosaic::Hex(signature_words[3], 1).c_str());
+      }
     }
 
     detail = "corpus " + std::to_string(programs) + " programs, " +

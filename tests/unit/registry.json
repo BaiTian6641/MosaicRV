@@ -148,7 +148,10 @@
         "sim/tb/mosaic_bringup_tb.sv"
       ],
       "cpp": [
-        "sim/unit/tb_bringup.cpp"
+        "sim/unit/tb_bringup.cpp",
+        "sim/common/elf_loader.cpp",
+        "sim/common/event_tap.cpp",
+        "sim/common/memory_model.cpp"
       ],
       "max_cycles": 200000,
       "seed": 1

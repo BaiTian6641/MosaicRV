@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "case": "core.bringup_vs_reference",
+  "verdict": "FAIL",
+  "detail": "check failed: p01_addsub.i0: the DUT and the independent reference disagree -- event count differs: run has 133333, reference has 71068",
+  "seed": 1,
+  "max_cycles": 400000,
+  "checks": 12,
+  "failures": 1,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-01T01:03:11Z",
+  "first_mismatch": "p01_addsub.i0 retire stream: expected results/unit/core.bringup_vs_reference/p01_addsub.i0.reference.events.txt, got ",
+  "failed_checks": ["no check failed"]
+}

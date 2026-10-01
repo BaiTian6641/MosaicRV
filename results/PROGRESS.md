@@ -79,3 +79,40 @@ prevent.
 Closing both would need a reference that implements the frozen misalignment
 policy *and* models a non-writable region. Neither is configurable in this
 Spike build.
+
+---
+
+## 2026-09-30 — I-004 regression, caught and fixed at the root
+
+Moving the test protocol into RAM to make Spike able to poll TOHOST broke my own
+harness, which is exactly what a shared constant invites. Four separate defects,
+each found by running rather than reading:
+
+1. **The micro-program hardcoded `0x00102000`.** It is now *derived* from the
+   generated platform header: the address is split into a `lui` and, where the
+   low bits need it, an `addi`, all encoded in C++ from `MOSAIC_SIGNATURE_ADDR`
+   and `MOSAIC_TOHOST`. A constant that was correct once cannot go stale again.
+2. **`EncSd` put `rs2` in the `rd` field.** The result was `sd x0, 0(t1)` — a
+   valid-looking encoding that stores zero. Checked against
+   `riscv64-elf-objdump -d -M no-aliases`, which reports `00533023` for
+   `sd t0, 0(t1)` and the corrected encoder produces the same.
+3. **A sampling race in the testbench.** `rd_value_out` is combinational from the
+   register file, so reading it after the clock edge samples the register the
+   write *just produced* — one instruction ahead. The wrong value still looked
+   like plausible register content, which is what made it hard to see. It is now
+   sampled in the pre-edge phase, where the source operands still hold their
+   original values.
+4. **The memory model only recognised TOHOST inside the device region.** Now that
+   the protocol is an ordinary memory word, it is handled before the region-kind
+   switch. Reads and writes to the now-undefined `test_harness` device region
+   raise an access fault rather than returning zero, so firmware written against
+   the old placement fails loudly instead of appearing to work.
+
+All four harness cases pass again, and `make lint-cpp` is clean across ten C++
+files.
+
+**The lesson worth keeping**: three of these four are the same mistake wearing
+different clothes — a value that was correct when written and had no mechanism to
+notice when the thing it depended on changed. The fix was never "fix the
+constant"; it was to derive the value, assert the encoding against the
+assembler, and sample at the point where the signal means what the comment says.

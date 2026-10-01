@@ -37,23 +37,64 @@ constexpr int kResetCycles = 8;
 // A micro-program in the p0 ISA subset the probe implements. It writes the pass
 // code into the signature area and then into TOHOST, which is the smallest thing
 // that exercises load, execute, store, signature and exit end to end.
+//
+// The addresses are **derived from the generated platform header**, not typed in.
+// An earlier version hardcoded 0x00102000 for TOHOST and silently stopped
+// terminating when the protocol moved into RAM -- a constant that was correct
+// once and wrong the moment the configuration changed. Encoding the immediates
+// from MOSAIC_SIGNATURE_ADDR and MOSAIC_TOHOST means that cannot happen again.
 struct MicroInstruction {
   uint32_t encoding;
   const char* mnemonic;
 };
 
-// Encodings verified against riscv64-elf-as/objdump; see the note below. A
-// store's funct3 is 011 for sd (010 is sw), and its source register is rs2, not
-// the rd field -- both of which this table previously got wrong.
-const MicroInstruction kMicroProgram[] = {
-    {0x00100293u, "addi t0, x0, 1"},    // t0 = 1 (the pass code)
-    {0x80000337u, "lui  t1, 0x80000"},  // t1 = 0x80000000
-    {0x40030313u, "addi t1, t1, 1024"}, // t1 = 0x80000400 (signature)
-    {0x00533023u, "sd   t0, 0(t1)"},   // signature[0] = 1
-    {0x001023b7u, "lui  t2, 0x102"},     // t2 = 0x00102000 (TOHOST)
-    {0x0053b023u, "sd   t0, 0(t2)"},   // TOHOST = 1 -> the program exits
-    {0x0000006fu, "jal  x0, 0"},        // park
-};
+// RISC-V encodings, assembled and checked against riscv64-elf-objdump.
+uint32_t EncAddi(uint32_t rs1, uint32_t rd, int32_t imm) {
+  return (((uint32_t)imm & 0xfff) << 20) | (rs1 << 15) | (0u << 12) | (rd << 7) | 0x13u;
+}
+uint32_t EncLui(uint32_t rd, uint32_t imm20) {
+  return ((imm20 & 0xfffffu) << 12) | (rd << 7) | 0x37u;
+}
+// S-type: rs2 is in [24:20], rs1 in [19:15], funct3 011 in [14:12], and the
+// immediate is split as [11:5] and [4:0]. Putting rs2 in the rd position at
+// [11:7] encodes a store of x0, which is valid-looking and silently wrong.
+uint32_t EncSd(uint32_t rs1, uint32_t rs2, int32_t imm = 0) {
+  const uint32_t imm_lo = static_cast<uint32_t>(imm) & 0x1f;
+  const uint32_t imm_hi = (static_cast<uint32_t>(imm) >> 5) & 0x7f;
+  return (imm_hi << 25) | (rs2 << 20) | (rs1 << 15) | (3u << 12) | (imm_lo << 7) | 0x23u;
+}
+uint32_t EncJalSelf() { return 0x6fu; }
+
+std::vector<MicroInstruction> BuildMicroProgram() {
+  // LUI takes bits [31:12]; a 64-bit constant that does not fit needs an addi.
+  auto lui_then_addi = [](uint32_t rd, uint64_t value, int32_t addend) {
+    std::vector<MicroInstruction> out;
+    const uint32_t high = static_cast<uint32_t>((value + 0x800) >> 12);
+    const int32_t low = static_cast<int32_t>(value & 0xfff);
+    if (low & 0x800) {
+      out.push_back({EncLui(rd, high), "lui (biased)"});
+      out.push_back({EncAddi(rd, rd, low), "addi (low half)"});
+    } else {
+      out.push_back({EncLui(rd, high), "lui"});
+      if (low != 0) out.push_back({EncAddi(rd, rd, low), "addi"});
+    }
+    (void)addend;
+    return out;
+  };
+
+  std::vector<MicroInstruction> program;
+  program.push_back({EncAddi(0, 5, 1), "addi t0, x0, 1"});  // rs1 = x0          // t0 = pass code
+  for (const MicroInstruction& i : lui_then_addi(6, MOSAIC_SIGNATURE_ADDR, 0)) {
+    program.push_back(i);
+  }
+  program.push_back({EncSd(6, 5), "sd t0, 0(t1)"});                  // signature[0] = 1
+  for (const MicroInstruction& i : lui_then_addi(7, MOSAIC_TOHOST, 0)) {
+    program.push_back(i);
+  }
+  program.push_back({EncSd(7, 5), "sd t0, 0(t2)"});                  // TOHOST = 1
+  program.push_back({EncJalSelf(), "jal x0, 0"});                    // park
+  return program;
+}
 
 void WriteInstruction(mosaic::MemoryModel* memory, uint64_t pc, uint32_t insn) {
   memory->Write(pc, 4, insn);
@@ -105,6 +146,17 @@ RunResult Run(Vharness_tb* dut, mosaic::MemoryModel* memory, mosaic::ClockDriver
     dut->step_valid = 1;
     dut->clk = 0;
     dut->eval();
+
+    // Sample the architectural write BEFORE the clock edge. rd_value_out is
+    // combinational from the register file, so it must be captured while the
+    // source operands still hold their pre-edge values: reading it after the edge
+    // samples the register the write just produced, one instruction ahead. That
+    // is exactly the kind of off-by-one a testbench hides from itself, because
+    // the wrong value still looks like a plausible register content.
+    const bool reg_write = dut->rd_we != 0;
+    const uint8_t reg_index = static_cast<uint8_t>(dut->rd_index);
+    const uint64_t reg_value = dut->rd_value_out;
+
     dut->clk = 1;
     dut->eval();
 
@@ -113,7 +165,7 @@ RunResult Run(Vharness_tb* dut, mosaic::MemoryModel* memory, mosaic::ClockDriver
     if (has_store) {
       store_status = memory->Write(dut->mem_addr, 8, dut->mem_wdata);
     }
-      dut->eval();
+    dut->eval();
 
     if (dut->retire) {
       mosaic::RetireEvent event;
@@ -127,10 +179,10 @@ RunResult Run(Vharness_tb* dut, mosaic::MemoryModel* memory, mosaic::ClockDriver
         event.cause = 2;  // illegal instruction
         event.tval = insn;
         event.epc = event.pc;
-      } else if (dut->rd_we) {
+      } else if (reg_write) {
         event.has_rd = true;
-        event.rd = static_cast<uint8_t>(dut->rd_index);
-        event.rd_value = dut->rd_value_out;
+        event.rd = reg_index;
+        event.rd_value = reg_value;
       } else if (has_store) {
         event.is_store = true;
         event.store_address = dut->mem_addr;
@@ -256,10 +308,13 @@ int RunPositiveCase(const mosaic::Options& options, mosaic::Reporter* reporter) 
   } else {
     // No image supplied: build the in-memory micro-program. This is what keeps
     // the harness self-test independent of the firmware package.
-    for (size_t i = 0; i < sizeof(kMicroProgram) / sizeof(kMicroProgram[0]); ++i) {
-      WriteInstruction(&memory, MOSAIC_RESET_VECTOR + i * 4, kMicroProgram[i].encoding);
+    const std::vector<MicroInstruction> program = BuildMicroProgram();
+    for (size_t i = 0; i < program.size(); ++i) {
+      WriteInstruction(&memory, MOSAIC_RESET_VECTOR + i * 4, program[i].encoding);
     }
-    reporter->Check(true, "built the built-in micro-program at the reset vector");
+    reporter->Check(true, "built the built-in micro-program at the reset vector, "
+                          "with TOHOST and the signature address taken from the "
+                          "generated platform header");
   }
 
   Vharness_tb dut;
@@ -446,8 +501,9 @@ int RunTimeoutCase(const mosaic::Options& options, mosaic::Reporter* reporter) {
 
 int RunInjectedMismatchCase(const mosaic::Options& options, mosaic::Reporter* reporter) {
   mosaic::MemoryModel memory;
-  for (size_t i = 0; i < sizeof(kMicroProgram) / sizeof(kMicroProgram[0]); ++i) {
-    WriteInstruction(&memory, MOSAIC_RESET_VECTOR + i * 4, kMicroProgram[i].encoding);
+  const std::vector<MicroInstruction> program = BuildMicroProgram();
+  for (size_t i = 0; i < program.size(); ++i) {
+    WriteInstruction(&memory, MOSAIC_RESET_VECTOR + i * 4, program[i].encoding);
   }
 
   Vharness_tb dut;

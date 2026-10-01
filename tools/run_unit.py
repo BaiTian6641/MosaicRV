@@ -69,8 +69,15 @@ def build_case(profile: str, case_id: str, entry: dict) -> str:
     binary = os.path.join(build_dir, case_id)
     os.makedirs(build_dir, exist_ok=True)
 
+    # Packages are listed before the files that use them. Verilator reads sources
+    # in command-line order, so a package declared after the module that imports it
+    # makes every package type look undeclared -- the same failure the linter had,
+    # and for the same reason.
+    rtl = entry.get("rtl", [])
+    packages = [p for p in rtl if os.path.basename(p) == "mosaic_pkg.sv"]
+    rest = [p for p in rtl if p not in packages]
     sources = [os.path.join(REPO_ROOT, p)
-               for p in (entry.get("sv", []) + entry.get("rtl", [])
+               for p in (packages + rest + entry.get("sv", [])
                          + entry.get("cpp", []) + SHARED_CPP)]
     missing = [p for p in sources if not os.path.exists(p)]
     if missing:

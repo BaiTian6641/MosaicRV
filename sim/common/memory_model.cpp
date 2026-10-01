@@ -98,15 +98,18 @@ AccessStatus MemoryModel::Read(uint64_t address, unsigned size, uint64_t* value)
     return AccessStatus::kAccessFault;
   }
 
+  if (address == MOSAIC_TOHOST) {
+    *value = 0;  // reads as "still running"
+    return AccessStatus::kOk;
+  }
+  if (address == MOSAIC_FROMHOST) {
+    *value = input_word_;
+    return AccessStatus::kOk;
+  }
   if (region->kind == RegionKind::kTestHarness) {
-    if (address == MOSAIC_TOHOST) {
-      *value = 0;  // reads as "still running"
-      return AccessStatus::kOk;
-    }
-    if (address == MOSAIC_FROMHOST) {
-      *value = input_word_;
-      return AccessStatus::kOk;
-    }
+    // The device region is mapped but this build defines no registers in it: the
+    // protocol moved into RAM. An access here faults rather than silently
+    // returning zero, so firmware written against the old placement fails loudly.
     ++access_faults_;
     return AccessStatus::kAccessFault;
   }
@@ -140,6 +143,24 @@ AccessStatus MemoryModel::Write(uint64_t address, unsigned size, uint64_t value)
   if (address + size > region->base + region->size) {
     ++access_faults_;
     return AccessStatus::kAccessFault;
+  }
+
+  // The test protocol lives in ordinary RAM, because an external reference model
+  // (HTIF, and therefore Spike) can only poll a tohost that is real memory. It is
+  // therefore handled before the region-kind switch, not inside the device branch.
+  if (address == MOSAIC_TOHOST) {
+    device_events_.push_back({address, value, true});
+    if (value != 0) {
+      finished_ = true;
+      passed_ = (value & 1u) != 0;
+      exit_code_ = value;
+    }
+    return AccessStatus::kOk;
+  }
+  if (address == MOSAIC_FROMHOST) {
+    device_events_.push_back({address, value, true});
+    input_word_ = value;  // lets a program hand data back to the harness
+    return AccessStatus::kOk;
   }
 
   device_events_.push_back({address, value, true});
