@@ -18,10 +18,14 @@ struct Segment {
   uint64_t vaddr;
   uint64_t filesz;
   uint64_t memsz;
+  uint32_t flags = 0;         // p_flags (PF_R=4, PF_W=2, PF_X=1)
   std::vector<uint8_t> data;  // filesz bytes; the memsz-filesz tail must be zero
 
+  // Written so it cannot overflow: `vaddr + memsz` wraps for a segment that
+  // claims to run off the top of the address space, and a wrapped bound would
+  // make a wild address look mapped.
   bool Contains(uint64_t address) const {
-    return address >= vaddr && address < vaddr + memsz;
+    return address >= vaddr && (address - vaddr) < memsz;
   }
 };
 
@@ -49,6 +53,11 @@ enum class LoadStatus {
   kSegmentOverlap,
   kSegmentAlignment,
   kBadProgramHeader,
+  // Appended after the original set so a stored status number, if any exists in
+  // an older result file, still names the same reason.
+  kSegmentOverflow,     // vaddr+memsz or offset+filesz wraps uint64
+  kNotExecutable,       // e_type is not ET_EXEC (a dynamic/PIE image has no fixed load address)
+  kEntryNotExecutable,  // the segment holding the entry declares flags and omits PF_X
 };
 
 const char* LoadStatusName(LoadStatus status);

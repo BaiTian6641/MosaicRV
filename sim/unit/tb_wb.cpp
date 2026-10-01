@@ -45,13 +45,41 @@
 //      second time raises `o_dup_ctr`, does not write, and the register file
 //      still holds the *first* value.
 //
+//   5. sustained contention           48 completions through all three producer
+//      ports, offered on every port the arbiter will take, over a tag order that
+//      makes same-bank pairs constant. Every one is taken and published, every
+//      register-writing one is durable at its own generation, the collision
+//      counter advances, and two no-destination completions are published inside
+//      the traffic.
+//
+//   6. generation wrap                a full sweep of the 7-bit generation space
+//      (0..127) on one tag, then 127 -> 0, writing and reading back at every
+//      generation; the ready table is asked for the current and the previous
+//      generation after every write. An 8-bit wire generation is offered too, to
+//      prove the 8th bit is counted rather than dropped.
+//
+//   7. every bank busy                three completions in one cycle, one per
+//      producer, twice, with home banks covering all four; the write is durable
+//      in each bank and the per-cycle comparison proves exactly one bank -- the
+//      selected destination's home bank -- is written per cycle.
+//
+//   8. the consumer reads it back     the cycle *after* the wakeup, the woken
+//      (tag, generation) is read back out of the elaborated register file and
+//      must hold the woken value with no generation mismatch. This is the
+//      "value is visible when ready" claim observed in time rather than argued
+//      from the write port.
+//
 // plus the ready-table query: `q_written` is 1 for the written (tag, generation)
 // and 0 for the same tag at another generation and for an unwritten tag.
 //
 // Standing invariants, checked on every cycle rather than in one phase: the
 // arbiter's counters against an independent tally; the conservation identity
 // offered == published at the end of every phase; and "the thing the arbiter
-// says it is publishing is a completion a producer actually offered".
+// says it is publishing is a completion a producer actually offered". Over the
+// whole run: offered == published, wakeups == durable writes, and every
+// publication is exactly one durable write, one stale refusal, one duplicate
+// refusal, one refusal for an unwritable destination, or one no-destination
+// completion.
 // ============================================================================
 
 #include <verilated.h>
@@ -139,9 +167,13 @@ class RenameModel {
   };
 
   // Declare `tag`'s current assigned generation. A tag that has not been
-  // declared owns nothing, and any offer naming it is stale.
+  // declared owns nothing, and any offer naming it is stale. A tag owns exactly
+  // one generation at a time, so allocating a *different* generation to the tag
+  // starts the "already written" state clean -- which is what lets the numeric
+  // generation value be reused after the allocation counter wraps.
   void Assign(uint32_t tag, uint32_t gen) {
     State& s = state_[tag];
+    if (!s.assigned || s.gen != gen) s.written.clear();
     s.assigned = true;
     s.gen = gen;
   }
@@ -250,6 +282,11 @@ struct Tally {
   uint64_t stores = 0;
   uint64_t loads = 0;
   uint64_t collisions = 0;  // observed from the DUT, monotone
+  // For the end-of-run conservation identity: a publication either carries no
+  // destination at all, or it carries one and is written, stale, duplicate, or
+  // refused for some other reason (a dead identity).
+  uint64_t nodst = 0;
+  uint64_t refused_dst = 0;
 };
 
 class Harness {
@@ -276,6 +313,8 @@ class Harness {
     rename_ = RenameModel();
     rob_ = RobModel();
     for (Held& h : held_) h = Held{};
+    for (bool& seen : banks_seen_) seen = false;
+    last_wu_ = Wakeup{};
     inflight_.clear();
     exp_ = Tally();
     prev_collision_ = 0;
@@ -302,14 +341,16 @@ class Harness {
   }
 
   // Run until the arbiter has consumed every offered completion *and* one more
-  // quiet cycle proves nothing is left to publish.
+  // quiet cycle proves nothing is left to publish. The guard is the conservation
+  // identity stated as a bound: a completion the arbiter took (`wb_ready` was
+  // high) must be published within a few cycles, never dropped.
   void Drain(uint64_t limit = 64) {
     uint64_t guard = 0;
     while (AnyHeld() || !inflight_.empty()) {
       Cycle(/*rst=*/false);
       Require(++guard <= limit, At(phase_, cycles_),
-              "the arbiter did not publish the pending completions within " +
-                  std::to_string(limit) + " cycles");
+              "a completion was taken but never published within " +
+                  std::to_string(limit) + " cycles: offered != published");
     }
     Cycle(/*rst=*/false);  // quiet: must publish nothing
   }
@@ -317,6 +358,23 @@ class Harness {
   bool AnyHeld() const {
     return held_[0].valid || held_[1].valid || held_[2].valid;
   }
+
+  bool Holding(int port) const { return held_[port].valid; }
+
+  // The wakeup the arbiter presented during the most recent Cycle(), sampled
+  // *before* the edge, so it is exactly the value a consumer would have latched
+  // in that cycle rather than the state the edge left behind.
+  struct Wakeup {
+    bool valid = false;
+    uint32_t tag = 0;
+    uint32_t gen = 0;
+    uint64_t value = 0;
+  };
+  const Wakeup& LastWakeup() const { return last_wu_; }
+
+  // Which of the register file's banks have taken a write this phase. Reset by
+  // Fresh(); the all-banks phase asserts every bank is covered.
+  bool BankSeen(uint32_t bank) const { return bank < 4 && banks_seen_[bank]; }
 
   // --- one cycle: drive, settle the combinational answers, compare, edge -----
   void Cycle(bool rst) {
@@ -336,6 +394,13 @@ class Harness {
     const Answers ans = ComputeAnswers();
     DriveAnswers(ans);
     dut_->eval();
+
+    // The wakeup is combinational in the cycle it is published, so it must be
+    // sampled here, before the edge, to be the value a consumer latches.
+    last_wu_.valid = dut_->wu_valid_o != 0;
+    last_wu_.tag = dut_->wu_tag_o;
+    last_wu_.gen = dut_->wu_gen_o;
+    last_wu_.value = dut_->wu_val_o;
 
     if (!rst) {
       Check(ans);
@@ -599,6 +664,8 @@ class Harness {
                   mosaic::Hex(ev->value) + ", got " + mosaic::Hex(data_b) + " " +
                   Describe(*ev));
     }
+    // Remember which bank took this write, for the all-banks phase.
+    if (write_ok && bank < 4) banks_seen_[bank] = true;
 
     Require(dut_->wu_valid_o == (write_ok ? 1 : 0), where,
             "wu_valid: expected " + Bool(write_ok) + ", got " +
@@ -699,6 +766,10 @@ class Harness {
         if (ev->is_store) { exp_.stores++; totals_.stores++; }
         if (ev->is_load) { exp_.loads++; totals_.loads++; }
         if (dst_ok) {
+          if (!write_ok && !ans.ren.stale && !ans.ren.duplicate) {
+            exp_.refused_dst++;
+            totals_.refused_dst++;
+          }
           if (ans.ren.stale) { exp_.stale++; totals_.stale++; }
           if (ans.ren.duplicate) { exp_.duplicate++; totals_.duplicate++; }
           if (Mask(ev->gen, pgen_w_) >= (1u << igen_w_)) {
@@ -715,6 +786,9 @@ class Harness {
             exp_.drops++;
             totals_.drops++;
           }
+        } else {
+          exp_.nodst++;
+          totals_.nodst++;
         }
         // Remove the published completion from the in-flight set.
         for (auto it = inflight_.begin(); it != inflight_.end(); ++it) {
@@ -786,6 +860,8 @@ class Harness {
   Tally exp_;      // expected DUT counter values at the start of this cycle
   Tally totals_;   // accumulated over the whole run
   uint64_t prev_collision_ = 0;
+  bool banks_seen_[4] = {false, false, false, false};
+  Wakeup last_wu_;
 };
 
 // ============================================================================
@@ -1100,6 +1176,344 @@ void PhaseReadyTable(Harness* h) {
               written_a & 1, (written_b >> 1) & 1, written_b & 1);
 }
 
+// ------------------------------------------------ 5. sustained contention
+//
+// The single same-bank pair above is the smallest instance of the rule. This
+// phase runs 48 completions through all three producer ports, offering on every
+// port the arbiter will take, so the pending set is full for dozens of cycles
+// and same-bank pairs are constant rather than arranged once. Two of the 48
+// carry no destination, so "done without a value" is exercised inside traffic
+// rather than in isolation. Nothing may be lost: every completion taken is
+// published, every register-writing completion is durable at its own
+// generation, and the collision counter must show that the delay really
+// happened.
+void PhaseSustained(Harness* h) {
+  h->Phase("sustained-contention");
+  h->Fresh();
+
+  const Tally before = h->Totals();
+  const uint64_t coll_before = h->Totals().collisions;
+
+  const uint32_t kCount = 48;
+  const uint32_t kStore0 = 10, kStore1 = 25;
+
+  // The tag order matters: the arbiter holds at most three completions, so two
+  // completions are pending together only if they are close in this order. Each
+  // group of eight interleaves two members of each bank ((j, j+4) have the same
+  // bank), which makes same-bank contention the common case rather than a
+  // rarity.
+  std::vector<uint32_t> order;
+  for (uint32_t base = 0; base + 7 < kCount; base += 8) {
+    for (uint32_t j = 0; j < 4; j++) {
+      order.push_back(base + j);
+      order.push_back(base + j + 4);
+    }
+  }
+  Require(order.size() == kCount, "sustained-contention",
+          "the tag order does not span the phase");
+
+  std::deque<Event> work;
+  uint64_t expect_writes = 0;
+  for (uint32_t i = 0; i < kCount; i++) {
+    const uint32_t tag = order[i];
+    Event e;
+    if (i == kStore0 || i == kStore1) {
+      // A completion with no destination: it still owes the ROB an answer.
+      e.rob_index = i;
+      e.rob_gen = 0;
+      e.uop_index = 1;
+      e.is_store = true;
+    } else {
+      const uint32_t gen = 1 + (i % 3);
+      h->Rename().Assign(tag, gen);
+      e = ValueEvent(/*index=*/i, /*rob_gen=*/0, /*uop=*/0, tag, gen,
+                     /*value=*/0x5a5a000000000000ull + i, /*is_load=*/true);
+      expect_writes++;
+    }
+    work.push_back(e);
+  }
+
+  uint64_t max_held = 0;
+  while (!work.empty()) {
+    for (int port = 0; port < 3 && !work.empty(); port++) {
+      if (!h->Holding(port)) {
+        h->Offer(port, work.front());
+        work.pop_front();
+      }
+    }
+    uint64_t held_now = 0;
+    for (int port = 0; port < 3; port++) {
+      if (h->Holding(port)) held_now++;
+    }
+    if (held_now > max_held) max_held = held_now;
+    h->Cycle(/*rst=*/false);
+  }
+  h->Drain();
+
+  const Tally after = h->Totals();
+  Require(after.offered - before.offered == kCount, "sustained-contention",
+          "not every offered completion was taken: " +
+              std::to_string(after.offered - before.offered) + " of " +
+              std::to_string(kCount));
+  Require(after.published - before.published == kCount, "sustained-contention",
+          "offered != published under sustained contention: " +
+              std::to_string(after.published - before.published) + " of " +
+              std::to_string(kCount));
+  Require(after.written - before.written == expect_writes, "sustained-contention",
+          "writes " + std::to_string(after.written - before.written) +
+              ", expected " + std::to_string(expect_writes));
+  Require(after.wakeups - before.wakeups == expect_writes, "sustained-contention",
+          "wakeups " + std::to_string(after.wakeups - before.wakeups) +
+              ", expected " + std::to_string(expect_writes));
+  Require(after.stale == before.stale && after.duplicate == before.duplicate &&
+              after.refused_dst == before.refused_dst,
+          "sustained-contention",
+          "a live distinct producer was refused: stale=" +
+              std::to_string(after.stale - before.stale) + " duplicate=" +
+              std::to_string(after.duplicate - before.duplicate) + " refused=" +
+              std::to_string(after.refused_dst - before.refused_dst));
+  Require(after.stores - before.stores == 2, "sustained-contention",
+          "the two no-destination completions were not both published");
+  Require(max_held == 3, "sustained-contention",
+          "the phase never held all three producers in one cycle: max " +
+              std::to_string(max_held));
+  Require(after.collisions - coll_before > 0, "sustained-contention",
+          "the interleaved same-bank tags produced no collision");
+
+  for (uint32_t i = 0; i < kCount; i++) {
+    if (i == kStore0 || i == kStore1) continue;
+    const uint32_t tag = order[i];
+    const uint32_t gen = 1 + (i % 3);
+    const uint64_t value = 0x5a5a000000000000ull + i;
+    const Harness::PrfRead r = h->PrfProbe(tag, gen);
+    Require(r.valid && !r.never_written && !r.mismatch && r.data == value,
+            "sustained-contention",
+            "tag " + std::to_string(tag) + " gen " + std::to_string(gen) +
+                " is not durable: holds " + mosaic::Hex(r.data));
+  }
+
+  std::printf("  [sustained] offered=%llu published=%llu writes=%llu "
+              "wakeups=%llu collisions=%llu max-held=%llu\n",
+              static_cast<unsigned long long>(after.offered - before.offered),
+              static_cast<unsigned long long>(after.published - before.published),
+              static_cast<unsigned long long>(after.written - before.written),
+              static_cast<unsigned long long>(after.wakeups - before.wakeups),
+              static_cast<unsigned long long>(after.collisions - coll_before),
+              static_cast<unsigned long long>(max_held));
+}
+
+// ---------------------------------------------------- 6. generation wrap
+//
+// The generation the arbiter hands rename and the wakeup is 7 bits, so the
+// allocation counter wraps. This phase sweeps the whole space 0..127 on one tag,
+// writing and reading back at each generation, then wraps 127 -> 0 and writes
+// again. The ready table, which keeps one (written, generation) pair per tag,
+// must name the generation just written and no earlier one -- so it is asked
+// after every write, once for the current generation and once for the previous
+// one.
+//
+// The wire generation is 8 bits, so a completion whose destination generation
+// has bit 7 set is also offered: the low 7 bits go to rename and the wakeup and
+// the 8th bit is counted (`o_wide_gen_ctr`) rather than silently dropped.
+void PhaseGenerationWrap(Harness* h) {
+  h->Phase("generation-wrap");
+  h->Fresh();
+
+  const Tally before = h->Totals();
+  const uint32_t tag = 33;  // bank 1
+  const uint32_t kSteps = 128;
+
+  for (uint32_t gen = 0; gen < kSteps; gen++) {
+    h->Rename().Assign(tag, gen);
+    const uint64_t value = 0x7700000000000000ull + gen;
+    const Event e = ValueEvent(/*index=*/gen % 64, /*rob_gen=*/gen / 64,
+                               /*uop=*/0, tag, gen, value, /*is_load=*/true);
+    h->Offer(0, e);
+    h->Drain();
+
+    Require(h->Totals().written - before.written == gen + 1, "generation-wrap",
+            "generation " + std::to_string(gen) + " did not write");
+    const Harness::PrfRead r = h->PrfProbe(tag, gen);
+    Require(r.valid && !r.never_written && !r.mismatch && r.data == value,
+            "generation-wrap",
+            "generation " + std::to_string(gen) + " is not durable: holds " +
+                mosaic::Hex(r.data));
+    Require((h->QProbe(tag, gen, true, 0, 0, false) & 1u) != 0, "generation-wrap",
+            "the ready table does not name the written generation " +
+                std::to_string(gen));
+    const uint32_t prev = (gen + kSteps - 1) % kSteps;
+    Require((h->QProbe(tag, prev, true, 0, 0, false) & 1u) == 0, "generation-wrap",
+            "the ready table still names the previous generation " +
+                std::to_string(prev));
+  }
+
+  // 127 -> 0: the numeric generation is recycled. The write must land and the
+  // ready table must follow the write that just happened.
+  h->Rename().Assign(tag, 0);
+  const uint64_t wrap_value = 0x9900000000000000ull;
+  const Event w = ValueEvent(/*index=*/0, /*rob_gen=*/2, /*uop=*/0, tag, 0,
+                             wrap_value, /*is_load=*/true);
+  h->Offer(0, w);
+  h->Drain();
+  Require(h->Totals().written - before.written == kSteps + 1, "generation-wrap",
+          "the wrap-around write did not land");
+  const Harness::PrfRead wr = h->PrfProbe(tag, 0);
+  Require(wr.valid && !wr.mismatch && wr.data == wrap_value, "generation-wrap",
+          "the wrapped generation is not durable: holds " + mosaic::Hex(wr.data));
+  Require((h->QProbe(tag, 0, true, 0, 0, false) & 1u) != 0, "generation-wrap",
+          "the ready table does not name the wrapped generation");
+  Require((h->QProbe(tag, 127, true, 0, 0, false) & 1u) == 0, "generation-wrap",
+          "the ready table still names the pre-wrap generation 127");
+
+  // The 8-bit wire generation: bit 7 set, low 7 bits 8.
+  const uint32_t wide = 0x88u;
+  h->Rename().Assign(tag, wide & 0x7fu);
+  const uint64_t wide_value = 0xabc0000000000000ull;
+  const Event we = ValueEvent(/*index=*/1, /*rob_gen=*/2, /*uop=*/0, tag, wide,
+                              wide_value, /*is_load=*/true);
+  h->Offer(0, we);
+  h->Drain();
+  Require(h->Totals().wide_gen - before.wide_gen == 1, "generation-wrap",
+          "o_wide_gen_ctr did not count the 8-bit generation");
+  Require(h->Totals().written - before.written == kSteps + 2, "generation-wrap",
+          "the 8-bit-generation write did not land");
+  const Harness::PrfRead we_r = h->PrfProbe(tag, wide);
+  Require(we_r.valid && !we_r.mismatch && we_r.data == wide_value,
+          "generation-wrap",
+          "the 8-bit generation is not durable: holds " + mosaic::Hex(we_r.data));
+  Require((h->QProbe(tag, wide & 0x7fu, true, 0, 0, false) & 1u) != 0,
+          "generation-wrap",
+          "the ready table does not name the low 7 bits of the 8-bit generation");
+
+  std::printf("  [generation-wrap] swept=%u writes=%llu wide=%llu\n", kSteps,
+              static_cast<unsigned long long>(h->Totals().written - before.written),
+              static_cast<unsigned long long>(h->Totals().wide_gen - before.wide_gen));
+}
+
+// ------------------------------------------------------ 7. every bank busy
+//
+// The register file has one write port per bank but the arbitration above is
+// single-writer: exactly one bank takes a write per cycle, and it is the home
+// bank of the selected destination. This phase offers three completions in one
+// cycle, one per producer, whose home banks are distinct, twice, so that all
+// four banks are covered and the per-cycle comparison sees the bank decode for
+// each of them. A phase that covered only one bank would not notice a
+// destination routed to the wrong bank.
+void PhaseAllBanks(Harness* h) {
+  h->Phase("all-banks-busy");
+  h->Fresh();
+
+  const Tally before = h->Totals();
+
+  // tag % 4 is the home bank: {7,4,5} -> banks {3,0,1}; {6,3,8} -> {2,3,0}.
+  const uint32_t bursts[2][3] = {{7, 4, 5}, {6, 3, 8}};
+  const uint64_t values[2][3] = {
+      {0x1111000000000001ull, 0x1111000000000002ull, 0x1111000000000003ull},
+      {0x1111000000000004ull, 0x1111000000000005ull, 0x1111000000000006ull}};
+
+  uint32_t idx = 0;
+  for (int b = 0; b < 2; b++) {
+    for (int p = 0; p < 3; p++) {
+      const uint32_t tag = bursts[b][p];
+      const uint32_t gen = 1 + idx;
+      h->Rename().Assign(tag, gen);
+      const Event e = ValueEvent(idx, 0, 0, tag, gen, values[b][p], /*is_load=*/true);
+      h->Offer(p, e);
+      idx++;
+    }
+    h->Cycle(/*rst=*/false);
+    Require(h->Totals().offered - before.offered == 3u * static_cast<uint64_t>(b + 1),
+            "all-banks-busy",
+            "a burst of three, one per producer, was not taken into all three "
+            "holding slots");
+    h->Drain();
+  }
+
+  Require(h->Totals().written - before.written == 6, "all-banks-busy",
+          "not all six writes landed: " +
+              std::to_string(h->Totals().written - before.written));
+  for (uint32_t bank = 0; bank < 4; bank++) {
+    Require(h->BankSeen(bank), "all-banks-busy",
+            "bank " + std::to_string(bank) + " never took a write");
+  }
+  idx = 0;
+  for (int b = 0; b < 2; b++) {
+    for (int p = 0; p < 3; p++) {
+      const uint32_t tag = bursts[b][p];
+      const uint32_t gen = 1 + idx;
+      const Harness::PrfRead r = h->PrfProbe(tag, gen);
+      Require(r.valid && !r.mismatch && r.data == values[b][p], "all-banks-busy",
+              "tag " + std::to_string(tag) + " (bank " + std::to_string(tag % 4) +
+                  ") is not durable: holds " + mosaic::Hex(r.data));
+      idx++;
+    }
+  }
+
+  std::printf("  [all-banks] writes=%llu banks=0,1,2,3\n",
+              static_cast<unsigned long long>(h->Totals().written - before.written));
+}
+
+// ------------------------------------------- 8. the consumer reads it back
+//
+// The claim "the value is visible when the wakeup says it is ready" has been
+// argued combinationally until now: the per-cycle check proves the write port
+// presents the value in the same cycle as the wakeup, but nothing *observed* a
+// consumer use it afterwards. This phase steps to the cycle the wakeup is
+// presented on, and on the very next cycle -- the earliest a consumer could
+// latch the value -- reads the (tag, generation) back out of the elaborated
+// register file and requires the woken value, with no generation mismatch. The
+// retire stash is read in the same breath.
+void PhasePostWakeupRead(Harness* h) {
+  h->Phase("post-wakeup-read");
+  h->Fresh();
+
+  const Tally before = h->Totals();
+  const uint32_t tag = 50;  // bank 2
+  const uint32_t gen = 2;
+  h->Rename().Assign(tag, gen);
+  const uint64_t value = 0xfeedfacecafebeefull;
+  const Event e = ValueEvent(/*index=*/0, /*rob_gen=*/0, /*uop=*/0, tag, gen,
+                             value, /*is_load=*/true);
+  h->Offer(0, e);
+
+  bool seen = false;
+  for (int i = 0; i < 8 && !seen; i++) {
+    h->Cycle(/*rst=*/false);
+    if (h->LastWakeup().valid) seen = true;
+  }
+  Require(seen, "post-wakeup-read", "no value-visible wakeup was published");
+  Require(h->LastWakeup().tag == tag && h->LastWakeup().gen == gen &&
+              h->LastWakeup().value == value,
+          "post-wakeup-read",
+          "the wakeup does not name the value that was written: tag=" +
+              std::to_string(h->LastWakeup().tag) + " gen=" +
+              std::to_string(h->LastWakeup().gen) + " val=" +
+              mosaic::Hex(h->LastWakeup().value));
+
+  // The edge of the wakeup cycle has been applied: this read is the cycle after
+  // the wakeup, through real storage, with the matching generation.
+  const Harness::PrfRead r = h->PrfProbe(tag, gen);
+  Require(r.valid && !r.never_written, "post-wakeup-read",
+          "the register file has no value on the cycle after the wakeup");
+  Require(!r.mismatch, "post-wakeup-read",
+          "the register file reports a generation mismatch on the cycle after "
+          "the wakeup");
+  Require(r.data == value, "post-wakeup-read",
+          "the register file holds " + mosaic::Hex(r.data) +
+              " on the cycle after the wakeup, expected " + mosaic::Hex(value));
+
+  const Harness::StashRead s = h->StashProbe(0);
+  Require(s.valid && s.value == value, "post-wakeup-read",
+          "the retire stash does not hold the value after the wakeup: holds " +
+              mosaic::Hex(s.value));
+
+  Require(h->Totals().wakeups - before.wakeups == 1, "post-wakeup-read",
+          "expected exactly one wakeup in this phase");
+
+  std::printf("  [post-wakeup-read] value=%s visible-on-next-cycle\n",
+              mosaic::Hex(value).c_str());
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -1186,7 +1600,41 @@ int main(int argc, char** argv) {
     harness.Phase("ready-table");
     PhaseReadyTable(&harness);
 
+    harness.Phase("sustained-contention");
+    PhaseSustained(&harness);
+
+    harness.Phase("generation-wrap");
+    PhaseGenerationWrap(&harness);
+
+    harness.Phase("all-banks-busy");
+    PhaseAllBanks(&harness);
+
+    harness.Phase("post-wakeup-read");
+    PhasePostWakeupRead(&harness);
+
+    // Conservation over the whole run. The arbiter holds a completion it has
+    // taken rather than dropping it, so the count of completions taken from the
+    // producers and the count of publications must agree. And every publication
+    // is exactly one of: a durable write, a stale refusal, a duplicate refusal,
+    // a refusal for a destination that could not be written, or a completion
+    // that carried no destination -- nothing else may consume a publication.
     const Tally& t = harness.Totals();
+    Require(t.published == t.offered, "conservation",
+            "offered " + std::to_string(t.offered) + " != published " +
+                std::to_string(t.published));
+    Require(t.wakeups == t.written, "conservation",
+            "every durable write must publish exactly one wakeup: writes " +
+                std::to_string(t.written) + ", wakeups " +
+                std::to_string(t.wakeups));
+    Require(t.published == t.written + t.stale + t.duplicate + t.refused_dst +
+                                 t.nodst,
+            "conservation",
+            "published " + std::to_string(t.published) + " != written " +
+                std::to_string(t.written) + " + stale " + std::to_string(t.stale) +
+                " + duplicate " + std::to_string(t.duplicate) + " + refused " +
+                std::to_string(t.refused_dst) + " + no-destination " +
+                std::to_string(t.nodst));
+
     detail = "completion path holds: " + std::to_string(harness.comparisons()) +
              " cycle comparisons over " + std::to_string(harness.cycles()) +
              " cycles; offered=" + std::to_string(t.offered) +
@@ -1196,6 +1644,8 @@ int main(int argc, char** argv) {
              " stale=" + std::to_string(t.stale) +
              " duplicate=" + std::to_string(t.duplicate) +
              " rob_stale=" + std::to_string(t.rob_stale) +
+             " no_dst=" + std::to_string(t.nodst) +
+             " wide_gen=" + std::to_string(t.wide_gen) +
              " collisions=" + std::to_string(t.collisions) + " seed " +
              std::to_string(options.seed);
   } catch (const Failure& f) {

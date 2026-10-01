@@ -15,6 +15,8 @@ const uint8_t kClass64 = 2;
 const uint8_t kDataLittle = 1;
 const uint16_t kMachineRiscv = 243;
 const uint32_t kPtLoad = 1;
+const uint16_t kEtExec = 2;   // e_type of a fixed-address executable
+const uint32_t kPfX = 1;      // p_flags execute bit
 
 uint16_t ReadU16(const std::vector<uint8_t>& data, size_t offset) {
   return static_cast<uint16_t>(data[offset]) |
@@ -65,6 +67,9 @@ const char* LoadStatusName(LoadStatus status) {
     case LoadStatus::kSegmentOverlap: return "segment-overlap";
     case LoadStatus::kSegmentAlignment: return "segment-alignment";
     case LoadStatus::kBadProgramHeader: return "bad-program-header";
+    case LoadStatus::kSegmentOverflow: return "segment-overflow";
+    case LoadStatus::kNotExecutable: return "not-executable";
+    case LoadStatus::kEntryNotExecutable: return "entry-not-executable";
   }
   return "unknown";
 }
@@ -138,6 +143,21 @@ LoadStatus LoadElf(const std::string& path, Image* out, std::string* detail) {
     return LoadStatus::kBadProgramHeader;
   }
 
+  // A dynamic object is position independent: its PT_LOAD p_vaddr is a link-time
+  // address and the real load address is chosen by the loader at run time. This
+  // harness has no relocation step, so accepting one would load the image at the
+  // wrong address and the failure would appear much later as a wild fetch.
+#ifndef MOSAIC_ELF_MUTANT_ACCEPT_DYNAMIC
+  const uint16_t type = ReadU16(raw, 16);
+  if (type != kEtExec) {
+    char text[96];
+    std::snprintf(text, sizeof(text), "e_type is %u, expected %u (ET_EXEC)",
+                  type, kEtExec);
+    *detail = text;
+    return LoadStatus::kNotExecutable;
+  }
+#endif
+
   const uint16_t machine = ReadU16(raw, 18);
   if (machine != kMachineRiscv) {
     char text[96];
@@ -170,19 +190,40 @@ LoadStatus LoadElf(const std::string& path, Image* out, std::string* detail) {
 
   for (uint16_t i = 0; i < phnum; ++i) {
     const size_t base = static_cast<size_t>(phoff) + static_cast<size_t>(i) * kPhdrSize;
-    const uint32_t type = ReadU32(raw, base + 0);
-    if (type != kPtLoad) continue;
+    const uint32_t segment_type = ReadU32(raw, base + 0);
+    if (segment_type != kPtLoad) continue;
 
     const uint64_t offset = ReadU64(raw, base + 8);
     const uint64_t vaddr = ReadU64(raw, base + 16);
     const uint64_t filesz = ReadU64(raw, base + 32);
     const uint64_t memsz = ReadU64(raw, base + 40);
+    const uint32_t flags = ReadU32(raw, base + 4);
 
     if (memsz == 0) continue;
     if (filesz > memsz) {
       *detail = "PT_LOAD has p_filesz larger than p_memsz";
       return LoadStatus::kBadProgramHeader;
     }
+    // Both bounds are sums of two attacker-controlled 64-bit fields. Checked
+    // before they are formed, because `offset + filesz` wrapping below
+    // `raw.size()` would make a segment that runs off the end of the file look
+    // like it fits, and `vaddr + memsz` wrapping would make a wild segment look
+    // like it maps the entry point.
+#ifndef MOSAIC_ELF_MUTANT_NO_SEGMENT_OVERFLOW_CHECK
+    if (UINT64_MAX - vaddr < memsz) {
+      char text[112];
+      std::snprintf(text, sizeof(text),
+                    "PT_LOAD vaddr 0x%llx + memsz %llu wraps the address space",
+                    static_cast<unsigned long long>(vaddr),
+                    static_cast<unsigned long long>(memsz));
+      *detail = text;
+      return LoadStatus::kSegmentOverflow;
+    }
+    if (UINT64_MAX - offset < filesz) {
+      *detail = "PT_LOAD p_offset + p_filesz wraps the file offset space";
+      return LoadStatus::kSegmentOverflow;
+    }
+#endif
     if (vaddr % 8 != 0) {
       char text[96];
       std::snprintf(text, sizeof(text), "PT_LOAD vaddr 0x%llx is not 8-byte aligned",
@@ -204,16 +245,24 @@ LoadStatus LoadElf(const std::string& path, Image* out, std::string* detail) {
     segment.vaddr = vaddr;
     segment.filesz = filesz;
     segment.memsz = memsz;
+    segment.flags = flags;
     segment.data.assign(raw.begin() + static_cast<long>(offset),
                         raw.begin() + static_cast<long>(offset + filesz));
     out->segments.push_back(std::move(segment));
   }
+
+#ifdef MOSAIC_ELF_MUTANT_LOAD_FIRST_SEGMENT_ONLY
+  // Negative control: a loader that silently drops every PT_LOAD after the
+  // first. The case must notice that the second segment never reached memory.
+  if (out->segments.size() > 1) out->segments.resize(1);
+#endif
 
   if (out->segments.empty()) {
     *detail = "image contains no PT_LOAD segment";
     return LoadStatus::kNoLoadableSegment;
   }
 
+#ifndef MOSAIC_ELF_MUTANT_SKIP_OVERLAP_CHECK
   std::sort(out->segments.begin(), out->segments.end(),
             [](const Segment& a, const Segment& b) { return a.vaddr < b.vaddr; });
   for (size_t i = 1; i < out->segments.size(); ++i) {
@@ -229,8 +278,13 @@ LoadStatus LoadElf(const std::string& path, Image* out, std::string* detail) {
       return LoadStatus::kSegmentOverlap;
     }
   }
+#else
+  std::sort(out->segments.begin(), out->segments.end(),
+            [](const Segment& a, const Segment& b) { return a.vaddr < b.vaddr; });
+#endif
 
-  if (out->Find(entry) == nullptr) {
+  const Segment* entry_segment = out->Find(entry);
+  if (entry_segment == nullptr) {
     char text[128];
     std::snprintf(text, sizeof(text),
                   "entry point 0x%llx is not inside any PT_LOAD segment",
@@ -238,8 +292,31 @@ LoadStatus LoadElf(const std::string& path, Image* out, std::string* detail) {
     *detail = text;
     return LoadStatus::kEntryNotMapped;
   }
+  // An image that declares segment permissions must mark the entry executable:
+  // fetching from a read-only data segment is a link error, not a runtime
+  // accident, and the harness has no way to report it later as anything but a
+  // wild fetch. An image that declares no permissions at all (p_flags == 0) is
+  // taken at face value: a hand-built or minimal image makes no claim to
+  // contradict. The I-004 harness case builds exactly such an image.
+#ifndef MOSAIC_ELF_MUTANT_ALLOW_NONEXEC_ENTRY
+  if (entry_segment->flags != 0 && (entry_segment->flags & kPfX) == 0) {
+    char text[144];
+    std::snprintf(text, sizeof(text),
+                  "entry point 0x%llx is in a PT_LOAD with p_flags 0x%x, which is not "
+                  "executable",
+                  static_cast<unsigned long long>(entry), entry_segment->flags);
+    *detail = text;
+    return LoadStatus::kEntryNotExecutable;
+  }
+#endif
 
+#ifdef MOSAIC_ELF_MUTANT_IGNORE_ENTRY
+  // Negative control: the header's e_entry is ignored and the image is entered
+  // at its lowest address.
+  out->entry = out->LowestAddress();
+#else
   out->entry = entry;
+#endif
   detail->clear();
   return LoadStatus::kOk;
 }

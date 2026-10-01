@@ -161,7 +161,31 @@ module mosaic_core_tb (
     output logic [4:0]  o_dbg_desc_rd0_o,
     output logic [4:0]  o_dbg_desc_rd1_o,
     output logic [31:0] o_dbg_alloc_ctr_o,
-    output logic [31:0] o_dbg_ins_ctr_o
+    output logic [31:0] o_dbg_ins_ctr_o,
+
+    // ------------------------------------------------------------- geometry
+    // Taken from the generated packages and from the elaborated core, never
+    // re-derived by a formula: the driver must decode identities and build PC
+    // sequences with the DUT's own widths and reset vector (the convention
+    // sim/tb/mosaic_rob_tb.sv documents).
+    output logic [31:0] o_geom_xlen_o,
+    output logic [31:0] o_geom_clusters_o,
+    output logic [31:0] o_geom_retire_width_o,
+    output logic [31:0] o_geom_rob_entries_o,
+    output logic [31:0] o_geom_rob_index_w_o,
+    output logic [31:0] o_geom_rob_gen_w_o,
+    output logic [31:0] o_geom_uop_index_w_o,
+    output logic [31:0] o_geom_uop_id_w_o,
+    output logic [31:0] o_geom_prf_entries_o,
+    output logic [31:0] o_geom_prf_tag_w_o,
+    output logic [31:0] o_geom_int_gen_w_o,
+    output logic [31:0] o_geom_iq_entries_o,
+    output logic [31:0] o_geom_occ_w_o,
+    output logic [31:0] o_geom_req_id_w_o,
+    output logic [31:0] o_geom_epoch_w_o,
+    output logic [31:0] o_geom_seq_w_o,
+    output logic [31:0] o_geom_ret_id_w_o,
+    output logic [TB_XLEN-1:0] o_geom_reset_vector_o
 );
 
   // ------------------------------------------------------------------ core
@@ -307,6 +331,27 @@ module mosaic_core_tb (
       .o_wait_ctr     (arb_wait_ctr_o),
       .o_nothing_ctr  ()
   );
+
+  // Geometry, straight from the generated packages (and, for the widths the
+  // core derives, from the elaborated core's own localparams).
+  assign o_geom_xlen_o         = 32'(TB_XLEN);
+  assign o_geom_clusters_o     = 32'(mosaic_cfg_pkg::MOSAIC_CLUSTERS);
+  assign o_geom_retire_width_o = 32'(TB_RET_N);
+  assign o_geom_rob_entries_o  = 32'(mosaic_cfg_pkg::MOSAIC_ROB_ENTRIES);
+  assign o_geom_rob_index_w_o  = 32'(mosaic_id_pkg::MOSAIC_ID_W_ROB_INDEX);
+  assign o_geom_rob_gen_w_o    = 32'(mosaic_id_pkg::MOSAIC_ID_W_ROB_GEN);
+  assign o_geom_uop_index_w_o  = 32'(mosaic_id_pkg::MOSAIC_ID_W_UOP_INDEX);
+  assign o_geom_uop_id_w_o     = 32'(TB_UOP_ID_W);
+  assign o_geom_prf_entries_o  = 32'(mosaic_cfg_pkg::MOSAIC_INT_PRF_ENTRIES);
+  assign o_geom_prf_tag_w_o    = 32'(mosaic_id_pkg::MOSAIC_ID_W_PRF_TAG);
+  assign o_geom_int_gen_w_o    = 32'(mosaic_cfg_pkg::MOSAIC_INT_PRF_TAG_W);
+  assign o_geom_iq_entries_o   = 32'(mosaic_cfg_pkg::MOSAIC_IQ_ENTRIES);
+  assign o_geom_occ_w_o        = 32'(TB_OCC_W);
+  assign o_geom_req_id_w_o     = 32'(TB_REQ_ID_W);
+  assign o_geom_epoch_w_o      = 32'(TB_EPOCH_W);
+  assign o_geom_seq_w_o        = 32'(TB_SEQ_W);
+  assign o_geom_ret_id_w_o     = 32'(TB_RET_ID_W);
+  assign o_geom_reset_vector_o = mosaic_cfg_pkg::MOSAIC_RESET_VECTOR;
 
 endmodule : mosaic_core_tb
 /* verilator lint_on PINCONNECTEMPTY */

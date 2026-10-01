@@ -79,6 +79,16 @@
 // what stops a recycled tag being reported as ready for a producer that has not
 // run yet.
 //
+// The table has one (written, generation) pair per tag and no reallocation
+// input, so it distinguishes generations by their *numeric* value. The
+// generation it stores is the same 7-bit allocation counter rename carries and
+// the wakeup publishes, so a generation *number* recycled onto the same tag
+// while the entry is still live is not distinguishable from the write that
+// produced the entry until the new producer writes. That is a property of the
+// generation width relative to the number of allocations a tag can be live
+// through, not of this table's keying, and it is recorded as not-verified in
+// results/reports/I-026-wb.md.
+//
 // ------------------------------------------------------------ value stash
 //
 // The ROB does not carry values and the PRF's read ports belong to dispatch, so

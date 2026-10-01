@@ -1433,7 +1433,14 @@ module mosaic_bringup_core #(
       mideleg_q  <= {XLEN{1'b0}};
       mie_q      <= {XLEN{1'b0}};
       mtvec_q    <= {XLEN{1'b0}};
+`ifdef MOSAIC_RESET_MUTANT_KEEP_MSCRATCH
+      // MUTANT (V-009 control): mscratch is not restored by reset, so whatever
+      // a previous run wrote survives into the next run and the post-reset
+      // state stops being a function of the reset alone.  Every other register
+      // resets normally, so only the post-reset CSR snapshot sees it.
+`else
       mscratch_q <= {XLEN{1'b0}};
+`endif
       mepc_q     <= {XLEN{1'b0}};
       mcause_q   <= {XLEN{1'b0}};
       mtval_q    <= {XLEN{1'b0}};
@@ -1443,7 +1450,14 @@ module mosaic_bringup_core #(
       daddr_q    <= {XLEN{1'b0}};
       dwdata_q   <= {XLEN{1'b0}};
       dsize_q    <= mosaic_pkg::SZ_DBL;
+`ifdef MOSAIC_RESET_MUTANT_EVENT_IN_RESET
+      // MUTANT (V-009 control): the machine reports an architectural event
+      // while it is held in reset.  Nothing else changes, so only the
+      // "no commit during reset" check can see it.
+      evt_valid_o      <= 1'b1;
+`else
       evt_valid_o      <= 1'b0;
+`endif
       evt_trap_o       <= 1'b0;
       evt_pc_o         <= {XLEN{1'b0}};
       evt_next_pc_o    <= {XLEN{1'b0}};

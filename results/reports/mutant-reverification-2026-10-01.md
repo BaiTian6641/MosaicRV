@@ -608,3 +608,276 @@ Two textual caveats, neither a behavioural difference:
 * `I-016-rob.md` carries two base lines (an earlier one with 3248 accepted / 3017
   stale / 2876 out-of-range, and the post-width-fix one with 3249 / 3014 /
   2878). This re-run reproduces the later one byte-for-byte.
+
+---
+
+## Round 3
+
+Independent re-run (lane `MutantReverify3-2`) of the mutation evidence claimed
+by the two rename packages for `rtl/core/mosaic_rename.sv` — `I-013-rename.md`
+§9 and `I-014-rename2w.md` §6 — against the live working-tree revision of
+2026-10-01 20:05–20:16 UTC, Verilator 5.052. Every mutant found by grep in the
+file was run against **both** registered cases, `rename.single_width_ownership`
+(I-013) and `rename.same_cycle_chain` (I-014): 13 defines × 2 cases = 26 mutant
+runs plus base runs before and after each campaign. No RTL, testbench, registry,
+config or progress file was edited by this campaign; this report is the only file
+the lane wrote.
+
+### Scope — every mutant found by grep
+
+`grep -nE '^[[:space:]]*`(ifdef|elsif|ifndef)[[:space:]]+MOSAIC_RENAME_MUTANT_'
+rtl/core/mosaic_rename.sv` yields **13 distinct defines** in 15 guard
+directives (`NO_GEN_CHECK` and `WAW_COMMIT2_PRE_MAP` each guard two blocks).
+The defines were found this way, not taken from the reports.
+
+| Define | Guard lines | Blocks | Claimed by |
+|---|---|---|---|
+| `NO_EXHAUST_CHECK` | 763 | 1 | I-013 #4 |
+| `NONATOMIC_GROUP` | 772 (elsif) | 1 | I-014 #2 |
+| `X0_ALLOC` | 803 | 1 | I-013 #2 / I-014 #3 |
+| `SAME_TAG_LANE1` | 819 | 1 | I-014 #4 |
+| `WAW_OLD_FROM_MAP` | 850 | 1 | I-014 #5 |
+| `NO_BYPASS` | 880 | 1 | I-014 #1 |
+| `NO_GEN_CHECK` | 955, 985 | 2 | I-013 #1 |
+| `NO_DUP_WB_GUARD` | 964 | 1 | I-013 #5 |
+| `NO_DOUBLE_FREE_CHECK` | 992 | 1 | I-013 #6 |
+| `WAW_COMMIT2_PRE_MAP` | 1063, 1207 | 2 | I-014 #6 |
+| `NO_BOUNDARY_CHECK` | 1117 | 1 | none (live RTL control 13) |
+| `NO_FREE_RESTORE` | 1230 | 1 | I-013 #3 |
+| `CKPT_ALLOC_LEAK` | 1330 | 1 | none (live RTL control 12) |
+
+Two of the 13 (`CKPT_ALLOC_LEAK`, `NO_BOUNDARY_CHECK`) exist only in the live RTL:
+no package report carries a row or claim for them (`grep -n
+'CKPT_ALLOC_LEAK\|NO_BOUNDARY_CHECK' results/reports/I-013-rename.md
+results/reports/I-014-rename2w.md` returns nothing; the only hits in the tree are
+the RTL guards and this section). They were run anyway, and their observed
+behaviour is reported below without a claim to match.
+
+### Recipe and controls
+
+* Build: `tools/run_unit.py`'s own command with
+  `VERILATOR_FLAGS.append('-DMOSAIC_RENAME_MUTANT_<NAME>')` and
+  `run_unit.build_case('p0', CASE, run_unit.load_registry()['cases'][CASE])`.
+  Each build+run ran in a **fresh process**, so a define could never leak from
+  one row into the next.
+* Run: `build/p0/unit/<CASE>/<CASE> --case <CASE> --out /tmp/mutrun3/<CASE>/<TAG>
+  --seed 1 --max-cycles 200000` (both cases register 200000); the exit code and
+  last `RESULT` line were captured, the failure count and first mismatch read
+  from `<out>/result.json`.
+* Build directories: both `build/p0/unit/rename.single_width_ownership` and
+  `build/p0/unit/rename.same_cycle_chain` existed before the campaign (each
+  holding `build_command.txt`, `obj_dir` and the case binary), were deleted
+  before the first build of each campaign, and deleted again before the final
+  base rebuild, so no base binary can share an object with a mutant and no
+  mutant can reuse a shipping object.
+* Command stamp: `build_command.txt` was re-read after every build. Every
+  mutant stamp contains exactly its own `-DMOSAIC…` token and nothing else;
+  every base stamp contains no `-DMOSAIC…` flag at all.
+* Binary-difference control: after the main campaign a second pass rebuilt the
+  base and all 13 mutants from deleted directories and SHA-256'd the produced
+  binary. **All 13 mutant binaries differ from the shipping binary in both
+  cases** (full hashes below), so each `-D` demonstrably reached the
+  elaborator rather than defining an unused macro.
+* One pass was **discarded**: the first scripted pass appended the row's short
+  tag (`-DX0_ALLOC`) instead of the full macro name. Every row then compiled
+  and ran the shipping build and PASSed; the build-command stamp showed no
+  `-DMOSAIC…` token, the pass was thrown away and re-run with the full define.
+  That is the "a `-D` whose `ifdef` body was never compiled proves nothing"
+  trap, caught by the stamp rather than by the green line.
+* Revision: the files below were SHA-256'd before and after every campaign
+  and are unchanged. `tests/unit/registry.json` was edited by another lane
+  (commit `05411a5`, 20:08:20 UTC) *before* the first campaign build; the two
+  rename entries are byte-identical in content to the revision seen at the
+  start of this session, so the case definitions under test did not move.
+
+Tested revision (SHA-256):
+
+| File | SHA-256 |
+|---|---|
+| `rtl/core/mosaic_rename.sv` | `2564b88bed819c8d717f90ddf52c767373942861708bd317870859c3915f9628` |
+| `sim/tb/mosaic_rename_tb.sv` | `d112b114b4eb3c0a09e69606690446a0de97d8b46b2cf43a61e5a7e6b734c00b` |
+| `sim/unit/tb_rename.cpp` | `22ae6712c032159322ae0fe4ce2dccdaac601e86350e3e3cb7c596ab1b5b4229` |
+| `tests/unit/registry.json` | `0327dfa51954d32709a4941ad0254958fb4e3bbc44c23d499fb5e7566e007b7d` |
+| `rtl/core/mosaic_pkg.sv` (include) | `846303bfa8031346d2a2cebcdf66b680bafe6d50ce19f42925af7f8782a4b3fb` |
+| `build/p0/rtl/mosaic_cfg_pkg.svh` (generated include) | `041cf99b17d28632fee55b936f2618a649d49c815ae94f8b5aad57d783ecd986` |
+
+### Results — `rename.single_width_ownership` (I-013's case)
+
+Base (no define), before the campaign — exit 0, `failures=0`,
+`checks=9`:
+
+```
+RESULT PASS rename.single_width_ownership rename contract holds: 5646 shadow comparisons over 5686 cycles, 96 entries / 4 banks, seed 1
+```
+
+Rebuilt from a deleted directory after the campaign and re-run, again for
+the binary-difference control, and once more as the final action of the
+campaign: all reruns exit 0, `failures=0`, and print a byte-identical
+`RESULT` line.
+
+| Define | Exit | Failures | Checks | Binary ≠ shipping | RESULT line (quoted; context brackets trimmed where marked `[…]`) |
+|---|---|---|---|---|---|
+| `NO_EXHAUST_CHECK` | 1 | 1 | 7 | yes | `RESULT FAIL rename.single_width_ownership contract violated: exhaustion: cycle 1678: alloc_accepted: expected 0, got 1 [alloc=1:x20 alloc2=0:x0 rs=x0,x0 \| x0,x0 wb=0(0,0) free=0(0,0) commit=0:x0(0,0) commit2=0:x0(0,0) ckpt=0 squash=0]` |
+| `NONATOMIC_GROUP` | 0 | 0 | 9 | yes | `RESULT PASS rename.single_width_ownership rename contract holds: 5646 shadow comparisons over 5686 cycles, 96 entries / 4 banks, seed 1` |
+| `X0_ALLOC` | 1 | 1 | 5 | yes | `RESULT FAIL rename.single_width_ownership contract violated: x0: cycle 1399: alloc_new_valid: expected 0, got 1 [alloc=1:x0 alloc2=0:x0 rs=x0,x0 \| x0,x0 wb=0(0,0) free=0(0,0) commit=0:x0(0,0) commit2=0:x0(0,0) ckpt=0 squash=0]` |
+| `SAME_TAG_LANE1` | 0 | 0 | 9 | yes | `RESULT PASS rename.single_width_ownership rename contract holds: 5646 shadow comparisons over 5686 cycles, 96 entries / 4 banks, seed 1` |
+| `WAW_OLD_FROM_MAP` | 0 | 0 | 9 | yes | `RESULT PASS rename.single_width_ownership rename contract holds: 5646 shadow comparisons over 5686 cycles, 96 entries / 4 banks, seed 1` |
+| `NO_BYPASS` | 0 | 0 | 9 | yes | `RESULT PASS rename.single_width_ownership rename contract holds: 5646 shadow comparisons over 5686 cycles, 96 entries / 4 banks, seed 1` |
+| `NO_GEN_CHECK` | 1 | 1 | 2 | yes | `RESULT FAIL rename.single_width_ownership contract violated: ownership: cycle 212: free_stale: expected 1, got 0 [alloc=0:x0 alloc2=0:x0 rs=x0,x0 \| x0,x0 wb=0(0,0) free=1(32,1) commit=0:x0(0,0) commit2=0:x0(0,0) ckpt=0 squash=0]` |
+| `NO_DUP_WB_GUARD` | 1 | 1 | 2 | yes | `RESULT FAIL rename.single_width_ownership contract violated: ownership: cycle 14: wb_accepted: expected 0, got 1 [alloc=0:x0 alloc2=0:x0 rs=x0,x0 \| x0,x0 wb=1(32,0) free=0(0,0) commit=0:x0(0,0) commit2=0:x0(0,0) ckpt=0 squash=0]` |
+| `NO_DOUBLE_FREE_CHECK` | 1 | 1 | 2 | yes | `RESULT FAIL rename.single_width_ownership contract violated: ownership: cycle 171: free_accepted: expected 0, got 1 [alloc=0:x0 alloc2=0:x0 rs=x0,x0 \| x0,x0 wb=0(0,0) free=1(32,0) commit=0:x0(0,0) commit2=0:x0(0,0) ckpt=0 squash=0]` |
+| `WAW_COMMIT2_PRE_MAP` | 0 | 0 | 9 | yes | `RESULT PASS rename.single_width_ownership rename contract holds: 5646 shadow comparisons over 5686 cycles, 96 entries / 4 banks, seed 1` |
+| `NO_BOUNDARY_CHECK` | 0 | 0 | 9 | yes | `RESULT PASS rename.single_width_ownership rename contract holds: 5646 shadow comparisons over 5686 cycles, 96 entries / 4 banks, seed 1` |
+| `NO_FREE_RESTORE` | 1 | 1 | 6 | yes | `RESULT FAIL rename.single_width_ownership contract violated: squash: cycle 1527: the free set differs from the shadow at tag 35` |
+| `CKPT_ALLOC_LEAK` | 1 | 1 | 8 | yes | `RESULT FAIL rename.single_width_ownership contract violated: random: cycle 1890: the free set differs from the shadow at tag 39` |
+
+Build-command stamps: every row's stamp contains exactly
+`-DMOSAIC_RENAME_MUTANT_<its own name>` and no other `-DMOSAIC…` flag.
+Shipping binary SHA-256: `fe8e41d9a050cdcec1b83101098ffe3fde8f93dcabeace86b05b7f4bcc55d900`; all 13 mutant binaries differ (hashes in
+`/tmp/mutrun3/rename.single_width_ownership/bindiff.json`).
+
+### Results — `rename.same_cycle_chain` (I-014's case)
+
+Base (no define), before the campaign — exit 0, `failures=0`,
+`checks=18`:
+
+```
+RESULT PASS rename.same_cycle_chain rename contract holds: 9767 shadow comparisons over 9843 cycles, 96 entries / 4 banks, seed 1
+```
+
+Rebuilt from a deleted directory after the campaign and re-run, again for
+the binary-difference control, and once more as the final action of the
+campaign: all reruns exit 0, `failures=0`, and print a byte-identical
+`RESULT` line.
+
+| Define | Exit | Failures | Checks | Binary ≠ shipping | RESULT line (quoted; context brackets trimmed where marked `[…]`) |
+|---|---|---|---|---|---|
+| `NO_EXHAUST_CHECK` | 1 | 1 | 7 | yes | `RESULT FAIL rename.same_cycle_chain contract violated: exhaustion: cycle 1678: alloc_accepted: expected 0, got 1 [alloc=1:x20 alloc2=0:x0 rs=x0,x0 \| x0,x0 wb=0(0,0) free=0(0,0) commit=0:x0(0,0) commit2=0:x0(0,0) ckpt=0 squash=0]` |
+| `NONATOMIC_GROUP` | 1 | 1 | 13 | yes | `RESULT FAIL rename.same_cycle_chain contract violated: twowide-stall: cycle 5781: alloc_accepted: expected 0, got 1 [alloc=1:x20 alloc2=1:x21 rs=x0,x0 \| x0,x0 wb=0(0,0) free=0(0,0) commit=0:x0(0,0) commit2=0:x0(0,0) ckpt=0 squash=0]` |
+| `X0_ALLOC` | 1 | 1 | 5 | yes | `RESULT FAIL rename.same_cycle_chain contract violated: x0: cycle 1399: alloc_new_valid: expected 0, got 1 [alloc=1:x0 alloc2=0:x0 rs=x0,x0 \| x0,x0 wb=0(0,0) free=0(0,0) commit=0:x0(0,0) commit2=0:x0(0,0) ckpt=0 squash=0]` |
+| `SAME_TAG_LANE1` | 1 | 1 | 9 | yes | `RESULT FAIL rename.same_cycle_chain contract violated: twowide-raw: cycle 5692: alloc2_new_tag: expected 34, got 33 [alloc=1:x5 alloc2=1:x6 rs=x9,x20 \| x5,x9 wb=0(0,0) free=0(0,0) commit=0:x0(0,0) commit2=0:x0(0,0) ckpt=0 squash=0]` |
+| `WAW_OLD_FROM_MAP` | 1 | 1 | 11 | yes | `RESULT FAIL rename.same_cycle_chain contract violated: twowide-waw: cycle 5702: alloc2_old_tag: expected 32, got 7 [alloc=1:x7 alloc2=1:x7 rs=x7,x7 \| x7,x7 wb=0(0,0) free=0(0,0) commit=0:x0(0,0) commit2=0:x0(0,0) ckpt=0 squash=0]` |
+| `NO_BYPASS` | 1 | 1 | 9 | yes | `RESULT FAIL rename.same_cycle_chain contract violated: twowide-raw: cycle 5692: rs3_bypass: expected 1, got 0 [alloc=1:x5 alloc2=1:x6 rs=x9,x20 \| x5,x9 wb=0(0,0) free=0(0,0) commit=0:x0(0,0) commit2=0:x0(0,0) ckpt=0 squash=0]` |
+| `NO_GEN_CHECK` | 1 | 1 | 2 | yes | `RESULT FAIL rename.same_cycle_chain contract violated: ownership: cycle 212: free_stale: expected 1, got 0 [alloc=0:x0 alloc2=0:x0 rs=x0,x0 \| x0,x0 wb=0(0,0) free=1(32,1) commit=0:x0(0,0) commit2=0:x0(0,0) ckpt=0 squash=0]` |
+| `NO_DUP_WB_GUARD` | 1 | 1 | 2 | yes | `RESULT FAIL rename.same_cycle_chain contract violated: ownership: cycle 14: wb_accepted: expected 0, got 1 [alloc=0:x0 alloc2=0:x0 rs=x0,x0 \| x0,x0 wb=1(32,0) free=0(0,0) commit=0:x0(0,0) commit2=0:x0(0,0) ckpt=0 squash=0]` |
+| `NO_DOUBLE_FREE_CHECK` | 1 | 1 | 2 | yes | `RESULT FAIL rename.same_cycle_chain contract violated: ownership: cycle 171: free_accepted: expected 0, got 1 [alloc=0:x0 alloc2=0:x0 rs=x0,x0 \| x0,x0 wb=0(0,0) free=1(32,0) commit=0:x0(0,0) commit2=0:x0(0,0) ckpt=0 squash=0]` |
+| `WAW_COMMIT2_PRE_MAP` | 1 | 1 | 11 | yes | `RESULT FAIL rename.same_cycle_chain contract violated: twowide-waw: cycle 5706: the free set differs from the shadow at tag 34` |
+| `NO_BOUNDARY_CHECK` | 1 | 1 | 16 | yes | `RESULT FAIL rename.same_cycle_chain contract violated: twowide-ckptbad: cycle 5831: squash_accepted: expected 0, got 1 [alloc=0:x0 alloc2=0:x0 rs=x0,x0 \| x0,x0 wb=0(0,0) free=0(0,0) commit=0:x0(0,0) commit2=0:x0(0,0) ckpt=0 squash=1]` |
+| `NO_FREE_RESTORE` | 1 | 1 | 6 | yes | `RESULT FAIL rename.same_cycle_chain contract violated: squash: cycle 1527: the free set differs from the shadow at tag 35` |
+| `CKPT_ALLOC_LEAK` | 1 | 1 | 8 | yes | `RESULT FAIL rename.same_cycle_chain contract violated: random: cycle 1890: the free set differs from the shadow at tag 39` |
+
+Build-command stamps: every row's stamp contains exactly
+`-DMOSAIC_RENAME_MUTANT_<its own name>` and no other `-DMOSAIC…` flag.
+Shipping binary SHA-256: `234a2424d85ebd56f00cc6497650093c8f48630c47248ea6fbbb0145be5cb3f8`; all 13 mutant binaries differ (hashes in
+`/tmp/mutrun3/rename.same_cycle_chain/bindiff.json`).
+
+### Verdict — report claims vs. re-run
+
+#### `I-013-rename.md` §9
+
+Claim quoted: *"For each one ... 3. the run **exits 1** with a `RESULT FAIL`
+line."* and the six-row table with *"exit **1**"*; the report's verbatim
+`MISMATCH`/`RESULT FAIL` blocks are the per-row claim. The case is
+`rename.single_width_ownership` (the report's own run used that case).
+
+| Mutant | Claim (quoted) | Re-run observation | Confirmed |
+|---|---|---|---|
+| `NO_GEN_CHECK` | `exit=1`; `MISMATCH ownership: cycle 212: free_stale: expected 1, got 0`; phase `ownership` (first), `generation`; `ifdef` 2 | exit 1, failures=1, checks=2; `RESULT FAIL rename.single_width_ownership contract violated: ownership: cycle 212: free_stale: expected 1, got 0 [alloc=0:x0 alloc2=0:x0 rs=x0,x0 \| x0,x0 wb=0(0,0) free=1(32,1) commit=0:x0(0,0) commit2=0:x0(0,0) ckpt=0 squash=0]` | yes |
+| `X0_ALLOC` | `exit=1`; `MISMATCH x0: cycle 1399: alloc_new_valid: expected 0, got 1`; phase `x0`; `ifdef` 1 | exit 1, failures=1, checks=5; `RESULT FAIL rename.single_width_ownership contract violated: x0: cycle 1399: alloc_new_valid: expected 0, got 1 [alloc=1:x0 alloc2=0:x0 rs=x0,x0 \| x0,x0 wb=0(0,0) free=0(0,0) commit=0:x0(0,0) commit2=0:x0(0,0) ckpt=0 squash=0]` | yes |
+| `NO_FREE_RESTORE` | `exit=1`; `MISMATCH squash: cycle 1527: the free set differs from the shadow at tag 35`; phase `squash` | exit 1, failures=1, checks=6; `RESULT FAIL rename.single_width_ownership contract violated: squash: cycle 1527: the free set differs from the shadow at tag 35` | yes |
+| `NO_EXHAUST_CHECK` | `exit=1`; `MISMATCH exhaustion: cycle 1678: alloc_accepted: expected 0, got 1`; phase `exhaustion` | exit 1, failures=1, checks=7; `RESULT FAIL rename.single_width_ownership contract violated: exhaustion: cycle 1678: alloc_accepted: expected 0, got 1 [alloc=1:x20 alloc2=0:x0 rs=x0,x0 \| x0,x0 wb=0(0,0) free=0(0,0) commit=0:x0(0,0) commit2=0:x0(0,0) ckpt=0 squash=0]` | yes |
+| `NO_DUP_WB_GUARD` | `exit=1`; `MISMATCH ownership: cycle 14: wb_accepted: expected 0, got 1`; phase `ownership` | exit 1, failures=1, checks=2; `RESULT FAIL rename.single_width_ownership contract violated: ownership: cycle 14: wb_accepted: expected 0, got 1 [alloc=0:x0 alloc2=0:x0 rs=x0,x0 \| x0,x0 wb=1(32,0) free=0(0,0) commit=0:x0(0,0) commit2=0:x0(0,0) ckpt=0 squash=0]` | yes |
+| `NO_DOUBLE_FREE_CHECK` | `exit=1`; `MISMATCH ownership: cycle 171: free_accepted: expected 0, got 1`; phase `ownership` | exit 1, failures=1, checks=2; `RESULT FAIL rename.single_width_ownership contract violated: ownership: cycle 171: free_accepted: expected 0, got 1 [alloc=0:x0 alloc2=0:x0 rs=x0,x0 \| x0,x0 wb=0(0,0) free=1(32,0) commit=0:x0(0,0) commit2=0:x0(0,0) ckpt=0 squash=0]` | yes |
+
+The base claim (line 326) is byte-identical to the re-run:
+
+```
+RESULT PASS rename.single_width_ownership rename contract holds: 5646 shadow comparisons over 5686 cycles, 96 entries / 4 banks, seed 1
+```
+
+The only textual difference is the stimulus context bracket: the live driver
+prints `[alloc=… alloc2=… commit2=…]` on the `MISMATCH` lines and repeats it on
+`RESULT FAIL`, while the report's captured strings predate the two-wide ports
+(its `MISMATCH` bracket carries only `alloc`/`wb`/`free`/`commit`/`ckpt`/
+`squash`, and its `RESULT FAIL` lines carry no bracket at all). Cycle, signal,
+expected/got values, exit code and failure count are identical in all six rows.
+
+#### `I-014-rename2w.md` §6
+
+Claim quoted: *"Six controls ... Shipping build for reference: **exit 0, 16
+checks, 0 failures, PASS**"* and the six-row table with *"Delta against the
+shipping build: **0 → 1 failing check** in every case"*. The case is
+`rename.same_cycle_chain`.
+
+| Mutant | Claim (checks / failures / first mismatch) | Re-run observation | Confirmed |
+|---|---|---|---|
+| `NO_BYPASS` | checks 9, failures 1, exit 1; `MISMATCH twowide-raw: cycle 5692: rs3_bypass: expected 1, got 0` | exit 1, failures=1, checks=9; `RESULT FAIL rename.same_cycle_chain contract violated: twowide-raw: cycle 5692: rs3_bypass: expected 1, got 0 [alloc=1:x5 alloc2=1:x6 rs=x9,x20 \| x5,x9 wb=0(0,0) free=0(0,0) commit=0:x0(0,0) commit2=0:x0(0,0) ckpt=0 squash=0]` | yes |
+| `NONATOMIC_GROUP` | checks 13, failures 1, exit 1; `MISMATCH twowide-stall: cycle 5781: alloc_accepted: expected 0, got 1` | exit 1, failures=1, checks=13; `RESULT FAIL rename.same_cycle_chain contract violated: twowide-stall: cycle 5781: alloc_accepted: expected 0, got 1 [alloc=1:x20 alloc2=1:x21 rs=x0,x0 \| x0,x0 wb=0(0,0) free=0(0,0) commit=0:x0(0,0) commit2=0:x0(0,0) ckpt=0 squash=0]` | yes |
+| `X0_ALLOC` | checks 5, failures 1, exit 1; `MISMATCH x0: cycle 1399: alloc_new_valid: expected 0, got 1`; phase `x0` (single-width phase); also I-013 #2 | exit 1, failures=1, checks=5; `RESULT FAIL rename.same_cycle_chain contract violated: x0: cycle 1399: alloc_new_valid: expected 0, got 1 [alloc=1:x0 alloc2=0:x0 rs=x0,x0 \| x0,x0 wb=0(0,0) free=0(0,0) commit=0:x0(0,0) commit2=0:x0(0,0) ckpt=0 squash=0]` | yes |
+| `SAME_TAG_LANE1` | checks 9, failures 1, exit 1; `MISMATCH twowide-raw: cycle 5692: alloc2_new_tag: expected 34, got 33` | exit 1, failures=1, checks=9; `RESULT FAIL rename.same_cycle_chain contract violated: twowide-raw: cycle 5692: alloc2_new_tag: expected 34, got 33 [alloc=1:x5 alloc2=1:x6 rs=x9,x20 \| x5,x9 wb=0(0,0) free=0(0,0) commit=0:x0(0,0) commit2=0:x0(0,0) ckpt=0 squash=0]` | yes |
+| `WAW_OLD_FROM_MAP` | checks 11, failures 1, exit 1; `MISMATCH twowide-waw: cycle 5702: alloc2_old_tag: expected 32, got 7` | exit 1, failures=1, checks=11; `RESULT FAIL rename.same_cycle_chain contract violated: twowide-waw: cycle 5702: alloc2_old_tag: expected 32, got 7 [alloc=1:x7 alloc2=1:x7 rs=x7,x7 \| x7,x7 wb=0(0,0) free=0(0,0) commit=0:x0(0,0) commit2=0:x0(0,0) ckpt=0 squash=0]` | yes |
+| `WAW_COMMIT2_PRE_MAP` | checks 11, failures 1, exit 1; `MISMATCH twowide-waw: cycle 5706: the free set differs from the shadow at tag 34` | exit 1, failures=1, checks=11; `RESULT FAIL rename.same_cycle_chain contract violated: twowide-waw: cycle 5706: the free set differs from the shadow at tag 34` | yes |
+
+All six rows check out, including the per-row `checks` totals at the point of
+abort (9 / 13 / 5 / 9 / 11 / 11) and the failure delta 0 → 1. Unlike the
+I-013 strings, the report's §6 `MISMATCH` lines already carry the live
+`[alloc=… alloc2=… commit2=…]` context bracket, and the re-run reproduces
+them character for character up to the report's own `...` truncation.
+
+Two **staleness** findings against §5/§6 text, not against the mutant claims:
+
+* §5 says the case runs *"the eight single-width phases **and** seven two-wide
+  phases"* and reports *"9750 shadow comparisons over 9818 cycles, 16 checks"*.
+  The live case runs eight single-width and **nine** two-wide phases and reports
+  **9767 comparisons over 9843 cycles, 18 checks** — the two added phases are
+  `twowide-ckptalloc` and `twowide-ckptbad` (they are the two checks that
+  separate the 16-line `check ok:` transcript in §5 from the live 18). §6's
+  *"Shipping build ... 16 checks"* and the `sha256[0:16]` prefixes are stale for
+  the same reason; the prefixes cannot be reproduced because the case sources
+  changed after the report, so the binary-difference control was re-established
+  here with full SHA-256 hashes (all 13 differ from shipping).
+* §5's `random` phase transcript (*"112 allocations, 65 accepted writebacks, 791
+  stale rejections, 235 squashes, 115 exhaustion reports"*) also predates the
+  case change: the live phase prints *"240 allocations, 97 accepted writebacks,
+  988 stale rejections, 274 squashes, 0 exhaustion reports"*.
+
+The two controls with no package-report claim, for completeness:
+
+* `CKPT_ALLOC_LEAK` (control 12, the pre-I-014 "checkpoint cycle is not
+  journalled" rule) is caught by **both** cases in the single-width `random`
+  phase: `random: cycle 1890: the free set differs from the shadow at tag 39`
+  (exit 1, failures=1, checks=8).
+* `NO_BOUNDARY_CHECK` (control 13, the committed-boundary refusal removed) is
+  caught by `rename.same_cycle_chain` in the new `twowide-ckptbad` phase:
+  `twowide-ckptbad: cycle 5831: squash_accepted: expected 0, got 1` (exit 1,
+  failures=1, checks=16). It is inert in `rename.single_width_ownership`, which
+  never presents a squash to a checkpoint taken with writers in flight, and
+  passes there — the phase that owns the defect is two-wide only.
+
+### Round 3 summary
+
+* 13 of 13 mutant defines found by grep were built and run against both cases:
+  26 builds, all succeeded; 26 runs, each captured with exit code, `failures`,
+  `checks` and the first mismatch.
+* `rename.single_width_ownership`: 7 of 13 exit 1 with exactly 1 failure — the
+  six I-013 rows plus `CKPT_ALLOC_LEAK` — and 6 pass, every one of them a
+  two-wide-only define that this case never drives (`alloc2_req` is never
+  asserted) or the boundary control, which needs the two-wide checkpoint phase.
+* `rename.same_cycle_chain`: **all 13 exit 1** with exactly 1 failure, at the
+  claimed phase and cycle in every case.
+* Every mutant's build-command stamp names its own define and no other; every
+  mutant binary differs from the shipping binary; every base stamp is clean.
+* Base runs: before and after each campaign, a fresh rebuild for the
+  binary-difference control, and a final rebuild+run — 4 per case, 8 in total;
+  all exit 0 with `failures=0`, and all four runs of a case print a
+  byte-identical `RESULT` line (the line `I-013-rename.md` quotes for
+  `rename.single_width_ownership`; `rename.same_cycle_chain` moved from the
+  report's 16-check line to the live 18-check line, see above).
+* **Package reports confirmed:** `I-013-rename.md` §9 — **confirmed**, 6/6 rows,
+  base line byte-identical. `I-014-rename2w.md` §6 — **confirmed**, 6/6 rows
+  including check counts and first mismatches; its §5/§6 base summary numbers
+  (16 checks, 9750/9818, binary prefixes) are stale relative to the live case,
+  which is a documentation lag from the later `twowide-ckptalloc`/`twowide-ckptbad`
+  work, not a mutant-claim discrepancy. No mutant behaves differently from its
+  report.
+

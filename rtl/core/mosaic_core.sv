@@ -236,6 +236,15 @@ module mosaic_core (
   mosaic_pkg::decode_ctl_t   dbuf_ctl   [0:1];
   logic [1:0]                dbuf_cnt;
   logic                      dbuf_take, dbuf_push, dbuf_room;
+  // The push slot and the buffer's next state. The push lands at the tail
+  // *after* this cycle's pop, so it is `dbuf_cnt - dbuf_take`, and the next
+  // state is computed per slot rather than by two independent writes to the
+  // same one -- see the always_comb in section 2.
+  logic [1:0]                dbuf_push_at_w;
+  logic                      dbuf_push_at;
+  logic [1:0]                dbuf_valid_n;
+  logic [CORE_XLEN-1:0]      dbuf_pc_n  [0:1];
+  mosaic_pkg::decode_ctl_t   dbuf_ctl_n [0:1];
 
   // dispatch
   logic [4:0]                alloc_rd_w;
@@ -540,6 +549,44 @@ module mosaic_core (
   assign dbuf_push = fetch_out_valid && dbuf_room && !core_stop;
   assign fetch_out_ready = dbuf_room && !core_stop;
 
+  // The buffer's next state, one expression per slot. The valid entries are
+  // always the contiguous run `[0 .. dbuf_cnt-1]`, oldest at slot 0:
+  //
+  //   * a pop shifts every entry down by one and invalidates the slot it
+  //     vacated, unless this cycle's push lands there;
+  //   * a push lands at the tail *after* the pop, `dbuf_cnt - dbuf_take`.
+  //
+  // Writing slot 0 whenever nothing was popped -- the form this replaces --
+  // overwrites a live entry when the buffer holds exactly one entry in slot 1,
+  // which is the state a pop leaves behind: the next push then lands *in front
+  // of* an older instruction, and the two swap places in program order. That is
+  // not a scheduling freedom: the ROB allocates in the order dispatch presents
+  // macros, so the machine would retire two instructions out of program order.
+  // CASE=fabric.fixed_two_cluster reads the retirement stream back in program
+  // order, and it is what caught this.
+  always_comb begin
+    // `dbuf_cnt - dbuf_take` is 0, 1 or 2; a push is only offered when it is
+    // 0 or 1 (`dbuf_room` refuses the full buffer with no pop), so the slot is
+    // one bit and is taken from the low bit of the difference.
+    dbuf_push_at_w = dbuf_cnt - {1'b0, dbuf_take};
+    dbuf_push_at   = dbuf_push_at_w[0];
+    dbuf_valid_n[0] = dbuf_valid[0];
+    dbuf_valid_n[1] = dbuf_valid[1];
+    dbuf_pc_n    = dbuf_pc;
+    dbuf_ctl_n   = dbuf_ctl;
+    if (dbuf_take) begin
+      dbuf_valid_n[0] = dbuf_valid[1];
+      dbuf_pc_n[0]    = dbuf_pc[1];
+      dbuf_ctl_n[0]   = dbuf_ctl[1];
+      dbuf_valid_n[1] = 1'b0;
+    end
+    if (dbuf_push) begin
+      dbuf_valid_n[dbuf_push_at] = 1'b1;
+      dbuf_pc_n[dbuf_push_at]    = fetch_out_pc;
+      dbuf_ctl_n[dbuf_push_at]   = dbuf_ctl_new;
+    end
+  end
+
   always_ff @(posedge clk) begin
     if (rst) begin
       dbuf_cnt      <= 2'd0;
@@ -554,17 +601,11 @@ module mosaic_core (
         dbuf_cnt      <= 2'd0;
       end
     end else begin
-      if (dbuf_take) begin
-        dbuf_valid[0] <= dbuf_valid[1];
-        dbuf_pc[0]    <= dbuf_pc[1];
-        dbuf_ctl[0]   <= dbuf_ctl[1];
-      end
-      if (dbuf_push) begin
-        dbuf_pc[dbuf_take ? 1 : 0]    <= fetch_out_pc;
-        dbuf_ctl[dbuf_take ? 1 : 0]   <= dbuf_ctl_new;
-        dbuf_valid[dbuf_take ? 1 : 0] <= 1'b1;
-      end
-      dbuf_cnt <= dbuf_cnt + {1'b0, dbuf_push} - {1'b0, dbuf_take};
+      dbuf_valid[0] <= dbuf_valid_n[0];
+      dbuf_valid[1] <= dbuf_valid_n[1];
+      dbuf_pc       <= dbuf_pc_n;
+      dbuf_ctl      <= dbuf_ctl_n;
+      dbuf_cnt      <= dbuf_cnt + {1'b0, dbuf_push} - {1'b0, dbuf_take};
     end
   end
 

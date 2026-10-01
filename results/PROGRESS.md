@@ -1447,3 +1447,42 @@ where evidence decays:
 **Re-dispatched after the commit**: the I-023 driver (`sim/unit/tb_core.cpp` + the two-cluster
 positive control), the V-008 finish (wire the checker into `make check`, write the derivation
 report), the rename mutant round 3, and the I-026 hardening described above.
+
+---
+
+## 2026-10-01 — I-026 hardened, I-013 recorded, and round 3 caught its own vacuous pass
+
+**I-026 (banked WB / value-visible wakeup)** grew from the thinnest case in the tree to a real
+one: 52 comparisons over 54 cycles became 956 over 522, eleven phases, 194 completions, 23
+same-bank collisions, a full 0..127 generation sweep including the 127->0 wrap, and a phase
+where a consumer reads the woken `(tag, generation)` out of the elaborated register file on the
+cycle *after* its wakeup — the value-visibility claim observed instead of argued combinationally.
+Eight mutants, all rebuilt from a wiped directory, all exiting 1 with distinct named first
+failures; independently re-checked here (`SAMEBANK_DROP` exits 1 at cycle 75 with
+`offered != published`). No RTL defect was found by the new coverage, and the one limitation is
+recorded rather than smoothed: the ready table keys on the numeric generation with no
+reallocation input, so a recycled generation number on a live tag answers `written` until the
+new producer writes. That is correct under the table's literal contract and is a cross-module
+width property, not something this module can fix from its ports.
+
+**I-013 (single-width rename ownership)** is recorded on round 3's evidence: 6 of 6 claimed
+mutant rows exit 1 at the claimed cycle and signal, spot-checked here (`NO_GEN_CHECK` at cycle
+212, `free_stale: expected 1, got 0`), and the six defines that pass are *expected-inert* in
+this case because they target the two-wide path — they are caught by `rename.same_cycle_chain`.
+I-014's note now carries two things: round 3 independently confirmed all six of its mutant rows
+including the per-row check totals, and two mutants exist in the live RTL that **no package
+report claims** (`CKPT_ALLOC_LEAK`, `NO_BOUNDARY_CHECK`) — caught by the cases, documented by
+nobody. They are attributed now. Its report's section 5 base figures are stale by two phases
+(9750/9818/16 against the live 9767/9843/18) and its recorded sha256 prefixes no longer
+reproduce; that is drift to be noted, not re-pinned, and the mutant claims it rests on are the
+ones that were checked.
+
+**The process finding worth keeping.** Round 3's first pass appended short mutant tags
+(`-DX0_ALLOC`) instead of the full macro names, so every row silently ran the *shipping* build
+and passed. The `build_command.txt` stamp — written precisely so a mutant cannot masquerade as a
+rebuild — showed no `-DMOSAIC` token, the pass was discarded and the campaign re-run with the
+full names, and the whole episode is in the report. This is the third distinct way this project
+has seen a "passing" mutant mean nothing (a define that does not exist in the RTL, a define that
+does not elaborate, and now a define that never reached the compiler), and the stamp caught all
+three. The rule stands: a mutant's evidence is its build command, its binary hash, **and** its
+exit code.

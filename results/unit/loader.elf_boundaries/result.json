@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "case": "loader.elf_boundaries",
+  "verdict": "PASS",
+  "detail": "490 checks, 312 DUT cycles, 14/14 controls observed",
+  "seed": 1,
+  "max_cycles": 4000000,
+  "checks": 490,
+  "failures": 0,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-01T20:17:06Z",
+  "first_mismatch": ""
+}

@@ -1,0 +1,14 @@
+accepts-good-image 0
+magic 2
+endian 2
+truncated 2
+noload 2
+align 2
+filesz-gt-memsz 2
+overlap 2
+vaddr-overflow 2
+file-overflow 2
+dynamic 2
+entry-unmapped 2
+entry-not-executable 2
+out-of-map 2

@@ -27,7 +27,9 @@
     "I-021",
     "I-007",
     "I-009",
-    "V-008"
+    "V-008",
+    "I-026",
+    "I-013"
   ],
   "evidence": {
     "I-001": {
@@ -152,7 +154,7 @@
         "python3 tools/run_unit.py --profile p0 --case rename.single_width_ownership"
       ],
       "verdict": "PASS",
-      "notes": "Both cases PASS through the official runner; the single-width case is the pre-existing one and is evidence that a group of one behaves exactly as before. Six mutants each rebuilt, shown to differ from the shipping binary, exit 1 with a 0->1 failing-check delta; the six I-013 mutants were re-demonstrated at their documented first mismatches, so the two-wide refactor preserved the earlier evidence. A real defect was found and fixed in the file: the second commit lane's supersede test compared lane 1's tag with itself (a continuous assign reading a variable assigned in the same always_comb block sees the settled value), so a dual retire released no mapping and leaked one physical tag per two-wide retirement; it survived because the retire case never checked the rename free set. NOT verified: profile p0 only; a checkpoint presented in the same cycle as an allocation is still a known corner (assigned to the lane as a follow-up, since the integrated core takes a checkpoint per branch dispatch); journal_overflow under a two-wide group is argued rather than run.",
+      "notes": "Both cases PASS through the official runner; the single-width case is the pre-existing one and is evidence that a group of one behaves exactly as before. Six mutants each rebuilt, shown to differ from the shipping binary, exit 1 with a 0->1 failing-check delta; the six I-013 mutants were re-demonstrated at their documented first mismatches, so the two-wide refactor preserved the earlier evidence. A real defect was found and fixed in the file: the second commit lane's supersede test compared lane 1's tag with itself (a continuous assign reading a variable assigned in the same always_comb block sees the settled value), so a dual retire released no mapping and leaked one physical tag per two-wide retirement; it survived because the retire case never checked the rename free set. NOT verified: profile p0 only; a checkpoint presented in the same cycle as an allocation is still a known corner (assigned to the lane as a follow-up, since the integrated core takes a checkpoint per branch dispatch); journal_overflow under a two-wide group is argued rather than run. Round 3 of the mutant re-verification independently confirmed all 6 two-wide mutant rows (exit 1, exactly the claimed first mismatches and per-row check totals 9/13/5/9/11/11 at abort) and additionally caught two mutants in the live RTL that no package report claims: MOSAIC_RENAME_MUTANT_CKPT_ALLOC_LEAK (twowide/random:1890, a checkpoint allocation leak) and MOSAIC_RENAME_MUTANT_NO_BOUNDARY_CHECK (squash_accepted expected 0 got 1 at cycle 5831 in the twowide-ckptbad phase). Both are now covered by this case and by I-013's. Recorded drift, not a defect: the package report's section 5 base numbers (9750/9818/16 checks, 'seven two-wide phases') are stale -- two checkpoint phases were added after it was written and the live figures are 9767/9843/18 -- and its sha256 prefixes no longer reproduce because the case sources changed. The mutant claims are what the record rests on and they are confirmed; the stale base figures are noted here rather than silently re-pinned.",
       "report": "results/reports/I-014-rename2w.md"
     },
     "I-025": {
@@ -322,6 +324,28 @@
       "verdict": "PASS",
       "notes": "The architectural event interface is frozen (config/contracts/event_v1.json: schema version 1, 21 fields, 100 octets per record, kinds RETIRE/TRAP/MEM_VISIBLE) and the checker is wired into `make check` in both modes; both exit 0. 33 built-in negative controls, each one a single mutation of the interface itself, are all rejected -- the rejections name the offending field and producer rather than an aggregate count, and they cover the three-producer agreement directly: an RTL tap declaration renamed, a host record field removed, a host field widened, a codec field narrowed or reordered or dropped, a codec schema version bumped alone, and a kind table whose values disagree. The freeze is enforced at runtime too: the encoder refuses an encode whose declared version differs from the compiled schema version and the decoder rejects a differing header. Reported gaps, all explicit: no runtime encode->decode->text round trip of a live stream yet (V-010/V-013); three fields are declared pending_rtl with reasons on every run (insn_bits, pc_after, trap_epc, rule F-3); MEM_VISIBLE has no DUT-side producer yet (F-4) and the host RetireEvent must migrate to the canonical record (F-5); p0 has no cache/MSHR/MMIO event tap and no asynchronous-interrupt kind; one hart. Integration route frozen as route A (SV retire probe -> C++ canonical event -> reference adapter); route B (Difftest generator via DPI) is permitted only after the V-004/V-008 layout/timing tests and must keep the same canonical event and serialiser.",
       "report": "results/reports/V-008-events.md"
+    },
+    "I-026": {
+      "cases": [
+        "wb.same_bank_many_producers"
+      ],
+      "commands": [
+        "python3 tools/run_unit.py --profile p0 --case wb.same_bank_many_producers"
+      ],
+      "verdict": "PASS",
+      "notes": "Case PASS from a clean build: 956 per-cycle comparisons over 522 cycles, 11 phases, 194 completions, 23 same-bank collisions, a full 0..127 generation sweep including the 127->0 wrap, all four banks covered, and a phase in which a consumer reads the woken (tag, generation) out of the elaborated register file on the cycle after its wakeup -- the value-visibility claim observed rather than argued. Both models the case uses are documented rules, not the modules: rename's write rule and the ROB's identity-liveness rule are C++ models (the case compiles neither mosaic_rename.sv nor mosaic_rob.sv), and the durable value is read back through the PRF's own read ports. Eight mutants, each ifdef-asserted present exactly once, each rebuilt from a wiped build directory with a binary hash differing from the shipping one, each exiting 1 with a distinct named first failure and cycle: EARLY_WAKE (stale-result cycle 21, a PRF write for a stale result), SAMEBANK_DROP (cycle 75, offered != published), STALE_WRITES, DUP_WRITES, ROB_STALE_WRITES, WAKE_NO_WRITE, RT_TAG_ONLY, WR_CTR_PUB. No mutant passes identically. Independently re-verified here: the base passes with the reported numbers, and SAMEBANK_DROP exits 1 at cycle 75 with the reported first failure. One limitation recorded rather than smoothed over: the ready table keys on the numeric generation and has no reallocation input, so a generation number recycled onto the same tag while its entry is still live answers 'written' until the new producer writes. That is correct under the table's literal contract and is a cross-module width property (7-bit rename generation against the number of allocations a tag can live through), not something this module's ports can fix; it is in the RTL header and the report. NOT verified: p0 and seed 1 only; rob_cmp_bad_uop never driven; store-heavy mixes not stressed; dispatch's actual use of the ready table and the retire consumer of the stash are other packages.",
+      "report": "results/reports/I-026-wb.md"
+    },
+    "I-013": {
+      "cases": [
+        "rename.single_width_ownership"
+      ],
+      "commands": [
+        "python3 tools/run_unit.py --profile p0 --case rename.single_width_ownership"
+      ],
+      "verdict": "PASS",
+      "notes": "Case PASS from a clean build (5646 per-cycle comparisons over 5686 cycles, checks=9, base RESULT line byte-identical before, after and between mutant campaigns). Mutant evidence independently re-derived in round 3 of results/reports/mutant-reverification-2026-10-01.md against both rename cases: of 13 mutant defines in rtl/core/mosaic_rename.sv, 7 exit 1 in this case with exactly one failure at the claimed cycle and signal (NO_GEN_CHECK ownership:212, X0_ALLOC x0:1399, NO_FREE_RESTORE squash:1527, NO_EXHAUST_CHECK exhaustion:1678, NO_DUP_WB_GUARD ownership:14, NO_DOUBLE_FREE_CHECK ownership:171, plus CKPT_ALLOC_LEAK random:1890), and the 6 that pass are expected-inert here because five of them target the two-wide path (alloc2_req is never asserted in this single-width case) and one needs the two-wide checkpoint phase -- they are caught by rename.same_cycle_chain instead. Spot-checked here: NO_GEN_CHECK rebuilt and observed to exit 1 at cycle 212 with free_stale: expected 1, got 0. The ownership rule this case exists for is that a physical tag's free/owner state is only correct at its current generation, and that a recycled generation cannot make a stale release look live.",
+      "report": "results/reports/I-013-rename.md"
     }
   }
 }

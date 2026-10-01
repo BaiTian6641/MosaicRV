@@ -120,7 +120,20 @@ module mosaic_bringup_tb (
     output wire  [63:0] c_dbg_csr_data,
     output wire  [63:0] h_tohost_value,
     output wire         h_tohost_written,
-    output wire  [63:0] h_uart_count
+    output wire  [63:0] h_uart_count,
+    // The memory model's outstanding-request ownership.  A harness cannot see a
+    // transaction the environment started and did not finish any other way, and
+    // "no transaction may cross a reset" is a property of the environment as
+    // much as of the core.  Exposed as observation only; nothing here drives it.
+    output wire         h_if_pending,
+    output wire         h_d_pending,
+    // The core's data-port request, exposed so a harness can assert on it
+    // without a hierarchical reference.  V-009 reads these to check that the
+    // machine posts no data request while reset is asserted, which is half of
+    // "no device write during reset".
+    output wire         c_dmem_req_o,
+    output wire         c_dmem_we_o,
+    output wire  [63:0] c_dmem_addr_o
 );
 
   // --------------------------------------------------------------------------
@@ -384,6 +397,11 @@ import mosaic_pkg::*;
   assign h_tohost_value   = m_tohost_value;
   assign h_tohost_written = m_tohost_written;
   assign h_uart_count     = m_uart_count;
+  assign h_if_pending     = m_if_pending;
+  assign h_d_pending      = m_d_pending;
+  assign c_dmem_req_o     = c_dmem_req;
+  assign c_dmem_we_o      = c_dmem_we;
+  assign c_dmem_addr_o    = c_dmem_addr;
 
   // --------------------------------------------------------------------------
   // The model's one sequential process: reset, the data and fetch ports, the
@@ -463,7 +481,16 @@ import mosaic_pkg::*;
       for (zi = 0; zi < UART_WORDS; zi = zi + 1)  m_uart[zi]  <= 64'd0;
       for (zi = 0; zi < HARN_WORDS; zi = zi + 1)  m_harn[zi]  <= 64'd0;
       for (zi = 0; zi < CLINT_WORDS; zi = zi + 1) m_clint[zi] <= 64'd0;
+`ifdef MOSAIC_RESET_MUTANT_SKIP_CLEAR
+      // MUTANT (V-009 control): the RAM data array is deliberately left alone
+      // by the clear pass.  A word nobody wrote then keeps whatever the
+      // previous run -- or the host simulator's own zero initialisation --
+      // left there, which is the defect "the harness depends on C++ memory
+      // happening to be zero".  The other four regions still clear, so only
+      // the SRAM-initialisation check can see this.
+`else
       for (zi = 0; zi < RAM_WORDS; zi = zi + 1)   m_ram[zi]   <= 64'd0;
+`endif
       m_if_pending     <= 1'b0;
       m_if_data        <= 32'h00000000;
       m_if_fault       <= 1'b0;
@@ -478,13 +505,31 @@ import mosaic_pkg::*;
       h_rb_fault       <= 1'b0;
       h_rb_valid       <= 1'b0;
     end else if (h_rst) begin
+`ifdef MOSAIC_RESET_MUTANT_STALE_PENDING
+      // MUTANT (V-009 control): an outstanding transaction is not cleared by
+      // reset, so a request the environment accepted before the reset is
+      // answered after it.  "An old transaction crossed the reset."
+`else
       m_if_pending     <= 1'b0;
       m_if_data        <= 32'h00000000;
       m_if_fault       <= 1'b0;
       m_d_pending      <= 1'b0;
       m_d_data         <= 64'd0;
       m_d_fault        <= 1'b0;
+`endif
       m_tohost_written <= 1'b0;
+      // The end-of-run latch is a transaction like any other: a TOHOST store
+      // that was accepted but whose report has not yet been registered must not
+      // survive a reset.  Without this line a reset landing in the one-cycle
+      // window between the store request and `m_tohost_written` leaves the run
+      // ending itself on the first cycle after release, with no instruction
+      // having executed -- the defect V-009 exists to catch, found by the
+      // reset-during-TOHOST-store case in sim/unit/tb_reset.cpp.
+`ifdef MOSAIC_RESET_MUTANT_STALE_TOHOST
+      // MUTANT (V-009 control): the latch survives reset.
+`else
+      m_tohost_commit  <= 1'b0;
+`endif
       m_tohost_value   <= 64'd0;
       m_uart_count     <= 64'd0;
       h_rb_data        <= 64'd0;
