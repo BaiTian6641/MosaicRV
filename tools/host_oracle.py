@@ -182,20 +182,26 @@ def MULHSU(a: int, b: int) -> int:
 # --------------------------------------------------------------------------
 
 def div_rem_floor(a: int, b: int) -> tuple:
-    """DIV/REM from Python floor division over signed operands.
+    """DIV/REM from Python integer division on signed interpretations.
 
-    Python's // floors toward -infinity; RISC-V DIV truncates toward zero, so
-    the quotient is corrected when the operands have opposite signs and the
-    remainder is non-zero.  The RISC-V corner cases are handled explicitly.
+    Takes the same 64-bit patterns as div_rem_bitserial but shares no code
+    with it: here the magnitudes are divided directly by Python's //, whereas
+    div_rem_bitserial runs a 64-step restoring loop.
+
+    Python's // floors toward -infinity while RISC-V DIV truncates toward
+    zero, so the quotient is negated when the operands have opposite signs
+    rather than rounded down.  The two architecturally defined corner cases
+    are handled explicitly.
     """
     if b == 0:
         return MASK64, u64(a)                  # DIV -> -1, REM -> dividend
     if a == SIGN64 and b == MASK64:
         return SIGN64, 0                      # signed overflow
-    quotient = abs(a) // abs(b)
-    if (a < 0) != (b < 0):
+    lhs, rhs = signed(a), signed(b)
+    quotient = abs(lhs) // abs(rhs)
+    if (lhs < 0) != (rhs < 0):
         quotient = -quotient
-    remainder = a - quotient * b
+    remainder = lhs - quotient * rhs
     return u64(quotient), u64(remainder)
 
 
@@ -293,24 +299,43 @@ def p01_addsub(a: int, b: int, c: int) -> tuple:
     shamt = c & 63
     total = signed(sig0)
     sig2 = u64(total >> shamt)
-    # second derivation of the arithmetic shift: shift the magnitude and fix
-    # the sign, which is how a barrel shifter with a separate sign path works
-    if total < 0:
-        mag = u64(-total)
-        mag_shift = mag >> shamt
-        expect = u64(-mag_shift) if mag_shift else 0
-    else:
-        expect = sig0 >> shamt
-    _check(sig2 == expect, "SRA floor=%#x mag=%#x" % (sig2, expect))
+    # Second derivation of the arithmetic shift, written as an explicit
+    # zero-fill plus sign-fill instead of a Python arithmetic shift: keep the
+    # shamt low bits of a logical shift, then drop in the sign above them.
+    sign_fill = MASK64 if total < 0 else 0
+    expect = u64(((sig0 >> shamt) & (MASK64 >> shamt))
+                 | (sign_fill << (64 - shamt)))
+    _check(sig2 == expect, "SRA ashr=%#x signfill=%#x" % (sig2, expect))
 
-    select = (a < b)                     # SLTU: unsigned compare
-    sig3 = u64(a - b) if select else u64(a + b)
-    sig3 = u64(sig3 ^ sext(signed(b) & 0xFF, 8) ^ zext(b, 8))
-    # the NOT term: NOT(zero_extend(b & 0xff)) masked to 0xff
-    term = (~zext(b, 8)) & 0xFF
-    _check(sig3 == u64((u64(a - b) if select else u64(a + b)) ^ term),
-           "p01 sig3 second derivation")
-    _check(sext(sext(signed(b) & 0xFF, 8), 8) == signed(b) & 0xFF, "sext")
+    # sig3 selects one of two sums with SLTU(a, b), then folds in
+    # NOT(zero_extend(b & 0xff)) masked to a byte.
+    sum_ab = u64(a + b)
+    diff_ab = u64(a - b)
+    select = a < b                       # SLTU: unsigned compare
+    base = diff_ab if select else sum_ab
+
+    # Second derivation of the select: the firmware branches, this computes
+    # both sides and merges them with a mask built from the comparison.  The
+    # two agree only if the unsigned comparison itself is right.
+    mask = MASK64 if select else 0
+    merged = u64((diff_ab & mask) | (sum_ab & u64(~mask)))
+    _check(base == merged, "p01 select branch=%#x mask=%#x" % (base, merged))
+
+    term = u64(~zext(b, 8)) & 0xFF
+    # Second derivation of NOT from an XOR against all-ones and a second
+    # mask, rather than Python's ~ and &.
+    term_alt = u64((zext(b, 8) ^ 0xFF) ^ 0xFF00) & 0xFF
+    _check(term == term_alt, "p01 NOT term=%#x alt=%#x" % (term, term_alt))
+
+    # Sign-extension round trip: a byte carried through two truncating sign
+    # extensions must come back unchanged, which is what the firmware's
+    # zero-extend-then-NOT path relies on.
+    byte = zext(b, 8)
+    _check(zext(sext(byte, 8), 8) == byte, "p01 sext round trip")
+    _check(sext(byte, 8) == sext_masked(byte, 8),
+           "p01 sext vs mask-and-or methods")
+
+    sig3 = u64(base ^ term)
     return [sig0, sig1, sig2, sig3], []
 
 
@@ -380,11 +405,17 @@ def p06_shiftlogic(a: int, b: int, c: int) -> tuple:
     sig0 = u64(a << shamt)
     sig1 = a >> shamt
     sig2 = u64(signed(a) >> shamt)
-    # second derivation: build the shifted-out bits by hand
+    # second derivation of SRL: rebuild the shifted-out bits one at a time,
+    # which shares nothing with the mask-and-shift operator above
     manual = 0
-    for bit in range(shamt):
-        manual |= ((a >> bit) & 1) << (63 - bit)
+    for bit in range(64 - shamt):
+        manual |= ((a >> (bit + shamt)) & 1) << bit
     _check(sig1 == manual, "SRL loop=%#x mask=%#x" % (sig1, manual))
+    # and an independent sign-fill construction of SRA
+    sign_fill = MASK64 if signed(a) < 0 else 0
+    manual_sra = u64(((a >> shamt) & (MASK64 >> shamt))
+                     | (sign_fill << (64 - shamt)))
+    _check(sig2 == manual_sra, "SRA ashr=%#x signfill=%#x" % (sig2, manual_sra))
     mix = u64((a ^ b) | b | u64(~(a & b)))
     lt_ab = signed(a) < signed(b)
     lt_bc = signed(b) < signed(c)

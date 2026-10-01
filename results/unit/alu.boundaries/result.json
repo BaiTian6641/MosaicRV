@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "case": "alu.boundaries",
+  "verdict": "PASS",
+  "detail": "108560 stimulus vectors (25 hand-written invariants, seed 1); add=4895 sub=4738 sll=9855 slt=4767 sltu=4744 xor=4871 srl=10105 sra=10252 or=4732 and=4894 addw=4813 subw=4753 sllw=10288 srlw=10144 sraw=9986 passb=4723",
+  "seed": 1,
+  "max_cycles": 200000,
+  "checks": 217243,
+  "failures": 0,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-01T00:19:42Z",
+  "first_mismatch": ""
+}

@@ -20,9 +20,10 @@
 //     before the truncation, so addw(0xffffffff80000000, 1) comes out as 0 in
 //     this spelling and as 0x0000000080000000 in addw's real definition. The
 //     model truncates first: `SignExtend32(aw + bw)`.
-//   * `(uint64_t)(uint32_t)x` is NOT the W rule either -- that is zero-extension.
-//     Every W answer goes through `SignExtend32`, which sets bits 63:32 from
-//     bit 31 explicitly.
+//   * `(uint64_t)(uint32_t)x` is not the W rule either -- that is zero-extension,
+//     which is exactly what MOSAIC_ALU_MUTANT_1 injects into the RTL. Every W
+//     answer in the model goes through `SignExtend32`, which fills bits 63:32
+//     from bit 31 explicitly.
 //   * `a >> n` is not `sra`. `>>>` on a signed type is implementation-defined
 //     before C++20, so the model builds the sign fill explicitly with unsigned
 //     shifts (`ArithmeticShiftRight*`); there is no signed right shift anywhere
@@ -35,7 +36,7 @@
 // Coverage is asserted, not assumed: a run that stops reaching an op, stops
 // reaching a zero result, or stops reaching the operand/shift shapes that
 // distinguish the five mutants fails instead of quietly passing over a shorter
-// path. See `ReportCoverage`.
+// path. See `Bench::ReportCoverage`.
 
 #include "sim_common.h"
 #include "verilated.h"
@@ -44,7 +45,6 @@
 #include <cstdint>
 #include <cstdio>
 #include <string>
-#include <vector>
 
 namespace {
 
@@ -77,20 +77,18 @@ const char* const kOpName[kOpCount] = {
     "or",  "and", "addw", "subw", "sllw", "srlw", "sraw", "passb",
 };
 
-// The six ops whose `b` is a shift amount. They get the dedicated sweep.
-const bool kIsShiftOp[kOpCount] = {
-    false, false, true, false, false, false, true, true,
-    false, false, false, false, true, true, true, false,
-};
+// The six ops whose `b` is a shift amount. They get the dedicated sweep, because
+// they are the ops with a masking rule of their own.
+const uint8_t kShiftOps[] = {kSll, kSrl, kSra, kSllw, kSrlw, kSraw};
+constexpr size_t kShiftOpCount = sizeof(kShiftOps) / sizeof(kShiftOps[0]);
 
-constexpr int kResetCyclesUnused = 0;  // the DUT has no reset; see the report
+constexpr uint64_t kSignBit64 = 0x8000000000000000ull;
 
 // Boundary operands. Every entry is a point where one of the sixteen ops, or the
 // distinction between a signed and an unsigned reading of it, changes answer:
-// zero and one, the all-ones mask, -2, INT64_MIN/INT64_MAX, the values straddling
-// bit 31 with all three possible sign extensions of the 32-bit boundary values,
-// the two 16-bit halves, alternating bit patterns, and pairs that differ only
-// above bit 32.
+// zero and the small integers, the all-ones mask, -2, INT64_MIN/INT64_MAX, the
+// values straddling bit 31 in all three possible extensions, the two 16-bit
+// halves, alternating bit patterns, and pairs that differ only above bit 32.
 const uint64_t kValues[] = {
     0x0000000000000000ull,  // 0
     0x0000000000000001ull,  // 1
@@ -110,7 +108,7 @@ const uint64_t kValues[] = {
     0x00000000FFFF0000ull,  // 16-bit mask, high half
     0xAAAAAAAAAAAAAAAAull,  // alternating bits, even
     0x5555555555555555ull,  // alternating bits, odd
-    0x0000000100000000ull,  // differs from 0x00000000FFFFFFFF00000000 in bit 32 only
+    0x0000000100000000ull,  // differs from 0x00000000FFFFFFFF in bit 32 only
     0x0000000100000001ull,  // and the same plus a one in bit 0
 };
 constexpr size_t kValueCount = sizeof(kValues) / sizeof(kValues[0]);
@@ -125,15 +123,10 @@ const uint64_t kShiftAmounts[] = {
 };
 constexpr size_t kShiftCount = sizeof(kShiftAmounts) / sizeof(kShiftAmounts[0]);
 
-// Total stimulus: the 2x2 operand matrix over all sixteen ops, the shift sweep,
-// a short hand-written invariant list, and the random campaign that fills the
-// rest of the --max-cycles budget.
 constexpr uint64_t kRandomVectors = 100000;
 constexpr uint32_t kMaxFailures = 8;  // stop early so a mutant log stays readable
 
-constexpr uint64_t kSignBit64 = 0x8000000000000000ull;
-
-// --------------------------------------------------------------- reference model
+// ------------------------------------------------------------ reference model
 
 // Sign-extend a 32-bit W answer into 64 bits. Written out bit by bit because the
 // one-character spellings of this -- a cast through int32_t, a cast through
@@ -172,9 +165,9 @@ bool SignedLessByBias(uint64_t a, uint64_t b) {
 }
 
 uint64_t ReferenceAlu(uint8_t op, uint64_t a, uint64_t b) {
-  const uint64_t ua = a;                       // unsigned reading
+  const uint64_t ua = a;                         // the unsigned reading
   const uint64_t ub = b;
-  const uint32_t aw = static_cast<uint32_t>(a);  // W readings
+  const uint32_t aw = static_cast<uint32_t>(a);  // the W readings
   const uint32_t bw = static_cast<uint32_t>(b);
 
   switch (op) {
@@ -183,12 +176,12 @@ uint64_t ReferenceAlu(uint8_t op, uint64_t a, uint64_t b) {
     case kSub:
       return ua - ub;
     case kSll:
-      // RV64 masks the shift amount to 6 bits; shift 64 is a shift by 0.
+      // RV64 masks the shift amount to 6 bits: a shift of 64 is a shift by 0.
       return ua << (ub & 63);
     case kSlt:
       return SignedLess(ua, ub) ? 1ull : 0ull;
     case kSltu:
-      // Unsigned: 0xffff... is the largest value, so -1 < 1 is false.
+      // Unsigned: 0xffff... is the largest value there is, so -1 < 1 is false.
       return (ua < ub) ? 1ull : 0ull;
     case kXor:
       return ua ^ ub;
@@ -206,12 +199,13 @@ uint64_t ReferenceAlu(uint8_t op, uint64_t a, uint64_t b) {
     case kSubw:
       return SignExtend32(aw - bw);
     case kSllw:
-      // RV64 W shifts mask to 5 bits: shift 32 is a shift by 0, not 0.
+      // RV64 W shifts mask to 5 bits: a shift of 32 is a shift by 0, not 0.
       return SignExtend32(aw << (bw & 31));
     case kSrlw:
       return SignExtend32(aw >> (bw & 31));
     case kSraw:
-      return SignExtend32(ArithmeticShiftRight32(aw, static_cast<unsigned>(bw & 31)));
+      return SignExtend32(
+          ArithmeticShiftRight32(aw, static_cast<unsigned>(bw & 31)));
     case kPassb:
       return ub;
     default:
@@ -220,7 +214,7 @@ uint64_t ReferenceAlu(uint8_t op, uint64_t a, uint64_t b) {
   return 0xDEADBEEFDEADBEEFull;  // unreachable: the op field is 4 bits wide
 }
 
-// ------------------------------------------------------------------- the bench
+// ------------------------------------------------------------------ the bench
 
 class Bench {
  public:
@@ -228,7 +222,8 @@ class Bench {
         Vmosaic_alu_tb* top)
       : options_(options), rep_(reporter), top_(top) {}
 
-  // One stimulus vector. The DUT is combinational, so a single eval() settles it.
+  // One stimulus vector against the model. The DUT is combinational, so a single
+  // eval() settles it and there is nothing to wait for.
   void Apply(uint64_t a, uint64_t b, uint8_t op, const char* phase) {
     if (halted_) return;
     top_->a = a;
@@ -245,7 +240,6 @@ class Bench {
     ++per_op_[op];
     if (want_result == 0) {
       ++zero_result_ops_[op];
-      if (a != 0) ++zero_from_nonzero_a_[op];
     } else {
       ++nonzero_result_ops_[op];
     }
@@ -253,26 +247,26 @@ class Bench {
     NoteShape(op, a, b);
 
     char where[192];
-    std::snprintf(where, sizeof(where),
-                  "%s %s(a=%s, b=%s) result", phase, kOpName[op],
-                  mosaic::Hex(a).c_str(), mosaic::Hex(b).c_str());
+    std::snprintf(where, sizeof(where), "%s %s(a=%s, b=%s) result", phase,
+                  kOpName[op], mosaic::Hex(a).c_str(), mosaic::Hex(b).c_str());
     if (got_result != want_result) {
       rep_->Mismatch(where, mosaic::Hex(want_result), mosaic::Hex(got_result));
-      Fail(std::string("result wrong: ") + where);
+      Fail(where);
     }
     rep_->Check(got_result == want_result, where);
 
-    std::snprintf(where, sizeof(where), "%s %s(a=%s, b=%s) zero", phase,
+    std::snprintf(where, sizeof(where), "%s %s(a=%s, b=%s) zero flag", phase,
                   kOpName[op], mosaic::Hex(a).c_str(), mosaic::Hex(b).c_str());
     if (got_zero != want_zero) {
       rep_->Mismatch(where, want_zero ? "1" : "0", got_zero ? "1" : "0");
-      Fail(std::string("zero flag wrong: ") + where);
+      Fail(where);
     }
     rep_->Check(got_zero == want_zero, where);
   }
 
   // A hand-computed expectation, checked against the RTL directly rather than
-  // through the model, so a shared mistake in the model cannot hide here.
+  // through the model, so a shared mistake in the model cannot make the two
+  // agree with each other for the wrong reason.
   void Expect(uint64_t a, uint64_t b, uint8_t op, uint64_t want_result,
               bool want_zero, const char* what) {
     top_->a = a;
@@ -286,45 +280,39 @@ class Bench {
       rep_->Mismatch(what, mosaic::Hex(want_result), mosaic::Hex(got_result));
       Fail(what);
     }
-    rep_->Check(got_result == want_result, std::string(what) + " [result]");
+    rep_->Check(got_result == want_result, std::string(what) + ": result");
     if (got_zero != want_zero) {
       rep_->Mismatch(what, want_zero ? "zero=1" : "zero=0",
                      got_zero ? "zero=1" : "zero=0");
       Fail(what);
     }
-    rep_->Check(got_zero == want_zero, std::string(what) + " [zero]");
+    rep_->Check(got_zero == want_zero, std::string(what) + ": zero flag");
     ++handwritten_;
   }
 
-  // Cross-check the reference against a second formulation of its only
-  // implementation-defined step, so a pathological host cannot quietly change
-  // what `slt` means here.
+  // Cross-check the reference against a second formulation of its one
+  // implementation-defined step, and prove every op is reachable through the
+  // switch rather than falling through to the unreachable sentinel.
   void CheckModelSelfConsistency() {
-    const uint64_t probes[] = {
-        0x0000000000000000ull, 0x0000000000000001ull, 0xFFFFFFFFFFFFFFFFull,
-        0x8000000000000000ull, 0x7FFFFFFFFFFFFFFFull, 0x0000000080000000ull,
-        0xFFFFFFFF80000000ull, 0x000000007FFFFFFFull, 0xAAAAAAAAAAAAAAAAull,
-        0x5555555555555555ull, 0x00000000FFFFFFFFull, 0x0000000100000000ull,
-    };
     bool consistent = true;
-    for (size_t i = 0; i < sizeof(probes) / sizeof(probes[0]); ++i) {
-      for (size_t j = 0; j < sizeof(probes) / sizeof(probes[0]); ++j) {
-        if (SignedLess(probes[i], probes[j]) != SignedLessByBias(probes[i], probes[j])) {
+    for (size_t i = 0; i < kValueCount; ++i) {
+      for (size_t j = 0; j < kValueCount; ++j) {
+        if (SignedLess(kValues[i], kValues[j]) !=
+            SignedLessByBias(kValues[i], kValues[j])) {
           consistent = false;
           rep_->Mismatch("slt reference cross-check",
-                         "same answer signed and unsigned-biased",
-                         mosaic::Hex(probes[i]) + " vs " + mosaic::Hex(probes[j]));
+                         "the same answer signed and unsigned-biased",
+                         mosaic::Hex(kValues[i]) + " vs " + mosaic::Hex(kValues[j]));
         }
       }
     }
-    // Every op must be reachable through the switch: a dropped case would fall
-    // through to the unreachable sentinel above.
     for (uint8_t op = 0; op < kOpCount; ++op) {
-      if (ReferenceAlu(op, 0x0123456789ABCDEFull, 0x1111111111111111ull) ==
-          0xDEADBEEFDEADBEEFull) {
+      const uint64_t probe = ReferenceAlu(op, 0x0123456789ABCDEFull,
+                                         0x1111111111111111ull);
+      if (probe == 0xDEADBEEFDEADBEEFull) {
         consistent = false;
         rep_->Mismatch("reference model", "every op implemented",
-                       std::string(kOpName[op]) + " falls through");
+                       std::string(kOpName[op]) + " falls through to the sentinel");
       }
     }
     rep_->Check(consistent, "reference model cross-checks against itself");
@@ -334,28 +322,35 @@ class Bench {
     for (uint8_t op = 0; op < kOpCount; ++op) {
       rep_->Check(per_op_[op] > 0,
                   std::string("coverage: op ") + kOpName[op] + " was exercised");
-      rep_->Check(zero_result_ops_[op] > 0,
-                  std::string("coverage: op ") + kOpName[op] + " produced a zero result");
+      rep_->Check(zero_result_ops_[op] > 0, std::string("coverage: op ") +
+                                                kOpName[op] +
+                                                " produced a zero result");
       rep_->Check(nonzero_result_ops_[op] > 0,
                   std::string("coverage: op ") + kOpName[op] +
                       " produced a non-zero result");
-      rep_->Check(both_zero_ops_[op] > 0,
-                  std::string("coverage: op ") + kOpName[op] +
-                      " was seen at a=b=0");
+      rep_->Check(both_zero_ops_[op] > 0, std::string("coverage: op ") +
+                                              kOpName[op] +
+                                              " was seen at a=b=0");
     }
 
-    // The specific operand shapes that separate the five negative controls.
-    // If one of these drops out of the stimulus the case fails, because a run
-    // that no longer distinguishes signed from unsigned, 5-bit from 6-bit shift
+    // The operand shapes that separate the five negative controls. If one of
+    // these drops out of the stimulus the case fails, because a run that no
+    // longer distinguishes signed from unsigned, 5-bit from 6-bit shift
     // masking, or arithmetic from logical shift is no longer testing anything.
-    rep_->Check(saw_slt_negative_, "coverage: slt saw a negative against a small positive");
-    rep_->Check(saw_sltu_negative_, "coverage: sltu saw the same pair");
-    rep_->Check(saw_sra_negative_, "coverage: sra saw an operand with bit 63 set");
-    rep_->Check(saw_sllw_amount_32_, "coverage: sllw saw a shift amount of 32");
-    rep_->Check(saw_sll_amount_64_, "coverage: sll saw a shift amount of 64");
-    rep_->Check(saw_addw_sign_, "coverage: addw produced a result with bit 31 set");
-    rep_->Check(saw_sraw_sign_, "coverage: sraw shifted an operand with bit 31 set");
-    rep_->Check(saw_zero_from_nonzero_a_, "coverage: some op produced zero from a non-zero a");
+    rep_->Check(saw_slt_negative_,
+                "coverage: slt saw -1 against 1");
+    rep_->Check(saw_sltu_negative_,
+                "coverage: sltu saw -1 against 1");
+    rep_->Check(saw_sra_negative_,
+                "coverage: sra saw an operand with bit 63 set");
+    rep_->Check(saw_sllw_amount_32_,
+                "coverage: sllw saw a shift amount that masks to 32");
+    rep_->Check(saw_addw_sign_,
+                "coverage: addw produced a sign-extended negative word result");
+    rep_->Check(saw_sraw_sign_,
+                "coverage: sraw shifted an operand with bit 31 set");
+    rep_->Check(saw_zero_from_nonzero_a_,
+                "coverage: some op produced zero from a non-zero a");
     rep_->Check(vectors_ > 0, "coverage: stimulus was applied");
   }
 
@@ -366,11 +361,10 @@ class Bench {
   bool out_of_budget() const { return vectors_ >= options_.max_cycles; }
 
   std::string CoverageSummary() const {
-    std::string text = "ops=";
+    std::string text;
     for (uint8_t op = 0; op < kOpCount; ++op) {
-      if (op != 0) text += "/";
-      text += kOpName[op];
-      text += ":" + std::to_string(per_op_[op]);
+      if (op != 0) text += " ";
+      text += std::string(kOpName[op]) + "=" + std::to_string(per_op_[op]);
     }
     return text;
   }
@@ -381,23 +375,26 @@ class Bench {
     if (failures_ >= kMaxFailures && !halted_) {
       halted_ = true;
       std::fprintf(stderr,
-                   "ABORT: %u checks failed; stopping to keep the log readable\n",
-                   failures_);
+                   "ABORT: %u checks failed (last: %s); stopping to keep the "
+                   "log readable\n",
+                   failures_, what.c_str());
     }
   }
 
   void NoteShape(uint8_t op, uint64_t a, uint64_t b) {
+    const uint64_t result = ReferenceAlu(op, a, b);
     if (op == kSlt && a == 0xFFFFFFFFFFFFFFFFull && b == 1) saw_slt_negative_ = true;
-    if (op == kSltu && a == 0xFFFFFFFFFFFFFFFFull && b == 1) saw_sltu_negative_ = true;
+    if (op == kSltu && a == 0xFFFFFFFFFFFFFFFFull && b == 1) {
+      saw_sltu_negative_ = true;
+    }
     if (op == kSra && (a >> 63) != 0) saw_sra_negative_ = true;
     if (op == kSllw && (b & 63) == 32) saw_sllw_amount_32_ = true;
     if (op == kSll && (b & 63) == 0 && b != 0) saw_sll_amount_64_ = true;
-    if (op == kAddw && (ReferenceAlu(op, a, b) & 0xFFFFFFFF80000000ull) ==
-                          0xFFFFFFFF80000000ull) {
+    if (op == kAddw && (result & 0xFFFFFFFF80000000ull) == 0xFFFFFFFF80000000ull) {
       saw_addw_sign_ = true;
     }
     if (op == kSraw && (a & 0x80000000ull) != 0) saw_sraw_sign_ = true;
-    if (ReferenceAlu(op, a, b) == 0 && a != 0) saw_zero_from_nonzero_a_ = true;
+    if (result == 0 && a != 0) saw_zero_from_nonzero_a_ = true;
   }
 
   mosaic::Options options_;
@@ -413,7 +410,6 @@ class Bench {
   uint32_t zero_result_ops_[kOpCount] = {};
   uint32_t nonzero_result_ops_[kOpCount] = {};
   uint32_t both_zero_ops_[kOpCount] = {};
-  uint32_t zero_from_nonzero_a_[kOpCount] = {};
 
   bool saw_slt_negative_ = false;
   bool saw_sltu_negative_ = false;
@@ -443,58 +439,52 @@ int main(int argc, char** argv) {
   Vmosaic_alu_tb* top = new Vmosaic_alu_tb;
   Bench bench(opt, &rep, top);
 
-  (void)kResetCyclesUnused;
-
   // ---- the reference model agrees with itself -------------------------------
   bench.CheckModelSelfConsistency();
 
   // ---- hand-written invariants, straight from the RV64I pseudo-code ----------
-  // These do not go through the model at all, so a shared mistake in ReferenceAlu
-  // cannot make them agree with the RTL for the wrong reason.
+  // These do not go through the model at all.
   {
-    const uint64_t minus_one = 0xFFFFFFFFFFFFFFFFull;
-    bench.Expect(0, 0, kAdd, 0, true, "add(0,0) == 0 and zero is set");
-    bench.Expect(1, minus_one, kAdd, 0, true,
-                 "add(1,-1) == 0 while a != 0");
+    const uint64_t kMinusOne = 0xFFFFFFFFFFFFFFFFull;
+    bench.Expect(0, 0, kAdd, 0, true, "add(0,0) is zero and sets zero");
+    bench.Expect(1, kMinusOne, kAdd, 0, true, "add(1,-1) is zero while a != 0");
     bench.Expect(0x7FFFFFFFFFFFFFFFull, 1, kAdd, 0x8000000000000000ull, false,
                  "add(INT64_MAX,1) wraps to INT64_MIN");
-    bench.Expect(0, 1, kSub, minus_one, false, "sub(0,1) == -1");
-    bench.Expect(minus_one, 1, kSlt, 1, false, "slt(-1,1) == 1, signed");
-    bench.Expect(minus_one, 1, kSltu, 0, true,
-                 "sltu(-1,1) == 0, -1 is the largest unsigned value");
-    bench.Expect(0x8000000000000000ull, 1, kSlt, 1, false,
-                 "slt(INT64_MIN,1) == 1");
+    bench.Expect(0, 1, kSub, kMinusOne, false, "sub(0,1) is -1");
+    bench.Expect(kMinusOne, 1, kSlt, 1, false, "slt(-1,1) is 1, signed");
+    bench.Expect(kMinusOne, 1, kSltu, 0, true,
+                 "sltu(-1,1) is 0, -1 is the largest unsigned value");
+    bench.Expect(0x8000000000000000ull, 1, kSlt, 1, false, "slt(INT64_MIN,1) is 1");
     bench.Expect(0x8000000000000000ull, 1, kSltu, 0, true,
-                 "sltu(INT64_MIN,1) == 0");
+                 "sltu(INT64_MIN,1) is 0");
     bench.Expect(0x8000000000000000ull, 1, kSra, 0xC000000000000000ull, false,
                  "sra(INT64_MIN,1) replicates the sign bit");
     bench.Expect(0x8000000000000000ull, 1, kSrl, 0x4000000000000000ull, false,
                  "srl(INT64_MIN,1) shifts a zero in");
-    bench.Expect(0x123456789ABCDEF0ull, 64, kSll, 0x123456789ABCDEF0ull, false,
+    bench.Expect(0x123456789ABCDEF1ull, 64, kSll, 0x123456789ABCDEF1ull, false,
                  "sll by 64 is a shift by 0");
-    bench.Expect(0x123456789ABCDEF0ull, 0xFFFFFFFFFFFFFFFFull, kSll,
-                 0x123456789ABCDEF0ull, false,
-                 "sll by the all-ones mask is a shift by 63");
-    bench.Expect(0xFFFFFFFFFFFFFFFFull, 0x80000000ull, kSll,
-                 0x8000000000000000ull, false, "sll ignores the shift bits above 5");
+    bench.Expect(0x123456789ABCDEF1ull, kMinusOne, kSll, 0x8000000000000000ull,
+                 false, "sll by the all-ones mask is a shift by 63");
+    bench.Expect(kMinusOne, 0x0000000080000020ull, kSll, 0xFFFFFFFF00000000ull,
+                 false, "sll masks the shift amount to six bits, ignoring bit 31");
     bench.Expect(0x000000007FFFFFFFull, 1, kAddw, 0xFFFFFFFF80000000ull, false,
                  "addw sign-extends its 32-bit answer");
     bench.Expect(0xFFFFFFFF80000000ull, 0, kAddw, 0xFFFFFFFF80000000ull, false,
                  "addw ignores the bits above bit 31 of its operands");
-    bench.Expect(0xFFFFFFFFFFFFFFFFull, 1, kSubw, 0xFFFFFFFFFFFFFFFEull, false,
+    bench.Expect(kMinusOne, 1, kSubw, 0xFFFFFFFFFFFFFFFEull, false,
                  "subw wraps at 32 bits and sign-extends");
-    bench.Expect(0xFFFFFFFFFFFFFFFFull, 32, kSllw, 0xFFFFFFFFFFFFFFFFull, false,
-                 "sllw by 32 is a shift by 0");
-    bench.Expect(0xFFFFFFFFFFFFFFFFull, 0xFFFFFFFFFFFFFFFFull, kSllw,
-                 0xFFFFFFFFFFFFFFFFull, false, "sllw by the all-ones mask is a shift by 31");
+    bench.Expect(kMinusOne, 32, kSllw, kMinusOne, false,
+                 "sllw by 32 is a shift by 0, not a shift to zero");
+    bench.Expect(kMinusOne, kMinusOne, kSllw, 0xFFFFFFFF80000000ull, false,
+                 "sllw by the all-ones mask is a shift by 31");
     bench.Expect(0xFFFFFFFF80000000ull, 1, kSraw, 0xFFFFFFFFC0000000ull, false,
                  "sraw replicates bit 31 of its operand");
-    bench.Expect(0xFFFFFFFF80000000ull, 1, kSrlw, 0x000000007FFFFFC0ull, false,
+    bench.Expect(0xFFFFFFFF80000000ull, 1, kSrlw, 0x0000000040000000ull, false,
                  "srlw shifts a zero in above bit 31");
     bench.Expect(0xFFFFFFFF80000000ull, 1, kAddw, 0xFFFFFFFF80000001ull, false,
                  "addw of a sign-extended operand ignores the upper bits");
     bench.Expect(0x0F0F0F0F0F0F0F0Full, 0xF0F0F0F0F0F0F0F0ull, kOr,
-                 0xFFFFFFFFFFFFFFFFull, false, "or saturates to the all-ones mask");
+                 0xFFFFFFFFFFFFFFFFull, false, "or of complementary patterns");
     bench.Expect(0x0F0F0F0F0F0F0F0Full, 0xF0F0F0F0F0F0F0F0ull, kAnd, 0, true,
                  "and of complementary patterns is zero");
     bench.Expect(0x0F0F0F0F0F0F0F0Full, 0xF0F0F0F0F0F0F0F0ull, kXor,
@@ -506,7 +496,8 @@ int main(int argc, char** argv) {
   // ---- the full 2x2 operand matrix, every op -------------------------------
   for (uint8_t op = 0; op < kOpCount && !bench.halted() && !bench.out_of_budget();
        ++op) {
-    for (size_t i = 0; i < kValueCount && !bench.halted() && !bench.out_of_budget();
+    for (size_t i = 0; i < kValueCount && !bench.halted() &&
+                      !bench.out_of_budget();
          ++i) {
       for (size_t j = 0; j < kValueCount && !bench.halted() &&
                         !bench.out_of_budget();
@@ -519,57 +510,64 @@ int main(int argc, char** argv) {
   // ---- the shift-amount sweep ----------------------------------------------
   // Every boundary operand as the shifted value against every shift amount,
   // which is where the 5-bit and 6-bit masking rules separate.
-  for (uint8_t op = 0; op < kOpCount && !bench.halted() && !bench.out_of_budget();
-       ++op) {
-    if (!kIsShiftOp[op]) continue;
-    for (size_t i = 0; i < kValueCount && !bench.halted() && !bench.out_of_budget();
+  for (size_t s = 0; s < kShiftOpCount && !bench.halted() && !bench.out_of_budget();
+       ++s) {
+    const uint8_t op = kShiftOps[s];
+    for (size_t i = 0; i < kValueCount && !bench.halted() &&
+                      !bench.out_of_budget();
          ++i) {
-      for (size_t s = 0; s < kShiftCount && !bench.halted() &&
+      for (size_t k = 0; k < kShiftCount && !bench.halted() &&
                         !bench.out_of_budget();
-           ++s) {
-        bench.Apply(kValues[i], kShiftAmounts[s], op, "shift-sweep");
-        // ...and the operand order the other way round, so a shift amount in
-        // `a` cannot slip past an implementation that only looks at one side.
-        bench.Apply(kShiftAmounts[s], kValues[i], op, "shift-sweep-rev");
+           ++k) {
+        bench.Apply(kValues[i], kShiftAmounts[k], op, "shift-sweep");
+        // ...and the operand order the other way round, so an implementation
+        // that only looks at one side of the ALU cannot slip past.
+        bench.Apply(kShiftAmounts[k], kValues[i], op, "shift-sweep-rev");
       }
     }
   }
 
   // ---- seeded random campaign over full-width operands ----------------------
   mosaic::Rng rng(opt.seed);
-  for (uint64_t n = 0; n < kRandomVectors && !bench.halted() &&
-                       !bench.out_of_budget();
-       ++n) {
+  for (uint64_t n = 0;
+       n < kRandomVectors && !bench.halted() && !bench.out_of_budget(); ++n) {
     uint64_t a = rng.Next();
     uint64_t b = rng.Next();
     uint8_t op = static_cast<uint8_t>(rng.Below(kOpCount));
 
-    // Bias a third of the vectors back onto the shapes that matter: a boundary
-    // operand on one side, or a shift amount on the other. Uniform noise alone
-    // almost never produces b == 32 or an all-ones shift.
+    // Bias half the vectors onto the shapes that matter. Uniform noise almost
+    // never produces b == 32, an all-ones shift amount, or two operands that
+    // differ only above bit 32.
     const uint32_t shape = rng.Below(100);
-    if (shape < 20) {
+    if (shape < 15) {
       a = kValues[rng.Below(static_cast<uint32_t>(kValueCount))];
-    } else if (shape < 40) {
+    } else if (shape < 30) {
       b = kValues[rng.Below(static_cast<uint32_t>(kValueCount))];
-    } else if (shape < 70) {
+    } else if (shape < 45) {
       // A small b, which is what a real shift amount looks like.
       b = rng.Below(256);
-      op = static_cast<uint8_t>(1 * kSll + rng.Below(6));  // one of the six shifts
-    } else if (shape < 80) {
-      // A b whose bits are all set above bit 5, to separate the masking rules.
+      op = kShiftOps[rng.Below(static_cast<uint32_t>(kShiftOpCount))];
+    } else if (shape < 60) {
+      // A b whose bits are all set above bit 5, which separates the 5-bit and
+      // 6-bit masking rules from each other.
       b = 0xFFFFFFFFFFFFFFC0ull | rng.Below(64);
-      op = static_cast<uint8_t>(1 * kSll + rng.Below(6));
-    } else if (shape < 90) {
+      op = kShiftOps[rng.Below(static_cast<uint32_t>(kShiftOpCount))];
+    } else if (shape < 75) {
       // Operands that differ only above bit 32, where a W form must not see the
       // difference and a 64-bit form must.
       a = 0x0000000100000000ull | rng.Below(8);
       b = 0x0000000200000000ull | rng.Below(8);
-    } else if (shape < 95) {
-      // Full-width but low-entropy: mostly zeros or mostly ones.
+    } else if (shape < 85) {
+      // Full width but low entropy: mostly zeros, or mostly ones.
       const uint64_t fill = rng.Chance(50) ? 0ull : ~0ull;
       a = fill & rng.Next();
       b = rng.Next() & rng.Next();
+    } else if (shape < 95) {
+      // Sign-crossing pairs: the two operands differ in sign but not in
+      // magnitude, which is where a signed/unsigned confusion shows up.
+      const uint64_t low = rng.Next() & 0xFFFFFFFFull;
+      a = low | (rng.Chance(50) ? 0xFFFFFFFF00000000ull : 0ull);
+      b = low | (rng.Chance(50) ? 0xFFFFFFFF00000000ull : 0ull);
     }
 
     bench.Apply(a, b, op, "random");
@@ -580,14 +578,17 @@ int main(int argc, char** argv) {
   delete top;
 
   if (bench.failures() > 0) {
-    std::string detail = std::to_string(bench.failures()) + " failed checks over " +
-                         std::to_string(bench.vectors()) + " vectors";
+    const std::string detail = std::to_string(bench.failures()) +
+                               " failed checks over " +
+                               std::to_string(bench.vectors()) + " vectors";
     return rep.Finish("FAIL", detail);
   }
 
-  std::string detail = std::to_string(bench.vectors()) + " stimulus vectors (" +
-                       std::to_string(bench.handwritten()) +
-                       " hand-written invariants, seed " +
-                       std::to_string(opt.seed) + "), " + bench.CoverageSummary();
+  const std::string detail = std::to_string(bench.vectors()) +
+                             " stimulus vectors (" +
+                             std::to_string(bench.handwritten()) +
+                             " hand-written invariants, seed " +
+                             std::to_string(opt.seed) + "); " +
+                             bench.CoverageSummary();
   return rep.Finish("PASS", detail);
 }

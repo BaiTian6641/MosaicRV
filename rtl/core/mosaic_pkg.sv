@@ -12,12 +12,6 @@
 
 package mosaic_pkg;
 
-  // ---------------------------------------------------------------- geometry
-  // XLEN is fixed at 64 for every profile this project builds; it is a parameter
-  // of the module that needs it, never a global, so a narrower build cannot
-  // silently truncate a 64-bit value.
-  localparam int unsigned MOSAIC_XLEN = 64;
-
   // ------------------------------------------------------------- opcode map
   // RV64IM only in p0. Compressed instructions are decoded by I-041 in p1 and
   // will arrive as a separate front end; nothing here pretends to know them.

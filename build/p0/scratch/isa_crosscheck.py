@@ -78,14 +78,14 @@ def decode(word, addr):
     r = ABI.__getitem__
 
     if op == 0x37:
-        return "lui %s,0x%x" % (r(rd), (word >> 12) & 0xFFFFF)
+        return "lui,%s,0x%x" % (r(rd), (word >> 12) & 0xFFFFF)
     if op == 0x17:
-        return "auipc %s,0x%x" % (r(rd), (word >> 12) & 0xFFFFF)
+        return "auipc,%s,0x%x" % (r(rd), (word >> 12) & 0xFFFFF)
     if op == 0x6F:
-        return "jal %s,%x" % (r(rd), (addr + imm_j(word)) & (2 ** 64 - 1))
+        return "jal,%s,%x" % (r(rd), (addr + imm_j(word)) & (2 ** 64 - 1))
     if op == 0x67:
         assert f3 == 0, "jalr funct3=%d" % f3
-        return "jalr %s,%d(%s)" % (r(rd), imm_i(word), r(rs1))
+        return "jalr,%s,%d(%s)" % (r(rd), imm_i(word), r(rs1))
     if op == 0x63:
         return "%s,%s,%s,%x" % (F3_BRANCH[f3], r(rs1), r(rs2),
                                 (addr + imm_b(word)) & (2 ** 64 - 1))
@@ -99,7 +99,7 @@ def decode(word, addr):
             return "fence.i"
         assert f3 == 0, "misc-mem funct3=%d" % f3
         fm, pred, succ = (word >> 28) & 0xF, (word >> 24) & 0xF, (word >> 20) & 0xF
-        return "fence " + "".join(c for m, c in PRED_SUCC if pred & m) + "," + \
+        return "fence," + "".join(c for m, c in PRED_SUCC if pred & m) + "," + \
             "".join(c for m, c in PRED_SUCC if succ & m)
     if op == 0x13:
         if f3 in F3_I:
@@ -117,7 +117,7 @@ def decode(word, addr):
         raise AssertionError("op-imm funct3=%d" % f3)
     if op == 0x1B:
         if f3 == 0:
-            return "addiw %s,%s,%d" % (r(rd), r(rs1), imm_i(word))
+            return "addiw,%s,%s,%d" % (r(rd), r(rs1), imm_i(word))
         if f3 in (1, 5):
             top5 = (word >> 25) & 0x7F  # RV64 word shifts: shamt is 5 bits,
             # so the legality field really is insn[31:25] here

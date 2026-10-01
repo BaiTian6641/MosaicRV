@@ -102,12 +102,12 @@ manifest: check-valid-profile $(GEN_CFG) $(GEN_ID)
 
 # ---------------------------------------------------------------------- lint
 
+# Lints every RTL file against its own module. Verilator needs a top module and
+# this design has no single one yet: it is assembled leaf by leaf, so a file is
+# elaborated standalone with only the packages it actually imports.
 lint: check-valid-profile manifest
-	@if [ -z "$(RTL_SRCS)" ]; then \
-	  echo "lint: no RTL sources yet; nothing to check" >&2; exit 1; \
-	fi
-	$(VERILATOR) $(VERILATOR_LINT_FLAGS) --top-module mosaic_top \
-	  -I$(BUILD_DIR)/rtl -Irtl/common -Irtl/core $(RTL_SRCS)
+	$(PYTHON) tools/lint_rtl.py --profile $(PROFILE)
+	$(PYTHON) tools/lint_rtl.py --profile $(PROFILE) --self-test
 
 # slang parses and type-checks the SystemVerilog AST directly, which catches
 # elaboration-time type errors Verilator's lint mode reports differently. It is a
