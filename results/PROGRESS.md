@@ -559,3 +559,38 @@ asserted.
 **V-002 remains open.** This establishes which model *may* adjudicate which program.
 It does not run a single one of those comparisons. The next step is the actual
 per-model differential, which is where the real evidence is.
+
+---
+
+## 2026-10-01 — Stage 1 begins
+
+Stage 0 is 11 of 239 work packages. Stage 1 opens with **I-021**, the branch
+predictor, which is the first genuine microarchitecture after the bring-up
+reference path and the first component whose value is a *hint* rather than an
+architectural fact.
+
+That distinction is why the task card is explicit about which outputs are
+advisory: a wrong prediction must never change architectural behaviour, so the
+predictor returns a target fetch may use speculatively, and the core must be able
+to squash it. Every predictor that "works" in isolation and cannot be corrected
+downstream is worse than one that never predicts.
+
+Three requirements are called out as the ones that actually discriminate, because
+each is a way this component silently fails:
+
+- **BTB aliasing** — two branches colliding on one entry must be distinguished.
+  A test that only ever hits one branch per entry proves nothing about aliasing.
+- **Training must be observable** — a sequence where the same PC changes
+  direction. A static predictor passes any suite that never checks it.
+- **Reset determinism** — same program, reset, identical output. A predictor that
+  does not fully reset makes every downstream failure irreproducible.
+
+Sizes come from the generated `mosaic_cfg_pkg` (`MOSAIC_BPU_ENTRIES = 512`,
+`MOSAIC_BTB_ENTRIES = 64`, `MOSAIC_RAS_ENTRIES = 16`) rather than being hardcoded,
+after this project was bitten twice by constants that were correct when written and
+had no mechanism to notice the thing they depended on had moved.
+
+Mutants are required, and the card warns about the specific way they lie: a `-D`
+whose `` `ifdef `` block does not exist compiles to the shipping build and "passes"
+vacuously. That has happened twice here, so the acceptance is that the mutant is
+shown to *change behaviour*, not merely that it was defined.
