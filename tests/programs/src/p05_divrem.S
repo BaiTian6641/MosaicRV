@@ -53,5 +53,5 @@ main:
     SIG2    s6
     SIG3    s7
 
-    FINISH_PASS 5
+    FINISH_PASS
     .size   main, . - main

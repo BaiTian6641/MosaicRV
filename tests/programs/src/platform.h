@@ -238,14 +238,26 @@ static inline void mosaic_write_mepc(unsigned long value)
     addi    \reg, s1, \off
 .endm
 
-/* End the run with PASS, code = \code.  Does not return. */
-.macro FINISH_PASS code
-    li      a0, \code
+/* End the run with PASS.  Does not return.
+ *
+ * The frozen rule is "tohost == 1 means PASS; any other non-zero value means
+ * FAIL and bits [63:1] carry a program-defined code".  A pass therefore has
+ * to write exactly MOSAIC_PASS_CODE, with no diagnostic code folded in: any
+ * other value, including (n << 1) | 1 for n != 0, is a FAIL by that rule.
+ * A program that wants to report a diagnostic on the pass path must put it
+ * somewhere other than TOHOST.
+ *
+ * This encoding is also what Spike's HTIF expects: HTIF reads the exit code
+ * as tohost >> 1, so tohost == 1 is exit code 0 (pass) and tohost == 2*code
+ * is exit code `code` (fail), with no ambiguity in between. */
+.macro FINISH_PASS
+    li      a0, 0
     li      a1, 1
     call    tohost_finish
 .endm
 
-/* End the run with FAIL, code = \code.  Does not return. */
+/* End the run with FAIL, code = \code in bits [63:1], PASS bit clear.
+ * Does not return. */
 .macro FINISH_FAIL code
     li      a0, \code
     li      a1, 0

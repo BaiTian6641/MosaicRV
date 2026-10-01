@@ -39,7 +39,7 @@ SLANG_TIDY ?= slang-tidy
 # toolchain will turn into a silently different netlist.
 VERILATOR_LINT_FLAGS := --lint-only -Wall -Wno-DECLFILENAME
 
-.PHONY: all help check check-config check-contracts check-docs manifest lint lint-slang lint-cpp \
+.PHONY: all help check check-config check-contracts check-coverage check-docs manifest lint lint-slang lint-cpp \
         unit sim synth-generic test clean distclean verify-tools
 
 all: check check-docs manifest lint unit
@@ -160,7 +160,10 @@ test: check check-contracts check-docs lint lint-slang lint-cpp unit sim synth-g
 check-docs:
 	$(PYTHON) tools/check_docs.py
 
-check: check-config check-contracts
+check-coverage:
+	$(PYTHON) tools/check_coverage.py
+
+check: check-config check-contracts check-coverage
 
 # ---------------------------------------------------------------------- clean
 

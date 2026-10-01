@@ -63,5 +63,5 @@ main:
     SIG2    s6
     SIG3    t4
 
-    FINISH_PASS 9
+    FINISH_PASS
     .size   main, . - main

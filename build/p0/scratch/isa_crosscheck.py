@@ -30,13 +30,13 @@ ABI = ["zero", "ra", "sp", "gp", "tp", "t0", "t1", "t2",
 CSR_NAMES = {"mstatus": 0x300, "cycle": 0xC00, "mvendorid": 0xF11,
              "mscratch": 0x340, "mtvec": 0x305, "satp": 0x180}
 
-F3_R = {0: "add", 1: "sll", 2: "slt", 3: "sltu",
-        4: "xor", 6: "or", 7: "and"}
+F3_R = {0: "add", 1: "sll", 2: "slt", 3: "sltu", 4: "xor", 5: "srl",
+        6: "or", 7: "and"}
 F3_I = {0: "addi", 2: "slti", 3: "sltiu", 4: "xori",
         6: "ori", 7: "andi"}
 F3_LOAD = {0: "lb", 1: "lh", 2: "lw", 3: "ld", 4: "lbu", 5: "lhu"}
 F3_STORE = {0: "sb", 1: "sh", 2: "sw", 3: "sd"}
-F3_BRANCH = {0: "beq", 1: "bne", 2: "blt", 5: "bge", 6: "bltu", 7: "bgeu"}
+F3_BRANCH = {0: "beq", 1: "bne", 4: "blt", 5: "bge", 6: "bltu", 7: "bgeu"}
 F3_MD = {0: "mul", 1: "mulh", 2: "mulhsu", 3: "mulhu",
          4: "div", 5: "divu", 6: "rem", 7: "remu"}
 F3_CSR = {1: "csrrw", 2: "csrrs", 3: "csrrc",
@@ -87,11 +87,13 @@ def decode(word, addr):
         assert f3 == 0, "jalr funct3=%d" % f3
         return "jalr %s,%d(%s)" % (r(rd), imm_i(word), r(rs1))
     if op == 0x63:
-        return "%s %s,%s,%x" % (F3_BRANCH[f3], r(rs1), r(rs2), addr + imm_b(word))
+        return "%s,%s,%s,%x" % (F3_BRANCH[f3], r(rs1), r(rs2),
+                                (addr + imm_b(word)) & (2 ** 64 - 1))
     if op == 0x03:
-        return "%s %s,%d(%s)" % (F3_LOAD[f3], r(rd), imm_i(word), r(rs1))
+        return "%s,%s,%d(%s)" % (F3_LOAD[f3], r(rd), imm_i(word), r(rs1))
     if op == 0x23:
-        return "%s %s,%d(%s)" % (F3_STORE[f3], r(rd), imm_s(word), r(rs1))
+        # S-type: insn[11:7] is imm[4:0], the data register is insn[24:20]
+        return "%s,%s,%d(%s)" % (F3_STORE[f3], r(rs2), imm_s(word), r(rs1))
     if op == 0x0F:
         if f3 == 1:
             return "fence.i"
@@ -101,53 +103,59 @@ def decode(word, addr):
             "".join(c for m, c in PRED_SUCC if succ & m)
     if op == 0x13:
         if f3 in F3_I:
-            return "%s %s,%s,%d" % (F3_I[f3], r(rd), r(rs1), imm_i(word))
+            return "%s,%s,%s,%d" % (F3_I[f3], r(rd), r(rs1), imm_i(word))
         if f3 in (1, 5):
+            top6 = (word >> 26) & 0x3F  # RV64: shamt is 6 bits, so the
+            # legality field is insn[31:26], NOT insn[31:25]
             if f3 == 1:
-                assert f7 == 0, "slli funct7=%02x" % f7
+                assert top6 == 0, "slli insn[31:26]=%02x" % top6
                 name = "slli"
             else:
-                assert f7 in (0, 0x20), "srli/srai funct7=%02x" % f7
-                name = "srli" if f7 == 0 else "srai"
-            return "%s %s,%s,0x%x" % (name, r(rd), r(rs1), (word >> 20) & 0x3F)
+                assert top6 in (0, 0x10), "srli/srai insn[31:26]=%02x" % top6
+                name = "srli" if top6 == 0 else "srai"
+            return "%s,%s,%s,0x%x" % (name, r(rd), r(rs1), (word >> 20) & 0x3F)
         raise AssertionError("op-imm funct3=%d" % f3)
     if op == 0x1B:
         if f3 == 0:
             return "addiw %s,%s,%d" % (r(rd), r(rs1), imm_i(word))
         if f3 in (1, 5):
+            top5 = (word >> 25) & 0x7F  # RV64 word shifts: shamt is 5 bits,
+            # so the legality field really is insn[31:25] here
             if f3 == 1:
-                assert f7 == 0, "slliw funct7=%02x" % f7
+                assert top5 == 0, "slliw insn[31:25]=%02x" % top5
                 name = "slliw"
             else:
-                assert f7 in (0, 0x20), "srliw/sraiw funct7=%02x" % f7
-                name = "srliw" if f7 == 0 else "sraiw"
-            return "%s %s,%s,0x%x" % (name, r(rd), r(rs1), (word >> 20) & 0x1F)
+                assert top5 in (0, 0x20), "srliw/sraiw insn[31:25]=%02x" % top5
+                name = "srliw" if top5 == 0 else "sraiw"
+            return "%s,%s,%s,0x%x" % (name, r(rd), r(rs1), (word >> 20) & 0x1F)
         raise AssertionError("op-imm-32 funct3=%d" % f3)
     if op == 0x33:
         if f7 == 1:
-            return "%s %s,%s,%s" % (F3_MD[f3], r(rd), r(rs1), r(rs2))
+            return "%s,%s,%s,%s" % (F3_MD[f3], r(rd), r(rs1), r(rs2))
         assert f7 in (0, 0x20), "op funct7=%02x" % f7
         name = F3_R[f3]
         if f3 == 0 and f7 == 0x20:
             name = "sub"
         if f3 == 5 and f7 == 0x20:
             name = "sra"
-        return "%s %s,%s,%s" % (name, r(rd), r(rs1), r(rs2))
+        return "%s,%s,%s,%s" % (name, r(rd), r(rs1), r(rs2))
     if op == 0x73:
         if f3 == 0:
             name = {0: "ecall", 1: "ebreak", 0x302: "mret"}[(word >> 20) & 0xFFF]
             return name
         src = str(rs1) if f3 >= 5 else r(rs1)
-        return "%s %s,0x%x,%s" % (F3_CSR[f3], r(rd), (word >> 20) & 0xFFF, src)
+        return "%s,%s,0x%x,%s" % (F3_CSR[f3], r(rd), (word >> 20) & 0xFFF, src)
     raise AssertionError("opcode %02x" % op)
 
 
 def normalise(printed):
     """Turn objdump's symbolic CSR operand back into its 12-bit address."""
-    parts = [p.strip() for p in " ".join(printed.split("#")[0].split()).split(",")]
-    if len(parts) == 4 and parts[1] in CSR_NAMES:
-        parts[1] = "0x%x" % CSR_NAMES[parts[1]]
-    return ",".join(parts)
+    body = printed.split("#")[0].split("<")[0]
+    tokens = body.split()          # objdump separates mnemonic and operands by
+    parts = [tokens[0]] + [t.strip() for t in ",".join(tokens[1:]).split(",")]
+    if len(parts) == 4 and parts[2] in CSR_NAMES:
+        parts[2] = "0x%x" % CSR_NAMES[parts[2]]
+    return ",".join(parts).rstrip(",")
 
 
 def main():

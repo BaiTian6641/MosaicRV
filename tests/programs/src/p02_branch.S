@@ -110,7 +110,7 @@ main:
     SIG2    t4
     SIG3    t3
 
-    FINISH_PASS 2
+    FINISH_PASS
     .size   main, . - main
 
     .balign 4

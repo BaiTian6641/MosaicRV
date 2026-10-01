@@ -1,5 +1,72 @@
 {
   "schema_version": 1,
-  "comment": "Delivered work packages. A capability may only be advertised in misa / compiler -march / reference capability once every implementation task named for it in config/capability_ladder.json appears here. Entries are added only after the package's own tests pass from a clean build; evidence hashes live under results/.",
-  "delivered_tasks": []
+  "comment": "Delivered work packages. A capability may only be advertised in misa / compiler -march / reference capability once every implementation task named for it in config/capability_ladder.json appears here. An ID is added only after that package's own registered cases have been run from a clean build and observed to pass; the evidence column records what was run and where the log lives. In particular the DUT-side evidence for I-005 and I-006 includes mutants that were rebuilt and confirmed to FAIL, because a test that cannot detect a defect it claims to cover has verified nothing.",
+  "delivered_tasks": [
+    "I-001",
+    "I-002",
+    "I-003",
+    "I-004",
+    "I-005",
+    "I-006"
+  ],
+  "evidence": {
+    "I-001": {
+      "cases": [],
+      "commands": [
+        "python3 tools/check_profile.py --profile p0",
+        "python3 tools/check_profile.py --profile p0 --negative",
+        "python3 tools/check_profile.py --all"
+      ],
+      "verdict": "PASS",
+      "notes": "All 28 negative controls rejected illegal configurations; the controls refuse to run when the unmodified configuration is already broken.",
+      "report": "results/PROGRESS.md, results/reports/I-001-csr-m.md"
+    },
+    "I-002": {
+      "cases": [],
+      "commands": [
+        "python3 tools/check_contracts.py --profile p0",
+        "python3 tools/check_contracts.py --profile p0 --negative"
+      ],
+      "verdict": "PASS",
+      "notes": "16 negative controls rejected; tag/ABA arithmetic proven against the real geometry. build/p0/rtl/mosaic_id_pkg.svh is generated from these contracts.",
+      "report": "results/PROGRESS.md"
+    },
+    "I-003": {
+      "cases": [],
+      "commands": [
+        "make check PROFILE=p0",
+        "make check-docs",
+        "python3 tools/gen_manifest.py --profile p0"
+      ],
+      "verdict": "PASS",
+      "notes": "Unknown profiles exit 2 with no fallback; a configuration that does not check out produces no manifest.",
+      "report": "results/PROGRESS.md"
+    },
+    "I-004": {
+      "cases": [
+        "harness.reset_load_exit",
+        "harness.bad_image",
+        "harness.timeout",
+        "harness.injected_mismatch"
+      ],
+      "commands": ["python3 tools/run_unit.py --case harness.reset_load_exit"],
+      "verdict": "PASS",
+      "notes": "All four registered cases pass. The DUT is an explicitly labelled test double so the harness is proven before any real core exists; nothing it observes is evidence about the core.",
+      "report": "results/PROGRESS.md"
+    },
+    "I-005": {
+      "cases": ["fifo.backpressure"],
+      "commands": ["python3 tools/run_unit.py --case fifo.backpressure"],
+      "verdict": "PASS",
+      "notes": "97069 checks over 3189 cycles. Mutants MOSAIC_FIFO_MUTANT_DROP_ON_FULL, _PHANTOM_POP, _UNSTABLE_OUT and _STALE_RESET were each rebuilt here and each makes the case FAIL with exit 1.",
+      "report": "results/reports/I-005-fifo.md"
+    },
+    "I-006": {
+      "cases": ["ram.collision_matrix"],
+      "commands": ["python3 tools/run_unit.py --case ram.collision_matrix"],
+      "verdict": "PASS",
+      "notes": "Mutants MOSAIC_RAM_MUTANT_COMB_READ, _NO_BYTE_ENABLE, _EARLY_VALID and _ARRAY_RESET were each rebuilt here and each makes the case FAIL with exit 1. Collision contract is READ-FIRST byte by byte.",
+      "report": "results/reports/I-006-ram.md"
+    }
+  }
 }

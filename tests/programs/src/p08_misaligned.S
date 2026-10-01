@@ -145,5 +145,5 @@ p08_t5:
     SIG2    s6
     SIG3    t6
 
-    FINISH_PASS 8
+    FINISH_PASS
     .size   main, . - main

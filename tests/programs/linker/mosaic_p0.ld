@@ -63,6 +63,14 @@ __scratch_size    = 128;
 __bss_base        = 0x80001100;
 __progtext_base   = 0x80001200;
 
+/* Absolute symbols at the frozen test_protocol addresses.  They describe
+ * what the firmware already does and let a host that looks for the
+ * conventional `tohost`/`fromhost` symbol names (Spike's HTIF, among
+ * others) find the device without a side-channel.  Defining them changes no
+ * address and no behaviour. */
+PROVIDE( tohost = 0x00102000 );
+PROVIDE( fromhost = 0x00102008 );
+
 SECTIONS
 {
     /* ============ boot region: everything reachable at reset ============ */
