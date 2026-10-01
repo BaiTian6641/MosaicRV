@@ -39,7 +39,7 @@ SLANG_TIDY ?= slang-tidy
 # toolchain will turn into a silently different netlist.
 VERILATOR_LINT_FLAGS := --lint-only -Wall -Wno-DECLFILENAME
 
-.PHONY: all help check check-config check-contracts check-coverage check-capability-matrix check-upstream check-upstream-pinned check-isolation check-docs manifest lint lint-slang lint-cpp \
+.PHONY: all help check check-config check-contracts check-event-contract check-coverage check-capability-matrix check-upstream check-upstream-pinned check-isolation check-docs manifest lint lint-slang lint-cpp \
         unit sim synth-generic test clean distclean verify-tools
 
 all: check check-docs manifest lint unit
@@ -50,6 +50,7 @@ help:
 	@echo "  make check-docs        the plan documents' own embedded checker"
 	@echo "  make check-config      validate profiles, PMA, CSRs, geometry"
 	@echo "  make check-contracts   validate interface contracts and tag arithmetic"
+	@echo "  make check-event-contract  freeze the architectural event interface (schema/RTL/C++)"
 	@echo "  make check-upstream    report pinned and optional external inputs"
 	@echo "  make check-capability-matrix  per-workload model intersection"
 	@echo "  make check-upstream-pinned require calibrated upstream pins and the ACT4 runtime"
@@ -90,6 +91,14 @@ check-config: check-valid-profile
 
 check-contracts: check-valid-profile
 	$(PYTHON) tools/check_contracts.py --all
+
+# The frozen architectural event interface (V-008): the schema, the two SV
+# producers and the one C++ serialiser must agree field for field. The
+# --negative pass mutates one input at a time and requires every mutation to be
+# rejected, so the check is itself under test rather than merely present.
+check-event-contract: check-valid-profile
+	$(PYTHON) tools/check_event_contract.py --profile $(PROFILE)
+	$(PYTHON) tools/check_event_contract.py --profile $(PROFILE) --negative
 
 # ------------------------------------------------------------- config -> RTL
 
@@ -234,7 +243,7 @@ check-upstream-pinned:
 check-isolation:
 	$(PYTHON) tools/check_isolation.py
 
-check: check-config check-contracts check-coverage check-capability-matrix check-upstream check-isolation
+check: check-config check-contracts check-event-contract check-coverage check-capability-matrix check-upstream check-isolation
 
 # ---------------------------------------------------------------------- clean
 

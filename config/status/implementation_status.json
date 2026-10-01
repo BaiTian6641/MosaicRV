@@ -24,7 +24,10 @@
     "I-018",
     "I-008",
     "I-011",
-    "I-021"
+    "I-021",
+    "I-007",
+    "I-009",
+    "V-008"
   ],
   "evidence": {
     "I-001": {
@@ -287,6 +290,38 @@
       "verdict": "PASS",
       "notes": "Case PASS. Five mutants re-run independently: all five exit 1. The discriminating coverage the card names is present and asserted: BTB aliasing is distinguished (two PCs colliding on one index resolve to different targets, and a retrained pair must HIT, so a predictor that always missed cannot pass), training is observable in both directions (a static predictor fails), and reset determinism is byte-identical across two runs. Sizes come from the generated config package (512/64/16), and the module takes no mispredict input by design -- it is corrected by being rewritten from resolved values, with the redirect and miss invariants checked every cycle.",
       "report": "results/reports/I-021-predictor.md"
+    },
+    "I-007": {
+      "cases": [],
+      "commands": [
+        "python3 tools/host_oracle.py --all",
+        "python3 tools/host_oracle.py --check-golden-only"
+      ],
+      "verdict": "PASS",
+      "notes": "The independent host oracle and the firmware corpus. 39 cases computed; the oracle agrees with the declared expectations and with the recorded golden signatures, and every program's three inputs produce three distinct signatures -- that last check is what stops a program whose output does not depend on its input from passing. The corpus is crt0 + linker script + trap handler + tohost/UART record + signature region, with fixed expected signatures produced on the host, not by the DUT: the failure mode the card names (comparing the DUT against values the DUT itself produced) is structurally impossible here. Exercised end-to-end by I-008's bring-up case, which compares the DUT's architectural event stream against this oracle's reference per instruction, not on an end state.",
+      "report": "results/reports/I-008-bringup.md (corpus and oracle section)"
+    },
+    "I-009": {
+      "cases": [
+        "fetch.redirect_late_response"
+      ],
+      "commands": [
+        "python3 tools/run_unit.py --profile p0 --case fetch.redirect_late_response"
+      ],
+      "verdict": "PASS",
+      "notes": "Case PASS from a clean build. Seven mutants, each documented in the report with its injected defect, the phase that catches it, the check count at abort and the first failing field; the report also requires `cmp` to show the mutant binary differs from the shipping one, so a mutant built from a stale object cannot masquerade as evidence. Independently re-verified here: the base passes, and MOSAIC_FETCH_MUTANT_ACCEPT_STALE (the response accepted on the strength of the slot alone) exits 1 after 223 comparisons at cycle 17 with the report's exact first failure, out_valid(registered): expected 0, got 1. The case's discriminating coverage is the redirect path: a late response that belongs to a cancelled slot must be dropped and its credit returned exactly once, which is what four of the seven mutants target; the other three cover the outstanding-request bound, the compressed-form check and the fault path.",
+      "report": "results/reports/I-009-fetch.md"
+    },
+    "V-008": {
+      "cases": [],
+      "commands": [
+        "python3 tools/check_event_contract.py --profile p0",
+        "python3 tools/check_event_contract.py --profile p0 --negative",
+        "make check"
+      ],
+      "verdict": "PASS",
+      "notes": "The architectural event interface is frozen (config/contracts/event_v1.json: schema version 1, 21 fields, 100 octets per record, kinds RETIRE/TRAP/MEM_VISIBLE) and the checker is wired into `make check` in both modes; both exit 0. 33 built-in negative controls, each one a single mutation of the interface itself, are all rejected -- the rejections name the offending field and producer rather than an aggregate count, and they cover the three-producer agreement directly: an RTL tap declaration renamed, a host record field removed, a host field widened, a codec field narrowed or reordered or dropped, a codec schema version bumped alone, and a kind table whose values disagree. The freeze is enforced at runtime too: the encoder refuses an encode whose declared version differs from the compiled schema version and the decoder rejects a differing header. Reported gaps, all explicit: no runtime encode->decode->text round trip of a live stream yet (V-010/V-013); three fields are declared pending_rtl with reasons on every run (insn_bits, pc_after, trap_epc, rule F-3); MEM_VISIBLE has no DUT-side producer yet (F-4) and the host RetireEvent must migrate to the canonical record (F-5); p0 has no cache/MSHR/MMIO event tap and no asynchronous-interrupt kind; one hart. Integration route frozen as route A (SV retire probe -> C++ canonical event -> reference adapter); route B (Difftest generator via DPI) is permitted only after the V-004/V-008 layout/timing tests and must keep the same canonical event and serialiser.",
+      "report": "results/reports/V-008-events.md"
     }
   }
 }

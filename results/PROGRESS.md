@@ -1391,3 +1391,59 @@ copy of the speculative maps, free list, generation table and journal. The cutov
 owner (`mosaic_rename`), with recovery driving `ckpt_valid`/`squash` and enforcing the
 "squash only at the ROB head" precondition, remains the integration task it was recorded as —
 the green case does not imply it.
+
+---
+
+## 2026-10-01 — session interruption, recovery, and the first commits
+
+The session running this integration was interrupted by a network fault while four lanes were
+in flight. Recovery, in order, and what it found:
+
+**What survived.** The working tree was intact: every module, testbench and report a lane had
+written was on disk, including the work of a *second* session that had been editing the same
+repository. That second session had also configured the git identity and made commits
+(`f1dab89` .. `aeadd70`), so the repository had a history rather than one enormous untracked
+tree. Both sessions were doing the same jobs — the same integration, the same event contract —
+which is worth stating plainly because it means some artifacts were written twice and the ones
+on disk are the survivors, not necessarily the ones from the lane whose report describes them.
+
+**What was lost.** Four lanes: the core-integration driver, the event-contract finish, the
+rename mutant round, and (dispatched later) the WB hardening. Nothing they had *written* was
+lost; what was lost was their running state.
+
+**State at the recovery commit (`6dc7c9a`, "Checkpoint recovery")**, all re-observed here:
+
+| check | result |
+|---|---|
+| `python3 tools/lint_rtl.py --profile p0` | 31 of 31 source files clean |
+| `slang-tidy --std 1800-2017 --single-unit` over every `.sv` | 0 errors (the `mosaic_dispatch.sv` use-before-declaration errors are gone) |
+| `python3 tools/check_event_contract.py --profile p0` | OK — 21 fields, 100 octets per record, kinds RETIRE/TRAP/MEM_VISIBLE |
+| `python3 tools/check_event_contract.py --negative` | 33 of 33 illegal interfaces rejected |
+| `python3 tools/run_unit.py --profile p0 --case wb.same_bank_many_producers` | PASS — but `checks: 1`, 52 cycle comparisons, one mutant define that has never been run, and no report |
+| `python3 tools/run_unit.py --profile p0 --case fabric.fixed_two_cluster` | FAIL — the case lists `sim/unit/tb_core.cpp`, which does not exist |
+
+So of 33 registered cases, 32 pass and one cannot build. That one is I-023, and its failure is a
+missing file, not a failing design: the RTL for the integrated core (core, cluster, dispatch,
+macro_desc, redirect_arb, wb_arbiter) and its SV wrapper `sim/tb/mosaic_core_tb.sv` are in
+place and lint clean, and the driver plus the bring-up iterations were what the interrupted lane
+had not reached.
+
+**Three things this recovery is carrying forward as rules**, because a session boundary is
+where evidence decays:
+
+1. **A commit is not a verdict.** The checkpoint commit says in its own message which case
+   cannot build; `config/status/implementation_status.json` remains the only place a package is
+   called delivered, and it is updated only after the case has been re-run from a deleted build
+   directory in the session that records it.
+2. **A case whose mutant has never been built is an untested test.** I-026 is the current
+   example: the case is well structured (per-cycle comparison, conservation identities, an
+   expectation model that reads rename's documented rule rather than compiling it) but its one
+   mutant has no build log and no report, so the package is being hardened before it is
+   recorded.
+3. **Two sessions on one tree is worse than one session twice.** The duplicate work is
+   recoverable; what is not recoverable is knowing which version of a file was the one whose
+   evidence was collected. The lanes now running are told explicitly which files they own.
+
+**Re-dispatched after the commit**: the I-023 driver (`sim/unit/tb_core.cpp` + the two-cluster
+positive control), the V-008 finish (wire the checker into `make check`, write the derivation
+report), the rename mutant round 3, and the I-026 hardening described above.
