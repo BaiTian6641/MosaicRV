@@ -467,6 +467,20 @@ class Shadow {
     uint64_t pre[kEntries];
     for (unsigned i = 0; i < kEntries; i++) pre[i] = slots_[i].age_abs;
 
+    // The slot an insertion takes, chosen from the state as it stands at the
+    // START of the cycle. The hardware's allocator scans `slot_valid` before this
+    // edge's removals are applied, so a slot freed by this cycle's kill or grant
+    // is NOT available to an insertion in the same cycle. Choosing it after the
+    // removals is the same family of defect as the two above -- the model and
+    // the hardware applying the rule at different points -- and it shows up
+    // exactly on a cycle that both removes and inserts, which is why the
+    // randomised phase reached it and the directed phases did not.
+    unsigned alloc_slot = alloc_ptr_;
+    for (unsigned k = 0; k < kEntries; k++) {
+      const unsigned probe = (alloc_ptr_ + k) % kEntries;
+      if (!slots_[probe].valid) { alloc_slot = probe; break; }
+    }
+
     // The base is the *oldest live entry*, and it slides only when that entry
     // itself is the one leaving -- not whenever the oldest element of some
     // removal list happens to be it.
@@ -510,7 +524,7 @@ class Shadow {
 
     // 4. The insertion, unless it was granted straight out of the insert port.
     if (ins_fire && !ins_taken) {
-      const unsigned p = expected_alloc_slot();
+      const unsigned p = alloc_slot;
       Entry e;
       e.valid = true;
       e.age_abs = age_ctr_abs_ - static_cast<uint64_t>(rm.size()) + (base_removed ? 1 : 0);
@@ -945,6 +959,7 @@ class Bench {
     unsigned cluster = 0;
     bool last_grant_valid = false;
     bool last_grant_ready = false;
+    bool last_kill_valid = false;   // a kill withdraws the grant; see CheckOne
     uint32_t last_grant_uop = 0;
     uint64_t last_grant_a = 0, last_grant_b = 0, last_grant_imm = 0;
     uint32_t last_grant_dst_tag = 0, last_grant_dst_gen = 0;
@@ -1314,11 +1329,15 @@ void Bench::CheckOne(Instance& inst, const Stimulus& s) {
              who + ": ins_total == grant_total + kill_total + count");
 
   // ---- the back-pressure invariant, against last cycle ----
-  // Not on a cycle that issues a kill: a kill naming the presented entry
-  // withdraws the grant, which is the one documented exception to "the grant
-  // holds until the FU accepts it". The withdrawal itself is checked against the
-  // shadow, because the shadow knows which entry the kill names.
-  if (!s.kill_valid) CheckGrantStability(inst);
+  // Not on a cycle that issues a kill, and not on the cycle after one: a kill
+  // naming the presented entry withdraws the grant, which is the one documented
+  // exception to "the grant holds until the FU accepts it". The withdrawal is
+  // *observed* on the kill cycle, but the state this check compares against is
+  // the previous cycle's, so the mismatch surfaces one cycle later -- which is
+  // exactly the off-by-one that made this fire 14 times in a 200k-cycle run and
+  // not once in a 2k-cycle one. The shadow checks the withdrawal itself, because
+  // it knows which entry the kill names.
+  if (!s.kill_valid && !inst.last_kill_valid) CheckGrantStability(inst);
 
   // ---- every slot, field by field ----
   CheckSlots(inst.cluster);
@@ -1339,6 +1358,7 @@ void Bench::CheckOne(Instance& inst, const Stimulus& s) {
   // Record for the next cycle's stability check and for the age-wrap counter.
   inst.last_grant_valid = grant_valid;
   inst.last_grant_ready = s.grant_ready;
+  inst.last_kill_valid = s.kill_valid;
   if (grant_valid) {
     inst.last_grant_uop = *p.grant_uop;
     inst.last_grant_a = *p.grant_a;

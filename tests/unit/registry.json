@@ -245,6 +245,21 @@
       ],
       "max_cycles": 200000,
       "seed": 1
+    },
+    "fetch.redirect_late_response": {
+      "task": "I-009",
+      "top": "mosaic_fetch_tb",
+      "rtl": [
+        "rtl/core/mosaic_fetch.sv"
+      ],
+      "sv": [
+        "sim/tb/mosaic_fetch_tb.sv"
+      ],
+      "cpp": [
+        "sim/unit/tb_fetch.cpp"
+      ],
+      "max_cycles": 200000,
+      "seed": 1
     }
   }
 }

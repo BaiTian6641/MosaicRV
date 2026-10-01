@@ -1,16 +1,15 @@
 {
   "schema_version": 1,
   "case": "iq.wakeup_insert_select",
-  "verdict": "FAIL",
-  "detail": "33393253 failed of 56853398 checks over 199800 cycles",
+  "verdict": "PASS",
+  "detail": "56850460 checks over 199800 cycles, 4 reset cycles, 2 clusters",
   "seed": 1,
   "max_cycles": 200000,
-  "checks": 56853398,
-  "failures": 33393253,
+  "checks": 56850460,
+  "failures": 0,
   "image": "",
   "expect": "",
   "tool": "Verilator 5.052 2026-09-05",
-  "timestamp": "2026-10-01T07:53:17Z",
-  "first_mismatch": "c0 back-pressure: expected grant_valid still high, got grant_valid dropped",
-  "failed_checks": ["c1: alloc_index is the first free slot from the pointer", "c1: the valid vector is exactly the shadow's live slots", "c1 slot 3: valid bit", "c1 slot 3: age", "c1 slot 3: uop identity", "c1 slot 3: alu_op", "c1 slot 3: immediate", "c1 slot 3: dst tag", "c1 slot 3: dst generation", "c1 slot 3: source 1 tag", "c1 slot 3: source 1 generation", "c1 slot 3: source 2 tag", "c1 slot 3: source 2 generation", "c1 slot 3: source 1 value", "c1 slot 3: source 2 value", "c1 slot 4: valid bit", "c1: alloc_index is the first free slot from the pointer", "c1: the valid vector is exactly the shadow's live slots", "c1 slot 3: valid bit", "c1 slot 3: age", "c1 slot 3: uop identity", "c1 slot 3: alu_op", "c1 slot 3: immediate", "c1 slot 3: dst tag", "c1 slot 3: dst generation", "c1 slot 3: source 1 tag", "c1 slot 3: source 1 generation", "c1 slot 3: source 2 tag", "c1 slot 3: source 2 generation", "c1 slot 3: source 1 value", "c1 slot 3: source 2 value", "c1 slot 4: age"]
+  "timestamp": "2026-10-01T13:54:51Z",
+  "first_mismatch": ""
 }
