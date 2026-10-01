@@ -190,21 +190,24 @@ uint32_t Lanes32(const Wide& port, uint32_t width) {
   for (uint32_t i = 0; i < width; i++) {
     if (RawLaneWord(port, i) & 1u) mask |= 1u << i;
   }
+  return mask;
 }
 
 // One lane's 32-bit *data* word out of a lane-strided vector. This is not a
 // mask: `ev_seq`, `ev_rd`, `commit_tag` and their siblings carry a value per
 // lane, and collapsing them into a lane mask would compare a register number
 // against a bit count.
+// The lanes are 32 bits APART, not packed into one mask word: lane i is word i
+// of the VlWide (words 2i/2i+1 only for the 64-bit payload stride). Reading
+// lane 1 through the packed-scalar low 32 bits reports lane 0 twice, so a
+// two-wide retire compares lane 1's rd/tag/seq against lane 0's.
 template <typename Wide>
-// One lane's 32-bit word out of a lane-strided 2x32 vector. Verilator lays a
-// 64-bit port out as two 32-bit words, so lane i is word i -- *not* words
-// 2i/2i+1, which is the stride for the 64-bit payload fields (ev_pc_o is
-// 2x64). Reading a 32-bit lane through the 64-bit helper walks off the port
-// and returns whatever Verilator left adjacent: lane 1 came back as 1828657216
-// on a DUT that was emitting 1.
 inline uint32_t LaneField(const Wide& port, uint32_t lane, uint32_t /*width*/) {
   return static_cast<uint32_t>(port[lane]);
+}
+
+inline uint32_t LaneField(uint32_t port, uint32_t lane, uint32_t /*width*/) {
+  return (lane == 0) ? port : 0u;
 }
 
 inline uint32_t LaneField(uint64_t port, uint32_t lane, uint32_t /*width*/) {
@@ -436,11 +439,16 @@ class ShadowPipeline {
   uint64_t mscratch() const { return mscratch_; }
   bool took_last_alloc() const { return alloc_took_last_; }
   uint32_t gen_mask() const { return gen_mask_; }
+  uint32_t index_w() const { return index_w_; }
   uint32_t done_mask() const {
     return (max_uops_ >= 32) ? 0xFFFFFFFFu : ((1u << max_uops_) - 1u);
   }
   // Whether the shadow would take the allocation in `s`: valid, room in the
-  // pre-edge queue, a well-formed child count, and no flush winning the cycle.
+  // pre-edge queue, a well-formed child count, and no recovery flush winning
+  // the cycle (the TB ORs both driver flushes into the ROB's `flush_valid`).
+  // A trapping head does NOT refuse an allocation: the trap gates retirement
+  // (`head_exc` blocks `head_ready`, so no ack), never admission -- the ROB's
+  // `alloc_ok` consults only valid/full/bad-uops/flush_valid.
   // Computed WITHOUT mutating anything, so Compare can ask it before Apply
   // runs: reading the flag Apply sets afterwards would answer for the previous
   // cycle, not this one.
@@ -554,9 +562,14 @@ class ShadowPipeline {
     // Recorded from the PRE-edge occupancy, before pops and flushes below
     // mutate the queue: the ROB decides accept on its own pre-edge occupancy,
     // and the cross-check compares that decision, not the post-edge state.
+    // No trap term: `alloc_ok` never consults the trap, so neither does this.
+    // Full is modelled from the shadow's own pre-edge occupancy: it agrees
+    // with the buffer's `occ_cnt` whenever every prior accept agreed -- and
+    // the allocation cross-check proves that each cycle -- so this is checked,
+    // not assumed.
     alloc_took_last_ = s.alloc_valid && queue_.size() < rob_entries_ &&
                        s.alloc_num_uops >= 1 && s.alloc_num_uops <= max_uops_ &&
-                       !s.rob_flush && !s.flush_valid && !v.trap_flush;
+                       !s.rob_flush && !s.flush_valid;
     // 1. The CSR file and the counters. Written first so a CSR write from a
     //    retiring instruction lands on this cycle's value.
     uint64_t seq_next = retire_seq_ + v.event_count;
@@ -585,15 +598,15 @@ class ShadowPipeline {
       return;
     }
 
-    // Pops follow the unit's events, but the RETIRED count follows the buffer's
-    // acknowledgements: the ROB pops the lanes the unit emitted events for,
-    // and counts retired exactly the lanes it acknowledged. The two agree
-    // whenever req and ack agree -- and the cross-checks above prove that --
-    // but the count must come from the acks, not the events, because the ROB
-    // is the counter's owner and the shadow models the owner.
+    // Pops and the RETIRED count both follow the buffer's acknowledgements:
+    // the ROB pops exactly the lanes it acknowledged and counts retired
+    // exactly those lanes (rtl/core/mosaic_rob.sv:509,542,669-670).
+    // Counting from ev_valid would also credit the trap event (Decode sets
+    // ev_valid on a trap while req/ack stay 0); the trap path returns early
+    // today so the two agree, but counting the ack keeps the model exact.
     uint32_t pops = 0;
     for (uint32_t i = 0; i < width_; i++) {
-      if (v.ev_valid & (1u << i)) {
+      if (v.retire_ack & (1u << i)) {
         pops++;
       } else {
         break;
@@ -603,6 +616,7 @@ class ShadowPipeline {
       queue_.front().live = false;
       queue_.pop_front();
     }
+    retired_ += pops;
 
     // 3. The committed map: one commit per acknowledged lane, in lane order.
     for (uint32_t i = 0; i < width_; i++) {
@@ -642,12 +656,15 @@ class ShadowPipeline {
       const uint32_t slot = Mask(s.cmp_index, index_w_);
       Entry* e = by_slot(slot);
       if (e != nullptr && Mask(e->gen, gen_mask_) == Mask(s.cmp_gen, gen_mask_)) {
-        // The child index is masked to the ROB's UOP_W, not to Clog2(max_uops):
-        // for max_uops=8 Clog2 gives 4 while UOP_W is 3, and a completion for
-        // child 8..15 would address a different bit in the shadow than in the
-        // buffer. Masking to the same width the hardware decodes is what keeps
-        // the two bitmaps on the same bit.
-        const uint32_t uop = Mask(s.cmp_uop, (max_uops_ <= 1) ? 1 : (Clog2(max_uops_) - 1));
+        // The child index is the ROB's own UOP_W slice of the driver's word
+        // (sim/tb/mosaic_retire_tb.sv narrows `cmp_uop_i` to UOP_W bits), so
+        // the shadow masks to the same width the hardware decodes: UOP_W is
+        // 1 bit when MAX_UOPS <= 1 else $clog2(MAX_UOPS). Masking to
+        // Clog2(max_uops)-1 bits instead aliases child 4..7 onto 0..3 for
+        // max_uops=8 (UOP_W=3), so the shadow marks done a child the buffer
+        // never completed and every later readiness check disagrees.
+        const uint32_t uop_w = (max_uops_ <= 1) ? 1u : Clog2(max_uops_);
+        const uint32_t uop = (uop_w >= 32) ? s.cmp_uop : (s.cmp_uop & ((uop_w == 0) ? 0u : ((1u << uop_w) - 1u)));
         if (uop < e->num_uops && !((e->done_mask >> uop) & 1u)) {
           e->done_mask |= 1u << uop;
           if (s.cmp_exc) e->exc = true;
@@ -1231,7 +1248,18 @@ class Harness {
     // alone advances, and every later readiness comparison disagrees.
     if (s.cmp_valid) {
       ++comparisons_;
-      if (!dut_->rob_cmp_accepted_o && !dut_->rob_cmp_duplicate_o) {
+      // Stale is only a defect when the shadow holds a LIVE entry for this
+      // slot+generation: a completion for an already-retired slot is correctly
+      // filed stale by the buffer (the slot is dead), and the shadow -- which
+      // pops on retire -- has nothing to mark done either. Failing those fills
+      // every phase with completions to drained slots (e.g. head-block (c)'s
+      // trap flush followed by slot reuse) with a defect that is really the
+      // checker's, not the buffer's.
+      Entry* tgt = shadow_->by_slot(Mask(s.cmp_index, shadow_->index_w()));
+      const bool shadow_live =
+          tgt != nullptr && tgt->live &&
+          Mask(tgt->gen, shadow_->gen_mask()) == Mask(s.cmp_gen, shadow_->gen_mask());
+      if (shadow_live && !dut_->rob_cmp_accepted_o && !dut_->rob_cmp_duplicate_o) {
         Fail(where, "completion filed as stale: the buffer accepted nothing for "
                      "an entry the shadow may still mark done" + Describe(s));
       }
@@ -1412,7 +1440,7 @@ class Harness {
                    v.retire_req, Lanes32(dut_->retire_req_o, width_),
                    v.ev_valid, Lanes32(dut_->ev_valid_o, width_),
                    v.ev_trap, Lanes32(dut_->ev_trap_o, width_),
-                   (unsigned long long)v.ev_seq, Lanes32(dut_->ev_seq_o, width_),
+                   (unsigned long long)v.retire_seq, Lanes32(dut_->ev_seq_o, width_),
                    v.ev_reg_we, Lanes32(dut_->ev_reg_we_o, width_),
                    (unsigned long long)v.csr_rd_data,
                    (unsigned long long)dut_->csr_rd_data_o);
@@ -1456,20 +1484,24 @@ class Harness {
   // Capture the reports that describe the edge about to happen, then the state
   // the edge leaves behind.
   void CaptureReports() {
+    // All four per-lane vectors are 32-bits-per-lane VlWide/64-bit mixes, so
+    // every field is read lane by lane: assigning the packed word to a scalar
+    // truncates lane 1 away, and `Events()` then reports a two-wide retire as
+    // a single lane-0 event -- exactly the mask-3-reads-as-1 in head-block (a).
     report_ = Reports();
-    report_.retire_req = dut_->retire_req_o;
+    report_.retire_req = Lanes32(dut_->retire_req_o, width_);
     report_.trap_flush = dut_->trap_flush_o != 0;
-    report_.ev_valid = dut_->ev_valid_o;
-    report_.ev_trap = dut_->ev_trap_o;
-    report_.commit_valid = dut_->commit_valid_o;
+    report_.ev_valid = Lanes32(dut_->ev_valid_o, width_);
+    report_.ev_trap = Lanes32(dut_->ev_trap_o, width_);
+    report_.commit_valid = Lanes32(dut_->commit_valid_o, width_);
     report_.order_fault = dut_->o_order_fault_o != 0;
     report_.event_count = dut_->o_event_count_o;
     report_.x0_retired = dut_->o_x0_retired_o != 0;
     report_.pay_missing = dut_->o_pay_missing_o;
     report_.csr_unsupported = dut_->o_csr_unsupported_o;
     report_.exc_queued = dut_->o_exc_queued_o;
-    report_.ev_csr_we = dut_->ev_csr_we_o;
-    report_.ev_store = dut_->ev_store_o;
+    report_.ev_csr_we = Lanes32(dut_->ev_csr_we_o, width_);
+    report_.ev_store = Lanes32(dut_->ev_store_o, width_);
     report_.commit_accepted = dut_->commit_accepted_o != 0;
     report_.commit2_accepted = dut_->commit2_accepted_o != 0;
     report_.rob_retire_ack = dut_->rob_retire_ack_o;
@@ -1826,19 +1858,12 @@ void PhaseHeadBlock(Harness* h) {
                 std::to_string(h->Events()) + " req=" + std::to_string(h->RetireReq()) +
                 " occ=" + std::to_string(h->ObservedOccupied()));
 
-    // Completing the head releases the head lane on the NEXT payload cycle:
-    // the completion lands one cycle, the head is retirable with its payload
-    // already presented the next, and the younger entry follows the cycle
-    // after -- because lane 1 only retires on top of a live lane-0
-    // acknowledgement, the pair drains head-first across two payload cycles.
+    // Completing the head releases BOTH lanes on the next payload cycle when
+    // both are ready (rtl/core/mosaic_rob.sv:542), so one Cycle drains the pair.
     h->Complete(older);
     h->Cycle(s);
-    Require(h->Events() == 0x1, At("head-block", 1),
-            "once the head completed, expected the head lane to retire, got mask " +
-                std::to_string(h->Events()) + " req=" + std::to_string(h->RetireReq()));
-    h->Cycle(s);
-    Require(h->Events() == 0x1, At("head-block", 1),
-            "the younger entry did not retire on the cycle after the head, got mask " +
+    Require(h->Events() == 0x3, At("head-block", 1),
+            "once the head completed, expected both lanes to retire, got mask " +
                 std::to_string(h->Events()) + " req=" + std::to_string(h->RetireReq()));
   }
 

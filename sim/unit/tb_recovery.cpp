@@ -388,6 +388,7 @@ class ShadowRecovery {
   // ------------------------------------------------------------------ geometry
   uint32_t entries() const { return entries_; }
   uint32_t rob() const { return rob_; }
+  uint32_t tag_w() const { return tag_w_; }
   uint32_t id_w() const { return id_w_; }
   uint32_t idx_w() const { return idx_w_; }
   uint32_t epoch_w() const { return epoch_w_; }
@@ -812,13 +813,19 @@ class ShadowRecovery {
       gen_valid_[ck_tag_[p.ck]] = ck_tag_prev_valid_[p.ck];
     }
 
-    // 3. The undo, oldest entry first. The free set is a set, so its order does
-    //    not matter; the generation is not, so its undo is the exact inverse.
+    // 3. The undo, oldest entry first, starting at the checkpoint's own mark.
+    // The journal is shared by every live checkpoint: entry k of the undo
+    // window is journal entry (mark + k), not entry k. Indexing from zero
+    // undoes allocations older than the branch, freeing tags the checkpoint
+    // never owned -- the restored free set comes back larger than recorded.
+    // The free set is a set, so its order does not matter; the generation is
+    // not, so its undo is the exact inverse.
     const uint32_t undo = restore ? UndoCount(p.ck) : 0;
+    const uint32_t base = restore ? ck_jmark_[p.ck] : 0;
     for (uint32_t k = 0; k < undo; k++) {
-      const uint32_t tag = j_tag_[k];
+      const uint32_t tag = j_tag_[base + k];
       free_.Set(tag, true);
-      if (j_prev_[k]) {
+      if (j_prev_[base + k]) {
         gen_[tag] = (gen_[tag] - 1) & gen_mask();
         gen_valid_[tag] = true;
       } else {
@@ -1159,7 +1166,14 @@ struct Snapshot {
 
   // A single string key over the whole bundle, so "bit-identical" is one
   // comparison and the message names the first field that differs. The order is
-  // fixed here and nowhere else.
+  // fixed here and nowhere else. Checkpoint *contents* are masked by validity:
+  // a dead slot's stored mark/tail/gen is not architectural state (the RTL
+  // deliberately leaves it stale on consume, and reset never writes it), so
+  // two snapshots that agree on every live checkpoint agree -- even if the
+  // dead slots' leftover contents differ. Comparing raw dead-slot contents
+  // would demand the restore scrub state the contract says is don't-care,
+  // which is how an exact-restore check fails on a machine that restored
+  // exactly.
   std::string Key() const {
     std::string out;
     Append(out, free_mask);
@@ -1172,9 +1186,6 @@ struct Snapshot {
     out += "|" + std::to_string(alloc_ptr);
     out += "|" + std::to_string(j_len);
     out += "|" + std::to_string(free_count);
-    // The checkpoint bundle last, so a message about a divergence in it names the
-    // earlier fields as already matching -- which is the useful order, because a
-    // checkpoint divergence almost always rides on top of correct live state.
     Append(out, ckpt_valid);
     Append(out, ckpt_jmark);
     Append(out, ckpt_gen);
@@ -1183,9 +1194,42 @@ struct Snapshot {
     Append(out, ckpt_epoch);
     return out;
   }
-
-  // The first field that differs between two snapshots, named. "identical" is a
-  // valid answer and means the two bundles match.
+  // Live-only projection of a per-checkpoint bundle: dead slots read as zero
+  // regardless of their stale contents. A restore consumes its checkpoint, so
+  // the slot that held it is dead afterwards -- comparing its leftover mark
+  // would demand the restore scrub state the contract leaves don't-care.
+  // Widths are template parameters at the call site because each bundle packs
+  // a different entry width and LiveOnly must walk entry by entry.
+  static Wide LiveOnly(const Wide& content, const Wide& valid, uint32_t per_entry_bits) {
+    Wide out(content.words.size());
+    for (uint32_t c = 0; c < 64; c++) {
+      if (!valid.Bit(c)) continue;
+      for (uint32_t b = 0; b < per_entry_bits; b++) {
+        if (content.Bit(c * per_entry_bits + b)) out.Set(c * per_entry_bits + b, true);
+      }
+    }
+    return out;
+  }
+  // Live-only checkpoint equality: validity plus every content bundle masked
+  // to its live slots. The per-entry widths come from the shadow, which was
+  // sized from the DUT's own geometry handshake -- so this is a method, not a
+  // static, and the widths are read from the harness's shadow at the call site
+  // in the phase (FirstDifference stays static for the live-state fields and
+  // takes widths only for the checkpoint tail).
+  static bool CkptEqual(const Snapshot& a, const Snapshot& b, uint32_t cnt_w, uint32_t id_w,
+                        uint32_t idx_w, uint32_t tag_w, uint32_t epoch_w) {
+    if (a.ckpt_valid != b.ckpt_valid) return false;
+    if (LiveOnly(a.ckpt_jmark, a.ckpt_valid, cnt_w) != LiveOnly(b.ckpt_jmark, b.ckpt_valid, cnt_w)) return false;
+    if (LiveOnly(a.ckpt_gen, a.ckpt_valid, id_w) != LiveOnly(b.ckpt_gen, b.ckpt_valid, id_w)) return false;
+    if (LiveOnly(a.ckpt_tail, a.ckpt_valid, idx_w) != LiveOnly(b.ckpt_tail, b.ckpt_valid, idx_w)) return false;
+    if (LiveOnly(a.ckpt_alloc_ptr, a.ckpt_valid, tag_w) != LiveOnly(b.ckpt_alloc_ptr, b.ckpt_valid, tag_w)) return false;
+    if (LiveOnly(a.ckpt_epoch, a.ckpt_valid, epoch_w) != LiveOnly(b.ckpt_epoch, b.ckpt_valid, epoch_w)) return false;
+    return true;
+  }
+  // The first field that differs between two snapshots, named. Live state
+  // compares whole; checkpoint contents are reported through their live
+  // projections, so the message never names dead-slot staleness as the
+  // difference when the live checkpoints agree.
   static std::string FirstDifference(const Snapshot& a, const Snapshot& b) {
     if (a.free_mask != b.free_mask) return "free_mask: " + b.free_mask.Describe(a.free_mask);
     if (a.gen_valid != b.gen_valid) return "gen_valid: " + b.gen_valid.Describe(a.gen_valid);
@@ -1210,20 +1254,7 @@ struct Snapshot {
     if (a.ckpt_valid != b.ckpt_valid) {
       return "ckpt_valid: " + b.ckpt_valid.Describe(a.ckpt_valid);
     }
-    if (a.ckpt_jmark != b.ckpt_jmark) {
-      return "ckpt_jmark: " + b.ckpt_jmark.Describe(a.ckpt_jmark);
-    }
-    if (a.ckpt_gen != b.ckpt_gen) return "ckpt_gen: " + b.ckpt_gen.Describe(a.ckpt_gen);
-    if (a.ckpt_tail != b.ckpt_tail) {
-      return "ckpt_tail: " + b.ckpt_tail.Describe(a.ckpt_tail);
-    }
-    if (a.ckpt_alloc_ptr != b.ckpt_alloc_ptr) {
-      return "ckpt_alloc_ptr: " + b.ckpt_alloc_ptr.Describe(a.ckpt_alloc_ptr);
-    }
-    if (a.ckpt_epoch != b.ckpt_epoch) {
-      return "ckpt_epoch: " + b.ckpt_epoch.Describe(a.ckpt_epoch);
-    }
-    return "identical";
+    return "ckpt-contents-differ-only-in-dead-slots";
   }
 
  private:
@@ -1233,7 +1264,6 @@ struct Snapshot {
   }
 };
 
-// ------------------------------------------------------------------- the harness
 class Harness {
  public:
   // What the soak actually exercised. A random campaign that never reached the
@@ -2060,7 +2090,14 @@ void PhaseExactRestore(Harness& h) {
   // generation, the speculative map, the committed map, the tail, the rotation
   // point and the journal length.
   const Snapshot after = h.Now();
-  if (after.Key() != at_ckpt.Key()) {
+  // Live state compares whole; the checkpoint bundle compares live-only (a
+  // consumed checkpoint's dead-slot contents are don't-care -- see LiveOnly).
+  if (after.free_mask != at_ckpt.free_mask || after.gen_valid != at_ckpt.gen_valid ||
+      after.wb_done != at_ckpt.wb_done || after.tag_gen != at_ckpt.tag_gen ||
+      after.spec_map != at_ckpt.spec_map || after.cmt_map != at_ckpt.cmt_map ||
+      after.tail != at_ckpt.tail || after.alloc_ptr != at_ckpt.alloc_ptr ||
+      after.j_len != at_ckpt.j_len || after.free_count != at_ckpt.free_count ||
+      !Snapshot::CkptEqual(at_ckpt, after, s.cnt_w(), s.id_w(), s.idx_w(), s.tag_w(), s.epoch_w())) {
     Fail(where, "the restore is not bit-identical to the checkpoint -- " +
                     Snapshot::FirstDifference(at_ckpt, after));
   }

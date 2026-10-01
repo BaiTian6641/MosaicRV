@@ -865,10 +865,22 @@ module mosaic_recovery #(
   // this unit refuses to create, so the clamp is unreachable in the shipping
   // build and is present only so a hostile `j_len` cannot index out of range.
   logic [REC_CNT_W-1:0] undo_n;
+  // The window base lives at the journal index width from the start: it is
+  // always a live journal position below REC_ROB, so the count width's top
+  // bit would be dead and -Wall would (rightly) say so.
+  logic [REC_JIDX_W-1:0] undo_base;
   always_comb begin
     undo_n = {REC_CNT_W{1'b0}};
+    undo_base = {REC_JIDX_W{1'b0}};
     if (pick_found && ck_valid[restore_ck] && (j_len > ck_jmark[restore_ck])) begin
       undo_n = j_len - ck_jmark[restore_ck];
+      // The window starts at the checkpoint's own mark, not at entry zero: the
+      // journal is shared by every live checkpoint, and entries below the mark
+      // belong to instructions older than the branch. Indexing from zero undoes
+      // those too, freeing tags the checkpoint never owned and handing the
+      // restored machine a free set larger than the one recorded. The mark is a
+      // live journal position below REC_ROB, so it fits the index width exactly.
+      undo_base = REC_JIDX_W'(ck_jmark[restore_ck]);
     end
     if (undo_n > REC_CNT_W'(REC_ROB)) begin
       undo_n = REC_CNT_W'(REC_ROB);
@@ -888,9 +900,19 @@ module mosaic_recovery #(
   // journal is still consumed and the free count also stops matching the live
   // mappings. The shadow catches it on the first cycle after the squash.
   assign undo_apply = {REC_CNT_W{1'b0}};
-`else
+ `else
   assign undo_apply = undo_n;
-`endif
+ `endif
+  // The first journal entry the restore undoes. Kept beside `undo_apply` so
+  // the mutant above stays a one-line change: the window is
+  // [undo_base, undo_base + undo_apply), never [0, undo_apply).
+  logic [REC_JIDX_W-1:0] undo_apply_base;
+ `ifdef MOSAIC_RECOVERY_MUTANT_NO_FREE_RESTORE
+  assign undo_apply_base = {REC_JIDX_W{1'b0}};
+ `else
+  // Already at the journal index width: direct assignment, no cast.
+  assign undo_apply_base = undo_base;
+ `endif
 
   // A checkpoint is refused when the stack is full, or in the cycle a redirect
   // is taken -- the squash owns that cycle, and pushing a checkpoint for a
@@ -1060,12 +1082,19 @@ module mosaic_recovery #(
     //    so its undo is the exact inverse of the allocation's step.
     for (int unsigned k = 0; k < REC_ROB; k++) begin
       if (REC_CNT_W'(k) < undo_apply) begin
-        free_q[j_tag[REC_JIDX_W'(k)]] = 1'b1;
-        gen_q[j_tag[REC_JIDX_W'(k)]]  =
-            j_prev_valid[REC_JIDX_W'(k)]
-              ? (gen[j_tag[REC_JIDX_W'(k)]] - REC_GEN_W'(1))
+        // Offset by the checkpoint's mark: entry k of the undo window is
+        // journal entry (undo_apply_base + k), not entry k. Both are counts
+        // below REC_ROB, so the sum stays inside the journal array; it is
+        // computed at the journal index width -- the width every other journal
+        // access uses -- so no bit is unused and none is silently truncated.
+        automatic logic [REC_JIDX_W-1:0] undo_idx =
+            undo_apply_base + REC_JIDX_W'(k);
+        free_q[j_tag[undo_idx]] = 1'b1;
+        gen_q[j_tag[undo_idx]]  =
+            j_prev_valid[undo_idx]
+              ? (gen[j_tag[undo_idx]] - REC_GEN_W'(1))
               : {REC_GEN_W{1'b0}};
-        genv_q[j_tag[REC_JIDX_W'(k)]] = j_prev_valid[REC_JIDX_W'(k)];
+        genv_q[j_tag[undo_idx]] = j_prev_valid[undo_idx];
       end
     end
 

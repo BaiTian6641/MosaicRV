@@ -274,11 +274,17 @@ module mosaic_retire_tb (
   assign rob_cmp_gen        = cmp_gen_i[TB_ROB_ID_W-1:0];
   assign rob_cmp_uop        = cmp_uop_i[TB_ROB_UOP_W-1:0];
   assign rob_obs_index      = obs_index_i[TB_RET_RB_W-1:0];
-  // The ROB's flush is the OR of the driver's recovery flush and the retire
-  // unit's trap flush. That one line is the whole of the trap path's effect on
-  // the queue, and putting it here rather than in the driver keeps the driver
-  // from having to know that a trap empties the buffer.
+  // The ROB's flush is the OR of the two driver recovery flushes (`rob_flush_i`
+  // into the queue, `flush_valid_i` into the retire path and hence the ROB).
+  // The trap flush does NOT re-enter the buffer: the ROB observes the trap
+  // through `head_exc` gating `head_ready` (so no retire is acknowledged) and
+  // the retire unit emits the trap event plus `trap_flush_o` downstream to
+  // recovery -- but `flush_valid` also clears slot_valid, and clearing the
+  // buffer underneath a just-taken trap would erase the trapping entry before
+  // recovery sees the redirect.
+  logic n_trap_flush_o;
   logic rob_flush;
+  assign rob_flush = rob_flush_i | flush_valid_i;
   // The retire unit's view of the two heads. `rob_ready[0]` *is* the queue's
   // `head_ready` and `rob_ready[1]` is the same predicate one slot on, so the
   // unit cannot hold a private opinion about what is finished.
@@ -381,7 +387,6 @@ module mosaic_retire_tb (
   logic [TB_RET_WIDTH*TB_RET_XLEN-1:0] n_ev_store_data;
   logic [TB_RET_WIDTH*TB_RET_XLEN-1:0] n_ev_trap_cause;
   logic [TB_RET_WIDTH*TB_RET_XLEN-1:0] n_ev_trap_tval;
-  logic n_trap_flush_o;
   logic n_trap_valid_o;
   logic n_csr_rd_unsupported_o;
   logic n_o_x0_retired_o;
@@ -595,10 +600,16 @@ module mosaic_retire_tb (
   assign commit_tag_lane0 = commit_tag_o[TB_RET_TAG_W-1:0];
   assign commit_gen_lane0 = commit_gen_o[TB_RET_GEN_W-1:0];
 
+  // Lane 1's rename feeds come from the PACKED driver words (commit_tag_o[1]),
+  // not from the retire nets: the retire unit's narrow commit port and the
+  // 32-bit driver word are different signals after the zero-extending pack.
+  // Reading lane 1's tag from the narrow net aliases lane 0's tag into lane 1
+  // whenever TAG_W != 32, so a two-wide retire commits lane 0 twice and lane
+  // 1's architectural register never moves.
   generate
     if (TB_RET_WIDTH > 1) begin : g_lane1_commit
-      assign commit_tag_lane1 = commit_tag_o[LANE_W + TB_RET_TAG_W-1: LANE_W];
-      assign commit_gen_lane1 = commit_gen_o[LANE_W + TB_RET_GEN_W-1: LANE_W];
+      assign commit_tag_lane1 = commit_tag_o[LANE_W +: TB_RET_TAG_W];
+      assign commit_gen_lane1 = commit_gen_o[LANE_W +: TB_RET_GEN_W];
     end
   endgenerate
 
@@ -873,14 +884,18 @@ module mosaic_retire_tb (
       .free_double       (ren_free_double),
 
       // The two commit lanes, straight from the retire unit and in lane order.
+      // All four lane-1 fields are sliced at LANE_W: the driver words are
+      // 32-bit-per-lane vectors, so bit 1 is lane 1's valid while bit 32 is
+      // lane 0's rd[1]. Reading valid/rd/tag/gen through mixed strides commits
+      // lane 0 under lane 1's name on every two-wide retire.
       .commit_valid      (commit_valid_o[0]),
       .commit_rd         (commit_rd_o[TB_RET_RD_W-1:0]),
       .commit_tag        (commit_tag_lane0),
       .commit_gen        (commit_gen_lane0),
       .commit_accepted   (commit_accepted_o),
       .commit_x0_dropped (ren_commit_x0_dropped),
-      .commit2_valid     (commit_valid_o[1]),
-      .commit2_rd        (commit_rd_o[LANE_W + TB_RET_RD_W-1: LANE_W]),
+      .commit2_valid     (commit_valid_o[LANE_W]),
+      .commit2_rd        (commit_rd_o[LANE_W +: TB_RET_RD_W]),
       .commit2_tag       (commit_tag_lane1),
       .commit2_gen       (commit_gen_lane1),
       .commit2_accepted  (commit2_accepted_o),

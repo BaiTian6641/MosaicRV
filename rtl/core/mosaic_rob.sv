@@ -665,9 +665,11 @@ module mosaic_rob #(
       // Two acks, two retirements: the conservation identity
       // `alloc == retired + squashed + occupied` is only meaningful if the
       // retirement counter and the occupancy move together, and lane 1 moves
-      // both.
-      if (retire_ack)       retired_total <= retired_total + 32'd1;
-      if (retire_ack_next)  retired_total <= retired_total + 32'd1;
+      // both. The two lanes are summed into ONE non-blocking write: two
+      // sequential `retired_total <= retired_total + 1` writes in the same
+      // `always_ff` both read the pre-edge value, so the second overwrites the
+      // first and a two-wide retire counts exactly one.
+      retired_total <= retired_total + {31'd0, retire_ack} + {31'd0, retire_ack_next};
       // Explicitly widened rather than concatenated to 32 bits: OCC_W depends on
       // the entry count, so a fixed 24-bit pad is only the right width for a
       // 64-entry ROB and silently truncates for any other.
