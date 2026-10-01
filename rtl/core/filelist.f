@@ -5,4 +5,8 @@ mosaic_alu.sv
 mosaic_decoder.sv
 mosaic_branch_cmp.sv
 mosaic_branch_target.sv
+mosaic_predictor.sv
+mosaic_rename.sv
+mosaic_rob.sv
+mosaic_iq.sv
 mosaic_bringup_core.sv

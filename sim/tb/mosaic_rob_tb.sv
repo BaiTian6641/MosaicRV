@@ -1,0 +1,247 @@
+// Simulation wrapper for CASE=rob.out_of_order_children (work package I-016).
+//
+// The wrapper adds no timing of its own. `mosaic_rob` is registered on its
+// inputs and combinational on its outputs, so the C++ driver drives the ports,
+// evaluates while the clock is low, compares every output against its shadow,
+// and then applies the edge. There is no clock generation, no reset generation
+// and no `$display` in here: the C++ side owns all three, per
+// sim/common/sim_common.h.
+//
+// --------------------------------------------------------------- geometry
+//
+// Every driver-facing port is a fixed 32-bit (64-bit for the PC) vector, so the
+// C++ driver contains no ROB geometry and would keep compiling if a profile
+// changed the depths. Narrowing to the ROB's own port widths needs those widths,
+// and they come from **the same generated package the RTL reads**, by scope
+// reference rather than by a second `include`:
+//
+//   * the generated header declares `package mosaic_cfg_pkg` with no include
+//     guard, so including it in a second file in the same compilation is a
+//     duplicate package declaration (Verilator MODDUP, slang
+//     -Wduplicate-definition) -- both are errors here, not warnings;
+//   * referring to `mosaic_cfg_pkg::MOSAIC_ROB_ENTRIES` after the package has
+//     been declared needs no include at all, and both tools accept it. Verilator
+//     requires the declaring file to come first on the command line, which
+//     tools/run_unit.py already guarantees for every case.
+//
+// So there is exactly one geometry in the compilation: the generated package.
+// This file derives its port widths from it with the same rules mosaic_rob uses,
+// and then *reads the elaborated values back* as `o_*_w` outputs so the driver
+// can check the two against each other instead of trusting the derivation.
+
+`default_nettype none
+`resetall
+
+module mosaic_rob_tb (
+    input  logic        clk,
+    input  logic        rst,
+
+    // ------------------------------------------------------------------ drive
+    input  logic [31:0] alloc_num_uops_i,
+    input  logic [31:0] alloc_tag_i,
+    input  logic [63:0] alloc_pc_i,
+    input  logic        alloc_valid_i,
+    input  logic        alloc_exc_i,
+    input  logic        alloc_open_i,
+
+    input  logic [31:0] close_index_i,
+    input  logic [31:0] close_gen_i,
+    input  logic        close_valid_i,
+
+    input  logic [31:0] cmp_index_i,
+    input  logic [31:0] cmp_gen_i,
+    input  logic [31:0] cmp_uop_i,
+    input  logic        cmp_valid_i,
+    input  logic        cmp_exc_i,
+
+    input  logic        retire_req_i,
+    input  logic        flush_valid_i,
+    input  logic [31:0] obs_index_i,
+
+    // ---------------------------------------------------------------- observe
+    output logic        alloc_ok_o,
+    output logic        alloc_refused_o,
+    output logic        alloc_full_o,
+    output logic        alloc_bad_uops_o,
+    output logic [31:0] alloc_index_o,
+    output logic [31:0] alloc_gen_o,
+
+    output logic        close_ok_o,
+    output logic        close_stale_o,
+
+    output logic        cmp_accepted_o,
+    output logic        cmp_duplicate_o,
+    output logic        cmp_stale_o,
+    output logic        cmp_bad_uop_o,
+
+    output logic        retire_ack_o,
+    output logic        head_valid_o,
+    output logic        head_ready_o,
+    output logic        head_replay_o,
+    output logic        head_complete_o,
+    output logic        head_exc_o,
+    output logic        head_closed_o,
+    output logic [31:0] head_index_o,
+    output logic [31:0] head_gen_o,
+    output logic [31:0] head_tag_o,
+    output logic [63:0] head_pc_o,
+    output logic [31:0] head_num_uops_o,
+    output logic [31:0] head_done_mask_o,
+    output logic [31:0] head_done_cnt_o,
+
+    output logic        obs_valid_o,
+    output logic [31:0] obs_gen_o,
+    output logic [31:0] obs_tag_o,
+    output logic [63:0] obs_pc_o,
+    output logic [31:0] obs_num_uops_o,
+    output logic [31:0] obs_done_mask_o,
+    output logic [31:0] obs_done_cnt_o,
+    output logic        obs_exc_o,
+    output logic        obs_closed_o,
+
+    output logic [31:0] o_head_ptr_o,
+    output logic [31:0] o_alloc_ptr_o,
+    output logic [31:0] o_occupied_o,
+    output logic [31:0] o_free_o,
+    output logic [31:0] o_alloc_total_o,
+    output logic [31:0] o_retired_total_o,
+    output logic [31:0] o_squashed_total_o,
+    output logic [31:0] o_gen_counter_o,
+
+    // ---------------------------------------------------------------- geometry
+    output logic [31:0] o_rob_entries_o,
+    output logic [31:0] o_index_w_o,
+    output logic [31:0] o_max_uops_o,
+    output logic [31:0] o_id_w_o,
+    output logic [31:0] o_pc_w_o,
+    output logic [31:0] o_num_uops_w_o,
+    output logic [31:0] o_occ_w_o
+);
+
+  // The same rules mosaic_rob derives from the same generated package.
+  localparam int unsigned ENTRIES = mosaic_cfg_pkg::MOSAIC_ROB_ENTRIES;
+  localparam int unsigned INDEX_W = mosaic_cfg_pkg::MOSAIC_ROB_INDEX_W;
+  localparam int unsigned MAX_UOPS = mosaic_cfg_pkg::MOSAIC_MAX_UOPS_PER_MACRO;
+
+  localparam int unsigned CNT_W = $clog2(MAX_UOPS + 1);
+  localparam int unsigned UOP_W = (MAX_UOPS <= 1) ? 1 : $clog2(MAX_UOPS);
+  localparam int unsigned OCC_W = $clog2(ENTRIES + 1);
+  localparam int unsigned ID_W  = 2 * INDEX_W;   // both TAG_W and GEN_W
+  localparam int unsigned BIT_W = MAX_UOPS;
+
+  // The driver hands over 32-bit values and the ROB sees exactly the low bits its
+  // own ports declare. Truncating part selects, not casts, so nothing is silent.
+  logic [CNT_W-1:0]    alloc_num_uops;
+  logic [ID_W-1:0]     alloc_tag;
+  logic [INDEX_W-1:0]  close_index;
+  logic [ID_W-1:0]     close_gen;
+  logic [INDEX_W-1:0]  cmp_index;
+  logic [ID_W-1:0]     cmp_gen;
+  logic [UOP_W-1:0]    cmp_uop;
+  logic [INDEX_W-1:0]  obs_index;
+  logic [BIT_W-1:0]    head_done_mask;
+  logic [BIT_W-1:0]    obs_done_mask;
+
+  assign alloc_num_uops = alloc_num_uops_i[CNT_W-1:0];
+  assign alloc_tag      = alloc_tag_i[ID_W-1:0];
+  assign close_index    = close_index_i[INDEX_W-1:0];
+  assign close_gen      = close_gen_i[ID_W-1:0];
+  assign cmp_index      = cmp_index_i[INDEX_W-1:0];
+  assign cmp_gen        = cmp_gen_i[ID_W-1:0];
+  assign cmp_uop        = cmp_uop_i[UOP_W-1:0];
+  assign obs_index      = obs_index_i[INDEX_W-1:0];
+
+  mosaic_rob u_rob (
+      .clk              (clk),
+      .rst              (rst),
+
+      .alloc_valid      (alloc_valid_i),
+      .alloc_tag        (alloc_tag),
+      .alloc_pc         (alloc_pc_i),
+      .alloc_num_uops   (alloc_num_uops),
+      .alloc_exc        (alloc_exc_i),
+      .alloc_open       (alloc_open_i),
+      .alloc_ok         (alloc_ok_o),
+      .alloc_refused    (alloc_refused_o),
+      .alloc_full       (alloc_full_o),
+      .alloc_bad_uops   (alloc_bad_uops_o),
+      .alloc_index      (alloc_index_o[INDEX_W-1:0]),
+      .alloc_gen        (alloc_gen_o[ID_W-1:0]),
+
+      .close_valid      (close_valid_i),
+      .close_index      (close_index),
+      .close_gen        (close_gen),
+      .close_ok         (close_ok_o),
+      .close_stale      (close_stale_o),
+
+      .cmp_valid        (cmp_valid_i),
+      .cmp_index        (cmp_index),
+      .cmp_gen          (cmp_gen),
+      .cmp_uop          (cmp_uop),
+      .cmp_exc          (cmp_exc_i),
+      .cmp_accepted     (cmp_accepted_o),
+      .cmp_duplicate    (cmp_duplicate_o),
+      .cmp_stale        (cmp_stale_o),
+      .cmp_bad_uop      (cmp_bad_uop_o),
+
+      .retire_req       (retire_req_i),
+      .retire_ack       (retire_ack_o),
+      .head_valid       (head_valid_o),
+      .head_ready       (head_ready_o),
+      .head_replay      (head_replay_o),
+      .head_complete    (head_complete_o),
+      .head_exc         (head_exc_o),
+      .head_closed      (head_closed_o),
+      .head_index       (head_index_o[INDEX_W-1:0]),
+      .head_gen         (head_gen_o[ID_W-1:0]),
+      .head_tag         (head_tag_o[ID_W-1:0]),
+      .head_pc          (head_pc_o),
+      .head_num_uops    (head_num_uops_o[CNT_W-1:0]),
+      .head_done_mask   (head_done_mask),
+      .head_done_cnt    (head_done_cnt_o[CNT_W-1:0]),
+
+      .flush_valid      (flush_valid_i),
+
+      .obs_index        (obs_index),
+      .obs_valid        (obs_valid_o),
+      .obs_gen          (obs_gen_o[ID_W-1:0]),
+      .obs_tag          (obs_tag_o[ID_W-1:0]),
+      .obs_pc           (obs_pc_o),
+      .obs_num_uops     (obs_num_uops_o[CNT_W-1:0]),
+      .obs_done_mask    (obs_done_mask),
+      .obs_done_cnt     (obs_done_cnt_o[CNT_W-1:0]),
+      .obs_exc          (obs_exc_o),
+      .obs_closed       (obs_closed_o),
+
+      .o_head_ptr       (o_head_ptr_o[INDEX_W-1:0]),
+      .o_alloc_ptr      (o_alloc_ptr_o[INDEX_W-1:0]),
+      .o_occupied       (o_occupied_o[OCC_W-1:0]),
+      .o_free           (o_free_o[OCC_W-1:0]),
+      .o_alloc_total    (o_alloc_total_o),
+      .o_retired_total  (o_retired_total_o),
+      .o_squashed_total (o_squashed_total_o),
+      .o_gen_counter    (o_gen_counter_o)
+  );
+
+  // MAX_UOPS is 8 for p0 and need not be a power of two in a later profile, so
+  // the two bitmap ports are zero-extended explicitly rather than relying on a
+  // width that happens to line up.
+  assign head_done_mask_o = {{(32 - BIT_W) {1'b0}}, head_done_mask};
+  assign obs_done_mask_o  = {{(32 - BIT_W) {1'b0}}, obs_done_mask};
+
+  // Read back from the elaborated instance rather than from the derivation above,
+  // so the driver can check the two against each other. A geometry file change
+  // that desynchronised them would show up here as a failing check rather than
+  // as a testbench quietly comparing the wrong field.
+  assign o_rob_entries_o = 32'(u_rob.ROB_ENTRIES);
+  assign o_index_w_o     = 32'(u_rob.ROB_INDEX_W);
+  assign o_max_uops_o    = 32'(u_rob.MAX_UOPS);
+  assign o_id_w_o        = 32'(u_rob.GEN_W);
+  assign o_pc_w_o        = 32'(u_rob.XLEN);
+  assign o_num_uops_w_o  = 32'(u_rob.CNT_W);
+  assign o_occ_w_o       = 32'(u_rob.OCC_W);
+
+endmodule : mosaic_rob_tb
+
+`resetall
+`default_nettype wire
