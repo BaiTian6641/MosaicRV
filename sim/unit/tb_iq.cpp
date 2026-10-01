@@ -274,7 +274,12 @@ class Shadow {
 
   // Is the entry being offered this cycle ready, after this cycle's broadcast?
   bool ins_ready_now(const Stimulus& st) const {
-    return Ready(st.s1, st) && Ready(st.s2, st);
+    // The `expected_ins_ready` term is the whole point: a full queue refuses the
+    // insertion, so the entry it would have created does not exist and must not
+    // be offered as a grant. Omitting it makes the shadow grant an entry the
+    // hardware never admitted -- which is exactly what it did, on the first cycle
+    // the randomised phase filled the queue while offering a ready uop.
+    return expected_ins_ready() && Ready(st.s1, st) && Ready(st.s2, st);
   }
 
   // The kill set: every live uop of the named macro, plus everything younger

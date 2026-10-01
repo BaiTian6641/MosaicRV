@@ -888,3 +888,69 @@ value built by plain concatenation.
 
 That sequence is the argument for keeping both tools: the wrong advice was caught by
 the tool I had just finished fixing, rather than by whoever applied it.
+
+---
+
+## 2026-10-01 — I-022 PARTIAL: directed suite green, all six mutants demonstrated
+
+**Recorded as PARTIAL, not complete, and not as incomplete.** The directed suite
+now passes every phase assertion: oldest-ready-not-lowest-index, same-cycle enqueue
+and wakeup, producer-older-than-consumer, age wrap with a full queue, stale
+generation rejected, duplicate broadcast refused, FU back-pressure, kill,
+kill_younger, duplicate destination, and full-and-age-order. Verilator 13/13 clean,
+slang 0 errors, and **zero** phase assertions read a live port.
+
+**All six mutants run and fail.** I rebuilt and re-ran them independently; each
+exits 1. Because the base is red, the **delta** is the column that carries the
+evidence, and the report says so:
+
+| mutant | delta vs base | first distinct failure |
+|---|---|---|
+| `NARROW_AGE` | +6,711 | `c0 slot 0: age` |
+| `NO_GEN_CHECK` | +183,310 | `c0 slot 0: age` |
+| `NO_SAME_CYCLE_WAKEUP` | +192,326 | `c0 slot 0: age` |
+| `UNSTABLE_GRANT` | +63,901 | back-pressure: same entry still offered after 1 stalled cycle |
+| `DROP_ON_GRANT` | +195,079 | back-pressure: same entry still offered after 1 stalled cycle |
+| `NO_DST_CHECK` | +358 | `c0 slot 2: age` |
+
+**The standing rule this produced, now in the report as a rule rather than an
+anecdote:**
+
+> An exit code against a red base is not evidence. Print the delta.
+
+That came from a mutant whose failure count was **identical to the base** — not
+detected at all, while both it and the base exited 1. Two earlier packages in this
+project had the same failure mode (`-D` with no `` `ifdef `` body), so this is the
+third time, and the rule now covers all three.
+
+**Two vacuous mutants found and replaced rather than reported as working.** One
+removed a `granted` exclusion but kept a bypass, so with oldest-ready arbitration
+the outstanding entry was still the oldest ready entry and the grant never moved —
+identical failure count, exit 1, invisible. The hold's real observable consequence
+is that a *fresh candidate* must not overtake an outstanding grant, and once written
+that way it is caught by name. The other could not be expressed as a width change at
+all — it died at elaboration, the right answer for the wrong reason — so it was
+re-expressed as the unbounded-separation defect the plan actually describes.
+
+**One more real shadow defect, found from the shadow's own first-mismatch report:**
+`ins_ready_now` omitted the "will the insert be accepted" term, so the shadow
+offered as a grant an entry that a *full* queue had just refused. Same class as the
+earlier port-width clamp: the model and the hardware were being fed different
+inputs.
+
+**Remaining gap, undiagnosed:** the randomised phase only, now narrowed to
+cluster 1 — whether a *refused* insert advances the allocation pointer. It is
+undiagnosed and no cause is claimed. It is not worked around: shortening the phase,
+seeding until it passes, or loosening the per-cycle comparison would each produce a
+green line that means nothing. It is also the only coverage exercising the queue
+under traffic the directed phases do not generate, so it is a real gap rather than
+a formality.
+
+**Corrections I owe, both from this package.** I localised the `0x70` divergence
+three times and was wrong each time; the agent was right that the queue was not
+non-empty, and that the cause was its own `Clamp` reducing an out-of-range `0xf0`
+expectation to `0x70`. I read the ascending grant sequence as proof the drain had
+failed when it was proof the opposite. And the concatenation fix I sent as
+"verified against both tools" compiled but had the field order wrong for the actual
+layout — I had verified that it compiled, not that it was correct, and said
+something stronger than I had checked.
