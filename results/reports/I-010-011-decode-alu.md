@@ -160,33 +160,12 @@ in this file, and all three avoided by the model:
   *before* the truncation, so `addw(0xffffffff80000000, 1)` comes out as `0` in that
   spelling and `0x0000000080000000` in `addw`'s real definition. The model truncates
   first.
-* `(uint64_t)(uint32_t)x` is not the W rule either; that is zero-extension, which is
-  precisely what negative control 1 injects into the RTL.
-* `a >> n` on a signed type is `sra` in intent but implementation-defined before
-  C++20. There is no signed right shift anywhere in the reference.
-
-The reference's one remaining implementation-defined step — the `uint64_t → int64_t`
-conversion in `slt` — is not left load bearing. `CheckModelSelfConsistency()` runs it
-over all 400 boundary pairs against `SignedLessByBias()`, a second formulation that
-never leaves unsigned arithmetic (flipping bit 63 of both operands turns the signed
-order into the unsigned order), and fails the case if the two ever disagree. It also
-proves all sixteen ops are reachable through the switch rather than falling through
-to the unreachable sentinel.
-
-The 25 hand-written ALU invariants are checked against the RTL **without going
-through the model at all**, so a shared mistake in `ReferenceAlu` cannot make the
-model and the RTL agree for the wrong reason.
-
----
-
-# Part II — branch condition, link value and jump target
-
 ### Why the comparator is a second module
 
 The port list fixed for `mosaic_branch_target` takes `branch_taken` as an *input*:
-the comparison result arrives from outside. The card nevertheless requires the branch
-comparison to be signed for BLT/BGE and unsigned for BLTU/BGEU, and requires a
-negative control for a BLTU that compares signed. A unit with no operand inputs
+the comparison result arrives from outside. The card nevertheless requires the
+branch comparison to be signed for BLT/BGE and unsigned for BLTU/BGEU, and requires
+a negative control for a BLTU that compares signed. A unit with no operand inputs
 cannot host either, so `mosaic_branch_cmp` is delivered as its own module in the
 file next to it: one implementation of the six conditions, one place the
 signed/unsigned rule lives, one place a mutant can break it. The core wires the
@@ -201,9 +180,10 @@ closed chain explicitly as well as checking each unit against its own model.
 | --- | --- | --- | --- |
 | `pc` | in | `XLEN` | address of the instruction |
 | `imm` | in | `XLEN` | branch/jump offset, already sign-extended by the decoder |
-| `is_jalr` | in | 1 | this is a JALR, so bit 0 of the target is forced to 0 |
-| `branch_funct` | in | 3 | BEQ/BNE/BLT/BGE/BLTU/BGEU |
-| `branch_taken` | in | 1 | the comparison result from `mosaic_branch_cmp` |
+| `is_branch` | in | 1 | a conditional branch: BEQ…BGEU |
+| `is_jal` | in | 1 | unconditional jump with its own immediate |
+| `is_jalr` | in | 1 | unconditional jump whose target has bit 0 forced to 0 |
+| `branch_taken` | in | 1 | the comparison result from `mosaic_branch_cmp`, or 0 |
 | `link` | out | `XLEN` | `pc + 4`, the value JAL/JALR write to `rd` |
 | `target` | out | `XLEN` | the address control transfers to, or `pc + 4` when it does not |
 | `is_taken` | out | 1 | does control actually transfer |
@@ -217,6 +197,43 @@ closed chain explicitly as well as checking each unit against its own model.
 | `branch_funct` | in | 3 | the condition |
 | `taken` | out | 1 | the comparison result |
 
+### What decides control transfer
+
+```
+is_taken = is_jal | is_jalr | (is_branch & branch_taken)
+target   = is_taken ? (is_jalr ? ((pc + imm) & ~64'd1) : (pc + imm)) : (pc + 4)
+link     = pc + 4
+```
+
+**Nothing in this unit sniffs an instruction encoding.** That is the part of the
+design that had to change, and the reason is worth recording because the first
+version of this section was wrong in kind rather than in degree.
+
+The port list this package was first given carried `is_jalr` and `branch_funct` but
+no `is_branch` and no `is_jal`. There was then no way to tell an unconditional JAL
+from a branch that did not fire, so the first implementation inferred it:
+`is_taken = is_jalr | ~names_condition | branch_taken`, where "names no condition"
+meant `branch_funct` was `3'b010` or `3'b011`, the two funct3 values no RV64I branch
+uses (BGEU is `3'b111`). That was inventing semantics for two reserved encodings.
+Today it happens to be harmless; the failure mode is that the day an instruction
+whose funct3 collides with that pattern is routed through this unit, `is_taken`
+disagrees with real control flow — and disagrees only for instructions nobody was
+thinking about. The port list was under-specified, and the honest description is
+that it was specified badly, not that the first implementation was implemented
+badly.
+
+The fix is the interface itself: `decode_ctl_t` already carries `is_branch`, `is_jal`
+and `is_jalr` as separate fields, so the decoder states what the instruction is and
+this unit does arithmetic on the statement. Two properties are worth having:
+
+* the unit is total — every combination of the three flags and `branch_taken` has a
+  defined answer, and the sweep exercises all sixteen combinations including the ones
+  no decoder emits;
+* a mis-wired caller fails loudly. `is_branch & branch_taken` means an instruction
+  that named no branch cannot be redirected by a stray comparator answer, so a
+  comparator left driving the wrong instruction is visible as a wrong branch
+  decision rather than as a silent redirect of a JAL.
+
 ### Behaviour, in prose
 
 `link` is `pc + 4`, **always** — for JAL, for JALR, for a branch, for an instruction
@@ -225,28 +242,121 @@ In IALIGN=32 a jump target that is not 4-byte aligned traps before fetch, so the
 no "aligned link" rule to implement and none is invented.
 
 `target` is the address control transfers to when `is_taken`, and `pc + 4` when it is
-not. A not-taken branch therefore still produces a correct sequential next PC on the
-same port, so nothing else in the core needs a second "fall-through" path.
+not. A not-taken instruction therefore still produces a correct sequential next PC on
+the same port, so nothing else in the core needs a second "fall-through" path.
 
 `JALR` clears **bit 0 and nothing else** of `pc + imm`. Bit 1 survives. That is the
 whole point of the rule: a target that is 2 mod 4 has to stay 2 mod 4 so that the core
 can raise `EXC_INSN_MISALIGNED` with the original PC and instruction available for
 `tval`. A target unit that quietly rounded bit 1 away would hide a trap from the
-checker, and the misaligned-target *report* is deliberately not this unit's job.
-
-`is_taken` is high for JALR, for a branch whose comparator said yes, and whenever
-`branch_funct` names no RV64I condition at all. The branch funct3 encodings are
-BEQ=000, BNE=001, BLT=100, BGE=101, BLTU=110, BGEU=111; funct3 = 010 and 011 name no
-condition and the decoder marks them illegal. The third term exists because the port
-list carries `is_jalr` but no `is_jal`, so an unconditional JAL would otherwise be
-indistinguishable from a branch that did not fire. The term is ORed with
-`branch_taken`, so a caller that instead holds `branch_taken` high for a JAL gets the
-same answer and neither convention has to be honoured; the term can only ever make an
-unconditional transfer look taken, never make a taken branch look untaken.
+checker, and the misaligned-target *report* is deliberately not this unit's job. When
+`is_jal` and `is_jalr` are both high, `is_jalr` wins for the bit-0 clear, because it
+is the stricter of the two rules.
 
 The immediate arrives already sign-extended and is never re-sign-extended here, so
 there is no second place where a W-form immediate could be widened.
 
+### Comparison table
+
+| funct3 | Condition | Reading | Answer |
+| --- | --- | --- | --- |
+| `3'b000` | BEQ | — | `rs1 == rs2` |
+| `3'b001` | BNE | — | `rs1 != rs2` |
+| `3'b100` | BLT | **signed** | `int64(rs1) < int64(rs2)` |
+| `3'b101` | BGE | **signed** | `int64(rs1) >= int64(rs2)` |
+| `3'b110` | BLTU | **unsigned** | `uint64(rs1) < uint64(rs2)` |
+| `3'b111` | BGEU | **unsigned** | `uint64(rs1) >= uint64(rs2)` |
+| `3'b010`, `3'b011` | none | — | 0; the decoder reports these illegal |
+
+**x0.** The comparator's inputs are register *values*, not register numbers: x0 is
+the register file's responsibility and it presents 0 here, so a comparison against
+x0 reads as a comparison against zero. This unit cannot distinguish x0 from any
+other register that happens to hold 0 and does not try. The testbench carries x0
+cases because they are where a signed/unsigned mix-up is most visible:
+`blt(0, -1)` is false while `bltu(0, -1)` is true.
+
+### Branch stimulus
+
+**PCs (11)** — `0`, `2`, `4`, `8`, `0x1000`, `0xfffffffe`…, `0x100000000`,
+`0x7ffffffffffffffc`, `0xffffffff00000000`, `0xfffffffffffffff8`,
+`0xfffffffffffffffc`. The last one makes `pc + 4` wrap to zero; the odd value makes
+an odd pc explicit.
+
+**Immediates (16)** — `0, 4, 8, -4, -8, 1, 2, 6, -1, 0x7f8, -0x800, 0x800,
+0x7ffffffc, 0xffffffff80000004, 3, 5`. The set deliberately contains offsets whose low
+bits are 1 and 2, so the difference between "JALR clears bit 0" and "JALR clears bits
+1 and 0" is visible, and offsets that make `pc + imm` misaligned in bit 0, in bit 1,
+and in both.
+
+| Phase | Vectors | What it is |
+| --- | --- | --- |
+| branch-target sweep | 2 816 | 11 pcs × 16 imms × all 16 combinations of `is_branch` × `is_jal` × `is_jalr` × `branch_taken` |
+| comparator sweep | 3 200 | all 8 funct3 × all 400 pairs of the 20-value boundary operand set |
+| closed chain | 3 520 | the DUT comparator's answer driving the DUT target unit, 8 funct3 × 20 operand values × 11 pcs × both `is_jalr` |
+| branch random | 40 000 | `--seed`ed; a realistic instruction kind 95 % of the time, 70 % aligned pcs and small immediates, 30 % sign-crossing or x0 operands |
+| **total applied** | **49 536** | seed 1 |
+
+The sweep includes flag combinations no decoder emits — all three flags low, and
+`is_jal` with `is_jalr` — on purpose: those are the vectors that prove the unit fails
+loudly rather than silently on a mis-wired input.
+
+### Branch reference models
+
+`ReferenceBranchCmp(funct, rs1, rs2)` switches on the funct3 and compares in
+`int64_t` for BLT/BGE and in `uint64_t` for BLTU/BGEU, returning false for the two
+funct3 values that name no condition.
+
+`ReferenceBranchTarget(pc, imm, is_branch, is_jal, is_jalr, branch_taken)` computes
+`link = pc + 4`, `sum = pc + imm`, `aligned = is_jalr ? (sum & ~1) : sum`,
+`is_taken = is_jal || is_jalr || (is_branch && branch_taken)`, and
+`target = is_taken ? aligned : link` — the same rules as the RTL, written
+independently in host integers.
+
+The two units are checked separately: the target-unit sweep drives `branch_taken`
+from the stimulus rather than from the DUT, so a wrong condition cannot hide behind
+a wrong address or the other way round. The closed chain is checked on top of that,
+with the DUT comparator's answer driving the DUT target unit and the pair compared
+against the model chain — which is the configuration the core will actually wire.
+
+### Branch invariants asserted
+
+34 hand-written branch invariants, checked against the RTL without going through the
+models:
+
+```
+JAL at pc=0 links to pc+4 and targets pc+imm    link wraps to zero at the top of the address space
+a JALR at the top of the address space targets zero  an odd pc links to pc+4, unaligned
+JALR clears bit 0 of the target                  JALR keeps bit 1: a target 2 bytes past pc
+JALR keeps bit 1 with a 6-byte offset            JALR clears bit 0 of pc+imm, not of imm
+JALR keeps bit 1 of a large misaligned target    is_jalr wins over is_jal, and still clears bit 0
+JAL leaves a 2-byte-aligned target for the trap logic
+a taken forward branch yields pc+imm             an untaken forward branch yields pc+4
+an untaken backward branch yields pc+4           an untaken branch with bit 1 set in imm yields pc+4
+branch_taken high with no branch named transfers nothing
+an ordinary ALU instruction falls through to pc+4  an unconditional jump ignores branch_taken
+beq(7,7) is true                                 beq(7,8) is false
+bne(7,7) is false                                blt(-1,1) is true, signed
+blt(1,-1) is false                               bge(-1,1) is false
+bge(1,-1) is true                                bltu(-1,1) is false, -1 is the largest unsigned
+bgeu(-1,1) is true                               blt(x0,-1) is false: x0 reads as zero
+bltu(x0,-1) is true: x0 reads as zero            beq(x0,x0) is true
+blt(INT64_MIN,INT64_MAX) is true                 bltu(INT64_MIN,INT64_MAX) is false
+funct3 010 compares as no condition              funct3 011 compares as no condition
+```
+
+Plus per-vector checks of `link`, `target`, `is_taken` and the comparator's `taken`,
+plus these coverage assertions:
+
+* JAL, JALR and a conditional branch were each exercised;
+* a taken transfer and a not-taken instruction were both seen;
+* **every** not-taken instruction produced `target == link`;
+* `branch_taken` was seen high with no branch named — the mis-wired-caller case;
+* a JALR cleared a bit 0 that was set;
+* a JALR left a misaligned bit 1 in the target — i.e. "clears bit 0 only" was seen
+  happening, not merely asserted;
+* all eight funct3 values were compared, both outcomes of every condition were seen,
+  and a comparison against a zero (x0) operand was made;
+* the comparator-to-target chain was exercised.
 ### Comparison table
 
 | funct3 | Condition | Reading | Answer |

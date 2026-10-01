@@ -542,3 +542,13 @@ flowchart TD
 |---|---|---|---|---|
 | 2026-09-29 | 初始团队指南由完整架构/验证/平台计划生成 | 本文件、source-inventory、references | 规划集成 | 各团队冻结输入并更新上表 |
 | 2026-09-29 | 面向较小模型/新工程师补充自然语言执行说明 | 本文件任务卡的执行者目标/须知/建议顺序/停止条件 | 规划集成 | 实施团队按卡执行并回填证据 |
+| 2026-09-30 | I-001 冻结 ISA/平台配置：四个 profile 的 schema、capability ladder、memory map、PMA、geometry、CSR 表全部通过校验；47/34/30/22 条负控制全部被拒绝 | `python3 tools/check_profile.py --all`、`--profile <p> --negative`；commit c455954；`results/reports/I-001-csr-m.md`、`I-001-csr-p1p3.md` | 配置/CSR | I-008 完成后由 DUT 输出 capability map |
+| 2026-09-30 | I-002 冻结 packet/tag/credit/memory contract：tag 宽度与计数模数由 geometry 表达式推导并证明；16 条负控制全部被拒绝 | `python3 tools/check_contracts.py --all`、`--negative`；生成 `build/<p>/rtl/mosaic_id_pkg.svh` | 协议契约 | I-013/I-016 按该合同实现 |
+| 2026-09-30 | I-003 可复现构建与能力拒绝：未知 profile 退出 2 且不回退；配置不合格不产出 manifest | `make check PROFILE=p0`、`make check-docs`、`tools/gen_manifest.py` | 构建 | 每次 gate 复用同一入口 |
+| 2026-09-30 | I-004 Verilator harness 与失败输出：ELF loader、内存模型、事件流、周期上限、首处不匹配 | `tools/run_unit.py --case harness.*`（4 例全 PASS） | harness | I-008 接入真实 core |
+| 2026-09-30 | I-005 FIFO 与 skid buffer：四个变异体在本仓库重建后全部使用例失败 | `tools/run_unit.py --case fifo.backpressure`（97069 checks）；`results/reports/I-005-fifo.md` | 基础 RTL | 下游统一复用 |
+| 2026-09-30 | I-006 同步 RAM 与碰撞语义：合同为逐字节 READ-FIRST；四个变异体全部被检出；yosys 证据显示存储阵列无复位 | `tools/run_unit.py --case ram.collision_matrix`；`results/reports/I-006-ram.md` | memory wrapper | I-015 PRF、I-042 cache 复用 |
+| 2026-09-30 | I-007 bare-metal 镜像与 host oracle：12 程序 × 3 输入 = 36 ELF，审计全部为 p0 指令；Spike 交叉核对 33/36 一致，并据此发现 10 个真实缺陷 | `make -C tests/programs audit`、`tools/host_oracle.py --all`、`tests/programs/audit/spike_crosscheck.py` | 固件 | **p08_misaligned 仍未决**：Spike 不实现本项目冻结的 misaligned trap 策略且无开关可改，该项对错位策略不构成证据 |
+| 2026-09-30 | I-010 RV64I/M decode 与非法指令；I-011 整数 ALU、分支比较与跳转目标 | `tools/run_unit.py --case decode.rv64im_reserved`、`--case alu.boundaries`；九个变异体全部失败；`results/reports/I-010-011-decode-alu.md` | decoder/ALU | I-008 集成 |
+| 2026-09-30 | 参考模型 Spike 由源码构建成功（riscv-isa-sim commit 0bff121），可执行本项目固件并输出 commit trace | `~/mosaic-ref/install/bin/spike --log-commits` | 验证 | 与 DUT 逐事件差分 |
+| 2026-09-30 | 计划文档自带检查器 `docs/verification.md` 以唯一一处声明偏差运行（实现证据排除在规划文档清单之外），其余检查全部未修改 | `python3 tools/check_docs.py` | 规划集成 | 偏差在 `tools/check_docs.py` 中显式打印 |
