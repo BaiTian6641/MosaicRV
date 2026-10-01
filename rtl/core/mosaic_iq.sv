@@ -220,19 +220,11 @@
 // The age width, chosen by a macro rather than by `ifdef inside the parameter
 // port list, which Verilator 5.052 does not parse. Both branches read the same
 // generated constant, so the geometry still has exactly one home.
-`ifdef MOSAIC_IQ_MUTANT_NARROW_AGE
-  // NEGATIVE CONTROL 1: $clog2(DEPTH) = 3 bits, i.e. a modulus of 8, which is
-  // not greater than 2*(DEPTH-1) = 14. A full window of 8 entries then spans 7
-  // and the modular comparison of the two extremes is ambiguous, so the oldest
-  // entry of a full queue is not recognisable as the oldest. Deliberately legal
-  // SystemVerilog with the age-modulus guard disabled below, so the mutation
-  // test shows the wrong *answer* rather than a build error.
-  `define MOSAIC_IQ_AGE_W $clog2(mosaic_cfg_pkg::MOSAIC_IQ_ENTRIES)
-`else
   // 2**AGE_W = 4*DEPTH = 32 > 2*(DEPTH-1) = 14. See the header for the
-  // derivation and for why the bound is structural.
+  // derivation, for why the bound is structural rather than a hope about the
+  // workload, and for the elaboration guard below that rejects a width which does
+  // not meet it.
   `define MOSAIC_IQ_AGE_W $clog2(4 * mosaic_cfg_pkg::MOSAIC_IQ_ENTRIES)
-`endif
 
 
 module mosaic_iq #(
@@ -358,11 +350,7 @@ module mosaic_iq #(
   // at or below 2*(DEPTH-1) is the defect the plan calls out: the extremes of a
   // full window are then at or beyond half the modulus apart and the modular
   // comparison cannot order them.
-`ifdef MOSAIC_IQ_MUTANT_NARROW_AGE
-  localparam bit AGE_MOD_TOO_SMALL = 1'b0;  // disabled on purpose, see above
-`else
   localparam bit AGE_MOD_TOO_SMALL = ((1 << AGE_W) <= 2 * (DEPTH - 1));
-`endif
 
   // $clog2 can name indices past a smaller queue, so an entry count that does
   // not fill the index space is allowed; every index is range-checked before it
@@ -714,21 +702,9 @@ module mosaic_iq #(
   // the output wires.
   logic [DEPTH-1:0] eligible;
 
-`ifdef MOSAIC_IQ_MUTANT_UNSTABLE_GRANT
-  // NEGATIVE CONTROL 4: the outstanding grant is not held. `slot_granted` is
-  // still written, so the entry is still marked, but the arbitration no longer
-  // excludes it and the grant is re-run every cycle -- so anything that becomes
-  // ready while the functional unit is stalled steals the grant away from the
-  // entry the FU is looking at, and the payload under back-pressure is not
-  // stable.
-  always_comb begin
-    for (int unsigned i = 0; i < DEPTH; i++) eligible[i] = entry_ready[i];
-  end
-`else
   always_comb begin
     for (int unsigned i = 0; i < DEPTH; i++) eligible[i] = entry_ready[i] && !slot_granted[i];
   end
-`endif
 
   // Oldest-ready, by age, over the resident entries. A lowest-index scan is
   // simpler and wrong: a slot index says nothing about age, and the allocation
@@ -778,18 +754,28 @@ module mosaic_iq #(
   logic win_is_ins;
   assign win_is_ins = !pend_found && !win_found && ins_ready_now;
 
-`ifdef MOSAIC_IQ_MUTANT_UNSTABLE_GRANT
-  assign grant_valid = !rst && ((win_found || ins_ready_now) && !pend_killed);
-`else
   assign grant_valid = !rst && (pend_found ? !pend_killed : (win_found || ins_ready_now));
-`endif
 
   // Which entry is presented, and whether its payload is read from the store or
   // from the insert bus.
   logic             grant_from_ins;
   logic [IDX_W-1:0] grant_idx;
 
+`ifdef MOSAIC_IQ_MUTANT_UNSTABLE_GRANT
+  // NEGATIVE CONTROL 4: the outstanding grant is not held. An entry offered on
+  // the insert port takes the grant away even while one is already outstanding
+  // and unaccepted, so the functional unit is offered a different entry each
+  // cycle of a stall, the entry it was looking at is never issued, and it leaks
+  // in the queue. An earlier version of this mutant only removed the
+  // `granted` exclusion from the arbitration, which is *not* a defect: the
+  // outstanding entry is still the oldest ready one, so oldest-ready selection
+  // re-picks it and the mutant was vacuous. The hold's observable consequence is
+  // that a fresh candidate must not overtake an outstanding grant, and that is
+  // what is broken here.
+  assign grant_from_ins = ins_ready_now;
+`else
   assign grant_from_ins = !pend_found && win_is_ins;
+`endif
   assign grant_idx      = pend_found ? pend_idx : (win_found ? win_idx : alloc_slot);
 
   logic grant_fire;
@@ -883,8 +869,22 @@ module mosaic_iq #(
       // Rule 2: the base's own removal is not a hole below anybody, because
       // there is nobody below it. Subtracting it would drag the whole window
       // back down and pin the base forever.
+`ifdef MOSAIC_IQ_MUTANT_NARROW_AGE
+      // NEGATIVE CONTROL 1: the hole a removal leaves is NOT closed. The live ages
+      // are no longer a contiguous window, so the distance between two long-lived
+      // entries grows without bound and the modular comparison -- which is only
+      // exact below half the modulus -- eventually orders them wrongly. This is
+      // the failure the plan's modulus bound exists to prevent, injected as the
+      // behaviour rather than as a width change, because a width change cannot be
+      // expressed by a testbench with literal port widths and would fail at
+      // elaboration for the wrong reason. The width form of the same defect is
+      // caught by the `AGE_MOD_TOO_SMALL` elaboration guard, which is a build
+      // error by design.
+      ent_age_next[i] = ent_age[i] - AGE_W'(older_removed);
+`else
       if (base_removed) older_removed = older_removed - CNT_W'(1);
       ent_age_next[i] = ent_age[i] - AGE_W'(older_removed);
+`endif
     end
   end
 
