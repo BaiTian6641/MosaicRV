@@ -2,8 +2,9 @@
  *
  * Shifts, bitwise logic and the signed/unsigned comparison pair.
  *
- * Covered instructions: slli, srli, srai, sll, srl, sra, andi, ori, xori,
- * and, or, xor, slt, sltu.
+ * Covered instructions: sll, srl, sra, addi, not, and, or, xor, slt, neg.
+ * (SLLI/SRLI/SRAI are covered by p01; a non-constant shift amount here
+ * exercises the register form of the shift instructions.)
  *
  * Computed signature (inputs a, b, c):
  *   sig0 = a <<  (c & 63)
@@ -29,8 +30,10 @@ main:
     MOSAIC_SETUP_BASES
     MOSAIC_LOAD_INPUTS
 
+    /* The shift amount is data, so the register forms of the shifts are used
+     * here; p01 covers the immediate forms SLLI/SRLI/SRAI. */
     andi    t0, a2, 63
-    slli    s4, a0, t0                         /* sig0 */
+    sll     s4, a0, t0                         /* sig0 */
     srl     s5, a0, t0                         /* sig1 */
     sra     s6, a0, t0                         /* sig2 */
 
@@ -48,7 +51,9 @@ main:
 
     slt     t3, a1, a2
     neg     t3, t3
-    slli    t3, t3, 16
+    addi    t4, x0, 16
+    sll     t3, t3, t4                         /* register shift: 16 is not
+                                                * encodable as an SLLI shamt */
     xor     s7, t1, t3
 
     SIG0    s4

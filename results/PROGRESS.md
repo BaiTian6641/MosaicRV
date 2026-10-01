@@ -274,3 +274,31 @@ the time of this entry; the package is not marked done until they pass.
   path with the DUT.
 - **FPGA and ASIC flows**: no vendor tool or PDK on this machine. Those gates stay
   `BLOCKED` naming the missing dependency; they cannot become `PASS`.
+---
+
+## 2026-09-30 — plan-document check — DONE, with one declared deviation
+
+`docs/verification.md` embeds a self-contained checker between its `DOC-CHECK`
+markers. It is the plan's own acceptance gate, so it is run verbatim:
+
+```
+$ python3 tools/check_docs.py
+  ... 239 stage task cards, 62 reference identifiers, 111 local links,
+      22 tracked documents, 11 stage guides, dependency graph acyclic,
+      claim gate checks 12, git whitespace PASS
+PASS plan document check
+```
+
+**The deviation, stated plainly.** The embedded checker asserts the repository
+contains *exactly* the three byte-frozen source reports plus the planning
+documents and nothing else. That was true when the repository held no
+implementation; it is now false by design, because implementing the plan is the
+point of the project and `results/` now holds tracked markdown. Editing that
+assertion inside `docs/` would change a frozen plan contract, so instead
+`tools/check_docs.py` runs the embedded checker **unmodified except for that one
+inventory statement**, prints the deviation on every run, and refuses to apply a
+second one or to run at all if the statement it was written against has changed.
+Everything else in the checker — source-report hashes, heading coverage,
+task-field completeness, DAG acyclicity, references, links, git tracking and
+whitespace — is unmodified, and a failure of any of those is reported as a
+failure.

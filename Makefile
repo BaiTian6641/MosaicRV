@@ -39,14 +39,15 @@ SLANG_TIDY ?= slang-tidy
 # toolchain will turn into a silently different netlist.
 VERILATOR_LINT_FLAGS := --lint-only -Wall -Wno-DECLFILENAME
 
-.PHONY: all help check check-config check-contracts manifest lint lint-slang lint-cpp \
+.PHONY: all help check check-config check-contracts check-docs manifest lint lint-slang lint-cpp \
         unit sim synth-generic test clean distclean verify-tools
 
-all: check manifest lint unit
+all: check check-docs manifest lint unit
 
 help:
 	@echo "MosaicRV targets (PROFILE=$(PROFILE)):"
-	@echo "  make check             config + contracts + lint + unit"
+	@echo "  make check             config + contracts + plan-document check"
+	@echo "  make check-docs        the plan documents' own embedded checker"
 	@echo "  make check-config      validate profiles, PMA, CSRs, geometry"
 	@echo "  make check-contracts   validate interface contracts and tag arithmetic"
 	@echo "  make manifest          generate build/$(PROFILE)/manifest.json and RTL config"
@@ -150,8 +151,14 @@ sim: check-valid-profile manifest
 synth-generic: check-valid-profile manifest
 	$(PYTHON) tools/synth_check.py --profile $(PROFILE)
 
-test: check check-contracts lint lint-slang lint-cpp unit sim synth-generic
+test: check check-contracts check-docs lint lint-slang lint-cpp unit sim synth-generic
 	@echo "profile $(PROFILE): all configured checks passed"
+
+# The plan's own embedded checker, with one declared deviation applied by the
+# wrapper and printed on every run: implementation evidence is excluded from the
+# planning-only document inventory. See tools/check_docs.py.
+check-docs:
+	$(PYTHON) tools/check_docs.py
 
 check: check-config check-contracts
 

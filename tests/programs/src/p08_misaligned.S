@@ -50,7 +50,7 @@ main:
     slli    t0, t0, 32
     li      t1, 0x5A5A5A5A
     or      t0, t0, t1                          /* t0 = canary constant */
-    xori    t2, t0, a2                          /* t2 = canary value */
+    xor     t2, t0, a2                          /* t2 = canary value */
     sd      t2, 0(s3)
     sd      t2, 8(s3)
 
