@@ -23,9 +23,35 @@
 //     PRF is storing at that edge. There is no window in which a consumer can
 //     be woken for a value the register file has not yet taken.
 //
-// The negative control `MOSAIC_WB_MUTANT_EARLY_WAKE` wakes on a completion the
-// register file did not take, which is the card's "FU done 提前 wakeup, 而值在
-// 后续争用中失踪" stated as a defect.
+// The negative control `EARLY_WAKE` wakes on a completion the register file did
+// not take, which is the card's "FU done 提前 wakeup, 而值在后续争用中失踪"
+// stated as a defect. Its `-D` spelling is in the mutants list below.
+//
+// ---------------------------------------------------------------- mutants
+//
+// Each `MOSAIC_WB_MUTANT_<n>` injects exactly one defect the case
+// (`wb.same_bank_many_producers`) must detect, so that every rule this module
+// claims has a control that fails on that rule's own check. None is defined in
+// the shipping build. The name appears exactly once in this file, and the sweep
+// asserts that before building, so a typo cannot silently compile the shipping
+// build and pass.
+//
+//   * `EARLY_WAKE`         the PRF write and the wakeup are driven by "has a
+//                          destination" instead of "rename accepted it": the
+//                          card's early-wakeup failure, stated as a defect.
+//   * `SAMEBANK_DROP`      the loser of a same-bank pair is discarded instead of
+//                          held, so a completion is *lost* under contention.
+//   * `STALE_WRITES`       a completion rename refused as *stale* still writes
+//                          the PRF and wakes a consumer.
+//   * `DUP_WRITES`         a *duplicate* producer writes a generation twice.
+//   * `ROB_STALE_WRITES`   a completion of a discarded macro still writes.
+//   * `WAKE_NO_WRITE`      the wakeup is published on the cycle a destination
+//                          is offered, without the PRF write it claims.
+//   * `RT_TAG_ONLY`        the ready table answers from the tag alone, ignoring
+//                          the generation the tag currently owns.
+//   * `WR_CTR_PUB`         `o_wr_ctr` counts offered destinations instead of
+//                          durable writes, so the counter drifts from the
+//                          register file and from an independent tally.
 //
 // ------------------------------------------------------- one producer / write
 //
@@ -249,6 +275,21 @@ module mosaic_wb_arbiter (
   // then told a value is available for an identity the PRF never stored, and it
   // computes with that value -- the card's "wakeup before the value is durable".
   assign write_ok = dst_ok;
+`elsif MOSAIC_WB_MUTANT_STALE_WRITES
+  // MUTANT: the "not already written" half of rename's answer is ignored on the
+  // stale side, so a completion of a *previous* owner of the tag writes the
+  // register file and wakes a consumer with a value that is not this
+  // generation's.
+  assign write_ok = dst_ok && rob_live && !ren_wb_duplicate;
+`elsif MOSAIC_WB_MUTANT_DUP_WRITES
+  // MUTANT: a second producer for a generation rename says is already written
+  // writes again, overwriting the first producer's value.
+  assign write_ok = dst_ok && rob_live && !ren_wb_stale;
+`elsif MOSAIC_WB_MUTANT_ROB_STALE_WRITES
+  // MUTANT: the ROB's liveness answer is dropped, so a completion of a macro
+  // that has been discarded still reaches a physical register and wakes a
+  // consumer whose uop will never be committed.
+  assign write_ok = ren_offered && ren_wb_accepted;
 `else
   assign write_ok = wb_ok;
 `endif
@@ -301,7 +342,14 @@ module mosaic_wb_arbiter (
   assign rob_cmp_exc   = pub_ev.exc.valid;
 
   // --------------------------------------------------------------- wakeup
+`ifdef MOSAIC_WB_MUTANT_WAKE_NO_WRITE
+  // MUTANT: the wakeup is published on the cycle a live destination is offered,
+  // whether or not the register file took the write. The consumer is woken for a
+  // value that never became durable.
+  assign wu_valid = dst_ok && rob_live;
+`else
   assign wu_valid = write_ok;
+`endif
   assign wu_tag   = sel_tag;
   assign wu_gen   = sel_gen[WBA_IGEN_W-1:0];
   assign wu_val   = pub_ev.value;
@@ -315,7 +363,14 @@ module mosaic_wb_arbiter (
     for (int unsigned q = 0; q < 2; q++) begin
       q_written[q] = 1'b0;
       if (q_valid[q] && (32'(q_tag[q]) < 32'(WBA_PRF_N))) begin
+`ifdef MOSAIC_WB_MUTANT_RT_TAG_ONLY
+        // MUTANT: the answer is keyed on the tag alone. A tag that has been
+        // written at any generation answers "written" for every generation,
+        // including a recycled generation that has not been produced yet.
+        q_written[q] = rt_valid[q_tag[q]];
+`else
         q_written[q] = rt_valid[q_tag[q]] && (rt_gen[q_tag[q]] == q_gen[q]);
+`endif
       end
     end
   end
@@ -376,7 +431,14 @@ module mosaic_wb_arbiter (
       rob_bad_ctr   <= 32'd0;
       rob_ok_ctr    <= 32'd0;
     end else begin
+`ifdef MOSAIC_WB_MUTANT_WR_CTR_PUB
+      // MUTANT: the "writes" counter counts every published destination instead
+      // of every durable write, so a stale, duplicate or dead-identity
+      // completion the register file refused still advances it.
+      wr_ctr        <= wr_ctr        + {31'd0, publish && ren_offered};
+`else
       wr_ctr        <= wr_ctr        + {31'd0, write_ok};
+`endif
       wake_ctr      <= wake_ctr      + {31'd0, wu_valid};
       stale_ctr     <= stale_ctr     + {31'd0, publish && ren_offered && ren_wb_stale};
       dup_ctr       <= dup_ctr       + {31'd0, publish && ren_offered && ren_wb_duplicate};
@@ -431,6 +493,20 @@ module mosaic_wb_arbiter (
           pend_v[i] <= 1'b0;
         end
       end
+`ifdef MOSAIC_WB_MUTANT_SAMEBANK_DROP
+      // MUTANT: a pending completion that shares the selected completion's home
+      // bank is discarded instead of being held for a later cycle. The producer
+      // was told `wb_ready`, so the completion is silently lost -- the card's
+      // "conflicting results are lost, not delayed" stated as a defect.
+      for (int unsigned i = 0; i < 3; i++) begin
+        if (publish && pend_v[i] && (sel != 2'(i))) begin
+          if ((32'(pend_ev[i].dst.tag) % 32'(WBA_BANKS)) ==
+              (32'(sel_tag) % 32'(WBA_BANKS))) begin
+            pend_v[i] <= 1'b0;
+          end
+        end
+      end
+`endif
       if (wb_valid0 && wb_ready0) begin
         pend_ev[0] <= wb_ev0;
         pend_v[0]  <= 1'b1;
