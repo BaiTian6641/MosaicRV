@@ -561,7 +561,12 @@ class Dut {
           stop_now = dut_.c_dbg_state == kStateDwait;
           break;
         case Stop::kTohostRequest:
-          stop_now = dut_.c_dmem_req_o && dut_.c_dmem_we_o &&
+          // The instant that matters is the cycle *after* the request is
+          // posted, when the memory model has accepted the store and latched
+          // its end-of-run signal.  Triggering on the request itself would land
+          // one cycle too early, before the model has seen anything, and the
+          // abort would then be vacuous.
+          stop_now = dut_.h_d_pending != 0 && dut_.c_dmem_we_o &&
                      ((dut_.c_dmem_addr_o & ~UINT64_C(7)) == MOSAIC_TOHOST);
           break;
         case Stop::kTohost:
@@ -950,10 +955,11 @@ int main(int argc, char** argv) {
                          tag + ": a data access is outstanding at the abort");
           break;
         case Stop::kTohostRequest:
-          reporter.Check(aborted.stop_dmem_we &&
+          reporter.Check(aborted.stop_d_pending && aborted.stop_dmem_we &&
                              (aborted.stop_dmem_addr & ~UINT64_C(7)) ==
                                  MOSAIC_TOHOST,
-                         tag + ": the outstanding store is the one to TOHOST");
+                         tag + ": the memory model has accepted a store to TOHOST and "
+                               "its end-of-run signal is latched when the reset lands");
           break;
         case Stop::kEdges:
           reporter.Check(aborted.live_edges == point.edges,
@@ -1009,10 +1015,15 @@ int main(int argc, char** argv) {
       reporter.Check(restarted.final_csrs == reference.final_csrs,
                      tag + ": the restarted run leaves the same CSR state");
 
-      std::printf("  %-32s aborted after %4llu live edges, restarted %llu events, "
-                  "tohost=%s\n",
+      std::printf("  %-32s aborted after %4llu live edges (if_pending=%d d_pending=%d "
+                  "tohost_req=%d), restarted %llu events in %llu edges, "
+                  "first_live_tohost=%d, tohost=%s\n",
                   tag.c_str(), static_cast<unsigned long long>(aborted.live_edges),
+                  aborted.stop_if_pending ? 1 : 0, aborted.stop_d_pending ? 1 : 0,
+                  aborted.stop_dmem_we ? 1 : 0,
                   static_cast<unsigned long long>(restarted.events.size()),
+                  static_cast<unsigned long long>(restarted.live_edges),
+                  restarted.first_live_tohost_written ? 1 : 0,
                   mosaic::Hex(restarted.tohost).c_str());
     }
 
@@ -1042,15 +1053,9 @@ int main(int argc, char** argv) {
                      "before five reset edges still holds its value after them (expected " +
                          mosaic::Hex(sentinel) + ", got " + mosaic::Hex(after) + ")");
 
-      // 5b. the clear pass is what makes an unwritten word zero
-      dut.Clear();
-      const uint64_t cleared = dut.ReadWord(kSentinel);
-      reporter.Check(cleared == 0,
-                     "the harness's clear pass re-initialises the RAM data array: the "
-                     "word that held " + mosaic::Hex(sentinel) + " reads " +
-                         mosaic::Hex(cleared) + " after it");
-
-      // 5c. what the program reads from an address nobody wrote
+      // 5b. what the program reads from an address nobody wrote, and that the
+      // image and the device really are there -- read before the clear, because
+      // these are properties of the run that just finished.
       reporter.Check(r.signature[0] == 0,
                      "the fixture reads the defined zero the clear pass left in RAM "
                      "(signature[0], got " + mosaic::Hex(r.signature[0]) + ")");
@@ -1063,7 +1068,6 @@ int main(int argc, char** argv) {
                      "reading that word again gives the same defined value (it is not "
                      "an uninitialised read)");
 
-      // 5d. the image really is loaded, so 5c is not "everything reads zero"
       uint64_t first_word = 0;
       for (size_t i = 0; i < 8 && i < fixture.size(); ++i) {
         first_word |= static_cast<uint64_t>(static_cast<unsigned char>(fixture[i]))
@@ -1077,6 +1081,30 @@ int main(int argc, char** argv) {
       reporter.Check((uart_byte & 0xFF) == 0x41,
                      "the fixture's one UART write reached the device: the UART holds "
                      "'A' (" + mosaic::Hex(uart_byte) + ")");
+
+      // 5c. the clear pass is what makes an unwritten word zero: the word that
+      // held the sentinel, and the image itself, both go away with it.
+      dut.Clear();
+      const uint64_t cleared = dut.ReadWord(kSentinel);
+      reporter.Check(cleared == 0,
+                     "the harness's clear pass re-initialises the RAM data array: the "
+                     "word that held " + mosaic::Hex(sentinel) + " reads " +
+                         mosaic::Hex(cleared) + " after it");
+      const uint64_t image_gone = dut.ReadWord(MOSAIC_RESET_VECTOR);
+      reporter.Check(image_gone == 0,
+                     "the clear pass removes the image as well, so the zero at " +
+                         mosaic::Hex(kUntouched) + " is the clear pass's doing and not "
+                         "an artefact of nothing ever being written (" +
+                         mosaic::Hex(image_gone) + ")");
+
+      // 5d. loading the image again puts it back, so 5c is not "the loader is
+      // broken and nothing ever lands in RAM".
+      dut.Clear();
+      dut.LoadFixture(fixture);
+      const uint64_t reloaded = dut.ReadWord(MOSAIC_RESET_VECTOR);
+      reporter.Check(reloaded == first_word,
+                     "loading the fixture again puts its first word back at the reset "
+                     "vector (" + mosaic::Hex(reloaded) + ")");
     }
 
     detail = "reset sweep " + std::to_string(configs_run) + " runs over " +

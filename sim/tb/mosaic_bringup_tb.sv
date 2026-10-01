@@ -526,7 +526,9 @@ import mosaic_pkg::*;
       // having executed -- the defect V-009 exists to catch, found by the
       // reset-during-TOHOST-store case in sim/unit/tb_reset.cpp.
 `ifdef MOSAIC_RESET_MUTANT_STALE_TOHOST
-      // MUTANT (V-009 control): the latch survives reset.
+      // MUTANT (V-009 control): the end-of-run latch survives the reset, so a
+      // TOHOST store accepted in the cycle before the reset ends the run on the
+      // first live edge after it, with no instruction having executed.
 `else
       m_tohost_commit  <= 1'b0;
 `endif

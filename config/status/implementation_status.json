@@ -29,7 +29,8 @@
     "I-009",
     "V-008",
     "I-026",
-    "I-013"
+    "I-013",
+    "V-011"
   ],
   "evidence": {
     "I-001": {
@@ -346,6 +347,18 @@
       "verdict": "PASS",
       "notes": "Case PASS from a clean build (5646 per-cycle comparisons over 5686 cycles, checks=9, base RESULT line byte-identical before, after and between mutant campaigns). Mutant evidence independently re-derived in round 3 of results/reports/mutant-reverification-2026-10-01.md against both rename cases: of 13 mutant defines in rtl/core/mosaic_rename.sv, 7 exit 1 in this case with exactly one failure at the claimed cycle and signal (NO_GEN_CHECK ownership:212, X0_ALLOC x0:1399, NO_FREE_RESTORE squash:1527, NO_EXHAUST_CHECK exhaustion:1678, NO_DUP_WB_GUARD ownership:14, NO_DOUBLE_FREE_CHECK ownership:171, plus CKPT_ALLOC_LEAK random:1890), and the 6 that pass are expected-inert here because five of them target the two-wide path (alloc2_req is never asserted in this single-width case) and one needs the two-wide checkpoint phase -- they are caught by rename.same_cycle_chain instead. Spot-checked here: NO_GEN_CHECK rebuilt and observed to exit 1 at cycle 212 with free_stale: expected 1, got 0. The ownership rule this case exists for is that a physical tag's free/owner state is only correct at its current generation, and that a recycled generation cannot make a stale release look live.",
       "report": "results/reports/I-013-rename.md"
+    },
+    "V-011": {
+      "cases": [
+        "loader.elf_boundaries"
+      ],
+      "commands": [
+        "python3 tools/run_unit.py --profile p0 --case loader.elf_boundaries",
+        "python3 tools/host_oracle.py --check-golden-only"
+      ],
+      "verdict": "PASS",
+      "notes": "ELF loader and memory-boundary verification. Case PASS from a clean build: 490 checks, 312 DUT cycles, 13 malformed images rejected and 1 accepted. The rejection contract is exit code 2 with dut_cycles=0 -- a bad image must be refused before the machine is allowed to run, which is the card's fail mode ('a wrong image keeps running') made impossible rather than merely checked. Three real loader defects were found by the new checks and fixed, none by weakening a check: e_type was never read so a dynamic ET_DYN image was accepted at its link-time address; a PT_LOAD whose vaddr+memsz or offset+filesz wrapped uint64 made a wild entry look mapped (both sums are now checked before addition and the segment containment test is overflow-safe); and p_flags was never read, so an entry inside a segment declaring itself non-executable was accepted. Six compile-time mutants each rebuild from an empty directory, differ from the shipping binary, and exit 1 naming the check they break; tools/check_elf_load.py independently re-parses the image and agrees byte for byte, and exits 1 on a corrupted manifest. Regression-checked here: harness.bad_image (I-004) and core.bringup_vs_reference (I-008) still pass and the golden signature check still agrees. Recorded judgement call: the p_flags==0 carve-out that keeps the I-004 image loadable. NOT verified: p_align is read but only the 8-byte rule is enforced; ET_NONE/ET_REL refused but not exercised against real images; the DUT checks prove image delivery and the first retire, not retire semantics or a run to TOHOST. All numbers were produced after the V-009 lane restored sim/tb/mosaic_bringup_tb.sv (wrapper sha256 78c27dfe..., HEAD 29bb23d).",
+      "report": "results/reports/V-011-loader.md"
     }
   }
 }

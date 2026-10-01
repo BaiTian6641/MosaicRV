@@ -621,6 +621,23 @@
    ],
    "max_cycles": 4000000,
    "seed": 1
+  },
+  "store.wrong_path_visibility": {
+   "task": "I-034",
+   "top": "mosaic_store_queue_tb",
+   "rtl": [
+    "rtl/core/mosaic_pkg.sv",
+    "rtl/core/mosaic_lsu_endpoint.sv",
+    "rtl/core/mosaic_store_queue.sv"
+   ],
+   "sv": [
+    "sim/tb/mosaic_store_queue_tb.sv"
+   ],
+   "cpp": [
+    "sim/unit/tb_store.cpp"
+   ],
+   "max_cycles": 200000,
+   "seed": 1
   }
  }
 }

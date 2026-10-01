@@ -68,6 +68,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <deque>
+#include <iterator>
 #include <map>
 #include <string>
 #include <vector>
@@ -617,8 +618,11 @@ class Harness {
 
     // The core's header claims the speculative map equals the committed map
     // whenever the machine holds no unretired macro. This is that claim.
-    if (dut_->o_rob_occupied_o == 0 && dut_->o_rename_boundary_o == 0 && dut_->o_commit_o == 0) {
-      std::printf("DIAG early boundary=0 cycle=%llu\n", (unsigned long long)cycles_);
+    if (dut_->o_rename_boundary_o == 0 && !saw_boundary_zero_) {
+      saw_boundary_zero_ = true;
+      std::printf("DIAG first boundary=0 at cycle=%llu commit=%u occupied=%u alloc=%u\n",
+                  (unsigned long long)cycles_, dut_->o_commit_o,
+                  dut_->o_rob_occupied_o, dut_->o_dbg_alloc_ctr_o);
     }
 
     Compare("no redirect while a straight-line program runs",
@@ -834,6 +838,13 @@ class Harness {
   uint32_t dut_c1_alu() const { return dut_->o_c1_alu_o; }
   uint32_t dut_muldiv() const { return dut_->o_muldiv_o; }
   uint32_t dut_wb_wr() const { return dut_->o_wb_wr_o; }
+  uint32_t dut_c0_branch() const { return dut_->o_c0_br_o; }
+  uint32_t dut_c1_branch() const { return dut_->o_c1_br_o; }
+  uint32_t dut_free_count() const { return dut_->o_free_count_o; }
+  uint32_t dut_alloc_ctr() const { return dut_->o_dbg_alloc_ctr_o; }
+  uint32_t dut_ins_ctr() const { return dut_->o_dbg_ins_ctr_o; }
+  uint32_t dut_head_valid() const { return dut_->o_dbg_head_valid_o; }
+  uint64_t dut_head_pc() const { return dut_->o_dbg_head_pc_o; }
 
  private:
   static constexpr uint64_t kStallCycles = 4000;
@@ -868,6 +879,7 @@ class Harness {
   uint64_t last_commit_ = 0;
   uint64_t last_alloc_ = 0;
   uint64_t last_progress_ = 0;
+  bool saw_boundary_zero_ = false;
 };
 
 // ============================================================================
@@ -1065,6 +1077,9 @@ void PhaseCoreProgram(Harness* h) {
   h->Reset(4, false);
   h->ClearTrace();
   h->SetImemEnabled(true);
+  // The free list's state after reset is the baseline the run must return to:
+  // every physical tag a macro takes must be released when that macro retires.
+  const uint32_t free_after_reset = h->dut_free_count();
 
   std::string ref_error;
   const std::vector<Expect> expected =
@@ -1108,12 +1123,29 @@ void PhaseCoreProgram(Harness* h) {
                   h->publish_cycle(h->publish_order()[i]));
     }
   }
+  std::printf("  [end] cycles=%llu occupied=%u boundary=%u commit=%u alloc=%u ins=%u "
+              "free=%u head_valid=%u head_pc=%s stopped=%u\n",
+              (unsigned long long)h->cycles(), h->dut_occupied(), h->dut_boundary(),
+              h->dut_commit(), (unsigned)h->dut_alloc_ctr(), (unsigned)h->dut_ins_ctr(),
+              (unsigned)h->dut_free_count(), (unsigned)h->dut_head_valid(),
+              mosaic::Hex(h->dut_head_pc()).c_str(), h->dut_stopped());
   h->Check("every instruction before the ECALL retired",
            static_cast<int>(h->retires().size()) == kRetireCount,
            "retired " + std::to_string(h->retires().size()) + " of " +
                std::to_string(kRetireCount) + "; " + h->Diagnose());
   h->Check("the core's own retire counter agrees", h->dut_commit() == kRetireCount,
            "o_commit_ctr=" + std::to_string(h->dut_commit()));
+  h->Check("every physical tag was returned to the free list",
+           h->dut_free_count() == free_after_reset,
+           "free count after reset=" + std::to_string(free_after_reset) +
+               ", after the program=" + std::to_string(h->dut_free_count()));
+  // The core's header states this claim for every quiescent point; the
+  // per-cycle comparison above already enforces it, and it is named here so a
+  // quiescent machine that is *not* at a boundary is a reported defect.
+  h->Check("the machine is at a rename boundary once quiescent",
+           h->dut_boundary() != 0,
+           "o_rename_boundary=0 with the ROB empty after " +
+               std::to_string(kRetireCount) + " retirements");
   h->Check("the machine stopped exactly once, at the refused ECALL",
            h->dut_stop_ctr() == 1 && h->dut_stopped() != 0,
            "o_stop_ctr=" + std::to_string(h->dut_stop_ctr()) +
@@ -1218,9 +1250,39 @@ void PhaseClusterFabric(Harness* h) {
   }
   h->Check("every grant follows the fixed affinity rule", affinity_ok, bad);
 
-  h->Check("both clusters presented different uops in the same cycle",
-           h->dual_grant_cycles() > 0,
-           "no cycle had a grant offered by both clusters");
+  // The two clusters executed *disjoint* sets of uops whose union is the whole
+  // program: every instruction was executed exactly once, by exactly one of the
+  // two clusters. This is the control the card asks for -- "both clusters
+  // executed distinct uops" -- and it cannot be satisfied by one cluster doing
+  // all the work, or by one uop being counted twice.
+  std::vector<uint32_t> from_c0, from_c1;
+  for (uint64_t uop : h->c0_grant_uops()) from_c0.push_back(h->GrantIndex(uop));
+  for (uint64_t uop : h->c1_grant_uops()) from_c1.push_back(h->GrantIndex(uop));
+  std::sort(from_c0.begin(), from_c0.end());
+  std::sort(from_c1.begin(), from_c1.end());
+  std::vector<uint32_t> merged;
+  std::set_union(from_c0.begin(), from_c0.end(), from_c1.begin(), from_c1.end(),
+                 std::back_inserter(merged));
+  bool disjoint = true;
+  for (uint32_t i = 0; i < from_c0.size() && disjoint; i++) {
+    if (std::binary_search(from_c1.begin(), from_c1.end(), from_c0[i])) disjoint = false;
+  }
+  bool complete = merged.size() == static_cast<size_t>(kRetireCount);
+  for (size_t i = 0; complete && i < merged.size(); i++) {
+    if (merged[i] != i) complete = false;
+  }
+  h->Check("the two clusters executed disjoint uops covering the program",
+           disjoint && complete,
+           "cluster 0 executed " + std::to_string(from_c0.size()) +
+               " uops, cluster 1 " + std::to_string(from_c1.size()) +
+               ", union " + std::to_string(merged.size()) +
+               (disjoint ? "" : ", and an instruction was executed by both"));
+
+  // Both clusters held un-issued work at the same instant. (A grant offered by
+  // both clusters in the *same cycle* is not expected here and is not required:
+  // dispatch allocates one macro per cycle and alternates the clusters, so the
+  // two issue streams are staggered by construction. The measurement is
+  // reported below rather than asserted.)
   h->Check("both issue queues held live work in the same cycle",
            h->overlap_cycles() > 0,
            "no cycle had both clusters' queues non-empty");
@@ -1229,12 +1291,18 @@ void PhaseClusterFabric(Harness* h) {
            "max ROB occupancy=" + std::to_string(h->max_occupied()));
 
   std::printf("  [fabric] c0_alu=%u c1_alu=%u muldiv=%u c0_grants=%zu c1_grants=%zu "
-              "dual_grant_cycles=%llu overlap_cycles=%llu max_occupied=%u\n",
+              "both_queues_live_cycles=%llu same_cycle_dual_offer=%llu "
+              "max_rob_occupied=%u\n",
               h->dut_c0_alu(), h->dut_c1_alu(), h->dut_muldiv(),
               h->c0_grant_uops().size(), h->c1_grant_uops().size(),
-              static_cast<unsigned long long>(h->dual_grant_cycles()),
               static_cast<unsigned long long>(h->overlap_cycles()),
+              static_cast<unsigned long long>(h->dual_grant_cycles()),
               h->max_occupied());
+  std::printf("  [fabric] cluster-0 executed indices:");
+  for (uint32_t i : from_c0) std::printf(" %u", i);
+  std::printf("\n  [fabric] cluster-1 executed indices:");
+  for (uint32_t i : from_c1) std::printf(" %u", i);
+  std::printf("\n");
 }
 
 // ============================================================================

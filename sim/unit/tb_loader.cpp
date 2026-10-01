@@ -867,9 +867,9 @@ struct ImageRunReport {
 };
 
 // Loads, checks against the frozen map, and only then drives the clock. The
-// duty_cycles counter is what distinguishes "refused before running" from
+// dut_cycles counter is what distinguishes "refused before running" from
 // "refused after running", so it is incremented only after a successful load.
-ImageRunReport RunImage(const std::string& path, bool check_dut) {
+ImageRunReport RunImage(const std::string& path) {
   ImageRunReport report;
   mosaic::Image image;
   std::string detail;
@@ -887,10 +887,6 @@ ImageRunReport RunImage(const std::string& path, bool check_dut) {
     return report;
   }
   report.entry = image.entry;
-  if (!check_dut) {
-    report.dut_ok = true;
-    return report;
-  }
 
   mosaic::ClockDriver clock;
   Dut dut(&clock);
@@ -961,7 +957,7 @@ std::string FirstLine(const std::string& text) {
 // refuses before touching the clock if it must, and otherwise runs the DUT.
 // ---------------------------------------------------------------------------
 int RunImageMode(const mosaic::Options& options) {
-  const ImageRunReport report = RunImage(options.image, /*check_dut=*/true);
+  const ImageRunReport report = RunImage(options.image);
   if (report.refused) {
     std::printf("REFUSE %s %s dut_cycles=0\n", options.case_id.c_str(),
                 report.reason.c_str());

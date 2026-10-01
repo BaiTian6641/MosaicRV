@@ -2,15 +2,15 @@
   "schema_version": 1,
   "case": "fabric.fixed_two_cluster",
   "verdict": "FAIL",
-  "detail": "contract violated: cluster-fabric at cycle 123: both clusters presented different uops in the same cycle: no cycle had a grant offered by both clusters",
+  "detail": "contract violated: core-program at cycle 123: the machine is at a rename boundary once quiescent: o_rename_boundary=0 with the ROB empty after 17 retirements",
   "seed": 1,
   "max_cycles": 200000,
-  "checks": 43,
+  "checks": 33,
   "failures": 2,
   "image": "",
   "expect": "",
   "tool": "Verilator 5.052 2026-09-05",
-  "timestamp": "2026-10-01T20:17:23Z",
-  "first_mismatch": "cluster-fabric at cycle 123: both clusters presented different uops in the same cycle: no cycle had a grant offered by both clusters: expected the fabric contract holds, got contract violated",
-  "failed_checks": ["cluster-fabric: both clusters presented different uops in the same cycle -- no cycle had a grant offered by both clusters", "no contract violation in any phase"]
+  "timestamp": "2026-10-01T20:20:10Z",
+  "first_mismatch": "core-program at cycle 123: the machine is at a rename boundary once quiescent: o_rename_boundary=0 with the ROB empty after 17 retirements: expected the fabric contract holds, got contract violated",
+  "failed_checks": ["core-program: the machine is at a rename boundary once quiescent -- o_rename_boundary=0 with the ROB empty after 17 retirements", "no contract violation in any phase"]
 }
