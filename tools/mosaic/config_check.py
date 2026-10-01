@@ -615,6 +615,27 @@ def _check_geometry(bundle: Bundle, profile_name: str) -> None:
             "XLEN=%d" % (quantum, xlen),
         )
 
+    # The rename stage holds as many physical registers in flight as the PRF has
+    # allocatable entries, and its undo journal is bounded by how many allocations
+    # can be outstanding at once, which is the ROB. For that bound to be sound
+    # rather than hopeful:
+    #
+    #     allocatable tags  >=  ROB entries
+    #
+    # At p0 this is 96 - 32 = 64 = ROB_ENTRIES exactly, with nothing to spare. A
+    # deeper ROB on the same PRF makes the journal the limiting structure and
+    # reports spurious overflow on a machine that squashes correctly, so the
+    # relationship is checked rather than assumed.
+    allocatable = prf["entries"] - ARCH_INT_REGS
+    if allocatable < rob["entries"]:
+        bundle.fail(
+            "geometry",
+            "int_prf.entries=%d leaves %d allocatable tags after %d architectural "
+            "registers, fewer than rob.entries=%d; the rename undo journal would "
+            "overflow on a correctly-squashing machine. Deepen the PRF or shrink the ROB"
+            % (prf["entries"], allocatable, ARCH_INT_REGS, rob["entries"]),
+        )
+
     if bundle.profile.get("clusters") != fabric["clusters"]:
         bundle.fail(
             "geometry",

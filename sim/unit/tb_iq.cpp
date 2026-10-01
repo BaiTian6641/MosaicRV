@@ -729,6 +729,23 @@ class Bench {
       const Stimulus& s = (c == 0) ? a : b;
       inst_[c].shadow->step(s, s.ins_valid, inst_[c].expected);
     }
+    // The hardware has now taken the edge; read what it settled to, so a phase
+    // can compare it with the shadow's state, which was advanced across the same
+    // edge one line above.
+    top_->clk = 0;
+    top_->eval();
+    for (unsigned c = 0; c < inst_.size(); c++) {
+      const Pins& p = inst_[c].pins;
+      Instance& in = inst_[c];
+      in.post_grant_valid = (*p.grant_valid != 0);
+      in.post_grant_uop = *p.grant_uop;
+      in.post_grant_dst_tag = *p.grant_dst_tag;
+      in.post_grant_a = *p.grant_a;
+      in.post_dst_conflict = (*p.dst_conflict != 0);
+      in.post_full = (*p.full != 0);
+      in.post_ins_ready = (*p.ins_ready != 0);
+      in.post_wu_stale = *p.wu_stale;
+    }
     clk_.Tick();
     cycles_++;
   }
@@ -834,6 +851,15 @@ class Bench {
   uint32_t seen_wu_stale(unsigned c) const { return inst_[c].seen_wu_stale; }
   bool seen_full(unsigned c) const { return inst_[c].seen_full; }
   bool seen_ins_ready(unsigned c) const { return inst_[c].seen_ins_ready; }
+  bool seen_grant_ready(unsigned c) const { return inst_[c].seen_grant_ready; }
+  bool post_grant_valid(unsigned c) const { return inst_[c].post_grant_valid; }
+  uint32_t post_grant_uop(unsigned c) const { return inst_[c].post_grant_uop; }
+  uint32_t post_grant_dst_tag(unsigned c) const { return inst_[c].post_grant_dst_tag; }
+  uint64_t post_grant_a(unsigned c) const { return inst_[c].post_grant_a; }
+  bool post_dst_conflict(unsigned c) const { return inst_[c].post_dst_conflict; }
+  bool post_full(unsigned c) const { return inst_[c].post_full; }
+  bool post_ins_ready(unsigned c) const { return inst_[c].post_ins_ready; }
+  uint32_t post_wu_stale(unsigned c) const { return inst_[c].post_wu_stale; }
   uint32_t seen_ins_uop(unsigned c) const { return inst_[c].seen_ins_uop; }
   const ExpectedGrant& last_expected(unsigned c) const { return inst_[c].expected; }
   int last_lowest_index(unsigned c) const { return inst_[c].last_lowest_index; }
@@ -928,8 +954,17 @@ class Bench {
     bool seen_dst_conflict = false;
     uint32_t seen_grant_dst_tag = 0;
     uint32_t seen_wu_stale = 0;
+    bool seen_grant_ready = false;   // was the FU accepting on the snapshot cycle
     bool seen_full = false;
     bool seen_ins_ready = false;
+    // The same values again, read AFTER the edge -- the hardware's settled state
+    // for the cycle that was just taken, which is the one the shadow has also
+    // just advanced to. A phase comparing state must use these, not `seen_*`.
+    bool post_grant_valid = false;
+    uint32_t post_grant_uop = 0, post_grant_dst_tag = 0;
+    uint64_t post_grant_a = 0;
+    bool post_dst_conflict = false, post_full = false, post_ins_ready = false;
+    uint32_t post_wu_stale = 0;
     uint32_t last_age_ctr = 0;
     // The resident the shadow picked this cycle, and the lowest-index eligible
     // one, both computed at check time against the state the DUT was in. A
@@ -1288,6 +1323,7 @@ void Bench::CheckOne(Instance& inst, const Stimulus& s) {
   inst.seen_grant_a = *p.grant_a;
   inst.seen_grant_b = *p.grant_b;
   inst.seen_ins_valid = s.ins_valid;
+  inst.seen_grant_ready = s.grant_ready;
   inst.seen_ins_uop = s.uop;
   inst.seen_dst_conflict = (*p.dst_conflict != 0);
   inst.seen_grant_dst_tag = *p.grant_dst_tag;
@@ -1701,7 +1737,7 @@ void PhaseStaleWakeup(Bench& bench, mosaic::Reporter& rep) {
             "stale: a matching tag with a stale generation did NOT make the entry ready");
   rep.Check(bench.shadow(0)->s1_value(static_cast<unsigned>(sh->slot_of(MakeUop(24, 0, 0)))) == 0,
             "stale: no value was written into the blocked operand");
-  rep.Check(bench.seen_wu_stale(0) == bench.shadow(0)->wu_stale(),
+  rep.Check(bench.post_wu_stale(0) == bench.shadow(0)->wu_stale(),
             "stale: the rejection is counted");
   rep.Check(bench.coverage(0).stale_rejects >= 1, "stale: the rejection was observed");
 
@@ -1747,7 +1783,7 @@ void PhaseDuplicateWakeup(Bench& bench, mosaic::Reporter& rep) {
                 0x1111222233334444ull,
             "duplicate: a second broadcast did not overwrite the stored value");
   rep.Check(bench.coverage(0).dup_rejects >= 1, "duplicate: the second broadcast was refused");
-  rep.Check(bench.seen_grant_a(0) == 0x1111222233334444ull,
+  rep.Check(bench.post_grant_a(0) == 0x1111222233334444ull,
             "duplicate: the grant still carries the first value");
 }
 
@@ -1907,12 +1943,12 @@ void PhaseFullAndOrder(Bench& bench, mosaic::Reporter& rep) {
                                            0, 0, 0, 0, 0xf0 + i, 1)));
   }
   rep.Check(bench.shadow(0)->count() == kEntries, "full: the queue is at capacity");
-  rep.Check(bench.seen_full(0), "full: o_full is high");
+  rep.Check(bench.post_full(0), "full: o_full is high");
   // One more: must be refused, and must change nothing.
   Stimulus over = bench.InsertOnly(MakeUop(60, 0, 99), true, true, 0, 0, 0, 0, 0xff, 1);
   over.grant_ready = false;
   bench.Step(over);
-  rep.Check(!bench.seen_ins_ready(0), "full: a full queue refuses an insert");
+  rep.Check(!bench.post_ins_ready(0), "full: a full queue refuses an insert");
   rep.Check(bench.shadow(0)->count() == kEntries, "full: the refused insert changed nothing");
   rep.Check(bench.coverage(0).full_cycles > 0, "full: the refusal was observed");
 
@@ -1920,7 +1956,14 @@ void PhaseFullAndOrder(Bench& bench, mosaic::Reporter& rep) {
   uint32_t next_expected = 0xf0;
   for (int i = 0; i < 16; i++) {
     bench.Idle();
-    if (bench.top()->c0_grant_valid) {
+    // This one asks "what was granted *during* the cycle just taken", so it reads
+    // the pre-edge snapshot: before the edge the DUT's grant output is the entry
+    // it presented on that cycle. The post-edge snapshot would be the *next*
+    // entry, because the granted one has already left.
+    // Only an *accepted* grant is an issue. A grant that is held across cycles is
+    // presented on each of them, and counting the held repeats would walk the
+    // expected sequence forward once per cycle instead of once per uop.
+    if (bench.seen_grant_valid(0) && bench.seen_grant_ready(0)) {
       rep.Check(bench.seen_grant_dst_tag(0) == next_expected,
                 "full: entries issue in age order");
       if (next_expected < 0xf0 + kEntries) next_expected++;
