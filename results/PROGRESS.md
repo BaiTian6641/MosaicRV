@@ -803,3 +803,53 @@ all six of its mutants as "verified three ways" without inventing exit codes.
 Where I suggested narrowing the DUT earlier in this session and was told no, that
 was correct and the principle has now paid off twice: a checker that agrees with a
 deliberately weaker DUT is not checking anything.
+
+---
+
+## 2026-10-01 — I-022 still incomplete; the two-snapshot rule is the durable lesson
+
+The directed suite is **one assertion from green** and the randomised phase still
+diverges. `grep -c 'bench.top()->c' sim/unit/tb_iq.cpp` is now **0** — every phase
+assertion reads a sampled value. The mutants remain unrun and **no exit code is
+claimed**, which is correct: a mutant run against a failing base proves nothing.
+
+**My grep found nine sites, not three.** Three were failing outright; six were
+passing *by luck*, because the state they read (`o_full`, `ins_ready`) happens not
+to change across a clock edge. Both kinds were wrong. That is the more useful
+finding than the three failures: a check that passes for the wrong reason is
+indistinguishable from one that passes for the right one until you look at how it
+reads.
+
+**Converting them exposed a second, deeper alignment error.** There are two
+legitimate snapshots and they answer different questions:
+
+- `seen_*` — read **before** the edge: what the DUT *presented on the cycle under
+  test*. Grant payloads.
+- `post_*` — read **after** the edge, once the hardware has settled and the shadow
+  has been advanced across the same edge: what is *true now*. Occupancies,
+  counters, `o_dst_conflict`, `o_full`, `ins_ready`.
+
+Mixing them compares different cycles. The shadow's tallies advance after the edge;
+the grant payload is only correct before it. Using one accessor for both questions
+is the same edge-alignment mistake the `seen_*` accessors were introduced to fix,
+one level down.
+
+**What I did not let happen.** The agent was offered the chance to shorten the
+randomised phase, seed until it passed, or loosen the per-cycle comparison. It
+declined all three, and said why: each produces a green line that means nothing.
+That is the correct call and it is the same judgement it made when it refused to
+narrow the RTL conflict detector to match a narrower shadow. A checker that agrees
+with a weakened DUT is not checking anything, and a test that passes because it was
+tuned until it passed is worse than one that fails honestly.
+
+**Also closed this round.** `tools/mosaic/config_check.py` now enforces
+`allocatable tags >= ROB entries`. The rename undo journal is bounded by
+allocations outstanding at once, which is the ROB, while the allocatable tags are
+PRF entries minus the 32 architectural ones. At p0 that is 96 − 32 = 64 =
+`ROB_ENTRIES` **exactly, with nothing to spare** — a number that ought to have been
+checked on the first line of the module and was not. A deeper ROB on the same PRF
+would make the journal the limiting structure and report spurious overflow on a
+machine that squashes correctly.
+
+**Still not done:** I-022's last directed assertion, its randomised phase, and all
+six mutants.
