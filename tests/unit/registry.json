@@ -153,7 +153,7 @@
         "sim/common/event_tap.cpp",
         "sim/common/memory_model.cpp"
       ],
-      "max_cycles": 200000,
+      "max_cycles": 4000000,
       "seed": 1
     }
   }

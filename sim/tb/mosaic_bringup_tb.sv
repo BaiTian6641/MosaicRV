@@ -114,7 +114,7 @@ module mosaic_bringup_tb (
     output wire         c_evt_is_store,
     output wire  [63:0] c_evt_store_addr,
     output wire  [63:0] c_evt_store_data,
-    output wire  [2:0]  c_evt_store_size,
+    output wire  [3:0]  c_evt_store_size,
     output wire  [63:0] c_dbg_pc,
     output wire  [2:0]  c_dbg_state,
     output wire  [63:0] c_dbg_csr_data,
@@ -184,6 +184,10 @@ import mosaic_pkg::*;
 
   logic [63:0] m_tohost_value;
   logic        m_tohost_written;
+  // The end-of-program pulse is raised when the store *commits*, not when the
+  // memory is asked to perform it.  A request-time pulse would end the run one
+  // instruction early and would end it even for a store that faulted.
+  logic        m_tohost_commit;
   logic [63:0] m_uart_count;
 
   // --------------------------------------------------------------------------
@@ -264,13 +268,6 @@ import mosaic_pkg::*;
       R_CLINT:   word_value = m_clint[word_index(rid, addr)[8:0]];
       default:   word_value = m_ram[word_index(rid, addr)];
     endcase
-  endfunction
-
-  // The word with `mask`'s bits cleared, i.e. what the region keeps.
-  function automatic logic [63:0] word_keep(input logic [2:0] rid,
-                                            input logic [63:0] addr,
-                                            input logic [63:0] mask);
-    word_keep = word_value(rid, addr) & ~mask;
   endfunction
 
   // One byte.  Only called for an address access_ok already accepted, so the
@@ -406,6 +403,7 @@ import mosaic_pkg::*;
   logic [2:0]  store_rid;
   logic [17:0] store_idx;
   logic [63:0] store_mask_v;
+  logic [63:0] store_shift;
   logic [63:0] store_value;
   logic        store_allowed;
   logic        store_is_tohost;
@@ -422,6 +420,11 @@ import mosaic_pkg::*;
     store_rid       = pma_region(c_dmem_addr);
     store_idx       = word_index(store_rid, c_dmem_addr);
     store_mask_v    = store_mask_of(c_dmem_size);
+    // Where inside the containing 8-byte word the access lands.  The core
+    // performs every alignment check itself and never issues a misaligned
+    // request, and every access width is a power of two, so an access can never
+    // straddle a word boundary and one word is always enough to update.
+    store_shift     = 64'(c_dmem_addr[2:0]) * 64'd8;
     store_value     = c_dmem_wdata & store_mask_v;
     store_allowed   = access_ok(c_dmem_addr, c_dmem_size, 1'b1, 1'b0);
     store_is_tohost = ((c_dmem_addr & ~64'd7) == TOHOST_BASE);
@@ -468,6 +471,7 @@ import mosaic_pkg::*;
       m_d_data         <= 64'd0;
       m_d_fault        <= 1'b0;
       m_tohost_written <= 1'b0;
+      m_tohost_commit  <= 1'b0;
       m_tohost_value   <= 64'd0;
       m_uart_count     <= 64'd0;
       h_rb_data        <= 64'd0;
@@ -487,7 +491,8 @@ import mosaic_pkg::*;
       h_rb_fault       <= 1'b0;
       h_rb_valid       <= 1'b0;
     end else begin
-      m_tohost_written <= 1'b0;
+      m_tohost_written <= m_tohost_commit;
+      m_tohost_commit  <= 1'b0;
 
       // ---- harness readback: request in cycle N, answer in cycle N+1 -------
       h_rb_valid  <= h_rb_req;
@@ -513,23 +518,33 @@ import mosaic_pkg::*;
             m_d_fault <= 1'b1;
           end else begin
             case (store_rid)
-              R_ROM: m_rom[store_idx[8:0]] <= word_keep(store_rid, c_dmem_addr, store_mask_v) | store_value;
+              R_ROM: m_rom[store_idx[8:0]] <=
+                        word_value(store_rid, c_dmem_addr) & ~(store_mask_v << store_shift) |
+                        (store_value << store_shift);
               R_UART: begin
                 // A UART THR write is a byte the firmware is printing.  Counted
                 // so the harness can prove the device was actually driven; the
                 // byte itself stays in the region's memory.
-                m_uart[store_idx[4:0]] <= word_keep(store_rid, c_dmem_addr, store_mask_v) | store_value;
+                m_uart[store_idx[4:0]] <=
+                        word_value(store_rid, c_dmem_addr) & ~(store_mask_v << store_shift) |
+                        (store_value << store_shift);
                 m_uart_count      <= m_uart_count + 64'd1;
               end
-              R_HARNESS: m_harn[store_idx[0:0]] <= word_keep(store_rid, c_dmem_addr, store_mask_v) | store_value;
-              R_CLINT:   m_clint[store_idx[8:0]] <= word_keep(store_rid, c_dmem_addr, store_mask_v) | store_value;
-              default:   m_ram[store_idx]   <= word_keep(store_rid, c_dmem_addr, store_mask_v) | store_value;
+              R_HARNESS: m_harn[store_idx[0:0]] <=
+                              word_value(store_rid, c_dmem_addr) & ~(store_mask_v << store_shift) |
+                              (store_value << store_shift);
+              R_CLINT:   m_clint[store_idx[8:0]] <=
+                              word_value(store_rid, c_dmem_addr) & ~(store_mask_v << store_shift) |
+                              (store_value << store_shift);
+              default:   m_ram[store_idx] <=
+                        word_value(store_rid, c_dmem_addr) & ~(store_mask_v << store_shift) |
+                        (store_value << store_shift);
             endcase
             // The protocol register is ordinary memory that also ends the run:
             // a non-zero write to TOHOST is the frozen end-of-program signal.
             if (store_is_tohost) begin
-              m_tohost_value   <= store_value;
-              m_tohost_written <= (store_value != 64'd0);
+              m_tohost_value  <= store_value;
+              m_tohost_commit <= (store_value != 64'd0);
             end
             m_d_fault <= 1'b0;
           end

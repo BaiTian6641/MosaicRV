@@ -203,7 +203,7 @@ module mosaic_bringup_core #(
     output logic            evt_is_store_o,
     output logic  [XLEN-1:0] evt_store_addr_o,
     output logic  [XLEN-1:0] evt_store_data_o,
-    output logic  [2:0]     evt_store_size_o,
+    output logic  [3:0]     evt_store_size_o,
 
     // -------------------------------------------------------- observability
     // The harness reads CSRs for the negative controls (an illegal CSR access
@@ -224,6 +224,11 @@ module mosaic_bringup_core #(
   // I (bit 8) and M (bit 12).  Transcribed, not invented; tb_bringup.cpp re-reads
   // the JSON and fails if this literal ever stops matching it.
   localparam logic [63:0] MISA_RESET = 64'h8000000000001100;
+
+  // Named here because "the most negative value" and "minus one" are otherwise
+  // easy to spell loosely, and the overflow cases below need both exactly.
+  localparam logic [63:0] NEG_ONE     = 64'hffff_ffff_ffff_ffff;
+  localparam logic [63:0] MIN_VALUE   = 64'h8000_0000_0000_0000;
 
   // config/csr/mode_m.json -> "mstatus": reset 6144 = 0x1800, i.e. MPP = 0b11
   // (M-mode) and nothing else set.
@@ -337,6 +342,18 @@ module mosaic_bringup_core #(
     endcase
   endfunction
 
+  // The event format prints an access size in bytes; the memory interface
+  // carries the encoded form.  Two spellings of the same fact, so both exist and
+  // neither is guessed at by the consumer.
+  function automatic logic [3:0] size_in_bytes(input logic [2:0] sz);
+    case (sz)
+      SZ_BYTE: size_in_bytes = 4'd1;
+      SZ_HALF: size_in_bytes = 4'd2;
+      SZ_WORD: size_in_bytes = 4'd4;
+      default: size_in_bytes = 4'd8;
+    endcase
+  endfunction
+
   function automatic logic [63:0] size_bytes(input logic [2:0] sz);
     case (sz)
       SZ_BYTE:  size_bytes = 64'd1;
@@ -429,11 +446,18 @@ module mosaic_bringup_core #(
     logic [XLEN-1:0]        prod_su_hi;
     logic [XLEN-1:0]        prod_uu_hi;
     logic [XLEN-1:0]        prod_uu_lo;
-    logic signed [XLEN-1:0] sa;
-    logic signed [XLEN-1:0] sb;
+    // Signed division is written on magnitudes rather than by casting the
+    // operands to signed and hoping the toolchain agrees.  Two's-complement
+    // magnitude and an explicit sign rule say exactly what happens, and a
+    // reference model written in a different language can be checked against
+    // it line for line.
+    logic [XLEN-1:0]        mag_a;
+    logic [XLEN-1:0]        mag_b;
+    logic [XLEN-1:0]        quo;
+    logic [XLEN-1:0]        rem;
 
-    sa = a;
-    sb = b;
+    mag_a = a[XLEN-1] ? (~a + {{(XLEN - 1){1'b0}}, 1'b1}) : a;   // |a|
+    mag_b = b[XLEN-1] ? (~b + {{(XLEN - 1){1'b0}}, 1'b1}) : b;   // |b|
 
     // Only the halves each operation actually returns are kept, so no 128-bit
     // temporary is left holding bits nobody reads.
@@ -449,22 +473,39 @@ module mosaic_bringup_core #(
       MD_MULHU:  muldiv_eval = prod_uu_hi;
 
 
-      // Division by zero is defined, not undefined: the quotient is all ones
-      // and the remainder is the dividend.  Signed overflow (most-negative
-      // divided by minus one) is likewise defined rather than a trap.
+      // Division by zero is defined, not undefined: the quotient is all ones and
+      // the remainder is the dividend.  The signed overflow case (the
+      // most-negative value divided by minus one) is likewise defined rather
+      // than a trap.  The quotient truncates toward zero and the remainder takes
+      // the sign of the dividend, which is what RV64 specifies.
       MD_DIV: begin
-        if (b == {XLEN{1'b0}})                     muldiv_eval = {XLEN{1'b1}};
-        else if (a[XLEN-1] && (b == {XLEN{1'b1}})) muldiv_eval = a;
-        else                                      muldiv_eval = sa / sb;
+        if (b == {XLEN{1'b0}}) begin
+          muldiv_eval = {XLEN{1'b1}};
+        end else if ((a == MIN_VALUE) && (b == NEG_ONE)) begin
+          // Only the most-negative value divided by exactly minus one.  Testing
+          // `a[XLEN-1]` instead would catch every negative dividend divided by
+          // minus one, which is not an overflow at all.
+          muldiv_eval = a;
+        end else begin
+          quo = mag_a / mag_b;
+          if (a[XLEN-1] != b[XLEN-1]) quo = ~quo + {{(XLEN - 1){1'b0}}, 1'b1};
+          muldiv_eval = quo;
+        end
       end
       MD_DIVU: begin
         if (b == {XLEN{1'b0}}) muldiv_eval = {XLEN{1'b1}};
         else                  muldiv_eval = a / b;
       end
       MD_REM: begin
-        if (b == {XLEN{1'b0}})                     muldiv_eval = a;
-        else if (a[XLEN-1] && (b == {XLEN{1'b1}})) muldiv_eval = {XLEN{1'b0}};
-        else                                      muldiv_eval = sa % sb;
+        if (b == {XLEN{1'b0}}) begin
+          muldiv_eval = a;
+        end else if ((a == MIN_VALUE) && (b == NEG_ONE)) begin
+          muldiv_eval = {XLEN{1'b0}};
+        end else begin
+          rem = mag_a % mag_b;
+          if (a[XLEN-1]) rem = ~rem + {{(XLEN - 1){1'b0}}, 1'b1};
+          muldiv_eval = rem;
+        end
       end
       MD_REMU: begin
         if (b == {XLEN{1'b0}}) muldiv_eval = a;
@@ -487,6 +528,11 @@ module mosaic_bringup_core #(
   // ==========================================================================
   // Decode
   // ==========================================================================
+
+  // Opcode 0110111 is LUI.  It shares an opcode with OP-IMM but puts the
+  // immediate in inst[31:12] and takes no rs1 at all; mosaic_pkg has no localparam
+  // for it, so it is named here next to the two other opcodes it does not list.
+  localparam logic [6:0]  OP_LUI       = 7'b0110111;
 
   // Opcode 0111011 is OP-32: addw, subw, sllw, srlw and sraw.  It is a
   // separate opcode from OP (0110011) because a 32-bit result must be
@@ -635,6 +681,20 @@ module mosaic_bringup_core #(
         endcase
       end
 
+      // ----------------------------------------------------------------- LUI
+      OP_LUI: begin
+        // inst[31:12] is the immediate before the shift; LUI's immediate is that
+        // value with the low 12 bits zero, sign-extended from bit 31.
+        imm = sext({{(XLEN - 32){ir[31]}}, ir[31:12], 12'b0}, 32);
+        d.uses_rs1  = 1'b0;   // LUI has no rs1; the operand is a hardwired zero
+        d.uses_imm  = 1'b1;
+        d.imm       = imm;
+        d.uses_alu  = 1'b1;
+        d.alu_op    = ALU_ADD;
+        d.reg_write = 1'b1;
+        d.valid     = 1'b1;
+      end
+
       // --------------------------------------------------------------- AUIPC
       OP_AUIPC: begin
         imm = sext({{(XLEN - 32){ir[31]}}, ir[31:12], 12'b0}, 32);
@@ -716,8 +776,11 @@ module mosaic_bringup_core #(
             F3_SLL:     d.md_op = MD_MULH;
             F3_SLT:     d.md_op = MD_MULHSU;
             F3_SLTU:    d.md_op = MD_MULHU;
-            F3_SRL_SRA: begin d.md_op = MD_DIV;  d.md_signed = 1'b1; end
-            F3_XOR:     begin d.md_op = MD_DIVU; d.md_signed = 1'b0; end
+            // funct3 100 is `div` and 101 is `divu`; F3_XOR is 100 and
+            // F3_SRL_SRA is 101, so the pairing below is by encoding, not by
+            // what the mnemonic happens to be called.
+            F3_XOR:     begin d.md_op = MD_DIV;  d.md_signed = 1'b1; end
+            F3_SRL_SRA: begin d.md_op = MD_DIVU; d.md_signed = 1'b0; end
             F3_OR:      begin d.md_op = MD_REM;  d.md_signed = 1'b1; end
             F3_AND:     begin d.md_op = MD_REMU; d.md_signed = 1'b0; end
             default:    d = illegal_op();
@@ -1018,7 +1081,12 @@ module mosaic_bringup_core #(
         alu_b  = ctl.imm;
         alu_op = ALU_PASSB;
       end else begin
-        alu_a  = ctl.is_auipc ? pc_q : rs1_val;
+        // `uses_rs1` is honoured here rather than assumed: `lui` shares an
+        // opcode with OP-IMM but has no rs1 field at all, so its operand A is a
+        // hardwired zero and reading ir[19:15] as an index would fold whatever
+        // happened to live in that register into the result.
+        alu_a  = ctl.is_auipc ? pc_q
+                             : (ctl.uses_rs1 ? rs1_val : {XLEN{1'b0}});
         alu_b  = ctl.uses_rs2 ? rs2_val : ctl.imm;
         alu_op = ctl.alu_op;
       end
@@ -1280,7 +1348,11 @@ module mosaic_bringup_core #(
     mip_n      = mip_q;
     mcycle_n   = mcycle_q + 64'd1;      // one increment per clock, not per event
     minstret_n = minstret_q;
-    pc_n       = next_pc;
+    // The PC is held, not advanced: it moves only inside the commit branch
+    // below.  Defaulting it to next_pc here would make the core free-run one
+    // instruction per clock whether or not the current instruction had finished
+    // waiting for its memory.
+    pc_n       = pc_q;
     state_n    = S_FETCH;
 
     case (state_q)
@@ -1365,7 +1437,7 @@ module mosaic_bringup_core #(
       evt_is_store_o   <= 1'b0;
       evt_store_addr_o <= {XLEN{1'b0}};
       evt_store_data_o <= {XLEN{1'b0}};
-      evt_store_size_o <= 3'b000;
+      evt_store_size_o <= 4'b0000;
       for (ri = 0; ri < 32; ri = ri + 1) begin
         regs_q[ri] <= {XLEN{1'b0}};
       end
@@ -1380,7 +1452,7 @@ module mosaic_bringup_core #(
       evt_is_store_o   <= 1'b0;
       evt_store_addr_o <= {XLEN{1'b0}};
       evt_store_data_o <= {XLEN{1'b0}};
-      evt_store_size_o <= 3'b000;
+      evt_store_size_o <= 4'b0000;
 
       state_q    <= state_n;
       pc_q       <= pc_n;
@@ -1455,7 +1527,7 @@ module mosaic_bringup_core #(
           evt_is_store_o   <= 1'b1;
           evt_store_addr_o <= daddr_q;
           evt_store_data_o <= dwdata_q;
-          evt_store_size_o <= dsize_q;
+          evt_store_size_o <= size_in_bytes(dsize_q);
         end
       end
     end

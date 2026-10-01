@@ -87,6 +87,11 @@ namespace {
 constexpr uint64_t kResetCycles = 5;
 constexpr uint64_t kPselBase    = 0x8000F000ull;  // probe selector, written by this harness
 
+// Set from MOSAIC_BRINGUP_DUMP=<hex address>: dump eight words of DUT memory
+// per program, so a memory divergence and an arithmetic divergence stop looking
+// the same in the event stream.
+uint64_t g_dump_address = 0;
+
 // ===========================================================================
 // Small helpers
 // ===========================================================================
@@ -949,9 +954,10 @@ bool RunReference(const std::string& repo, const std::string& image_manifest,
       result->tohost = std::strtoull(token.c_str(), nullptr, 16);
     } else if (key == "uart_writes") {
       result->uart_writes = std::strtoull(token.c_str(), nullptr, 10);
-    } else if (key.rfind("sig", 0) == 0 && token.size() == 4) {
+    } else if (key.rfind("sig", 0) == 0 && key.size() == 4 &&
+               key[3] >= '0' && key[3] <= '9') {
       const int index = key[3] - '0';
-      if (index >= 0 && index < 4) {
+      if (index < 4) {
         result->signature[index] = std::strtoull(token.c_str(), nullptr, 16);
       }
     }
@@ -996,6 +1002,8 @@ class Dut {
     ZeroInputs();
     const char* trace = std::getenv("MOSAIC_BRINGUP_TRACE");
     trace_cycles_ = trace != nullptr ? std::strtoull(trace, nullptr, 10) : 0;
+    const char* dump = std::getenv("MOSAIC_BRINGUP_DUMP");
+    if (dump != nullptr) g_dump_address = std::strtoull(dump, nullptr, 16);
   }
 
   Vmosaic_bringup_tb* raw() { return &dut_; }
@@ -1372,6 +1380,20 @@ int main(int argc, char** argv) {
 
       ++programs;
       total_events += tap.size();
+
+      // On request, dump a window of DUT memory next to the program line.  A
+      // divergence that is a memory bug and a divergence that is an arithmetic
+      // bug look identical in the event stream, and the difference shows up in
+      // one line of dump.
+      if (g_dump_address != 0) {
+        std::printf("  dump %s:", stem.c_str());
+        for (int i = 0; i < 8; ++i) {
+          std::printf(" %016llx",
+                      static_cast<unsigned long long>(
+                          dut.ReadWord(g_dump_address + 8 * static_cast<uint64_t>(i))));
+        }
+        std::printf("\n");
+      }
 
       const std::string event_path = options.out_dir + "/" + stem + ".events.txt";
       if (!tap.Save(event_path, &detail)) Fail(stem + ": " + detail);
