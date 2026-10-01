@@ -1,24 +1,31 @@
-# I-010 / I-011 — RV64I/M decode and the integer ALU
+# I-010 / I-011 — RV64I/M decode, the integer ALU, and branch targets
 
-Work package **I-011** (integer ALU), run as `CASE=alu.boundaries` from
-`tests/unit/registry.json`. The card is `### I-011 — 实现整数 ALU 与分支目标计算`
-in `docs/stage-1-scalar-control.md`.
+Work package **I-011** (integer ALU and branch target), run as
+`CASE=alu.boundaries` from `tests/unit/registry.json`. The card is
+`### I-011 — 实现整数 ALU 与分支目标计算` in `docs/stage-1-scalar-control.md`.
 
-**This section covers the integer ALU only.** The I-011 card also carries branch
-condition evaluation, JAL/JALR link values and target computation; those are a
-separate unit with its own interface and are *not* implemented in the files
-described here. What this unit provides for them is `ALU_PASSB`, the pass-through
-op that address generation uses. See *Scope, and what this section does not claim*.
-
----
+The card has two halves and this document covers both: the **integer ALU**
+(`mosaic_alu`, the sixteen `alu_op_e` encodings) and the **branch/target half**
+(`mosaic_branch_target` plus its comparator `mosaic_branch_cmp`). Both are covered
+by the one case the card names.
 
 ## What was built
 
 | File | Contents |
 | --- | --- |
 | `rtl/core/mosaic_alu.sv` | `mosaic_alu`, all sixteen `alu_op_e` encodings, purely combinational |
-| `sim/tb/mosaic_alu_tb.sv` | Port-for-port simulation wrapper (the DUT has no clock, so that is all the wrapper can be) |
-| `sim/unit/tb_alu.cpp` | Independent reference model, boundary matrix, shift sweep, seeded random campaign, coverage assertions, five negative controls |
+| `rtl/core/mosaic_branch_target.sv` | `mosaic_branch_target`: link value, taken/not-taken target, transfer predicate |
+| `rtl/core/mosaic_branch_cmp.sv` | `mosaic_branch_cmp`: the BEQ/BNE/BLT/BGE/BLTU/BGEU comparison |
+| `sim/tb/mosaic_alu_tb.sv` | Port-for-port simulation wrapper for all three units |
+| `sim/unit/tb_alu.cpp` | Independent reference models, boundary matrix, shift sweep, branch sweep, closed comparator-to-target chain, seeded random campaigns, coverage assertions, nine negative controls |
+
+`tests/unit/registry.json` was edited once, to add `mosaic_branch_target.sv` and
+`mosaic_branch_cmp.sv` to the `rtl` list of `alu.boundaries`; without it the case
+cannot build the new units. Nothing else outside this file list was touched.
+
+---
+
+# Part I — the integer ALU
 
 ### Interface
 
@@ -36,7 +43,7 @@ No clock, no reset, no state. `op` is exactly as wide as the enum, so there is n
 illegal `op`: all sixteen encodings are decoded, and the `default` arm is
 unreachable.
 
-## Behaviour, in prose
+### Behaviour, in prose
 
 `result` is the RV64I definition of `(a, b, op)` at `XLEN` bits. Three rules carry
 almost all of the risk, and each is implemented in exactly one place:
@@ -97,16 +104,7 @@ user in this design wants one. The three questions RV64I *does* give an
 architectural answer to — `slt`, `sltu` and the zero flag — are answered inside
 this block.
 
-## The testbench
-
-`CASE=alu.boundaries` → `python3 tools/run_unit.py --case alu.boundaries`.
-
-The DUT is combinational, so the top-level wrapper has no clock and no reset, and
-the driver settles each vector with a single `eval()`. `--max-cycles` therefore
-bounds stimulus vectors, not clock cycles. There is no reset schedule because there
-is no state to reset.
-
-### Stimulus
+### ALU stimulus
 
 **Operand set (20 values)** — `0`, `1`, `2`, `3`, `-1`, `-2`, `INT64_MIN`,
 `INT64_MAX`, `0x7fffffff`, `0xffffffff7fffffff`, `0x80000000`,
@@ -122,15 +120,12 @@ straddle the W boundary, `63` is the largest legal 64-bit shift, `64`/`65`/`127`
 exercise the wrap, and the all-ones mask masks to 63 for the 64-bit forms and to 31
 for the W forms, separating the two masking rules by construction.
 
-**Phases**
-
 | Phase | Vectors | What it is |
 | --- | --- | --- |
 | operand matrix | 6 400 | all 20 × 20 pairs × all 16 ops |
 | shift sweep | 2 160 | 6 shift ops × 20 boundary values × 9 amounts, in both operand orders |
 | random campaign | 100 000 | `--seed`ed, biased onto the interesting shapes |
 | **total applied** | **108 560** | seed 1 |
-| hand-written invariants | 25 | checked against the RTL without going through the model; not counted as stimulus vectors |
 
 Half the random vectors are biased onto shapes that uniform noise essentially never
 produces: a boundary operand on one side; a small `b` (a realistic shift amount)
@@ -138,7 +133,7 @@ with a shift op; a `b` whose bits are all set above bit 5; operands differing on
 above bit 32; low-entropy all-ones/all-zeros operands; and sign-crossing pairs equal
 in magnitude but differing in sign.
 
-### The reference model, and how each expected value is computed
+### The ALU reference model, and how each expected value is computed
 
 `ReferenceAlu()` is written from the RV64I pseudo-code in host integer arithmetic —
 `uint64_t`/`int64_t` for the 64-bit forms, `uint32_t` for the W forms — and shares
@@ -178,58 +173,185 @@ order into the unsigned order), and fails the case if the two ever disagree. It 
 proves all sixteen ops are reachable through the switch rather than falling through
 to the unreachable sentinel.
 
-Finally, the 25 hand-written invariants are checked against the RTL **without going
+The 25 hand-written ALU invariants are checked against the RTL **without going
 through the model at all**, so a shared mistake in `ReferenceAlu` cannot make the
 model and the RTL agree for the wrong reason.
 
-### Invariants asserted
+---
 
-The 25 hand-written invariants, one line each:
+# Part II — branch condition, link value and jump target
+
+### Why the comparator is a second module
+
+The port list fixed for `mosaic_branch_target` takes `branch_taken` as an *input*:
+the comparison result arrives from outside. The card nevertheless requires the branch
+comparison to be signed for BLT/BGE and unsigned for BLTU/BGEU, and requires a
+negative control for a BLTU that compares signed. A unit with no operand inputs
+cannot host either, so `mosaic_branch_cmp` is delivered as its own module in the
+file next to it: one implementation of the six conditions, one place the
+signed/unsigned rule lives, one place a mutant can break it. The core wires the
+comparator's `taken` into the target unit's `branch_taken`, and the case checks that
+closed chain explicitly as well as checking each unit against its own model.
+
+### Interfaces
+
+`mosaic_branch_target #(.XLEN(int))`
+
+| Port | Dir | Width | Meaning |
+| --- | --- | --- | --- |
+| `pc` | in | `XLEN` | address of the instruction |
+| `imm` | in | `XLEN` | branch/jump offset, already sign-extended by the decoder |
+| `is_jalr` | in | 1 | this is a JALR, so bit 0 of the target is forced to 0 |
+| `branch_funct` | in | 3 | BEQ/BNE/BLT/BGE/BLTU/BGEU |
+| `branch_taken` | in | 1 | the comparison result from `mosaic_branch_cmp` |
+| `link` | out | `XLEN` | `pc + 4`, the value JAL/JALR write to `rd` |
+| `target` | out | `XLEN` | the address control transfers to, or `pc + 4` when it does not |
+| `is_taken` | out | 1 | does control actually transfer |
+
+`mosaic_branch_cmp #(.XLEN(int))`
+
+| Port | Dir | Width | Meaning |
+| --- | --- | --- | --- |
+| `rs1_value` | in | `XLEN` | architectural value of rs1; x0 presents 0 |
+| `rs2_value` | in | `XLEN` | architectural value of rs2; x0 presents 0 |
+| `branch_funct` | in | 3 | the condition |
+| `taken` | out | 1 | the comparison result |
+
+### Behaviour, in prose
+
+`link` is `pc + 4`, **always** — for JAL, for JALR, for a branch, for an instruction
+whose pc is odd, and for a pc at the top of the address space where it wraps to zero.
+In IALIGN=32 a jump target that is not 4-byte aligned traps before fetch, so there is
+no "aligned link" rule to implement and none is invented.
+
+`target` is the address control transfers to when `is_taken`, and `pc + 4` when it is
+not. A not-taken branch therefore still produces a correct sequential next PC on the
+same port, so nothing else in the core needs a second "fall-through" path.
+
+`JALR` clears **bit 0 and nothing else** of `pc + imm`. Bit 1 survives. That is the
+whole point of the rule: a target that is 2 mod 4 has to stay 2 mod 4 so that the core
+can raise `EXC_INSN_MISALIGNED` with the original PC and instruction available for
+`tval`. A target unit that quietly rounded bit 1 away would hide a trap from the
+checker, and the misaligned-target *report* is deliberately not this unit's job.
+
+`is_taken` is high for JALR, for a branch whose comparator said yes, and whenever
+`branch_funct` names no RV64I condition at all. The branch funct3 encodings are
+BEQ=000, BNE=001, BLT=100, BGE=101, BLTU=110, BGEU=111; funct3 = 010 and 011 name no
+condition and the decoder marks them illegal. The third term exists because the port
+list carries `is_jalr` but no `is_jal`, so an unconditional JAL would otherwise be
+indistinguishable from a branch that did not fire. The term is ORed with
+`branch_taken`, so a caller that instead holds `branch_taken` high for a JAL gets the
+same answer and neither convention has to be honoured; the term can only ever make an
+unconditional transfer look taken, never make a taken branch look untaken.
+
+The immediate arrives already sign-extended and is never re-sign-extended here, so
+there is no second place where a W-form immediate could be widened.
+
+### Comparison table
+
+| funct3 | Condition | Reading | Answer |
+| --- | --- | --- | --- |
+| `3'b000` | BEQ | — | `rs1 == rs2` |
+| `3'b001` | BNE | — | `rs1 != rs2` |
+| `3'b100` | BLT | **signed** | `int64(rs1) < int64(rs2)` |
+| `3'b101` | BGE | **signed** | `int64(rs1) >= int64(rs2)` |
+| `3'b110` | BLTU | **unsigned** | `uint64(rs1) < uint64(rs2)` |
+| `3'b111` | BGEU | **unsigned** | `uint64(rs1) >= uint64(rs2)` |
+| `3'b010`, `3'b011` | none | — | 0; the decoder reports these illegal |
+
+**x0.** The comparator's inputs are register *values*, not register numbers: x0 is
+the register file's responsibility and it presents 0 here, so a comparison against
+x0 reads as a comparison against zero. This unit cannot distinguish x0 from any
+other register that happens to hold 0 and does not try. The testbench carries x0
+cases because they are where a signed/unsigned mix-up is most visible:
+`blt(0, -1)` is false while `bltu(0, -1)` is true.
+
+### Branch stimulus
+
+**PCs (11)** — `0`, `2`, `4`, `8`, `0x1000`, `0xfffffffe`…, `0x100000000`,
+`0x7ffffffffffffffc`, `0xffffffff00000000`, `0xfffffffffffffff8`,
+`0xfffffffffffffffc`. The last one makes `pc + 4` wrap to zero; the odd value makes
+an odd pc explicit.
+
+**Immediates (16)** — `0, 4, 8, -4, -8, 1, 2, 6, -1, 0x7f8, -0x800, 0x800,
+0x7ffffffc, 0xffffffff80000004, 3, 5`. The set deliberately contains offsets whose low
+bits are 1 and 2, so the difference between "JALR clears bit 0" and "JALR clears bits
+1 and 0" is visible, and offsets that make `pc + imm` misaligned in bit 0, in bit 1,
+and in both.
+
+| Phase | Vectors | What it is |
+| --- | --- | --- |
+| branch sweep | 5 632 | 8 funct3 × 11 pcs × 16 imms × both `is_jalr` × both `branch_taken` |
+| comparator sweep | 3 200 | all 8 funct3 × all 400 pairs of the 20-value boundary operand set |
+| closed chain | 3 520 | the DUT comparator's answer driving the DUT target unit, 8 funct3 × 20 operand values × 11 pcs × both `is_jalr` |
+| branch random | 20 000 | `--seed`ed; 70 % aligned pcs and small immediates, 30 % sign-crossing or x0 operands |
+| **total applied** | **32 352** | seed 1 |
+
+### Branch reference models
+
+`ReferenceBranchCmp(funct, rs1, rs2)` switches on the funct3 and compares in
+`int64_t` for BLT/BGE and in `uint64_t` for BLTU/BGEU, returning false for the two
+funct3 values that name no condition.
+
+`ReferenceBranchTarget(pc, imm, is_jalr, funct, branch_taken)` computes
+`link = pc + 4`, `sum = pc + imm`, `aligned = is_jalr ? (sum & ~1) : sum`,
+`is_taken = is_jalr || !names_condition || branch_taken`, and
+`target = is_taken ? aligned : link` — the same four rules as the RTL, written
+independently in host integers.
+
+The two units are checked separately, with `branch_taken` driven from the stimulus
+rather than from the DUT, so a wrong condition cannot hide behind a wrong address or
+the other way round. The closed chain is checked on top of that, with the DUT
+comparator's answer driving the DUT target unit and the pair compared against the
+model chain — which is the configuration the core will actually wire.
+
+### Branch invariants asserted
+
+32 hand-written branch invariants, checked against the RTL without going through the
+models:
 
 ```
-add(0,0) is zero and sets zero                         add(1,-1) is zero while a != 0
-add(INT64_MAX,1) wraps to INT64_MIN                    sub(0,1) is -1
-slt(-1,1) is 1, signed                                 sltu(-1,1) is 0, -1 is the largest unsigned value
-slt(INT64_MIN,1) is 1                                  sltu(INT64_MIN,1) is 0
-sra(INT64_MIN,1) replicates the sign bit               srl(INT64_MIN,1) shifts a zero in
-sll by 64 is a shift by 0                              sll by the all-ones mask is a shift by 63
-sll masks the shift amount to six bits, ignoring bit 31
-addw sign-extends its 32-bit answer                    addw ignores the bits above bit 31 of its operands
-addw of a sign-extended operand ignores the upper bits subw wraps at 32 bits and sign-extends
-sllw by 32 is a shift by 0, not a shift to zero        sllw by the all-ones mask is a shift by 31
-sraw replicates bit 31 of its operand                  srlw shifts a zero in above bit 31
-or of complementary patterns                           and of complementary patterns is zero
-xor of complementary patterns                          passb returns b unchanged
+link at pc=0 is pc+4 and the target is pc+imm        link wraps to zero at the top of the address space
+a JALR at the top of the address space links to zero an odd pc links to pc+4, unaligned
+JALR clears bit 0 of the target                      JALR keeps bit 1: a target 2 bytes past pc
+JALR keeps bit 1 with a 6-byte offset                JALR clears bit 0 of pc+imm, not of imm
+JALR keeps bit 1 of a large misaligned target        JAL leaves a 2-byte-aligned target for the trap logic
+a branch with bit 1 set in imm falls through to pc+4  an untaken forward branch yields pc+4
+an untaken backward branch yields pc+4               a taken forward branch yields pc+imm
+funct3 010 names no condition and still transfers    funct3 011 names no condition and still transfers
+beq(7,7) is true                                     beq(7,8) is false
+bne(7,7) is false                                    blt(-1,1) is true, signed
+blt(1,-1) is false                                   bge(-1,1) is false
+bge(1,-1) is true                                    bltu(-1,1) is false, -1 is the largest unsigned
+bgeu(-1,1) is true                                   blt(x0,-1) is false: x0 reads as zero
+bltu(x0,-1) is true: x0 reads as zero                beq(x0,x0) is true
+blt(INT64_MIN,INT64_MAX) is true                     bltu(INT64_MIN,INT64_MAX) is false
+funct3 010 compares as no condition                  funct3 011 compares as no condition
 ```
 
-Each is two checks, one on `result` and one on `zero`, each named in the failure
-output.
+Plus per-vector checks of `link`, `target`, `is_taken` and the comparator's `taken`,
+plus these coverage assertions:
 
-Plus, per vector: `result` against the model, and `zero` against `result == 0`.
+* every one of the eight funct3 values was exercised;
+* a taken transfer and a not-taken branch were both seen;
+* **every** not-taken branch produced `target == link`;
+* JALR and the non-JALR path were both exercised;
+* a JALR cleared a bit 0 that was set;
+* a JALR left a misaligned bit 1 in the target — i.e. "clears bit 0 only" was seen
+  happening, not merely asserted;
+* both outcomes of every condition were seen, and a comparison against a zero (x0)
+  operand was made;
+* the comparator-to-target chain was exercised.
 
-Plus coverage, asserted at the end so that a stimulus edit which stops reaching
-something fails the case instead of quietly passing over a shorter path:
+---
 
-* every one of the sixteen ops was exercised, produced a zero result, produced a
-  non-zero result, and was seen at `a == b == 0`;
-* `slt` and `sltu` each saw the `-1` against `1` pair;
-* `sra` saw an operand with bit 63 set;
-* `sllw` saw a shift amount that masks to 32, and `sll` saw one that masks to 0 but
-  is not 0;
-* `addw` produced a sign-extended negative word result, and `sraw` shifted an
-  operand with bit 31 set;
-* some op produced zero from a non-zero `a`.
+# Negative controls
 
-Those last eight are exactly the operand shapes that separate the five mutants, so a
-run that cannot distinguish signed from unsigned, 5-bit from 6-bit masking, or
-arithmetic from logical shift fails rather than reporting a pass.
+Nine deliberate defects, each behind a `-D` that is off in the shipping build, and
+each demonstrated below to fail the case with exit 1. The wrapper and the C++ driver
+are identical in all ten builds; only the `-D` changes.
 
-## Negative controls
-
-Five deliberate defects, each behind a `-D` that is off in the shipping build, each
-injected into `rtl/core/mosaic_alu.sv`, and each demonstrated below to fail the case
-with exit 1. The wrapper and the C++ driver are identical in all six builds; only the
-`-D` changes.
+## ALU mutants
 
 | Mutant | Injected defect | First mismatch reported | Exit |
 | --- | --- | --- | --- |
@@ -239,45 +361,82 @@ with exit 1. The wrapper and the C++ driver are identical in all six builds; onl
 | `MOSAIC_ALU_MUTANT_4` | `slt` uses the unsigned comparison | `slt(-1, 1)`: expected `0x0000000000000001`, got `0x0000000000000000` | 1 |
 | `MOSAIC_ALU_MUTANT_5` | `zero` computed from `a` instead of `result` | `add(1, -1)`: expected `zero=1`, got `zero=0` | 1 |
 
+## Branch mutants
+
+| Mutant | Injected defect | First mismatch reported | Exit |
+| --- | --- | --- | --- |
+| `MOSAIC_BRANCH_TARGET_MUTANT_1` | JALR forgets to clear bit 0 | `jalr(pc=0, imm=1)`: expected target `0x0000000000000000`, got `0x0000000000000001` | 1 |
+| `MOSAIC_BRANCH_TARGET_MUTANT_2` | `link` is `pc + 2` | `link at pc=0`: expected `0x0000000000000004`, got `0x0000000000000002` | 1 |
+| `MOSAIC_BRANCH_TARGET_MUTANT_3` | a not-taken branch leaks the branch target | an untaken branch with `imm=2`: expected `0x0000000000000004`, got `0x0000000000000002` | 1 |
+| `MOSAIC_BRANCH_CMP_MUTANT_1` | BLTU/BGEU compare with the signed relation | `bltu(-1, 1)`: expected `0`, got `1` | 1 |
+
 The run stops at eight failed checks so a mutant log stays readable; the coverage
 assertions are skipped in that case, because after a deliberate halt they would be
 reporting the truncation rather than anything about the stimulus.
 
-Mutant 4 is worth calling out as a process result: the first time this table was
-produced, **mutant 4 passed** — because the `ifdef` block for it had never been
-written, so `-DMOSAIC_ALU_MUTANT_4` compiled to nothing. A negative control that is
-never exercised proves nothing. The block now exists, and the defect is detected.
+## Two things that went wrong on the way, kept on the record
 
-## Evidence
+**Mutant 4 passed the first time.** The first time the mutant table was produced,
+**mutant 4 passed** — because the `ifdef` block for it had never been written, so
+`-DMOSAIC_ALU_MUTANT_4` compiled to nothing and the run was bit-identical to the
+shipping build. A define that selects nothing builds cleanly and a case that only
+exercises the good path reports a pass, which is exactly the failure mode that makes
+mutation evidence worthless. The block now exists, the defect is detected, and this
+is the same reason `tools/lint_rtl.py --self-test` requires a deliberately latching
+module to actually produce a LATCH warning: a gate that has never been seen to fail is
+not a gate.
 
-### Lint — `rtl/core/mosaic_alu.sv` and `sim/tb/mosaic_alu_tb.sv`
+**Two of the hand-written constants were wrong when first written.** A 6-bit-versus-
+64-bit reading of one `sll` case (the model of `sll(x, 0x80000000)` was written as if
+the shift amount were not masked to six bits) and the wrong sign extension on one
+`srlw` case. Both were caught by the RTL on the first run and are the reason the
+boundary set is worth its size: a reference model that is wrong in the same direction
+as the DUT is worse than no model, and these two were wrong in exactly the direction
+the boundary values are chosen to expose. Two more branch constants were wrong the
+same way on the first run of Part II (a target written as `link` where the answer was
+`pc + imm`, and `blt(-1,1)` written as false where it is true), again caught
+immediately by the RTL.
+
+---
+
+# Evidence
+
+### Lint — every RTL file this package owns, plus the wrapper
+
+The project linter is `tools/lint_rtl.py`, which elaborates each source on its own
+with the packages it imports:
+
+```
+$ python3 tools/lint_rtl.py | grep -E 'mosaic_alu|mosaic_branch'
+ok   rtl/core/mosaic_alu.sv: clean as mosaic_alu
+ok   rtl/core/mosaic_branch_cmp.sv: clean as mosaic_branch_cmp
+ok   rtl/core/mosaic_branch_target.sv: clean as mosaic_branch_target
+```
+
+and, with the plain `-Wall` the Makefile uses and no warning suppressions at all:
 
 ```
 $ verilator --lint-only -Wall -Wno-DECLFILENAME --top-module mosaic_alu_tb \
-    -Irtl/core rtl/core/mosaic_alu.sv sim/tb/mosaic_alu_tb.sv \
-  | grep -oE '^%[A-Za-z-]+: [a-z/._A-Za-z0-9]+\.sv' | sort | uniq -c
-     32 %Warning-UNUSEDPARAM: rtl/core/mosaic_pkg.sv
-```
-
-Every warning is `UNUSEDPARAM` inside `rtl/core/mosaic_pkg.sv`, which is read-only for
-this package: they are the constants an ALU has no business referencing (`OP_LOAD`,
-`EXC_MISALIGNED`, …). A `lint_off` region in `mosaic_alu.sv` cannot silence them,
-because Verilator attributes the warning to the definition rather than to the use
-site. With that one warning class suppressed:
-
-```
-$ verilator --lint-only -Wall -Wno-DECLFILENAME -Wno-UNUSEDPARAM --top-module mosaic_alu_tb \
-    -Irtl/core rtl/core/mosaic_alu.sv sim/tb/mosaic_alu_tb.sv; echo $?
+    -Irtl/core -Ibuild/p0/sim rtl/core/mosaic_alu.sv rtl/core/mosaic_branch_target.sv \
+    rtl/core/mosaic_branch_cmp.sv sim/tb/mosaic_alu_tb.sv; echo $?
 - V e r i l a t i o n   R e p o r t: Verilator 5.052 2026-09-05 rev vUNKNOWN-built20260905
-- Verilator: Built from 0.061 MB sources in 4 modules, into 0.026 MB in 3 C++ files needing 0.000 MB
+- Verilator: Built from 0.109 MB sources in 6 modules, into 0.039 MB in 3 C++ files needing 0.000 MB
 0
 ```
 
-Zero warnings and zero errors from the two files this package owns. **Recommendation
-for integration:** a `/* verilator lint_off UNUSEDPARAM */` region at the top of
-`rtl/core/mosaic_pkg.sv`, or `-Wno-UNUSEDPARAM` in the Makefile's
-`VERILATOR_LINT_FLAGS`, would make `make lint` clean repo-wide. Either is a one-line
-change to a file this package does not own.
+Zero warnings and zero errors from the five files this package owns.
+
+**History worth keeping.** An earlier version of this section was written before
+`mosaic_pkg.sv` carried its scoped `/* verilator lint_off UNUSEDPARAM */` region, and
+plain `-Wall` then produced **32 `UNUSEDPARAM` warnings, every one of them attributed
+to `rtl/core/mosaic_pkg.sv`** — the opcode and exception constants an ALU has no
+business referencing. A `lint_off` region in the *using* module cannot suppress them,
+because Verilator attributes the warning to the definition, not to the use site. Two
+import forms were also measured on the way to the present one: a `$unit`-scope
+`import mosaic_pkg::*` raises `IMPORTSTAR`, and Verilator 5.052 rejects the narrower
+`import mosaic_pkg::alu_op_e::*` as a syntax error, so `mosaic_alu` keeps a plain
+`import mosaic_pkg::*;` **inside the module body**, which is sufficient because its
+port list uses only plain vectors.
 
 ### The case, seed 1
 
@@ -288,37 +447,35 @@ PASS alu.boundaries               task=I-011
 
 $ cat results/unit/alu.boundaries/run.log
 $ /Users/flare/MosaicRV/build/p0/unit/alu.boundaries/alu.boundaries --case alu.boundaries --out /Users/flare/MosaicRV/results/unit/alu.boundaries --seed 1 --max-cycles 200000
-RESULT PASS alu.boundaries 108560 stimulus vectors (25 hand-written invariants, seed 1); add=4895 sub=4738 sll=9855 slt=4767 sltu=4744 xor=4871 srl=10105 sra=10252 or=4732 and=4894 addw=4813 subw=4753 sllw=10288 srlw=10144 sraw=9986 passb=4723
+RESULT PASS alu.boundaries 108560 ALU and 32352 branch stimulus vectors (57 hand-written invariants, seed 1); alu_ops=add=4895 sub=4738 sll=9855 slt=4767 sltu=4744 xor=4871 srl=10105 sra=10252 or=4732 and=4894 addw=4813 subw=4753 sllw=10288 srlw=10144 sraw=9986 passb=4723; branch=28832 vectors, chain=3520
 
 $ python3 -c "import json;d=json.load(open('results/unit/alu.boundaries/result.json'));print('checks',d['checks'],'failures',d['failures'],'seed',d['seed'])"
-checks 217244 failures 0 seed 1
+checks 339694 failures 0 seed 1
 ```
 
-217 244 checks: 2 per stimulus vector (217 120), 2 per hand-written invariant (50), one
-model self-consistency check, and 73 coverage assertions. Every op is exercised
-between 4 700 and 10 300 times.
+339 694 checks: two or three per stimulus vector, two or three per hand-written
+invariant, one model self-consistency check, and 90 coverage assertions. Every ALU op
+is exercised between 4 700 and 10 300 times.
 
 ### Seed independence
 
-The random campaign is reproducible from `--seed`; the case does not pass on seed 1
+The random campaigns are reproducible from `--seed`; the case does not pass on seed 1
 alone.
 
 ```
-$ for s in 2 7 12345 4294967296; do build/p0/unit/alu.boundaries/alu.boundaries \
-    --case alu.boundaries --out /tmp/alu_seed_$s --seed $s --max-cycles 200000; echo "exit=$?"; done
-RESULT PASS alu.boundaries 108560 stimulus vectors (25 hand-written invariants, seed 2); add=4672 sub=4685 sll=10161 slt=4879 sltu=4832 xor=4693 srl=10238 sra=10329 or=4824 and=4664 addw=4717 subw=4756 sllw=10136 srlw=10144 sraw=10118 passb=4712
+$ for s in 2 7 4294967296; do build/p0/unit/alu.boundaries/alu.boundaries \
+    --case alu.boundaries --out /tmp/as_$s --seed $s --max-cycles 200000; echo "exit=$?"; done
+RESULT PASS alu.boundaries 108560 ALU and 32352 branch stimulus vectors (57 hand-written invariants, seed 2); alu_ops=add=4672 sub=4685 sll=10161 slt=4879 sltu=4832 xor=4693 srl=10238 sra=10329 or=4824 and=4664 addw=4717 subw=4756 sllw=10136 srlw=10144 sraw=10118 passb=4712; branch=28832 vectors, chain=3520
 exit=0
-RESULT PASS alu.boundaries 108560 stimulus vectors (25 hand-written invariants, seed 7); add=4770 sub=4787 sll=10255 slt=4825 sltu=4645 xor=4800 srl=10030 sra=10225 or=4876 and=4726 addw=4796 subw=4684 sllw=10059 srlw=10165 sraw=10132 passb=4785
+RESULT PASS alu.boundaries 108560 ALU and 32352 branch stimulus vectors (57 hand-written invariants, seed 7); alu_ops=add=4770 sub=4787 sll=10255 slt=4825 sltu=4645 xor=4800 srl=10030 sra=10225 or=4876 and=4726 addw=4796 subw=4684 sllw=10059 srlw=10165 sraw=10132 passb=4785; branch=28832 vectors, chain=3520
 exit=0
-RESULT PASS alu.boundaries 108560 stimulus vectors (25 hand-written invariants, seed 12345); add=4688 sub=4891 sll=10123 slt=4863 sltu=4669 xor=4732 srl=10294 sra=10087 or=4760 and=4798 addw=4700 subw=4764 sllw=10149 srlw=10221 sraw=9991 passb=4830
-exit=0
-RESULT PASS alu.boundaries 108560 stimulus vectors (25 hand-written invariants, seed 4294967296); add=4710 sub=4742 sll=10130 slt=4830 sltu=4881 xor=4783 srl=10064 sra=9976 or=4789 and=4834 addw=4946 subw=4822 sllw=10249 srlw=10086 sraw=10015 passb=4703
+RESULT PASS alu.boundaries 108560 ALU and 32352 branch stimulus vectors (57 hand-written invariants, seed 4294967296); alu_ops=add=4710 sub=4742 sll=10130 slt=4830 sltu=4881 xor=4783 srl=10064 sra=9976 or=4789 and=4834 addw=4946 subw=4822 sllw=10249 srlw=10086 sraw=10015 passb=4703; branch=28832 vectors, chain=3520
 exit=0
 ```
 
-### Third cross-check of the hand-written constants
+### Third cross-check of the hand-written ALU constants
 
-The 25 hand-written expected values were recomputed by an independent
+The 25 hand-written ALU expected values were recomputed by an independent
 arbitrary-precision Python model — a third implementation, in a third language, with
 none of C++'s integer-conversion rules — and compared against the literals in
 `sim/unit/tb_alu.cpp`:
@@ -328,8 +485,8 @@ $ python3 /tmp/xcheck_alu.py      # throwaway script, not committed
 checked 25 hand-written invariants against the independent python model, 0 wrong
 ```
 
-This is not decoration. Two of the 25 constants were wrong when first written — a
-6-bit-versus-64-bit reading of one `sll` case, and the wrong extension on one `srlw`
+This is not decoration. Two of the 25 constants were wrong when first written — the
+6-bit-versus-64-bit reading of one `sll` case and the wrong extension on one `srlw`
 case — and the RTL caught both on the first run.
 
 ### C++ lint
@@ -337,7 +494,7 @@ case — and the RTL caught both on the first run.
 ```
 $ c++ -std=c++17 -fsyntax-only -Wall -Wextra -Wshadow -Isim/common -Ibuild/p0/sim \
     -Ibuild/p0/unit/alu.boundaries/obj_dir -I$(verilator -getenv VERILATOR_ROOT)/include \
-    sim/unit/tb_alu.cpp 2>&1 | grep 'tb_alu.cpp:[0-9]'
+    sim/unit/tb_alu.cpp 2>&1 | grep -E 'tb_alu\.cpp:[0-9]+:[0-9]+: (error|warning)'
 (no output)
 ```
 
@@ -352,72 +509,89 @@ directory:
 
 ```
 R=$(pwd)
-for n in 1 2 3 4 5; do
-  d=$R/build/p0/unit/alu.mutant$n; rm -rf $d; mkdir -p $d
-  verilator --cc --exe --build -j 0 -O2 -CFLAGS "-O2 -std=c++17 -Wall" \
-    --x-assign unique --x-initial unique --top-module mosaic_alu_tb -Mdir $d/obj_dir \
-    -I$R/build/p0/sim -I$R/rtl/core -I$R/rtl/common \
-    -CFLAGS -I$R/sim/common -CFLAGS -I$R/build/p0/sim \
-    -DMOSAIC_ALU_MUTANT_$n -o $d/alu.mutant$n \
-    $R/sim/tb/mosaic_alu_tb.sv $R/rtl/core/mosaic_alu.sv $R/sim/unit/tb_alu.cpp \
-    $R/sim/common/sim_common.cpp
-  $d/alu.mutant$n --case alu.boundaries --out $d/out --seed 1 --max-cycles 200000
-  echo "exit=$?"
-done
+SRC="$R/sim/tb/mosaic_alu_tb.sv $R/rtl/core/mosaic_alu.sv \
+     $R/rtl/core/mosaic_branch_target.sv $R/rtl/core/mosaic_branch_cmp.sv \
+     $R/sim/unit/tb_alu.cpp $R/sim/common/sim_common.cpp"
+verilator --cc --exe --build -j 0 -O2 -CFLAGS "-O2 -std=c++17 -Wall" \
+  --x-assign unique --x-initial unique --top-module mosaic_alu_tb -Mdir $d/obj_dir \
+  -I$R/build/p0/sim -I$R/rtl/core -I$R/rtl/common \
+  -CFLAGS -I$R/sim/common -CFLAGS -I$R/build/p0/sim \
+  -D<the mutant> -o $d/m $SRC
 ```
 
-Output:
+Output, all nine:
 
 ```
-=== MOSAIC_ALU_MUTANT_1 : build exit=0 ===
-MISMATCH addw sign-extends its 32-bit answer: expected 0xffffffff80000000, got 0x0000000080000000
-ABORT: 8 checks failed (last: matrix addw(a=0x0000000000000000, b=0xffffffffffffffff) result); stopping to keep the log readable
+=== MOSAIC_ALU_MUTANT_1 build=0 ===
+MISMATCH addw sign-extends its 32-bit answer: result: expected 0xffffffff80000000, got 0x0000000080000000
 coverage: not asserted, the run halted at the failure limit
-RESULT FAIL alu.boundaries 8 failed checks over 4005 vectors
---- MUTANT 1 : run exit=1 ---
-=== MOSAIC_ALU_MUTANT_2 : build exit=0 ===
-MISMATCH sra(INT64_MIN,1) replicates the sign bit: expected 0xc000000000000000, got 0x4000000000000000
-ABORT: 8 checks failed (last: matrix sra(a=0xffffffffffffffff, b=0x000000007fffffff) result); stopping to keep the log readable
+RESULT FAIL alu.boundaries 8 failed checks over 4005 ALU and 0 branch vectors
+exit=1
+=== MOSAIC_ALU_MUTANT_2 build=0 ===
+MISMATCH sra(INT64_MIN,1) replicates the sign bit: result: expected 0xc000000000000000, got 0x4000000000000000
 coverage: not asserted, the run halted at the failure limit
-RESULT FAIL alu.boundaries 8 failed checks over 2889 vectors
---- MUTANT 2 : run exit=1 ---
-=== MOSAIC_ALU_MUTANT_3 : build exit=0 ===
-MISMATCH sllw by 32 is a shift by 0, not a shift to zero: expected 0xffffffffffffffff, got 0x0000000000000000
-ABORT: 8 checks failed (last: matrix sllw(a=0x0000000000000001, b=0xfffffffffffffffe) zero flag); stopping to keep the log readable
+RESULT FAIL alu.boundaries 8 failed checks over 2889 ALU and 0 branch vectors
+exit=1
+=== MOSAIC_ALU_MUTANT_3 build=0 ===
+MISMATCH sllw by 32 is a shift by 0, not a shift to zero: result: expected 0xffffffffffffffff, got 0x0000000000000000
 coverage: not asserted, the run halted at the failure limit
-RESULT FAIL alu.boundaries 8 failed checks over 4826 vectors
---- MUTANT 3 : run exit=1 ---
-=== MOSAIC_ALU_MUTANT_4 : build exit=0 ===
-MISMATCH slt(-1,1) is 1, signed: expected 0x0000000000000001, got 0x0000000000000000
-ABORT: 8 checks failed (last: matrix slt(a=0x0000000000000000, b=0xfffffffffffffffe) zero flag); stopping to keep the log readable
+RESULT FAIL alu.boundaries 8 failed checks over 4826 ALU and 0 branch vectors
+exit=1
+=== MOSAIC_ALU_MUTANT_4 build=0 ===
+MISMATCH slt(-1,1) is 1, signed: result: expected 0x0000000000000001, got 0x0000000000000000
 coverage: not asserted, the run halted at the failure limit
-RESULT FAIL alu.boundaries 8 failed checks over 1206 vectors
---- MUTANT 4 : run exit=1 ---
-=== MOSAIC_ALU_MUTANT_5 : build exit=0 ===
-MISMATCH add(1,-1) is zero while a != 0: expected zero=1, got zero=0
-ABORT: 8 checks failed (last: matrix add(a=0x0000000000000000, b=0x0000000000000003) zero flag); stopping to keep the log readable
+RESULT FAIL alu.boundaries 8 failed checks over 1206 ALU and 0 branch vectors
+exit=1
+=== MOSAIC_ALU_MUTANT_5 build=0 ===
+MISMATCH add(1,-1) is zero while a != 0: zero flag: expected 1, got 0
 coverage: not asserted, the run halted at the failure limit
-RESULT FAIL alu.boundaries 8 failed checks over 4 vectors
---- MUTANT 5 : run exit=1 ---
+RESULT FAIL alu.boundaries 8 failed checks over 4 ALU and 0 branch vectors
+exit=1
+=== MOSAIC_BRANCH_TARGET_MUTANT_1 build=0 ===
+MISMATCH JALR clears bit 0 of the target: target: expected 0x0000000000000000, got 0x0000000000000001
+coverage: not asserted, the run halted at the failure limit
+RESULT FAIL alu.boundaries 8 failed checks over 8560 ALU and 63 branch vectors
+exit=1
+=== MOSAIC_BRANCH_TARGET_MUTANT_2 build=0 ===
+MISMATCH link at pc=0 is pc+4 and the target is pc+imm: link: expected 0x0000000000000004, got 0x0000000000000002
+coverage: not asserted, the run halted at the failure limit
+RESULT FAIL alu.boundaries 19 failed checks over 0 ALU and 0 branch vectors
+exit=1
+=== MOSAIC_BRANCH_TARGET_MUTANT_3 build=0 ===
+MISMATCH a branch with bit 1 set in imm falls through to pc+4: target: expected 0x0000000000000004, got 0x0000000000000002
+coverage: not asserted, the run halted at the failure limit
+RESULT FAIL alu.boundaries 8 failed checks over 8560 ALU and 21 branch vectors
+exit=1
+=== MOSAIC_BRANCH_CMP_MUTANT_1 build=0 ===
+MISMATCH bltu(-1,1) is false, -1 is the largest unsigned: expected 0, got 1
+coverage: not asserted, the run halted at the failure limit
+RESULT FAIL alu.boundaries 8 failed checks over 8560 ALU and 4236 branch vectors
+exit=1
 ```
 
-Every mutant exits 1 with a named first mismatch. Mutant 5 reports after only four
-vectors because the hand-written invariants run before the matrix and `add(1, -1)` is
-the second of them; it fails on the `zero` flag alone, with every `result` value
-correct, which is what makes it a control for the flag rather than for the
-datapath.
+`MOSAIC_ALU_MUTANT_5` reports after four vectors because the hand-written invariants
+run before the matrix; it fails on the `zero` flag alone, with every `result` value
+correct, which is what makes it a control for the flag rather than for the datapath.
+`MOSAIC_BRANCH_TARGET_MUTANT_2` fails every link on its very first vector, so the run
+stops before any stimulus is counted.
 
-## Scope, and what this section does not claim
+---
 
-* **Branch condition evaluation, JAL/JALR link values and target computation** — the
-  other half of the I-011 card — are **not** implemented here. They need their own
-  interface (`funct3` condition, PC, immediate, JALR's bit-0 clear, 4-byte target
-  alignment, and the misaligned-target policy) and their own case. `ALU_PASSB` is
-  provided for them. No claim is made about that half of I-011.
-* `XLEN` is a parameter, but the word forms are written for RV64 (32-bit W operands,
-  6-bit and 5-bit shift masks). Only `XLEN = 64` is instantiated in this profile,
-  which is what `mosaic_pkg::MOSAIC_XLEN` freezes.
+# Scope, and what this section does not claim
+
+* **Misaligned-target reporting is not here, by design.** `target` preserves bit 1 so
+  the core can raise `EXC_INSN_MISALIGNED` (or `EXC_INSN_ACCESS` under a stricter PMA)
+  at the fetch boundary with the original PC and instruction to build `tval`.
+* **x0 handling is not here, by design.** `mosaic_branch_cmp` takes values; presenting
+  0 for `x0` is the register file's job, and the case exercises the consequences.
+* **Immediate construction is not here.** The branch and jump immediate is decoded,
+  sign-extended and delivered as a `XLEN` value; these units never re-derive it.
+* `XLEN` is a parameter on all three modules, but the word forms and the 6-bit/5-bit
+  shift masks are written for RV64. Only `XLEN = 64` is instantiated in this profile.
 * The `alu_op_e` encodings are transcribed by hand into `sim/unit/tb_alu.cpp`, since
   C++ cannot import a SystemVerilog package. I-010's `decode.rv64im_reserved` checks
-  the same numbering from the RTL side; the two transcriptions must agree.
+  the same numbering from the RTL side; the two transcriptions must agree. The branch
+  funct3 encodings in this report and in `mosaic_branch_cmp` are the ISA literals
+  (BEQ=0, BNE=1, BLT=4, BGE=5, BLTU=6, BGEU=7; 2 and 3 name no condition), not a
+  new set of constants.
 * `rtl/core/mosaic_pkg.sv` was not modified.

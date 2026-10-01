@@ -1,0 +1,91 @@
+{
+  "schema_version": 1,
+  "profiles": ["p2", "p3"],
+  "modes": [
+    {
+      "mode": "U",
+      "csrs": [
+        {
+          "name": "vstart",
+          "address": 8,
+          "width": 64,
+          "access": "rwr",
+          "behavior": "warl_wpri",
+          "reset": 0,
+          "unmodifiable_bits": [],
+          "writable_fields": ["6:0"],
+          "wpri_fields": ["63:7"],
+          "spec_clause": "RISC-V Vector Extension Specification v1.0, tag v1.0 commit 3570f998903f00352552b670f1f7b7334f0a144a (riscv/riscv-v-spec), src/v-spec.adoc. Address and privilege: L99 '| 0x008 | URW | vstart | Vector start position' and L89-L91 'The vector extension adds 32 vector registers, and seven unprivileged CSRs (vstart, vxsat, vxrm, vcsr, vtype, vl, vlenb) to a base scalar RISC-V ISA'. Section 'Vector Start Index CSR vstart' L543, 'The vstart read-write CSR specifies the index of the first element to be executed by a vector instruction' L545-L547, 'All vector instructions are defined to begin execution with the element number given in the vstart CSR ... and to reset the vstart CSR to zero at the end of execution' L555-L558, 'vstart is not modified by vector instructions that raise illegal-instruction exceptions' L563-L564, 'The vstart CSR is defined to have only enough writable bits to hold the largest element index (one less than the maximum VLMAX)' L566-L567, with the note L569-L572 'The maximum vector length is obtained with the largest LMUL setting (8) and the smallest SEW setting (8), so VLMAX_max = 8*VLEN/8 = VLEN. For example, for VLEN=256, vstart would have 8 bits to represent indices from 0 through 255', and 'The use of vstart values greater than the largest element index for the current SEW setting is reserved' L574-L575. VLEN is frozen at 128 by config/profiles/p2.json and p3.json (isa_target.vlen = 128), so VLMAX_max = 128, the largest element index is 127, and vstart has exactly 7 writable bits (6:0); the remaining 57 bits are write-preserve-zero, which is the only value they can hold because the upper bits are reserved (L574-L575) and the spec explicitly refuses to assign them a meaning ('a possible future use of upper vstart bits is to store imprecise trap information', L577-L579). Reset: section 'State of Vector Extension at Reset' L674, 'The vstart, vxrm, vxsat CSRs can have arbitrary values at reset' L683 - so the post-reset value is not architecturally fixed - combined with the recommendation L680-L681 'It is recommended that at reset, vtype.vill is set, the remaining bits in vtype are zero, and vl is set to zero' and the note L685-L687 'Most uses of the vector unit will require an initial vset{i}vl{i}, which will reset vstart'. 0 is chosen: it is the reset value every vector instruction itself establishes, so it is the one value that is legal under every SEW/LMUL setting and the one the spec recommends."
+        },
+        {
+          "name": "vxsat",
+          "address": 9,
+          "width": 64,
+          "access": "rwr",
+          "behavior": "warl_wpri",
+          "reset": 0,
+          "unmodifiable_bits": [],
+          "writable_fields": ["0"],
+          "wpri_fields": ["63:1"],
+          "spec_clause": "RISC-V Vector Extension Specification v1.0, tag v1.0 commit 3570f998903f00352552b670f1f7b7334f0a144a (riscv/riscv-v-spec), src/v-spec.adoc. Address and privilege: L100 '| 0x009 | URW | vxsat | Fixed-Point Saturate Flag'. Section 'Vector Fixed-Point Saturation Flag vxsat' L649, 'The vxsat CSR has a single read-write least-significant bit (vxsat[0]) that indicates if a fixed-point instruction has had to saturate an output value to fit into a destination format. Bits vxsat[XLEN-1:1] should be written as zeros' L651-L654, 'The vxsat bit is mirrored in vcsr' L656. The one read-write bit is bit 0; the 63 upper bits are write-preserve-zero, as the spec directs. The accrued flag itself is set by executing a saturating fixed-point instruction, so 'read-write' here means software can clear it by writing 0 and hardware sets it - the schema has no token for a hardware-set flag, which is recorded as an ambiguity in results/reports/I-001-csr-p1p3.md. Reset: 'The vstart, vxrm, vxsat CSRs can have arbitrary values at reset' L683, and the note L686-L687 'The vxrm and vxsat fields should be reset explicitly in software before use'. 0 is chosen as the conservative value: it asserts that no fixed-point instruction has yet saturated, which is true at reset, and it is the only value that cannot make software believe a saturation occurred that never happened."
+        },
+        {
+          "name": "vxrm",
+          "address": 10,
+          "width": 64,
+          "access": "rwr",
+          "behavior": "warl_wpri",
+          "reset": 0,
+          "unmodifiable_bits": [],
+          "writable_fields": ["1:0"],
+          "wpri_fields": ["63:2"],
+          "spec_clause": "RISC-V Vector Extension Specification v1.0, tag v1.0 commit 3570f998903f00352552b670f1f7b7334f0a144a (riscv/riscv-v-spec), src/v-spec.adoc. Address and privilege: L101 '| 0x00A | URW | vxrm | Fixed-Point Rounding Mode'. Section 'Vector Fixed-Point Rounding Mode Register vxrm' L610, 'The vector fixed-point rounding-mode register holds a two-bit read-write rounding-mode field in the least-significant bits (vxrm[1:0]). The upper bits, vxrm[XLEN-1:2], should be written as zeros' L612-L615, 'The vector fixed-point rounding mode is given a separate CSR address to allow independent access, but is also reflected as a field in vcsr' L617-L619, and the .vxrm encoding table L630-L640 (0 rnu round-to-nearest-up, 1 rne round-to-nearest-even, 2 rdn round-down/truncate, 3 rod round-to-odd). All four encodings are legal, so vxrm[1:0] is a plain two-bit read-write field; the 62 upper bits are write-preserve-zero as the spec directs. Reset: 'The vstart, vxrm, vxsat CSRs can have arbitrary values at reset' L683, note L686-L687 'The vxrm and vxsat fields should be reset explicitly in software before use'. 0 is chosen, i.e. vxrm = 0b00 = rnu, round-to-nearest-up. The card for this table named 0; the choice is recorded in results/reports/I-001-csr-p1p3.md as an ambiguity, with the observation that rdn (0b10, truncate) would be the more conservative rounding mode for a fixed-point core because it can only ever lose precision, never invent it. Either value is architecturally legal; the value is frozen here and the RTL must match this table."
+        },
+        {
+          "name": "vcsr",
+          "address": 15,
+          "width": 64,
+          "access": "rwr",
+          "behavior": "warl_wpri",
+          "reset": 0,
+          "unmodifiable_bits": [],
+          "writable_fields": ["2:1", "0"],
+          "wpri_fields": ["63:3"],
+          "spec_clause": "RISC-V Vector Extension Specification v1.0, tag v1.0 commit 3570f998903f00352552b670f1f7b7334f0a144a (riscv/riscv-v-spec), src/v-spec.adoc. Address and privilege: L102 '| 0x00F | URW | vcsr | Vector control and status register'; the four numbers 0x00B-0x00E are 'tentatively reserved for future vector CSRs' (L108-L109), which is why 15 is the highest unprivileged vector CSR here. Section 'Vector Control and Status Register vcsr' L658, 'The vxrm and vxsat separate CSRs can also be accessed via fields in the vector control and status CSR, vcsr' L660-L661, and the .vcsr layout table L663-L672 which allocates bits 2:1 to vxrm[1:0] and bit 0 to vxsat. vcsr is the same storage as the vxrm and vxsat CSRs (L617-L619 and L656), so vxrm[1:0] is read-write exactly as vxrm[1:0] is (L612-L615) and vxsat[0] is read-write exactly as vxsat[0] is (L651-L654). The remaining 61 bits are write-preserve-zero; the spec does not allocate any other vcsr field. Reset: vcsr is a mirror of vxrm and vxsat, both of which 'can have arbitrary values at reset' (L683); 0 is chosen so that both mirrored fields hold the same reset values as their dedicated CSRs. Recorded ambiguity: the .vcsr layout table gives no writability statement for bit 0, and in practice a write of 1 to vcsr[0] does not set the accrued saturation flag because the flag is set only by executing a saturating fixed-point instruction; the table follows the normative text of L651-L654 rather than that microarchitectural convention, and the difference is documented in results/reports/I-001-csr-p1p3.md."
+        },
+        {
+          "name": "vl",
+          "address": 3104,
+          "width": 64,
+          "access": "ro",
+          "behavior": "fixed",
+          "reset": 0,
+          "unmodifiable_bits": ["63:0"],
+          "spec_clause": "RISC-V Vector Extension Specification v1.0, tag v1.0 commit 3570f998903f00352552b670f1f7b7334f0a144a (riscv/riscv-v-spec), src/v-spec.adoc. Address and privilege: L103 '| 0xC20 | URO | vl | Vector Length'. Section 'Vector Length Register vl' L515, 'The XLEN-bit-wide read-only vl CSR can only be updated by the vset{i}vl{i} instructions, and the fault-only-first vector load instruction variants' L517-L519, 'The vl register holds an unsigned integer specifying the number of elements to be updated with results from a vector instruction' L521-L523, note L525-L529 'The number of bits implemented in vl depends on the implementation's maximum vector length of the smallest supported type'; and section 'Vector Context Status in mstatus' L118-L132, 'Attempts to execute any vector instruction, or to access the vector CSRs, raise an illegal-instruction exception when mstatus.VS is set to Off' L124-L126, 'executing any instruction that changes vector state, including the vector CSRs, will change mstatus.VS to Dirty' L128-L130. vl has no software-writable state and no encoding constraint, so it is declared ro/fixed with the whole register read-only, which is the same modelling the frozen config/csr/mode_m.json uses for the read-only counter shadows cycle/time/instret. Recorded schema limitation: csr.schema.json has no behaviour token for 'maintained by vset{i}vl{i} and fault-only-first loads, read-only to software but not a constant', so 'fixed' is used to mean 'no software-writable state'; the value is not a design-time constant and the RTL must not implement it as one. Reset: L676-L678 'The vector extension must have a consistent state at reset. In particular, vtype and vl must have values that can be read and then restored with a single vsetvl instruction', and the recommendation L680-L681 'It is recommended that at reset, vtype.vill is set, the remaining bits in vtype are zero, and vl is set to zero'. vl = 0 is taken; it is also the only value that is consistent with the vtype reset this table declares (vill = 1), because with vill set no vector instruction that depends on vtype may execute (L506-L507) and so vl is unobservable until the first successful vset{i}vl{i}."
+        },
+        {
+          "name": "vtype",
+          "address": 3105,
+          "width": 64,
+          "access": "rwr",
+          "behavior": "warl_wpri",
+          "reset": 9223372036854775808,
+          "unmodifiable_bits": [],
+          "writable_fields": ["63", "7:0"],
+          "wpri_fields": ["62:8"],
+          "spec_clause": "RISC-V Vector Extension Specification v1.0, tag v1.0 commit 3570f998903f00352552b670f1f7b7334f0a144a (riscv/riscv-v-spec), src/v-spec.adoc. Address and privilege: L104 '| 0xC21 | URO | vtype | Vector data type register'. Section 'Vector type register, vtype' L173, 'The read-only XLEN-wide vector type CSR, vtype provides the default type used to interpret the contents of the vector register file, and can only be updated by vset{i}vl{i} instructions' L175-L177, 'The vtype register has five fields, vill, vma, vta, vsew[2:0], and vlmul[2:0]. Bits vtype[XLEN-2:8] should be written with zero, and non-zero values in this field are reserved' L186-L188; the vtype bit map is include::vtype-format.adoc[] at L190, giving for XLEN=64: vlmul[2:0] = bits 2:0, vma = bit 3, vta = bit 4, vsew[2:0] = bits 7:5, reserved = bits 62:8, vill = bit XLEN-1 = bit 63. Section 'Vector Type Illegal vill' L489, 'The vill bit is used to encode that a previous vset{i}vl{i} instruction attempted to write an unsupported value to vtype' L491-L492, note L494-L495 'The vill bit is held in bit XLEN-1 of the CSR to support checking for illegal values with a branch on the sign bit', 'All bits of the vtype argument must be considered in determining if the value is supported by the implementation' L497-L498, 'A vtype value with the vill bit set is an unsupported value' L504, 'If the vill bit is set, then any attempt to execute a vector instruction that depends upon vtype will raise an illegal-instruction exception' L506-L507, note L509-L510 'vset{i}vl{i} and whole-register loads, stores, and moves do not depend upon vtype', 'When the vill bit is set, the other XLEN-1 bits in vtype shall be zero' L512-L513. THIS IS THE DIFFERENCE THAT IS EASY TO GET BACKWARDS: when vill = 0 the eight configuration bits (7:0) hold the SEW/LMUL/ta/ma encoding written by the last successful vset{i}vl{i} and are readable; when vill = 1 the whole of vtype[62:0] reads as zero, so the configuration bits are no longer readable and the only way to recover the offending encoding is to re-execute the vset{i}vl{i} and test vill. Field declarations therefore follow the two states: bits 7:0 are the WARL configuration field (writable, and forced to zero while vill is set), bit 63 is the WARL vill flag (set by hardware when a vset{i}vl{i} argument is unsupported, cleared by any successful vset{i}vl{i}), and bits 62:8 are the reserved field that must be written with zero and always reads zero, i.e. write-preserve-zero. Legal value set: 'Implementations must provide fractional LMUL settings that allow the narrowest supported type to occupy a fraction of a vector register corresponding to the ratio of the narrowest supported type's width to that of the largest supported type's width. In general, the requirement is to support LMUL >= SEW_MIN/ELEN, where SEW_MIN is the narrowest supported SEW value and ELEN is the widest supported SEW value. In the standard extensions, SEW_MIN=8 ... For standard vector extensions with ELEN=64, fractional LMULs of 1/2, 1/4, and 1/8 must be supported' L305-L314, 'An attempt to set an unsupported SEW and LMUL configuration sets the vill bit in vtype' L326-L327, 'The use of vtype encodings with LMUL < SEW_MIN/ELEN is reserved, but implementations can set vill if they do not support these configurations' L329-L331, and 'For a given supported fractional LMUL setting, implementations must support SEW settings between SEW_MIN and LMUL * ELEN, inclusive' L323-L324. The vlmul encoding table L348-L361 draws the 3-bit field as three separate columns and is easy to misread: vlmul[2:0] = 0b000 gives LMUL 1, 0b001 gives 2, 0b010 gives 4, 0b011 gives 8, 0b100 is the single 'reserved' row at L353, 0b101 gives 1/8, 0b110 gives 1/4 and 0b111 gives 1/2. The legal MosaicRV set is therefore vsew in {3,4,5,6} (SEW 8/16/32/64) crossed with vlmul in {0b000, 0b001, 0b010, 0b011, 0b101, 0b110, 0b111} (LMUL 1, 2, 4, 8, 1/8, 1/4, 1/2), subject to SEW <= LMUL*ELEN; the mandatory fractional-LMUL floor for ELEN=64 needs 1/8, 1/4 and 1/2 and all three are present. Every other vtype argument sets vill and leaves vtype unchanged apart from vill. RESET: this is the one row in the whole configuration where the task card and the ratified specification disagree, and the specification wins. The card asked for 'vtype 0 (vill 0)'. A vtype value of 0 decodes to vsew = 0b000, i.e. SEW = 2^0 = 1, which is not a supported SEW (SEW_MIN = 8, L309-L311), so by L326-L327 writing it must set vill; a vtype of 0 with vill = 0 would report an unsupported configuration as legal, which the spec forbids. The only self-consistent reset is vill = 1 with all other bits zero, which is also what the spec recommends: L680-L681 'It is recommended that at reset, vtype.vill is set, the remaining bits in vtype are zero, and vl is set to zero', consistent with the mandatory rule L676-L678 that vtype and vl must be readable and restorable with a single vsetvl. reset = 1 << 63 = 0x8000000000000000 = 9223372036854775808. Recorded in results/reports/I-001-csr-p1p3.md as a rejected task-card instruction."
+        },
+        {
+          "name": "vlenb",
+          "address": 3106,
+          "width": 64,
+          "access": "ro",
+          "behavior": "fixed",
+          "reset": 16,
+          "unmodifiable_bits": ["63:0"],
+          "spec_clause": "RISC-V Vector Extension Specification v1.0, tag v1.0 commit 3570f998903f00352552b670f1f7b7334f0a144a (riscv/riscv-v-spec), src/v-spec.adoc. Address and privilege: L105 '| 0xC22 | URO | vlenb | VLEN/8 (vector register length in bytes)'. Section 'Vector Byte Length vlenb' L531, 'The XLEN-bit-wide read-only CSR vlenb holds the value VLEN/8, i.e., the vector register length in bytes' L533-L534, note L536-L537 'The value in vlenb is a design-time constant in any implementation', note L539-L541 'Without this CSR, several instructions are needed to calculate VLEN in bytes'. VLEN is frozen for the life of the hart at 128 by config/profiles/p2.json and config/profiles/p3.json (isa_target.vlen = 128; the p2 source line records 'initial VLEN=128' and the p2 derived_notes record 'VLEN is fixed for the whole life of a hart'), so vlenb = 128/8 = 16. THIS ROW IS THE ONE THAT MUST NOT RESET TO ZERO: vlenb is a design-time constant and its only legal value is 16, so a reset value of 0 would tell software the vector register is zero bytes wide. The register is read-only and every bit is unmodifiable, so behavior is fixed and the whole 64 bits are unmodifiable. The 64-bit width follows the 'XLEN-bit-wide' wording of L533 together with xlen = 64 in every profile that loads this table."
+        }
+      ]
+    }
+  ]
+}

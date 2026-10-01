@@ -16,13 +16,15 @@ produces", without either side being derived from the other:
 
 Spike is configured here to present the frozen p0 memory map:
 
-  -m0x00100000:0x4000   covers the uart (0x00100000) and the test_harness
-                       device (0x00102000), so TOHOST/FROMHOST accesses are
-                       ordinary memory as the protocol requires.
-  -m0x80000000:0x200000 the 2 MiB of RAM.
-  boot_rom at 0x0 is deliberately NOT mapped, so a store there raises an
-  access fault exactly as config/memory/p0.json requires of a read-only
-  region.
+Spike is run with its default memory only: DRAM at 0x80000000, nothing else.
+That is exactly the point of moving TOHOST and FROMHOST into RAM
+(config/profiles/p0.json -> test_protocol.tohost = 0x80001000): the whole
+image, the result protocol and the stacks now live in one contiguous region a
+reference model maps by default.
+
+boot_rom at 0x0 is deliberately NOT mapped, so a store there raises an
+access fault, which is what config/memory/p0.json requires of a region whose
+error_response is access_fault and whose writable flag is false.
 
 Exit status 0 only when Spike's signature words equal the oracle's for every
 (program, input) pair and Spike exits 0 (tohost == 1, PASS) for all of them.
@@ -42,7 +44,7 @@ REPO = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
 CORPUS = os.path.join(REPO, "tests", "programs", "corpus.json")
 BUILD = os.path.join(REPO, "tests", "programs", "build")
 
-MEMORY = "0x00100000:0x4000,0x80000000:0x200000"
+MEMORY = None  # default DRAM at 0x80000000 now covers TOHOST/FROMHOST
 COMMIT_RE = re.compile(
     r"^core\s+0:\s+3\s+0x([0-9a-f]+)\s+\(0x[0-9a-f]+\)\s+mem\s+"
     r"0x([0-9a-f]+)\s+0x([0-9a-f]+)\s*$")
@@ -61,10 +63,14 @@ def oracle_signature(document: dict, program: dict, inputs: dict) -> list:
 
 
 def run_spike(spike: str, elf: str, timeout: int) -> tuple:
-    cmd = [spike, "--isa=rv64im_zicsr_zifencei", "-m" + MEMORY,
-           "--log-commits", elf]
-    proc = subprocess.run(cmd, stdout=subprocess.PIPE,
-                          stderr=subprocess.STDOUT, timeout=timeout)
+    cmd = [spike, "--isa=rv64im_zicsr_zifencei", "--log-commits", elf]
+    try:
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE,
+                              stderr=subprocess.STDOUT, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        # A program that never writes TOHOST hangs the reference.  Report it
+        # as a failure instead of aborting the whole run.
+        return "timeout", (exc.stdout or b"").decode("utf-8", "replace")
     return proc.returncode, proc.stdout.decode("utf-8", "replace")
 
 
@@ -124,7 +130,7 @@ def main(argv: list) -> int:
             want = oracle_signature(document, program, inputs)
             label = "%s.i%d" % (program["name"], index)
             if code != 0:
-                failures.append("%s: spike exit %d (tohost was not 1)" % (label, code))
+                failures.append("%s: spike exit %s (tohost was not 1)" % (label, code))
             if any(word is None for word in got):
                 failures.append("%s: spike never stored the whole signature" % label)
             elif got != want:

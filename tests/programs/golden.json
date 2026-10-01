@@ -105,7 +105,7 @@
       "input": 1,
       "program": "p03_loadstore",
       "sig": [
-        "0x8000000080000001",
+        "0x7fffffff80000001",
         "0x0000000000000181",
         "0x0000000000000081",
         "0x8000000000000180"
@@ -136,7 +136,7 @@
         "0x2236d88fe5618cf0",
         "0xfffeb49923cc0953",
         "0x0121fa00ad77d742",
-        "0x7e4d182bb281d4e7"
+        "0x81b2e7d44d7e2b18"
       ],
       "traps": []
     },
@@ -150,7 +150,7 @@
         "0x0000000000000001",
         "0x0000000000000000",
         "0xfffffffffffffffe",
-        "0x8000000000000000"
+        "0x7fffffffffffffff"
       ],
       "traps": []
     },
@@ -362,7 +362,7 @@
       "program": "p09_storeload",
       "sig": [
         "0x0123456789abcdef",
-        "0x0000000089abcdef",
+        "0xffffffff89abcdef",
         "0x000000000000ff00",
         "0xaaaaaaaaaaaaaaaa"
       ],
@@ -376,7 +376,7 @@
       "program": "p09_storeload",
       "sig": [
         "0xdeadbeefcafebabe",
-        "0x00000000cafebabe",
+        "0xffffffffcafebabe",
         "0x0000000000004500",
         "0x0000000000000000"
       ],
@@ -390,7 +390,7 @@
       "program": "p09_storeload",
       "sig": [
         "0xffffffffffffffff",
-        "0x00000000ffffffff",
+        "0xffffffffffffffff",
         "0x000000000000ff00",
         "0x5555555555555555"
       ],

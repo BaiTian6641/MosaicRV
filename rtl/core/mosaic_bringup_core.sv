@@ -154,9 +154,13 @@
 
 `default_nettype none
 
-// File-scope, not inside the module: an import written in the module body does
-// not reach the port list, which is elaborated first.
+// File-scope, not inside the module: a package import written in the module
+// is elaborated after the port list, so it would not make a package type
+// usable in a port declaration.  The wildcard form is what the linter asks for
+// at $unit scope (IMPORTSTAR), so it is waived here and only here.
+/* verilator lint_off IMPORTSTAR */
 import mosaic_pkg::*;
+/* verilator lint_on IMPORTSTAR */
 
 module mosaic_bringup_core #(
     parameter int XLEN = 64
@@ -436,7 +440,7 @@ module mosaic_bringup_core #(
     prod_ss_hi = XLEN'(({{XLEN{a[XLEN-1]}}, a} * {{XLEN{b[XLEN-1]}}, b}) >> XLEN);
     prod_su_hi = XLEN'(({{XLEN{a[XLEN-1]}}, a} * {{XLEN{1'b0}},   b}) >> XLEN);
     prod_uu_hi = XLEN'(({{XLEN{1'b0}},   a} * {{XLEN{1'b0}},   b}) >> XLEN);
-    prod_uu_lo = {{XLEN{1'b0}}, a} * {{XLEN{1'b0}}, b};
+    prod_uu_lo = XLEN'({{XLEN{1'b0}}, a} * {{XLEN{1'b0}}, b});
 
     case (op)
       MD_MUL:    muldiv_eval = prod_uu_lo;
@@ -523,7 +527,7 @@ module mosaic_bringup_core #(
       d.reg_write = 1'b1;
       d.valid     = 1'b1;
       decode      = d;
-      return;
+      return d;
     end
 `endif
 
@@ -879,7 +883,7 @@ module mosaic_bringup_core #(
   // architectural writes made on the closing edge of S_EXEC or S_DWAIT.
   // ==========================================================================
 
-  // Verilator reports the bits of `ctl` that no elaborated mux arm reads as
+  // The lint gate reports the bits of `ctl` that no elaborated mux arm reads as
   // unused.  That is an artefact of which branch of the operand-selection mux a
   // given path takes, not a defect: the decode struct is shared with the real
   // front end and this single-issue path simply does not consume every field
@@ -1397,14 +1401,19 @@ module mosaic_bringup_core #(
           evt_has_rd_o   <= rd_we;
           evt_rd_value_o <= rd_val;
           if (rd_we) regs_q[ctl.rd] <= rd_val;
-          if (commit_store) begin
-            evt_is_store_o   <= 1'b1;
-            evt_store_addr_o <= daddr_q;
-            evt_store_data_o <= dwdata_q;
-            evt_store_size_o <= dsize_q;
-          end
         end
 `endif
+
+        // A store appears in the event only when it actually committed.  This
+        // lives outside the trap/retire branch on purpose: a store that faults
+        // is still a store instruction, and reporting its address and data as
+        // if it had been performed would be a second way of lying in the event.
+        if (!commit_is_trap && commit_store) begin
+          evt_is_store_o   <= 1'b1;
+          evt_store_addr_o <= daddr_q;
+          evt_store_data_o <= dwdata_q;
+          evt_store_size_o <= dsize_q;
+        end
       end
     end
   end

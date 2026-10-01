@@ -120,7 +120,9 @@
       "task": "I-011",
       "top": "mosaic_alu_tb",
       "rtl": [
-        "rtl/core/mosaic_alu.sv"
+        "rtl/core/mosaic_alu.sv",
+        "rtl/core/mosaic_branch_target.sv",
+        "rtl/core/mosaic_branch_cmp.sv"
       ],
       "sv": [
         "sim/tb/mosaic_alu_tb.sv"

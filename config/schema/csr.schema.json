@@ -4,40 +4,80 @@
   "title": "MosaicRV CSR table with WARL/WPRI and reset values",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "profiles", "modes"],
+  "required": [
+    "schema_version",
+    "profiles",
+    "modes"
+  ],
   "properties": {
-    "schema_version": { "type": "integer", "const": 1 },
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
     "profiles": {
       "type": "array",
       "minItems": 1,
       "uniqueItems": true,
-      "items": { "type": "string", "enum": ["p0", "p1", "p2", "p3"] }
+      "items": {
+        "type": "string",
+        "enum": [
+          "p0",
+          "p1",
+          "p2",
+          "p3"
+        ]
+      }
     },
     "modes": {
       "type": "array",
-      "minItems": 1,
+      "minItems": 0,
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["mode", "csrs"],
+        "required": [
+          "mode",
+          "csrs"
+        ],
         "properties": {
-          "mode": { "type": "string", "enum": ["M", "S", "U"] },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "M",
+              "S",
+              "U"
+            ]
+          },
           "csrs": {
             "type": "array",
             "minItems": 1,
             "items": {
               "type": "object",
               "additionalProperties": false,
-              "required": ["name", "address", "width", "access", "behavior", "reset", "spec_clause"],
+              "required": [
+                "name",
+                "address",
+                "width",
+                "access",
+                "behavior",
+                "reset",
+                "spec_clause"
+              ],
               "properties": {
-                "name": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+                "name": {
+                  "type": "string",
+                  "pattern": "^[a-z][a-z0-9_]*$"
+                },
                 "address": {
                   "type": "integer",
                   "minimum": 0,
                   "maximum": 4095,
                   "description": "12-bit CSR number in decimal (0xF14 -> 3860)"
                 },
-                "width": { "type": "integer", "minimum": 32, "maximum": 64 },
+                "width": {
+                  "type": "integer",
+                  "minimum": 32,
+                  "maximum": 64
+                },
                 "access": {
                   "type": "string",
                   "pattern": "^(ro|wo|rw|rwr|wow|rwow|reserved)$",
@@ -45,29 +85,89 @@
                 },
                 "behavior": {
                   "type": "string",
-                  "enum": ["warl", "wpri", "warl_wpri", "fixed", "read_only_zero", "read_only_ones"]
+                  "enum": [
+                    "warl",
+                    "wpri",
+                    "warl_wpri",
+                    "fixed",
+                    "read_only_zero",
+                    "read_only_ones"
+                  ]
                 },
-                "reset": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
+                "reset": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 18446744073709551615
+                },
                 "unmodifiable_bits": {
                   "type": "array",
-                  "items": { "type": "string", "pattern": "^[0-9]+(:[0-9]+)?$" },
+                  "items": {
+                    "type": "string",
+                    "pattern": "^[0-9]+(:[0-9]+)?$"
+                  },
                   "description": "msb:lsb inclusive bit ranges that software can never change"
                 },
                 "writable_fields": {
                   "type": "array",
-                  "items": { "type": "string", "pattern": "^[0-9]+(:[0-9]+)?$" }
+                  "items": {
+                    "type": "string",
+                    "pattern": "^[0-9]+(:[0-9]+)?$"
+                  }
                 },
                 "wpri_fields": {
                   "type": "array",
-                  "items": { "type": "string", "pattern": "^[0-9]+(:[0-9]+)?$" },
+                  "items": {
+                    "type": "string",
+                    "pattern": "^[0-9]+(:[0-9]+)?$"
+                  },
                   "description": "write-preserve-zero: software writes are legal, reads always return zero"
                 },
-                "spec_clause": { "type": "string", "minLength": 1 }
+                "spec_clause": {
+                  "type": "string",
+                  "minLength": 1
+                }
               }
             }
           }
         }
       }
+    },
+    "absent_csr_ranges": {
+      "type": "array",
+      "description": "CSR number ranges this profile deliberately leaves unimplemented. Accessing any address in a declared range must raise illegal instruction. Recording the absence here is what lets the checker prove no defined CSR falls inside a range the profile says is not implemented, instead of leaving the gap in prose.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "first",
+          "last",
+          "reason",
+          "spec_clause"
+        ],
+        "properties": {
+          "first": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4095
+          },
+          "last": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4095
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1
+          },
+          "spec_clause": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "comment": {
+      "type": "string"
     }
   }
 }

@@ -132,9 +132,15 @@ class NegativeControls(object):
     # -- the controls -----------------------------------------------------
     def run(self) -> int:
         ladder = _read_json(os.path.join(self.config_root, "capability_ladder.json"))
+        rank = config_check.PROFILE_ORDER.index(self.profile)
+        # Capabilities strictly ABOVE this profile. Using `!= self.profile` instead
+        # of an ordering comparison silently included capabilities this profile
+        # legitimately already has, so the controls "claims X one rung too early"
+        # wrongly reported acceptance as a checker failure.
         future = sorted({
             cap["name"] for cap in ladder["capabilities"]
-            if cap["min_profile"] != self.profile and cap["kind"] != "constraint"
+            if config_check.PROFILE_ORDER.index(cap["min_profile"]) > rank
+            and cap["kind"] != "constraint"
         })
 
         for ext in future:
@@ -171,9 +177,18 @@ class NegativeControls(object):
         )
         self.case("Zicsr claimed without Zifencei", self.drop_extension("Zifencei"))
         self.case("xlen is not 64", self.patch_profile(lambda d: d.update({"xlen": 32})))
+        def vlen_without_v(document):
+            # The violation is "a vector width is declared while V is not claimed".
+            # For a profile that already claims V, the control must remove V first,
+            # otherwise setting vlen=128 changes nothing and the control passes
+            # vacuously.
+            if "V" in document["isa_target"]["extensions"]:
+                document["isa_target"]["extensions"].remove("V")
+            document["isa_target"]["vlen"] = 128
+
         self.case(
             "VLEN declared without claiming V",
-            self.patch_profile(lambda d: d["isa_target"].update({"vlen": 128})),
+            self.patch_profile(vlen_without_v),
         )
         self.case(
             "unknown schema field in the profile",
@@ -212,6 +227,36 @@ class NegativeControls(object):
             "privilege mode with no CSR table",
             self.patch_profile(lambda d: d["privilege_modes"].append("U")),
         )
+
+        def move_field(table, field, to_fixed):
+            """Move a WARL field between the writable and unmodifiable sets."""
+            for block in table["modes"]:
+                for csr in block["csrs"]:
+                    if csr["name"] != "mstatus":
+                        continue
+                    writable = csr.get("writable_fields", [])
+                    fixed = csr.get("unmodifiable_bits", [])
+                    if field in writable:
+                        writable.remove(field)
+                    elif field in fixed:
+                        fixed.remove(field)
+                    (fixed if to_fixed else writable).append(field)
+                    return True
+            return False
+
+        # These controls only mean anything for a profile that actually claims the
+        # extension: for one that does not, a read-only-zero extension-state field
+        # is the *correct* description. Registering them unconditionally would
+        # report the checker as broken when it is behaving correctly, which is the
+        # same mistake as a control that passes for the wrong reason.
+        with open(os.path.join(self.config_root, "profiles", "%s.json" % self.profile)) as handle:
+            claimed = set(json.load(handle)["isa_target"]["extensions"])
+        if "F" in claimed:
+            self.case("mstatus.FS made read-only zero while F is claimed",
+                      self.patch_first_csr(lambda t: move_field(t, "14:13", True)))
+        if "V" in claimed:
+            self.case("mstatus.VS made read-only zero while V is claimed",
+                      self.patch_first_csr(lambda t: move_field(t, "10:9", True)))
 
         if self.failures:
             print(

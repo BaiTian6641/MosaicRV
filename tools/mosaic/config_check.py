@@ -409,12 +409,34 @@ def _ranges_overlap(a: List[Tuple[int, int]], b: List[Tuple[int, int]]) -> bool:
 
 def _check_csr(bundle: Bundle, profile_name: str) -> None:
     claimed_modes = set(bundle.profile["privilege_modes"]) if bundle.profile else set()
+
+    # A profile may leave a CSR address range deliberately unimplemented. That is a
+    # legitimate, common state -- a profile that does not implement two-stage
+    # translation has no hypervisor CSRs at all -- but it must be *declared*, so
+    # the absence can be checked rather than merely asserted in prose, and so the
+    # CSR unit can be told which numbers must raise illegal instruction.
+    absent = []
+    for table in bundle.csr_tables:
+        for span in table.get("absent_csr_ranges", []):
+            first, last = span["first"], span["last"]
+            if first > last:
+                bundle.fail("csr table absent range",
+                            "range 0x%03x..0x%03x has first > last" % (first, last))
+                continue
+            absent.append((first, last, span.get("reason", "")))
+
     for table in bundle.csr_tables:
         if profile_name not in table.get("profiles", []):
             bundle.fail(
                 "csr table",
                 "table does not list profile %r in its `profiles` array, so it may not be "
                 "used by that profile" % profile_name,
+            )
+        if not table["modes"] and not table.get("absent_csr_ranges"):
+            bundle.fail(
+                "csr table",
+                "defines no CSRs and declares no absent ranges; an empty table must say "
+                "what it is deliberately leaving out and why",
             )
         for mode_block in table["modes"]:
             mode = mode_block["mode"]
@@ -479,6 +501,37 @@ def _check_csr(bundle: Bundle, profile_name: str) -> None:
                     bundle.fail(where, "behavior wpri requires a non-empty wpri_fields")
                 if not csr.get("spec_clause"):
                     bundle.fail(where, "missing spec_clause; an unproven CSR must not ship")
+
+                # Extension-state fields. The privileged specification states that
+                # mstatus.FS shall not be read-only zero when the F extension is
+                # implemented, and the same for VS and the V extension. Only that
+                # direction is enforced: these CSR tables are shared across all four
+                # profiles, so a field that is writable but reads zero in a profile
+                # without F is the correct single description of "no floating-point
+                # state exists", not a violation. The reverse -- claiming F while
+                # declaring FS read-only zero -- hides real dirty state and is rejected.
+                #
+                # `writable` and `fixed` above are *parsed* (msb, lsb) tuples, so
+                # membership against declared field names must use the raw lists.
+                declared_fixed = csr.get("unmodifiable_bits", [])
+                for field, capability in (("14:13", "F"), ("10:9", "V")):
+                    if field not in declared_fixed:
+                        continue
+                    if capability in bundle.profile["isa_target"]["extensions"]:
+                        bundle.fail(
+                            where,
+                            "field %s is read-only zero but this profile claims %s; the "
+                            "specification requires the field not to be read-only zero "
+                            "when the extension is implemented" % (field, capability),
+                        )
+
+                for first, last, reason in absent:
+                    if first <= address <= last:
+                        bundle.fail(
+                            where,
+                            "address 0x%03x lies inside a range this profile declares "
+                            "unimplemented (%s)" % (address, reason),
+                        )
 
 
 # ---------------------------------------------------------------------------

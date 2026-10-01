@@ -32,18 +32,19 @@ main:
 
     /* andi cannot hold a 0x..FF00 mask (12-bit signed immediate), so every
      * mask below is expressed as shift-left / shift-right. */
-    andi    t0, a0, 0xFF                         /* a[7:0]   */
-    slli    t0, t0, 8
-    slli    t1, a0, 40
-    srli    t1, t1, 56                          /* a[15:8]  */
-    or      t0, t0, t1                          /* bytes 0 and 1 from a */
-    slli    t0, t0, 16
-    andi    t1, a1, 0xFF                         /* b[7:0]   */
-    or      t0, t0, t1                          /* byte 2 from b */
-    slli    t0, t0, 8
-    slli    t1, a1, 40
-    srli    t1, t1, 56                          /* b[15:8]  */
-    or      t0, t0, t1                          /* byte 3 from b */
+    andi    t0, a0, 0xFF                         /* byte0 = a[7:0]   */
+    slli    t1, a0, 48
+    srli    t1, t1, 56
+    slli    t1, t1, 8                           /* byte1 = a[15:8]  */
+    or      t0, t0, t1
+    slli    t1, a1, 56
+    srli    t1, t1, 56
+    slli    t1, t1, 16                          /* byte2 = b[7:0]   */
+    or      t0, t0, t1
+    slli    t1, a1, 48
+    srli    t1, t1, 56
+    slli    t1, t1, 24                          /* byte3 = b[15:8]  */
+    or      t0, t0, t1
     sw      t0, 0(s3)
 
     slli    t1, a2, 48

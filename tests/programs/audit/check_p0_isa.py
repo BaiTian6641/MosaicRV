@@ -26,6 +26,8 @@ Exit status 0 only when every ELF passes every check.
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import re
 import subprocess
 import sys
@@ -214,6 +216,45 @@ def check_no_runtime_helper(objdump: str, path: str) -> None:
                          % (path, len(records), "\n".join(records[:10])))
 
 
+def load_profile_protocol() -> dict:
+    """Read test_protocol from config/profiles/p0.json.
+
+    The firmware and the audit both take the TOHOST/FROMHOST addresses from
+    the frozen profile rather than from a second hard-coded copy, so a profile
+    change cannot leave a stale address in the image.
+    """
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "..", "..", "..", "config", "profiles", "p0.json")
+    with open(path) as handle:
+        return json.load(handle)["test_protocol"]
+
+
+def check_htif_symbols(readelf: str, path: str, protocol: dict) -> None:
+    """tohost/fromhost must exist in the symbol table at the frozen addresses.
+
+    A host that communicates through the conventional symbols -- Spike's HTIF
+    is the one this corpus is actually run against -- resolves them by name.
+    If they are absent (PROVIDE, or stripped) the host cannot terminate the
+    program; if they are present at the wrong address it talks to nothing.
+    """
+    text = run([readelf, "-sW", path])
+    found = {}
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) >= 8 and parts[7] in ("tohost", "fromhost"):
+            found[parts[7]] = int(parts[1], 16)
+    for name, key in (("tohost", "tohost"), ("fromhost", "fromhost")):
+        want = int(protocol[key])
+        if name not in found:
+            raise AuditError(
+                "%s: no `%s` symbol in the symbol table; a host cannot "
+                "communicate with the target" % (path, name))
+        if found[name] != want:
+            raise AuditError(
+                "%s: `%s` is 0x%x, config/profiles/p0.json test_protocol.%s "
+                "is 0x%x" % (path, name, found[name], key, want))
+
+
 def check_entry(objdump: str, path: str, want_entry: int) -> None:
     text = run([objdump, "-f", path])
     match = re.search(r"start address 0x([0-9a-f]+)", text)
@@ -229,6 +270,7 @@ def audit_one(objdump: str, readelf: str, arch: str, path: str) -> int:
     count = check_disassembly(objdump, path)
     check_arch_attribute(readelf, path, arch)
     check_no_runtime_helper(objdump, path)
+    check_htif_symbols(readelf, path, load_profile_protocol())
     return count
 
 

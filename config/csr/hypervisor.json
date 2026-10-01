@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "profiles": ["p3"],
+  "comment": "The p3 profile implements M, S and U privilege with a single translation stage (Sv39) and does NOT claim the H extension or two-stage translation. It therefore defines no hypervisor or Virtual Supervisor CSR at all, and `modes` is empty on purpose: a table full of plausible-looking hypervisor CSRs would advertise two-stage translation that MosaicRV does not implement, which is the exact failure this configuration layer exists to prevent. The absent_csr_ranges below are the machine-readable half of that statement. Each range is one of the CSR number bands that Table csrrwpriv allocates to csr[9:8] = 0b10, the hypervisor privilege level; p3 has no mode above S, so no address in these bands can be accessed from any implemented mode and every access must raise an illegal instruction (src/priv-csrs.tex L114-L115). The ranges are contiguous mergers of the individual bands in Table csrrwpriv L80-L91. tools/mosaic/config_check.py rejects this table if any CSR any other table defines for p3 falls inside a range listed here, so the absence is checked rather than merely asserted.",
+  "modes": [],
+  "absent_csr_ranges": [
+    {
+      "first": 512,
+      "last": 767,
+      "reason": "Virtual Supervisor CSRs (0x200-0x2FF: vsstatus 0x200, vsie 0x204, vstvec 0x205, vsscratch 0x240, vsepc 0x241, vscause 0x242, vstval 0x243, vsip 0x244, vsatp 0x280) are defined only when the H extension is present, which p3 does not claim; they are the guest-visible shadows a second translation stage needs",
+      "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033: src/priv-csrs.tex L226-L284 table hcsrnames, 'Virtual Supervisor Registers' group L272-L281 ('0x200 & HRW & vsstatus' ... '0x280 & HRW & vsatp'); address band L82 '00 & 10 & XXXX & 0x200-0x2FF & Standard read/write' of Table csrrwpriv L80-L91, whose L36-L37 state that csr[9:8] 'encode[s] the lowest privilege level that can access the CSR'; absence rule L114-L115 'Attempts to access a non-existent CSR raise an illegal instruction exception. Attempts to access a CSR without appropriate privilege level ... also raise illegal instruction exceptions'"
+    },
+    {
+      "first": 1536,
+      "last": 1791,
+      "reason": "Hypervisor CSRs (0x600-0x6FF: hstatus 0x600, hedeleg 0x602, hideleg 0x603, hie 0x604, htimedelta 0x605, hcounteren 0x606, hgeie 0x607, henvcfg 0x60A, henvcfgh 0x61A, htimedeltah 0x615, htval 0x643, hip 0x644, hvip 0x645, htinst 0x64A, hgatp 0x680, hcontext 0x6A8) plus the custom read/write band 0x6C0-0x6FF, which MosaicRV also defines nothing in; hgatp is the guest-physical-address translation register, so none of this exists without the H extension and two-stage translation",
+      "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033: src/priv-csrs.tex L226-L284 table hcsrnames, 'Hypervisor Trap Setup' group L230-L239 ('0x600 & HRW & hstatus' ... '0x607 & HRW & hgeie'), 'Hypervisor Trap Handling' group L241-L247 ('0x643 & HRW & htval' ... '0xE12 & HRO & hgeip'), 'Hypervisor Configuration' group L250-L253 ('0x60A & HRW & henvcfg', '0x61A & HRW & henvcfgh ... RV32 only'), 'Hypervisor Protection and Translation' group L256-L257 ('0x680 & HRW & hgatp') and 'Debug/Trace Registers' group L260-L261 ('0x6A8 & HRW & hcontext'); address bands L83 '01 & 10 & 0XXX & 0x600-0x67F', L84 '01 & 10 & 10XX & 0x680-0x6BF' and L85 '01 & 10 & 11XX & 0x6C0-0x6FF' of Table csrrwpriv; absence rule L114-L115"
+    },
+    {
+      "first": 2560,
+      "last": 2815,
+      "reason": "Hypervisor-level read/write bands 0xA00-0xA7F (standard), 0xA80-0xABF and 0xAC0-0xAFF (custom): allocated to the hypervisor privilege level, which p3 does not have, and MosaicRV defines no custom CSR in any band",
+      "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033: src/priv-csrs.tex Table csrrwpriv L86 '10 & 10 & 0XXX & 0xA00-0xA7F & Standard read/write', L87 '10 & 10 & 10XX & 0xA80-0xABF & Custom read/write' and L88 '10 & 10 & 11XX & 0xAC0-0xAFF & Custom read/write', with L36-L37 (csr[9:8] is the lowest privilege level that can access the CSR) and L114-L115 (illegal instruction). No CSR in these bands is named anywhere in the ratified table hcsrnames L226-L284, so all three are unallocated as well as inaccessible."
+    },
+    {
+      "first": 3584,
+      "last": 3839,
+      "reason": "Hypervisor-level read-only bands 0xE00-0xE7F (standard, holds hgeip 0xE12), 0xE80-0xEBF and 0xEC0-0xEFF (custom): hgeip is the guest-external-interrupt-pending register of the H extension, and the custom bands hold nothing in MosaicRV",
+      "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033: src/priv-csrs.tex table hcsrnames L245 '0xE12 & HRO & hgeip & Hypervisor guest external interrupt pending'; address bands L89 '11 & 10 & 0XXX & 0xE00-0xE7F & Standard read-only', L90 '11 & 10 & 10XX & 0xE80-0xEBF & Custom read-only' and L91 '11 & 10 & 11XX & 0xEC0-0xEFF & Custom read-only' of Table csrrwpriv; absence rule L114-L115"
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "case": "decode.rv64im_reserved",
+  "verdict": "PASS",
+  "detail": "166701 instructions (84469 legal, 82232 illegal), 0 mismatches, 1428 named reserved checks",
+  "seed": 1,
+  "max_cycles": 200000,
+  "checks": 169428,
+  "failures": 0,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-01T00:42:21Z",
+  "first_mismatch": ""
+}

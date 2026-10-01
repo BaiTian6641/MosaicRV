@@ -68,11 +68,25 @@ __progtext_base   = 0x80001200;
  * conventional `tohost`/`fromhost` symbol names (Spike's HTIF, among
  * others) find the device without a side-channel.  Defining them changes no
  * address and no behaviour. */
-/* Plain assignments, not PROVIDE: PROVIDE only materialises a symbol when a
- * relocation references it, and nothing in the firmware references these, so
- * PROVIDE would leave them out of the symbol table entirely. */
-tohost   = 0x00102000;
-fromhost = 0x00102008;
+/* Absolute symbols at the frozen test_protocol addresses (config/profiles/
+ * p0.json -> tohost 0x80001000, fromhost 0x80001008).
+ *
+ * These are PLAIN assignments, not PROVIDE.  PROVIDE only materialises a
+ * symbol when a relocation actually references it, and nothing in the
+ * firmware references these, so PROVIDE leaves them out of the symbol table
+ * and any host that looks for the conventional names cannot find them --
+ * Spike then prints "tohost and fromhost symbols not in ELF; can't
+ * communicate with target" and the run never terminates.  That was observed
+ * and is why they are plain.
+ *
+ * The protection PROVIDE was meant to give -- "a stale address cannot survive
+ * silently" -- is instead provided by a real check:
+ * tests/programs/audit/check_p0_isa.py asserts that both symbols exist in
+ * every ELF and that their values equal test_protocol.tohost / .fromhost as
+ * read from config/profiles/p0.json.  A profile change that moves them fails
+ * the audit; it does not pass unnoticed. */
+tohost   = 0x80001000;
+fromhost = 0x80001008;
 
 SECTIONS
 {

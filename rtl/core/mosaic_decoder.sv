@@ -73,6 +73,13 @@
 
 `default_nettype none
 
+// The port below is written as `mosaic_pkg::decode_ctl_t`, fully qualified, so
+// it resolves without any import -- which matters because a port list is
+// elaborated before an in-body import could take effect (IEEE 1800-2023 6.18).
+// The body does its own `import mosaic_pkg::*;` for the type names and
+// constants. A $unit-scope `import *` is deliberately not relied on: Verilator
+// warns about it (IMPORTSTAR) and does not apply it inside the module.
+
 module mosaic_decoder (
     input  wire  [31:0]             insn,
     output mosaic_pkg::decode_ctl_t ctl
@@ -200,16 +207,19 @@ module mosaic_decoder (
   assign shamt_w  = insn[24:20];
   assign imm_slli = MutShiftUpper ? {52'd0, insn[31:20]} : {58'd0, shamt_x};
 
-  // M-extension signedness: the three unsigned operations are exactly the
-  // three funct3 patterns with all three bits set (mulhu, divu, remu).
+  // M-extension signedness: the unsigned operations are mulhu (011), divu (101)
+  // and remu (111). Written out, because "all three bits set" is wrong -- that
+  // is 111 only, and would classify mulhu and divu as signed.
   logic md_is_signed;
-  assign md_is_signed = !(funct3[2] && funct3[1] && funct3[0]);
+  assign md_is_signed = (funct3 != 3'b011) && (funct3 != 3'b101) &&
+                        (funct3 != 3'b111);
 
   // The one and only illegal state. Every field is a defined constant, so an
   // illegal encoding cannot leave a stale rd or a stale mem_size behind, and
   // "the decoder drove nothing" is a single named value rather than a list of
   // defaults that can drift apart.
-  localparam decode_ctl_t CTL_ILLEGAL = '{
+
+  localparam mosaic_pkg::decode_ctl_t CTL_ILLEGAL = '{
       valid:        1'b0,
       illegal:      1'b1,
       alu_op:       ALU_PASSB,   // defined "no ALU operation" encoding
@@ -268,11 +278,11 @@ module mosaic_decoder (
         // Only funct3 000 (fence) and 001 (fence.i) are defined. The
         // fm/pred/succ fields of fence are all legal values and are not
         // decoded here: the memory system owns them.
-        case (funct3)
-          F3_ADD_SUB: begin ctl.is_miscmem = 1'b1; ctl.is_fence_i = 1'b0; end
-          F3_SLL:     begin ctl.is_miscmem = 1'b1; ctl.is_fence_i = 1'b1; end
-          default:     legal = 1'b0;
-        endcase
+        if ((funct3 == F3_ADD_SUB) || (funct3 == F3_SLL)) begin
+          ctl.is_miscmem = 1'b1;              // fence or fence.i
+          ctl.is_fence_i = (funct3 == F3_SLL);  // funct3 001 is fence.i
+          legal         = 1'b1;
+        end
       end
 
       // ----------------------------------------------------------- OP-IMM
@@ -315,6 +325,21 @@ module mosaic_decoder (
           F3_AND:  ctl.alu_op = ALU_AND;        // andi
           default: legal = 1'b0;
         endcase
+      end
+
+      // --------------------------------------------------------------- lui
+      // U-type with no operands at all: the answer is the immediate itself, so
+      // ALU_PASSB is the operation. funct3 is not part of the encoding, and
+      // insn[19:15] / insn[24:20] are imm[19:15] / imm[9:5], not registers --
+      // which is why rs1 and rs2 stay at x0 here and in auipc.
+      7'b0110111: begin
+        ctl.uses_imm  = 1'b1;
+        ctl.imm       = imm_u;
+        ctl.rd        = rd_f;
+        ctl.reg_write = (rd_f != 5'd0);
+        ctl.uses_alu  = 1'b1;
+        ctl.alu_op    = ALU_PASSB;
+        legal         = 1'b1;
       end
 
       // ------------------------------------------------------------- auipc
@@ -397,7 +422,7 @@ module mosaic_decoder (
           // M extension: funct7 == 0000001 selects it, funct3 the operation.
           // The datapath is I-012's; only the classification is here.
           ctl.is_muldiv = 1'b1;
-          ctl.md_op     = md_op_e'(funct3);
+          ctl.md_op     = mosaic_pkg::md_op_e'(funct3);
           ctl.md_signed = md_is_signed;
         end else begin
           ctl.uses_alu = 1'b1;
@@ -450,10 +475,13 @@ module mosaic_decoder (
         ctl.imm          = imm_b;
         ctl.is_branch    = 1'b1;
         ctl.branch_funct = funct3;
-        // beq bne blt bge bltu bgeu; funct3 100 is the only reserved value.
-        if ((funct3 == F3_ADD_SUB) || (funct3 == F3_SLL) ||
-            (funct3 == F3_SLT)     || (funct3 == F3_SRL_SRA) ||
-            (funct3 == F3_SLTU)    || (funct3 == F3_AND)) begin
+        // beq 000, bne 001, blt 100, bge 101, bltu 110, bgeu 111. The
+        // reserved pair is funct3 010 and 011 -- the branch encoding reuses the
+        // funct3 space but not the ALU's meaning of it, so funct3 100 is blt
+        // here and not a reserved value.
+        if ((funct3 == F3_ADD_SUB) || (funct3 == F3_SLL)  ||
+            (funct3 == F3_XOR)     || (funct3 == F3_SRL_SRA) ||
+            (funct3 == F3_OR)      || (funct3 == F3_AND)) begin
           legal = 1'b1;
         end
       end

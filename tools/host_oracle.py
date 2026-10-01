@@ -160,19 +160,16 @@ def MULHU(a: int, b: int) -> int:
 
 
 def MULHSU(a: int, b: int) -> int:
-    """MULHSU: rs1 is signed, rs2 is signed-interpreted as RISC-V defines it.
+    """MULHSU: rs1 signed, rs2 unsigned.
 
-    In RV64, MULHSU multiplies rs1 by rs2 where rs1 is signed and rs2 is
-    also treated as a signed value (the "SU" naming means rs1 is sign-extended
-    and rs2 is used as-is, which for a full 64-bit operand is the same as
-    treating both as signed).  Both limbs and big-int use the same
-    interpretation, so agreement here does not discriminate the signedness
-    mix-up; MULH and MULHU together do, because they pin the all-signed and
-    all-unsigned results and MULHSU differs from MULHU whenever an operand is
-    negative.
+    The mnemonic is "signed x unsigned": rs1 is sign-extended and rs2 is
+    zero-extended, so the product is signed(a) * b with b taken as a
+    non-negative number.  Treating rs2 as signed is a classic bug that only
+    shows up when rs2 has bit 63 set, which is why p04's inputs include
+    0x8000000000000000 as c.
     """
-    hi = mulh_bigint(a, b, True, True)
-    hi2 = mulh_limbs(a, b, True, True)
+    hi = mulh_bigint(a, b, True, False)
+    hi2 = mulh_limbs(a, b, True, False)
     _check(hi == hi2, "MULHSU bigint=%#x limbs=%#x" % (hi, hi2))
     return hi
 
@@ -375,7 +372,9 @@ def p02_branch(a: int, b: int, c: int) -> tuple:
 
 
 def p03_loadstore(a: int, b: int, c: int) -> tuple:
-    sig0 = u64(a ^ (a >> 32))
+    # LW sign-extends: the word written at scratch+16 is the high half of a,
+    # read back as a sign-extended 32-bit value, not a zero-extended one.
+    sig0 = u64(a ^ sext(u64(a >> 32), 32))
     sig1 = u64(zext(a, 16) ^ sext(zext(b, 16), 16))
     sig2 = u64(sext(zext(a, 8), 8) ^ zext(b, 8))
     sig3 = u64(b ^ (a + c))
@@ -475,7 +474,9 @@ def p08_misaligned(a: int, b: int, c: int) -> tuple:
 
 def p09_storeload(a: int, b: int, c: int) -> tuple:
     sig0 = u64(a)                          # sd a; ld; sd b; ld; sd a; ld
-    sig1 = u64(a & 0xFFFFFFFF)             # sw a, 4; lw 4
+    # LW sign-extends: reading back a stored 64-bit value with a word load
+    # reproduces bit 31 into bits 63:31 whenever a is "negative" as a word.
+    sig1 = sext(zext(a, 32), 32)           # sw a, 4; lw 4
     byte_mix = u64((a & u64(~0xFF)) | (b & 0xFF))
     half_mix = u64((a & u64(~0xFFFF)) | (b & 0xFFFF))
     sig2 = u64(byte_mix ^ half_mix)

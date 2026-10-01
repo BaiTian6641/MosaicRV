@@ -37,8 +37,8 @@
 /* ------------------------------------------------------------------ */
 /* Frozen test protocol (config/profiles/p0.json -> test_protocol)    */
 /* ------------------------------------------------------------------ */
-#define MOSAIC_TOHOST             0x00102000UL   /* u64, RW, write != 0 ends */
-#define MOSAIC_FROMHOST           0x00102008UL   /* u64, R,  input word      */
+#define MOSAIC_TOHOST             0x80001000UL   /* u64 in RAM, write != 0 ends */
+#define MOSAIC_FROMHOST           0x80001008UL   /* u64 in RAM, input word   */
 #define MOSAIC_SIGNATURE_BASE     0x80000400UL   /* 4 x u64 in RAM           */
 #define MOSAIC_SIGNATURE_WORDS    4
 #define MOSAIC_PASS_CODE          1              /* bit 0 of tohost          */

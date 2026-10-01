@@ -83,7 +83,11 @@ main:
                                                * address */
 1:
     beqz    t5, 2f
-    jalr    zero, t1
+    /* jalr writes the link register, so the stub's `ret` comes back here and
+     * not to the loop setup; using `jalr zero, t1` would leave ra pointing at
+     * the instruction after the very first `jal`, and the stub would rewind
+     * to the loop setup on every trip. */
+    jalr    ra, t1
     addi    t4, t4, 1
     addi    t5, t5, -1
     j       1b

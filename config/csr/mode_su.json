@@ -1,0 +1,178 @@
+{
+  "schema_version": 1,
+  "profiles": ["p1", "p2", "p3"],
+  "modes": [
+    {
+      "mode": "S",
+      "csrs": [
+        {
+          "name": "sstatus",
+          "address": 256,
+          "width": 64,
+          "access": "rwr",
+          "behavior": "warl_wpri",
+          "reset": 8589934592,
+          "unmodifiable_bits": ["63", "33:32", "16:15", "6"],
+          "writable_fields": ["19", "18", "14:13", "10:9", "8", "5", "1"],
+          "wpri_fields": ["62:34", "31:20", "17", "12:11", "7", "4:2", "0"],
+          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L195 '0x100 & SRW & sstatus'. src/supervisor.tex: section 'Supervisor Status Register (sstatus)' L36, 'The sstatus register is an SXLEN-bit read/write register formatted as shown in Figure sstatusreg-rv32 when SXLEN=32 and Figure sstatusreg when SXLEN=64' L40-L43; RV64 figure sstatusreg L104-L165 (bit-number rows L110-L113 and L132-L143, field-name rows L119-L125 and L145-L156: SD = bit 63, WPRI = 62:34, UXL[1:0] = 33:32, WPRI = 31:20, MXR = 19, SUM = 18, WPRI = 17, XS[1:0] = 16:15, FS[1:0] = 14:13, WPRI = 12:11, VS[1:0] = 10:9, SPP = 8, WPRI = 7, UBE = 6, SPIE = 5, WPRI = 4:2, SIE = 1, WPRI = 0). 'The sstatus register is a subset of the mstatus register' L185 and the commentary L187-L191 'reading or writing any field in sstatus is equivalent to reading or writing the homonymous field in mstatus'. Per-field rules: SPP 'indicates the privilege level at which a hart was executing before entering supervisor mode' L167-L172 (both U and S are implemented, so neither the 'read-only 0' condition for SPP nor the read-only 0b11 condition for MPP applies - see src/machine.tex L621-L623 for the xPP rules); SIE 'enables or disables all interrupts in supervisor mode' L174-L178 and SPIE 'indicates whether supervisor interrupts were enabled prior to trapping' L180-L183 are plain read/write in the figure with no read-only-zero sentence anywhere in the chapter; MXR L217-L221 and SUM L223-L229, with 'SUM is read-only 0 if satp.MODE is read-only 0' L231 - not applicable, satp.MODE is a writable WARL field here (see the satp row); UXL 'When SXLEN=64, it is a WARL field that encodes the current value of UXLEN. In particular, an implementation may make UXL be a read-only field whose value always ensures that UXLEN=SXLEN' L200-L203, so MosaicRV makes UXL read-only 2 (config/profiles/p1.json freezes xlen 64, so UXLEN=SXLEN=64); XS, FS, VS and SD from src/machine.tex: 'If the F extension is implemented, the FS field shall not be read-only zero' L925-L926 and 'If S-mode is implemented but the F extension is not, FS may optionally be read-only zero' L930-L931, 'If the v registers are implemented, the VS field shall not be read-only zero' L941-L942 and 'If S-mode is implemented but the v registers are not, VS may optionally be read-only zero' L946-L947, 'In systems without additional user extensions requiring new state, the XS field is read-only zero' L949-L950, 'The SD bit is a read-only bit that summarizes whether either the FS, VS, or XS fields signal the presence of some dirty state' L961-L964. FS and VS are therefore WRITABLE in all three profiles, which is mandatory for p2/p3 (F and V claimed) and permitted for p1 (F and V not claimed). This is inconsistent with the frozen mstatus rows in config/csr/mode_m.json, which declare mstatus.FS/VS read-only zero for p0..p3; the contradiction is reported in results/reports/I-001-csr-p1p3.md section 5.1 and the mstatus table must be corrected by its owner, because sstatus.FS/VS and mstatus.FS/VS are the same storage (supervisor.tex L187-L191). UBE: 'UBE is a WARL field that controls the endianness of explicit memory accesses made from U-mode ... An implementation may make UBE be a read-only field that always specifies the same endianness as for S-mode' L257-L261; every profile freezes endianness: little (config/profiles/p1.json), so UBE is read-only 0. Reset: src/machine.tex section 'Reset' L2839, 'All other hart state is unspecified' L2858 and 'No WARL field contains an illegal value' L2857; Table misabase L57-L71 defines only MXL 1/2/3 (=XLEN 32/64/128) and leaves 0 unallocated, so a UXL of 0 would be an illegal WARL value and the only legal UXL for UXLEN=64 is 0b10. The reset value is therefore UXL=0b10 at bits 33:32 = 2 << 32 = 0x200000000 = 8589934592, with every other field reset to 0 (SIE=0 is required by 'The mstatus fields MIE and MPRV are reset to 0' L2842-L2843 read through the shared storage named by L187-L191; SD=0 because nothing is dirty at reset)."
+        },
+        {
+          "name": "sie",
+          "address": 260,
+          "width": 64,
+          "access": "rwr",
+          "behavior": "warl_wpri",
+          "reset": 0,
+          "unmodifiable_bits": [],
+          "writable_fields": ["5", "1"],
+          "wpri_fields": ["63:6", "4:2", "0"],
+          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L196 '0x104 & SRW & sie'. src/supervisor.tex: section 'Supervisor Interrupt Registers (sip and sie)' L338, 'sie is the corresponding SXLEN-bit read/write register containing interrupt enable bits' L341-L342; 'Interrupt cause number i (as reported in CSR scause) corresponds with bit i in both sip and sie. Bits 15:0 are allocated to standard interrupt causes only, while bits 16 and above are designated for platform or custom use' L343-L347; Fig. siereg L366-L381 draws the whole SXLEN field as 'Interrupts (WARL)'; standard portion Fig. siereg-standard L447-L475 (bit 9 SEIE, bit 5 STIE, bit 1 SSIE, every other standard bit drawn as a literal 0); 'A bit in sie must be writable if the corresponding interrupt can ever become pending' L409-L410 and 'Bits of sie that are not writable are read-only zero' L411; 'Each standard interrupt type (SEI, STI, or SSI) may not be implemented, in which case the corresponding interrupt-pending and interrupt-enable bits are read-only zeros' L499-L501; 'All bits in sip and sie are WARL fields' L502. Implementation evidence: config/memory/p1.json maps a clint device (which drives the supervisor timer interrupt STIP, L483-L486 'Bits sip.STIP and sie.STIE are the interrupt-pending and interrupt-enable bits for supervisor-level timer interrupts') and a clint_msip device (which raises SSIP, L487-L491 'If implemented, SSIP is writable in sip and may also be set to 1 by a platform-specific interrupt controller'). No PLIC or other external interrupt controller exists (KNOWN_DEVICES in tools/mosaic/config_check.py is uart/test_harness/clint/msip, and every memory map lists exactly those), so SEIP can never become pending and SEIE is read-only zero under L499-L501. Hence STIE (bit 5) and SSIE (bit 1) are writable and every other bit, including SEIE (9) and the platform/custom bits 63:16, is write-preserve-zero. Bits 16 and above are designated for platform or custom use (L346-L347) and MosaicRV designates none, so they are WPRI like the M-mode mie/mip rows. Reset: 'All other hart state is unspecified' src/machine.tex L2858 and 'No WARL field contains an illegal value' L2857, so 0 is a legal value; nothing is interrupt-enabled at reset, matching 'The mstatus fields MIE and MPRV are reset to 0' L2842-L2843. Writability does not depend on mideleg: mideleg controls only whether an interrupt traps to S-mode (src/machine.tex L1404-L1416 requires bit i to be clear in mideleg), whereas the sie writability rule L409-L410 depends on whether the interrupt can ever become pending."
+        },
+        {
+          "name": "sip",
+          "address": 324,
+          "width": 64,
+          "access": "rwr",
+          "behavior": "warl_wpri",
+          "reset": 0,
+          "unmodifiable_bits": ["5"],
+          "writable_fields": ["1"],
+          "wpri_fields": ["63:10", "8:6", "4:2", "0"],
+          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L210 '0x144 & SRW & sip'. src/supervisor.tex: section 'Supervisor Interrupt Registers (sip and sie)' L338, 'The sip register is an SXLEN-bit read/write register containing information on pending interrupts' L340-L341; Fig. sipreg L349-L364 draws the whole SXLEN field as 'Interrupts (WARL)'; 'Each individual bit in register sip may be writable or may be read-only. When bit i in sip is writable, a pending interrupt i can be cleared by writing 0 to this bit' L400-L403; 'All bits in sip and sie are WARL fields' L502; standard portion Fig. sipreg-standard L417-L445 (bit 9 SEIP, bit 5 STIP, bit 1 SSIP, other standard bits literal 0). Per-bit: SSIP (1) is writable - 'If implemented, SSIP is writable in sip and may also be set to 1 by a platform-specific interrupt controller' L487-L491 - because config/memory/p1.json maps clint_msip, which is the mechanism that raises a supervisor software interrupt. STIP (5) is read-only but NOT write-preserve-zero: 'If implemented, STIP is read-only in sip, and is set and cleared by the execution environment' L483-L486, so it tracks the CLINT timer interrupt and can read 1 at run time; it is therefore declared in unmodifiable_bits (software can never change it) rather than in wpri_fields (reads always return zero). SEIP (9) is write-preserve-zero: 'If implemented, SEIP is read-only in sip, and is set and cleared by the execution environment, typically through a platform-specific interrupt controller' L477-L481, and no such controller exists in any MosaicRV memory map, so SEIP is never pending and 'Each standard interrupt type may not be implemented, in which case the corresponding interrupt-pending ... bits are read-only zeros' L499-L501. Bits 63:16 are designated for platform or custom use (L346-L347) and MosaicRV designates none, and the remaining standard bits are drawn as a literal 0 in Fig. sipreg-standard, so all of them are write-preserve-zero. Reset: src/machine.tex 'All other hart state is unspecified' L2858 and 'No WARL field contains an illegal value' L2857, so 0 is legal; no interrupt is pending at reset."
+        },
+        {
+          "name": "stvec",
+          "address": 261,
+          "width": 64,
+          "access": "rw",
+          "behavior": "warl",
+          "reset": 0,
+          "unmodifiable_bits": [],
+          "writable_fields": ["63:2", "1:0"],
+          "wpri_fields": [],
+          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L197 '0x105 & SRW & stvec'. src/supervisor.tex: section 'Supervisor Trap Vector Base Address Register (stvec)' L282, 'The stvec register is an SXLEN-bit read/write register that holds trap vector configuration, consisting of a vector base address (BASE) and a vector mode (MODE)' L284-L286; Fig. stvecreg L288-L305 (BASE[SXLEN-1:2] = bits 63:2 WARL, MODE = bits 1:0 WARL); 'The BASE field in stvec is a WARL field that can hold any valid virtual or physical address, subject to the following alignment constraints: the address must be 4-byte aligned' L307-L310; Table stvec-mode L312-L326 (MODE 0 = Direct 'All exceptions set pc to BASE', MODE 1 = Vectored 'Asynchronous interrupts set pc to BASE+4*cause', '>=2 --- Reserved'); 'The encoding of the MODE field is shown in Table stvec-mode' L328. MosaicRV accepts MODE 0 and MODE 1; MODE >= 2 is Reserved and canonicalises to MODE 0 with a legal BASE, exactly as the mtvec row of config/csr/mode_m.json does. Reset: src/machine.tex 'All other hart state is unspecified' L2858 and 'No WARL field contains an illegal value' L2857, so 0 (BASE 0, MODE Direct) is a legal value."
+        },
+        {
+          "name": "scounteren",
+          "address": 262,
+          "width": 32,
+          "access": "rwr",
+          "behavior": "warl_wpri",
+          "reset": 0,
+          "unmodifiable_bits": [],
+          "writable_fields": ["2", "1", "0"],
+          "wpri_fields": ["31:3"],
+          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L198 '0x106 & SRW & scounteren'. src/supervisor.tex: section 'Counter-Enable Register (scounteren)' L534, 'The counter-enable register scounteren is a 32-bit register that controls the availability of the hardware performance monitoring counters to U-mode' L572-L574; Fig. scounteren L536-L570 (bit 0 CY, bit 1 TM, bit 2 IR, bits 31:3 HPM31..HPM3); 'When the CY, TM, IR, or HPMn bit in the scounteren register is clear, attempts to read the cycle, time, instret, or hpmcounter_n register while executing in U-mode will cause an illegal instruction exception. When one of these bits is set, access to the corresponding register is permitted' L576-L580; 'scounteren must be implemented. However, any of the bits may be read-only zero, indicating reads to the corresponding counter will cause an exception when executing in U-mode. Hence, they are effectively WARL fields' L582-L585; commentary L590-L591 'U-mode may only access a counter if the corresponding bits in scounteren and mcounteren are both set'. MosaicRV implements no hpmcounter_n CSR at all (config/csr/mode_m.json contains mcycle, minstret, cycle, time and instret and no hpmcounter), so HPM31..HPM3 (bits 31:3) are write-preserve-zero. CY, TM and IR gate the three counters that do exist and are writable, so that an OS which sets mcounteren can actually expose them to U-mode; a read-only-zero scounteren would make the register a permanent illegal-instruction source for U-mode counter reads. The profile's own derived_notes for p1/p2/p3 make the CLINT (time) and the cycle/instret counters platform obligations, so the gates are meaningful. Reset: src/machine.tex 'All other hart state is unspecified' L2858 and 'No WARL field contains an illegal value' L2857, so 0 is legal; 0 is also the conservative choice, because at reset U-mode cannot read any counter."
+        },
+        {
+          "name": "senvcfg",
+          "address": 266,
+          "width": 64,
+          "access": "rwr",
+          "behavior": "warl_wpri",
+          "reset": 0,
+          "unmodifiable_bits": ["7"],
+          "writable_fields": ["6", "5:4", "0"],
+          "wpri_fields": ["63:8", "3:1"],
+          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L202 '0x10A & SRW & senvcfg'. src/supervisor.tex: section 'Supervisor Environment Configuration Register (senvcfg)' L808, 'The senvcfg CSR is an SXLEN-bit read/write register, formatted as shown in Figure fig:senvcfg, that controls certain characteristics of the U-mode execution environment' L810-L812; Fig. fig:senvcfg L814-L839 (WPRI = bits SXLEN-1:8, CBZE = bit 7, CBCFE = bit 6, CBIE = bits 5:4, WPRI = bits 3:1, FIOM = bit 0). FIOM (bit 0): 'If FIOM (Fence of I/O implies Memory) is set to one in senvcfg, FENCE instructions executed in U-mode are modified so the requirement to order accesses to device I/O implies also the requirement to order main memory accesses' L841-L846, and the only sentence that permits freezing it - 'If satp.MODE is read-only zero (always Bare), the implementation may make FIOM read-only zero' L853 - does not apply, because MosaicRV implements Sv39 and satp.MODE is a writable WARL field (see the satp row). FIOM is therefore writable. CBZE (bit 7): 'The definition of the CBZE field will be furnished by the forthcoming Zicboz extension' L914-L917; Zicboz is claimed by no profile in config/capability_ladder.json, and the ratified menvcfg rule is 'When the Zicboz extension is not implemented, CBZE is read-only zero' (riscv-isa-manual main, commit 51c1291fc8168bf36530de3386d3f452069ce327, src/priv/machine.adoc L2240-L2241), so CBZE is read-only zero. CBCFE (bit 6) and CBIE (bits 5:4): v1.12 defers their definition - 'The definitions of the CBCFE and CBIE fields will be furnished by the forthcoming Zicbom extension' L919-L922 - so v1.12 provides no writability sentence; the ratified Zicbom rules are 'When the Zicbom extension is not implemented, CBCFE is read-only zero' (main src/priv/machine.adoc L2243-L2247) and 'The Zicbom extension adds the CBIE ... WARL field to menvcfg ... When the Zicbom extension is not implemented, CBIE is read-only zero. The encoding 0b10 is reserved' (main src/priv/machine.adoc L2250-L2261), so both are writable whenever Zicbom is implemented. p1, p2 and p3 all claim Zicbom (config/profiles/p1.json isa_target.extensions; config/capability_ladder.json name 'Zicbom', min_profile p1), which is why both are writable here; CBIE is a genuine two-bit WARL field whose only legal values are 0b00, 0b01 and 0b11. The remaining bits are the WPRI fields drawn in Fig. fig:senvcfg. Reset: src/machine.tex 'All other hart state is unspecified' L2858 and 'No WARL field contains an illegal value' L2857, so 0 is legal; CBIE=0b00 is the conservative value, since it makes CBO.INVAL raise illegal-instruction below M."
+        },
+        {
+          "name": "sscratch",
+          "address": 320,
+          "width": 64,
+          "access": "rw",
+          "behavior": "warl",
+          "reset": 0,
+          "unmodifiable_bits": [],
+          "writable_fields": ["63:0"],
+          "wpri_fields": [],
+          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L206 '0x140 & SRW & sscratch'. src/supervisor.tex: section 'Supervisor Scratch Register (sscratch)' L594, 'The sscratch register is an SXLEN-bit read/write register, dedicated for use by the supervisor' L596-L597; Fig. kregs L603-L618 draws the whole SXLEN field with no field decomposition. The spec imposes no field constraints, so every 64-bit value is legal and reads back unchanged; 'warl' is the honest encoding because csr.schema.json has no plain read/write behavior token and this register is exactly an unconstrained WARL field. The spec does not specify a reset value ('All other hart state is unspecified', src/machine.tex L2858); 0 is used."
+        },
+        {
+          "name": "sepc",
+          "address": 321,
+          "width": 64,
+          "access": "rwr",
+          "behavior": "warl",
+          "reset": 0,
+          "unmodifiable_bits": ["0"],
+          "writable_fields": ["63:1"],
+          "wpri_fields": [],
+          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L207 '0x141 & SRW & sepc'. src/supervisor.tex: section 'Supervisor Exception Program Counter (sepc)' L620, 'sepc is an SXLEN-bit read/write register' L622, 'The low bit of sepc (sepc[0]) is always zero. On implementations that support only IALIGN=32, the two low bits (sepc[1:0]) are always zero' L623-L625, 'If an implementation allows IALIGN to be either 16 or 32 ..., then, whenever IALIGN=32, bit sepc[1] is masked on reads so that it appears to be 0' L627-L631, 'sepc is a WARL register that must be able to hold all valid virtual addresses' L633-L635, 'When a trap is taken into S-mode, sepc is written with the virtual address of the instruction that was interrupted or that encountered the exception' L639-L641; Fig. epcreg L644-L659. Unlike the frozen mepc row of config/csr/mode_m.json (which uses IALIGN=32 because p0 is RV64IM without C), every profile that loads this table (p1, p2, p3) claims the C extension, and 'The C extension allows 16-bit instructions to be freely intermixed with 32-bit instructions, with the latter now able to start on any 16-bit boundary, i.e., IALIGN=16' (src/c.tex L28-L31), so only sepc[0] is always zero; sepc[1] is fully writable and unmasked, because IALIGN is never 32. Reset: src/machine.tex 'All other hart state is unspecified' L2858 and 'No WARL field contains an illegal value' L2857, so 0 is a legal sepc value (a 4-byte aligned address)."
+        },
+        {
+          "name": "scause",
+          "address": 322,
+          "width": 64,
+          "access": "rw",
+          "behavior": "warl",
+          "reset": 0,
+          "unmodifiable_bits": [],
+          "writable_fields": ["63:0"],
+          "wpri_fields": [],
+          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L208 '0x142 & SRW & scause'. src/supervisor.tex: section 'Supervisor Cause Register (scause)' L661, 'The scause register is an SXLEN-bit read-write register' L664-L665, 'When a trap is taken into S-mode, scause is written with a code indicating the event that caused the trap. Otherwise, scause is never written by the implementation, though it may be explicitly written by software' L665-L668, 'The Interrupt bit in the scause register is set if the trap was caused by an interrupt. The Exception Code field contains a code identifying the last exception or interrupt ... The Exception Code is a WLRL field. It is required to hold the values 0-31 (i.e., bits 4-0 must be implemented), but otherwise it is only guaranteed to hold supported exception codes' L670-L676; Fig. scausereg L678-L695 (Interrupt = bit SXLEN-1 = 63, Exception Code = bits SXLEN-2:0 = 62:0 WLRL); Table scauses L697-L738. WLRL is a strict subset of WARL, so behavior is declared warl, matching the mcause row of config/csr/mode_m.json. Reset: src/machine.tex section 'Reset' L2850-L2852 'The mcause register is set to a value indicating the cause of the reset' and L2860-L2864 'The mcause values after reset have implementation-specific interpretation, but the value 0 should be returned on implementations that do not distinguish different reset conditions'; MosaicRV does not distinguish reset conditions, so scause resets to 0 (Interrupt = 0, Exception Code 0 = instruction address misaligned, which is never a legal S-mode reset cause but is the spec-sanctioned placeholder)."
+        },
+        {
+          "name": "stval",
+          "address": 323,
+          "width": 64,
+          "access": "rw",
+          "behavior": "warl",
+          "reset": 0,
+          "unmodifiable_bits": [],
+          "writable_fields": ["63:0"],
+          "wpri_fields": [],
+          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L209 '0x143 & SRW & stval'. src/supervisor.tex: section 'Supervisor Trap Value (stval) Register' L740, 'The stval register is an SXLEN-bit read-write register' L742, 'When a trap is taken into S-mode, stval is written with exception-specific information ... Otherwise, stval is never written by the implementation, though it may be explicitly written by software' L743-L746, 'The hardware platform will specify which exceptions must set stval informatively and which may unconditionally set it to zero' L746-L748, 'If stval is written with a nonzero value when a breakpoint, address-misaligned, access-fault, or page-fault exception occurs on an instruction fetch, load, or store, then stval will contain the faulting virtual address' L751-L754, 'For other traps, stval is set to zero' L796-L797, 'stval is a WARL register that must be able to hold all valid virtual addresses and the value 0' L799-L801, 'If the feature to return the faulting instruction bits is implemented, stval must also be able to hold all values less than 2^N, where N is the smaller of SXLEN and ILEN' L804-L806; Fig. stvalreg L756-L771. MosaicRV declares stval not read-only zero, and therefore implements it as a full-width WARL register, exactly as the mtval row of config/csr/mode_m.json does; the illegal-instruction feature is deliberately NOT claimed (see the omissions list in results/reports/I-001-csr-p1p3.md), so the 2^N requirement does not apply. Which S-mode exceptions set stval informatively is a platform policy outside this table and is recorded as an open ambiguity in results/reports/I-001-csr-p1p3.md. Reset: src/machine.tex 'All other hart state is unspecified' L2858; 0 is explicitly a value stval must be able to hold (L800)."
+        },
+        {
+          "name": "satp",
+          "address": 384,
+          "width": 64,
+          "access": "rwr",
+          "behavior": "warl",
+          "reset": 0,
+          "unmodifiable_bits": ["59:44"],
+          "writable_fields": ["63:60", "43:0"],
+          "wpri_fields": [],
+          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L214 '0x180 & SRW & satp'. src/supervisor.tex: section 'Supervisor Address Translation and Protection (satp) Register' L924, 'The satp register is an SXLEN-bit read/write register, formatted as shown in Figure rv32satp for SXLEN=32 and Figure rv64satp for SXLEN=64, which controls supervisor-mode address translation and protection. This register holds the physical page number (PPN) of the root page table ... an address space identifier (ASID) ... and the MODE field' L927-L935; Fig. rv64satp L972-L994 (MODE = bits 63:60 WARL, ASID = bits 59:44 WARL, PPN = bits 43:0 WARL). MODE value set: Table satp-mode L1043-L1071 gives, for SXLEN=64, '0 Bare', '1-7 Reserved for standard use', '8 Sv39', '9 Sv48', '10 Sv57', '11 Sv64 (Reserved)', '12-13 Reserved for standard use', '14-15 Designated for custom use'; 'When SXLEN=64, three paged virtual-memory schemes are defined: Sv39, Sv48, and Sv57' L1032-L1033; 'Implementations are not required to support all MODE settings, and if satp is written with an unsupported MODE, the entire write has no effect; no fields in satp are modified' L1039-L1041; 'To select MODE=Bare, software must write zero to the remaining fields of satp (bits 30-0 when SXLEN=32, or bits 59-0 when SXLEN=64)' L1009-L1010. MosaicRV implements Sv39 only: p1, p2 and p3 claim Sv39 (config/capability_ladder.json name 'Sv39', min_profile p1) and none of them claims Sv48 or Sv57, and config/profiles/p3.json derived_notes states explicitly that 'Sv48 ... stay NOT_CLAIMED'. The honest WARL value set is therefore {0b0000 Bare, 0b1000 Sv39}; a write of any other MODE leaves the entire register unmodified (L1039-L1041) rather than silently selecting an unimplemented mode. ASID: 'The number of ASID bits is unspecified and may be zero. The number of implemented ASID bits, termed ASIDLEN, may be determined by writing one to every bit position in the ASID field, then reading back the value in satp ... The least-significant bits of ASID are implemented first ... The maximal value of ASIDLEN, termed ASIDMAX, is 9 for Sv32 or 16 for Sv39, Sv48, and Sv57' L1073-L1079; MosaicRV freezes ASIDLEN = 0, so ASID (bits 59:44) is read-only zero. This is the conservative end of the spec's explicit range and it is the only choice consistent with 'To select MODE=Bare, software must write zero to the remaining fields' L1009-L1010; ASIDMAX=16 remains available if the S-mode implementation tasks later need per-address-space fences. PPN (bits 43:0) is the writable WARL root page-table pointer; 'The satp.PPN field might not be capable of holding all physical page numbers' is a commentary statement (L965-L969) and no MosaicRV memory map needs more than the 44 bits. Access from S-mode is gated by mstatus.TVM: 'When TVM=1, attempts to read or write the satp CSR or execute an SFENCE.VMA or SINVAL.VMA instruction while executing in S-mode will raise an illegal instruction exception' (src/machine.tex L816-L820). Reset: src/machine.tex 'All other hart state is unspecified' L2858 and 'No WARL field contains an illegal value' L2857, so MODE=Bare with all other fields zero, i.e. 0, is a legal value and is the conservative one - no translation is active until software configures it."
+        }
+      ]
+    },
+    {
+      "mode": "U",
+      "csrs": [
+        {
+          "name": "cycle",
+          "address": 3072,
+          "width": 64,
+          "access": "ro",
+          "behavior": "fixed",
+          "reset": 0,
+          "unmodifiable_bits": ["63:0"],
+          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L166 '0xC00 & URO & cycle' - URO, so this CSR is readable from U-mode, which is why the U-mode block of this table exists at all. src/machine.tex section 'Machine Counter-Enable Register (mcounteren)' L1805-L1810, 'The cycle, instret, and hpmcounter_n CSRs are read-only shadows of mcycle, minstret, and mhpmcounter_n, respectively'; section 'Hardware Performance Monitor' L1653-L1655 gives mcycle 64-bit precision on RV64, so cycle is 64 bits wide. Reset 0 because mcycle is 0 after reset in config/csr/mode_m.json. U-mode accessibility: src/supervisor.tex L576-L580, 'When the CY, TM, IR, or HPMn bit in the scounteren register is clear, attempts to read the cycle, time, instret, or hpmcounter_n register while executing in U-mode will cause an illegal instruction exception. When one of these bits is set, access to the corresponding register is permitted', plus the commentary L590-L591 'U-mode may only access a counter if the corresponding bits in scounteren and mcounteren are both set'. The same address is declared in the M-mode block of config/csr/mode_m.json, which owns the register's definition (name, width, behaviour, reset); this U-mode row records that the register is URO and therefore reachable from U-mode, gated by scounteren.CY and mcounteren.CY. See results/reports/I-001-csr-p1p3.md section 4 for why the U block re-declares the URO counters."
+        },
+        {
+          "name": "time",
+          "address": 3073,
+          "width": 64,
+          "access": "ro",
+          "behavior": "fixed",
+          "reset": 0,
+          "unmodifiable_bits": ["63:0"],
+          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L167 '0xC01 & URO & time' - URO, so this CSR is readable from U-mode. src/machine.tex section 'Machine Counter-Enable Register (mcounteren)' L1807-L1812, 'The time CSR is a read-only shadow of the memory-mapped mtime register ... time shadows only the lower 32 bits' (so timeh, the RV32-only upper-half alias at 0xC81, is excluded on RV64); section 'Machine Timer Registers (mtime and mtimecmp)' L2485-L2489, 'Platforms provide a real-time counter, exposed as a memory-mapped machine-mode read-write register, mtime'; every memory map (config/memory/p1.json, p2, p3) maps a clint device, which supplies mtime. src/supervisor.tex L532 'The implementation must provide a facility for scheduling timer interrupts in terms of the real-time counter, time'. Reset 0 because the CLINT mtime register is unspecified at reset and 0 is the value the frozen mcounteren-era table uses. U-mode accessibility is gated by scounteren.TM and mcounteren.TM (L576-L580 and L590-L591). The same address is declared in the M-mode block of config/csr/mode_m.json, which owns the register's definition; this U-mode row records URO reachability from U-mode."
+        },
+        {
+          "name": "instret",
+          "address": 3074,
+          "width": 64,
+          "access": "ro",
+          "behavior": "fixed",
+          "reset": 0,
+          "unmodifiable_bits": ["63:0"],
+          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L168 '0xC02 & URO & instret' - URO, so this CSR is readable from U-mode. src/machine.tex section 'Machine Counter-Enable Register (mcounteren)' L1805-L1810, 'The cycle, instret, and hpmcounter_n CSRs are read-only shadows of mcycle, minstret, and mhpmcounter_n, respectively'; section 'Hardware Performance Monitor' L1653-L1655 gives minstret 64-bit precision on RV64, so instret is 64 bits wide. Reset 0 because minstret is 0 after reset in config/csr/mode_m.json. U-mode accessibility is gated by scounteren.IR and mcounteren.IR (src/supervisor.tex L576-L580 and L590-L591). The same address is declared in the M-mode block of config/csr/mode_m.json, which owns the register's definition; this U-mode row records URO reachability from U-mode."
+        }
+      ]
+    }
+  ]
+}

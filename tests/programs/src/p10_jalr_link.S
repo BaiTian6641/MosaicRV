@@ -24,8 +24,8 @@
  *   jal  p10_outer     -> a1 = b - 1, a2 = a0 ^ a1
  *
  * Computed signature:
- *   sig0 = jal link delta        (0)
- *   sig1 = jalr link delta       (0)
+ *   sig0 = JAL link delta        (0, link == next instruction)
+ *   sig1 = JALR link delta       (0, link == next instruction)
  *   sig2 = a0 after the chain    = a + 1 + 2b
  *   sig3 = a1 ^ a2               = (b - 1) ^ (2 * (a + 3b))
  */
@@ -40,28 +40,41 @@ main:
     MOSAIC_SETUP_BASES
     MOSAIC_LOAD_INPUTS
 
+    /* ra is owned by crt0's `call main`; every routine below returns through
+     * it, so save it before the first call and restore it on the way out. */
+    addi    sp, sp, -16
+    sd      ra, 0(sp)
+
     /* ---- JAL link ---- */
-    jal     t0, p10_jal_b
+    jal     ra, p10_jal_b
 p10_after_jal:
     la      t1, p10_after_jal
-    sub     s4, t0, t1                         /* must be 0 */
+    sub     s4, ra, t1                         /* must be 0 */
 
     /* ---- JALR with bit 0 deliberately set ---- */
     la      t2, p10_jalr_b
     ori     t2, t2, 1                          /* JALR must clear bit 0 */
-    jalr    t3, t2
+    jalr    ra, t2
 p10_after_jalr:
     la      t4, p10_after_jalr
-    sub     s5, t3, t4                         /* must be 0 */
+    sub     s5, ra, t4                         /* must be 0 */
 
-    /* ---- JALR with rd == rs1 ---- */
+    /* ---- JALR with rd == rs1 ----
+     * ra must point at the continuation before this one, because `jalr` with
+     * rd == ra would clobber the return address the callee needs. */
+    la      a4, 2f
     mv      a3, t2
+    mv      ra, a4
     jalr    a3, a3
+2:
 
     /* ---- nested call / return through ra ---- */
     jal     ra, p10_outer
 
     xor     t0, a1, a2                         /* sig3 */
+
+    ld      ra, 0(sp)
+    addi    sp, sp, 16
 
     SIG0    s4
     SIG1    s5

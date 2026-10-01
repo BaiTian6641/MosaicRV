@@ -1,17 +1,29 @@
 // CASE=alu.boundaries -- work package I-011.
 //
-// Exercises every one of the sixteen `mosaic_pkg::alu_op_e` encodings of
-// rtl/core/mosaic_alu.sv against an independent reference model, over the full
-// 2x2 boundary matrix of the operand set in `kValues` x `kValues`, a dedicated
-// shift-amount sweep, and a seeded random campaign over full-width operands.
+// Two units under test, both purely combinational, both checked against
+// reference models written independently of the RTL:
 //
-// Independence of the reference model
+//   * rtl/core/mosaic_alu.sv          -- all sixteen `mosaic_pkg::alu_op_e`
+//                                        encodings: add/sub/shift/compare/logic,
+//                                        the five RV64 word forms and ALU_PASSB;
+//   * rtl/core/mosaic_branch_target.sv -- link value, taken/not-taken target,
+//                                        and "does control transfer";
+//   * rtl/core/mosaic_branch_cmp.sv    -- the BEQ/BNE/BLT/BGE/BLTU/BGEU
+//                                        comparison that feeds `branch_taken`.
+//
+// The ALU is swept over the full 2x2 matrix of a 20-value boundary operand set,
+// a dedicated shift-amount sweep, and a seeded random campaign. The branch half
+// is swept over a pc set, an immediate set, all eight funct3 values, both
+// `branch_taken` values and both `is_jalr` values, plus the closed chain in which
+// the DUT comparator drives the DUT target unit.
+//
+// Independence of the reference models
 // -----------------------------------
-// The model below is written from the RV64I pseudo-code in int64_t/uint64_t (and
+// The ALU model is written from the RV64I pseudo-code in int64_t/uint64_t (and
 // uint32_t for the W forms). It shares no expression with the RTL: the RTL is
 // bit-selected SV with `$signed()` casts, the model is host integer arithmetic,
-// and the W sign-extension -- the single easiest thing to get wrong -- is done
-// by an explicit function rather than by a cast.
+// and the W sign-extension -- the single easiest thing to get wrong -- is done by
+// an explicit function rather than by a cast.
 //
 // The three C++ expressions that silently compute the wrong thing here, and what
 // this file does instead:
@@ -33,10 +45,9 @@
 // second formulation that never leaves unsigned arithmetic (`SignedLessByBias`),
 // so the model's one implementation-defined conversion is not load bearing.
 //
-// Coverage is asserted, not assumed: a run that stops reaching an op, stops
-// reaching a zero result, or stops reaching the operand/shift shapes that
-// distinguish the five mutants fails instead of quietly passing over a shorter
-// path. See `Bench::ReportCoverage`.
+// Coverage is asserted, not assumed: a run that stops reaching an op, a condition,
+// or the operand/shift/target shapes that distinguish the mutants fails instead
+// of quietly passing over a shorter path. See `Bench::ReportCoverage`.
 
 #include "sim_common.h"
 #include "verilated.h"
@@ -48,10 +59,10 @@
 
 namespace {
 
-// The `mosaic_pkg::alu_op_e` encodings, transcribed from rtl/core/mosaic_pkg.sv
-// lines 49-66. I-010 verifies the same numbering from the RTL side; this file
-// cannot import a SystemVerilog package, so the transcription is the one thing
-// the two sides must agree on by inspection.
+// The `mosaic_pkg::alu_op_e` encodings, transcribed from rtl/core/mosaic_pkg.sv.
+// I-010 verifies the same numbering from the RTL side; this file cannot import a
+// SystemVerilog package, so the transcription is the one thing the two sides
+// must agree on by inspection.
 enum AluOp : uint8_t {
   kAdd = 0,
   kSub = 1,
@@ -82,6 +93,24 @@ const char* const kOpName[kOpCount] = {
 const uint8_t kShiftOps[] = {kSll, kSrl, kSra, kSllw, kSrlw, kSraw};
 constexpr size_t kShiftOpCount = sizeof(kShiftOps) / sizeof(kShiftOps[0]);
 
+// RV64I branch funct3. funct3 = 010 and 011 name no condition and the decoder
+// reports them illegal; they are carried through the sweep anyway, because a
+// unit that answers something specific for them is testable and one that does
+// not is not.
+enum BranchFunct : uint8_t {
+  kBeq = 0,
+  kBne = 1,
+  kFunctNoneA = 2,
+  kFunctNoneB = 3,
+  kBlt = 4,
+  kBge = 5,
+  kBltu = 6,
+  kBgeu = 7,
+};
+
+const char* const kFunctName[8] = {"beq", "bne", "none", "none",
+                                   "blt", "bge", "bltu", "bgeu"};
+
 constexpr uint64_t kSignBit64 = 0x8000000000000000ull;
 
 // Boundary operands. Every entry is a point where one of the sixteen ops, or the
@@ -89,8 +118,10 @@ constexpr uint64_t kSignBit64 = 0x8000000000000000ull;
 // zero and the small integers, the all-ones mask, -2, INT64_MIN/INT64_MAX, the
 // values straddling bit 31 in all three possible extensions, the two 16-bit
 // halves, alternating bit patterns, and pairs that differ only above bit 32.
+// The same set is reused as the comparator's operand set, where the sign-crossing
+// entries are what separates blt from bltu.
 const uint64_t kValues[] = {
-    0x0000000000000000ull,  // 0
+    0x0000000000000000ull,  // 0, and x0
     0x0000000000000001ull,  // 1
     0x0000000000000002ull,  // 2
     0x0000000000000003ull,  // 3
@@ -123,10 +154,37 @@ const uint64_t kShiftAmounts[] = {
 };
 constexpr size_t kShiftCount = sizeof(kShiftAmounts) / sizeof(kShiftAmounts[0]);
 
+// Branch program counters. `0xFFFFFFFFFFFFFFFC` makes `pc + 4` wrap to zero,
+// which is the only way a broken link rule can still look right, and the odd
+// values make an odd pc explicit rather than implied.
+const uint64_t kBranchPcs[] = {
+    0x0000000000000000ull, 0x0000000000000002ull, 0x0000000000000004ull,
+    0x0000000000000008ull, 0x0000000000001000ull, 0x00000000FFFFFFFCull,
+    0x0000000100000000ull, 0x7FFFFFFFFFFFFFFCull, 0xFFFFFFFF00000000ull,
+    0xFFFFFFFFFFFFFFF8ull, 0xFFFFFFFFFFFFFFFCull,
+};
+constexpr size_t kBranchPcCount = sizeof(kBranchPcs) / sizeof(kBranchPcs[0]);
+
+// Branch immediates, already sign-extended the way the decoder delivers them.
+// The set deliberately contains offsets whose low bits are 1 and 2, so that the
+// difference between "JALR clears bit 0" and "JALR clears bits 1 and 0" is
+// visible, and offsets that make `pc + imm` misaligned in bit 0, in bit 1, and in
+// both.
+const uint64_t kBranchImms[] = {
+    0x0000000000000000ull, 0x0000000000000004ull, 0x0000000000000008ull,
+    0xFFFFFFFFFFFFFFFCull, 0xFFFFFFFFFFFFFFF8ull, 0x0000000000000001ull,
+    0x0000000000000002ull, 0x0000000000000006ull, 0xFFFFFFFFFFFFFFFFull,
+    0x00000000000007F8ull, 0xFFFFFFFFFFFFF800ull, 0x0000000000000800ull,
+    0x000000007FFFFFFCull, 0xFFFFFFFF80000004ull, 0x0000000000000003ull,
+    0x0000000000000005ull,
+};
+constexpr size_t kBranchImmCount = sizeof(kBranchImms) / sizeof(kBranchImms[0]);
+
 constexpr uint64_t kRandomVectors = 100000;
+constexpr uint64_t kRandomBranchVectors = 20000;
 constexpr uint32_t kMaxFailures = 8;  // stop early so a mutant log stays readable
 
-// ------------------------------------------------------------ reference model
+// ------------------------------------------------------------ reference models
 
 // Sign-extend a 32-bit W answer into 64 bits. Written out bit by bit because the
 // one-character spellings of this -- a cast through int32_t, a cast through
@@ -214,6 +272,42 @@ uint64_t ReferenceAlu(uint8_t op, uint64_t a, uint64_t b) {
   return 0xDEADBEEFDEADBEEFull;  // unreachable: the op field is 4 bits wide
 }
 
+bool ReferenceBranchCmp(uint8_t funct, uint64_t rs1, uint64_t rs2) {
+  const int64_t s1 = static_cast<int64_t>(rs1);
+  const int64_t s2 = static_cast<int64_t>(rs2);
+  switch (funct) {
+    case kBeq:  return rs1 == rs2;
+    case kBne:  return rs1 != rs2;
+    case kBlt:  return s1 < s2;
+    case kBge:  return s1 >= s2;
+    case kBltu: return rs1 < rs2;  // unsigned: -1 is the largest value
+    case kBgeu: return rs1 >= rs2;
+    default:    break;
+  }
+  return false;  // funct3 010 / 011 name no condition
+}
+
+struct BranchResult {
+  uint64_t link;
+  uint64_t target;
+  bool is_taken;
+};
+
+BranchResult ReferenceBranchTarget(uint64_t pc, uint64_t imm, bool is_jalr,
+                                   uint8_t funct, bool branch_taken) {
+  BranchResult out;
+  out.link = pc + 4;  // wraps, like every other XLEN arithmetic in this model
+  const uint64_t sum = pc + imm;
+  // JALR clears bit 0 and nothing else. Bit 1 survives on purpose: the
+  // misaligned-target report belongs to the core, not to this unit.
+  const uint64_t aligned = is_jalr ? (sum & ~1ull) : sum;
+  const bool names_condition = (funct != kFunctNoneA) && (funct != kFunctNoneB);
+  out.is_taken = is_jalr || !names_condition || branch_taken;
+  // A not-taken branch falls through to pc + 4, which is exactly the link value.
+  out.target = out.is_taken ? aligned : out.link;
+  return out;
+}
+
 // ------------------------------------------------------------------ the bench
 
 class Bench {
@@ -222,8 +316,10 @@ class Bench {
         Vmosaic_alu_tb* top)
       : options_(options), rep_(reporter), top_(top) {}
 
-  // One stimulus vector against the model. The DUT is combinational, so a single
-  // eval() settles it and there is nothing to wait for.
+  // ---------------------------------------------------------------- ALU ------
+
+  // One ALU stimulus vector against the model. The DUT is combinational, so a
+  // single eval() settles it and there is nothing to wait for.
   void Apply(uint64_t a, uint64_t b, uint8_t op, const char* phase) {
     if (halted_) return;
     top_->a = a;
@@ -249,23 +345,14 @@ class Bench {
     char where[192];
     std::snprintf(where, sizeof(where), "%s %s(a=%s, b=%s) result", phase,
                   kOpName[op], mosaic::Hex(a).c_str(), mosaic::Hex(b).c_str());
-    if (got_result != want_result) {
-      rep_->Mismatch(where, mosaic::Hex(want_result), mosaic::Hex(got_result));
-      Fail(where);
-    }
-    rep_->Check(got_result == want_result, where);
-
+    CheckField(where, mosaic::Hex(want_result), mosaic::Hex(got_result));
     std::snprintf(where, sizeof(where), "%s %s(a=%s, b=%s) zero flag", phase,
                   kOpName[op], mosaic::Hex(a).c_str(), mosaic::Hex(b).c_str());
-    if (got_zero != want_zero) {
-      rep_->Mismatch(where, want_zero ? "1" : "0", got_zero ? "1" : "0");
-      Fail(where);
-    }
-    rep_->Check(got_zero == want_zero, where);
+    CheckFlag(where, want_zero, got_zero);
   }
 
-  // A hand-computed expectation, checked against the RTL directly rather than
-  // through the model, so a shared mistake in the model cannot make the two
+  // A hand-computed ALU expectation, checked against the RTL directly rather
+  // than through the model, so a shared mistake in the model cannot make the two
   // agree with each other for the wrong reason.
   void Expect(uint64_t a, uint64_t b, uint8_t op, uint64_t want_result,
               bool want_zero, const char* what) {
@@ -274,19 +361,9 @@ class Bench {
     top_->op = op;
     top_->eval();
 
-    const uint64_t got_result = top_->result;
-    const bool got_zero = top_->zero != 0;
-    if (got_result != want_result) {
-      rep_->Mismatch(what, mosaic::Hex(want_result), mosaic::Hex(got_result));
-      Fail(what);
-    }
-    rep_->Check(got_result == want_result, std::string(what) + ": result");
-    if (got_zero != want_zero) {
-      rep_->Mismatch(what, want_zero ? "zero=1" : "zero=0",
-                     got_zero ? "zero=1" : "zero=0");
-      Fail(what);
-    }
-    rep_->Check(got_zero == want_zero, std::string(what) + ": zero flag");
+    CheckField(std::string(what) + ": result", mosaic::Hex(want_result),
+               mosaic::Hex(top_->result));
+    CheckFlag(std::string(what) + ": zero flag", want_zero, top_->zero != 0);
     ++handwritten_;
   }
 
@@ -318,6 +395,131 @@ class Bench {
     rep_->Check(consistent, "reference model cross-checks against itself");
   }
 
+  // -------------------------------------------------------------- branch ------
+
+  // One branch vector. The comparator and the target unit are each checked
+  // against their own model in the same vector, with `branch_taken` driven from
+  // the stimulus rather than from the DUT, so a wrong condition cannot hide
+  // behind a wrong address or the other way round. The closed chain -- DUT
+  // comparator into DUT target unit -- is checked separately, in `ApplyChain`.
+  void ApplyBranch(uint64_t pc, uint64_t imm, bool is_jalr, uint8_t funct,
+                   bool branch_taken, uint64_t rs1, uint64_t rs2,
+                   const char* phase) {
+    if (halted_) return;
+    Drive(pc, imm, is_jalr, funct, branch_taken, rs1, rs2);
+
+    const BranchResult want =
+        ReferenceBranchTarget(pc, imm, is_jalr, funct, branch_taken);
+    const bool want_cmp = ReferenceBranchCmp(funct, rs1, rs2);
+
+    ++branch_vectors_;
+    ++per_funct_[funct];
+    if (want.is_taken) {
+      ++taken_vectors_;
+    } else {
+      ++not_taken_vectors_;
+      if (top_->bt_target == top_->bt_link) ++not_taken_link_vectors_;
+    }
+    const uint64_t sum = pc + imm;
+    if (is_jalr) {
+      ++jalr_vectors_;
+      if ((sum & 1ull) != 0 && (top_->bt_target & 1ull) == 0) {
+        ++jalr_clears_bit0_vectors_;
+      }
+      // The target is still misaligned after JALR: bit 1 survived, which is
+      // what "clears bit 0 only" means, and the core will raise the trap.
+      if ((sum & 3ull) == 2 && (top_->bt_target & 3ull) == 2) {
+        ++jalr_keeps_bit1_vectors_;
+      }
+    } else {
+      ++jal_vectors_;
+    }
+    if (want_cmp) {
+      ++cmp_true_vectors_;
+    } else {
+      ++cmp_false_vectors_;
+    }
+    if (rs1 == 0 || rs2 == 0) ++cmp_x0_vectors_;
+
+    char where[224];
+    std::snprintf(where, sizeof(where),
+                  "%s %s pc=%s imm=%s jalr=%d taken=%d", phase,
+                  kFunctName[funct], mosaic::Hex(pc).c_str(),
+                  mosaic::Hex(imm).c_str(), is_jalr ? 1 : 0,
+                  branch_taken ? 1 : 0);
+
+    CheckField(std::string(where) + ": link", mosaic::Hex(want.link),
+               mosaic::Hex(top_->bt_link));
+    CheckField(std::string(where) + ": target", mosaic::Hex(want.target),
+               mosaic::Hex(top_->bt_target));
+    CheckFlag(std::string(where) + ": is_taken", want.is_taken,
+              top_->bt_is_taken != 0);
+    CheckFlag(std::string(where) + ": compare", want_cmp,
+              top_->bt_cmp_taken != 0);
+  }
+
+  // The closed chain: the comparator's own answer drives the target unit, and the
+  // pair is compared against the model chain. This is how the two units are
+  // checked in the configuration the core will actually wire them in.
+  void ApplyChain(uint64_t pc, uint64_t imm, bool is_jalr, uint8_t funct,
+                  uint64_t rs1, uint64_t rs2, const char* phase) {
+    if (halted_) return;
+    Drive(pc, imm, is_jalr, funct, false, rs1, rs2);
+    const bool dut_taken = top_->bt_cmp_taken != 0;
+    top_->bt_branch_taken = dut_taken ? 1 : 0;
+    top_->eval();
+
+    const bool model_taken = ReferenceBranchCmp(funct, rs1, rs2);
+    const BranchResult want =
+        ReferenceBranchTarget(pc, imm, is_jalr, funct, model_taken);
+    ++chain_vectors_;
+
+    char where[224];
+    std::snprintf(where, sizeof(where), "%s chain %s pc=%s imm=%s jalr=%d",
+                  phase, kFunctName[funct], mosaic::Hex(pc).c_str(),
+                  mosaic::Hex(imm).c_str(), is_jalr ? 1 : 0);
+    CheckField(std::string(where) + ": target", mosaic::Hex(want.target),
+               mosaic::Hex(top_->bt_target));
+    CheckFlag(std::string(where) + ": is_taken", want.is_taken,
+              top_->bt_is_taken != 0);
+  }
+
+  // A hand-computed branch expectation, checked against the RTL directly.
+  void ExpectBranch(uint64_t pc, uint64_t imm, bool is_jalr, uint8_t funct,
+                    bool branch_taken, uint64_t want_link, uint64_t want_target,
+                    bool want_is_taken, const char* what) {
+    Drive(pc, imm, is_jalr, funct, branch_taken, 0, 0);
+    CheckField(std::string(what) + ": link", mosaic::Hex(want_link),
+               mosaic::Hex(top_->bt_link));
+    CheckField(std::string(what) + ": target", mosaic::Hex(want_target),
+               mosaic::Hex(top_->bt_target));
+    CheckFlag(std::string(what) + ": is_taken", want_is_taken,
+              top_->bt_is_taken != 0);
+    ++handwritten_;
+  }
+
+  // A hand-computed comparison expectation, checked against the DUT comparator.
+  void ExpectCompare(uint8_t funct, uint64_t rs1, uint64_t rs2, bool want,
+                     const char* what) {
+    Drive(0, 0, false, funct, false, rs1, rs2);
+    CheckFlag(what, want, top_->bt_cmp_taken != 0);
+    ++handwritten_;
+  }
+
+  void Drive(uint64_t pc, uint64_t imm, bool is_jalr, uint8_t funct,
+             bool branch_taken, uint64_t rs1, uint64_t rs2) {
+    top_->bt_pc = pc;
+    top_->bt_imm = imm;
+    top_->bt_is_jalr = is_jalr ? 1 : 0;
+    top_->bt_branch_funct = funct;
+    top_->bt_branch_taken = branch_taken ? 1 : 0;
+    top_->bt_rs1_value = rs1;
+    top_->bt_rs2_value = rs2;
+    top_->eval();
+  }
+
+  // ------------------------------------------------------------- coverage ----
+
   void ReportCoverage() {
     if (halted_) {
       // The run stopped at the failure limit, so the coverage facts below would
@@ -340,10 +542,10 @@ class Bench {
                                               " was seen at a=b=0");
     }
 
-    // The operand shapes that separate the five negative controls. If one of
-    // these drops out of the stimulus the case fails, because a run that no
-    // longer distinguishes signed from unsigned, 5-bit from 6-bit shift
-    // masking, or arithmetic from logical shift is no longer testing anything.
+    // The operand shapes that separate the ALU mutants. If one of these drops
+    // out of the stimulus the case fails, because a run that no longer
+    // distinguishes signed from unsigned, 5-bit from 6-bit shift masking, or
+    // arithmetic from logical shift is no longer testing anything.
     rep_->Check(saw_slt_negative_, "coverage: slt saw -1 against 1");
     rep_->Check(saw_sltu_negative_, "coverage: sltu saw -1 against 1");
     rep_->Check(saw_sra_negative_,
@@ -358,25 +560,74 @@ class Bench {
                 "coverage: sraw shifted an operand with bit 31 set");
     rep_->Check(saw_zero_from_nonzero_a_,
                 "coverage: some op produced zero from a non-zero a");
-    rep_->Check(vectors_ > 0, "coverage: stimulus was applied");
+    rep_->Check(vectors_ > 0, "coverage: ALU stimulus was applied");
+
+    // The same for the branch half: every funct3, both directions of every
+    // condition, both is_jalr values, a not-taken branch whose target fell back
+    // to pc + 4, a JALR that cleared bit 0, and a JALR whose target stayed
+    // misaligned in bit 1.
+    for (uint8_t funct = 0; funct < 8; ++funct) {
+      rep_->Check(per_funct_[funct] > 0,
+                  std::string("coverage: funct3 ") + kFunctName[funct] +
+                      " was exercised");
+    }
+    rep_->Check(taken_vectors_ > 0, "coverage: a taken transfer was exercised");
+    rep_->Check(not_taken_vectors_ > 0,
+                "coverage: a not-taken branch was exercised");
+    rep_->Check(not_taken_link_vectors_ == not_taken_vectors_,
+                "coverage: every not-taken branch fell back to pc + 4");
+    rep_->Check(jalr_vectors_ > 0, "coverage: JALR was exercised");
+    rep_->Check(jal_vectors_ > 0, "coverage: the non-JALR path was exercised");
+    rep_->Check(jalr_clears_bit0_vectors_ > 0,
+                "coverage: JALR cleared a bit 0 that was set");
+    rep_->Check(jalr_keeps_bit1_vectors_ > 0,
+                "coverage: JALR left a misaligned bit 1 in the target");
+    rep_->Check(cmp_true_vectors_ > 0 && cmp_false_vectors_ > 0,
+                "coverage: both outcomes of every condition were seen");
+    rep_->Check(cmp_x0_vectors_ > 0,
+                "coverage: a comparison against a zero (x0) operand was made");
+    rep_->Check(chain_vectors_ > 0,
+                "coverage: the comparator-to-target chain was exercised");
   }
 
   uint64_t vectors() const { return vectors_; }
+  uint64_t branch_vectors() const { return branch_vectors_ + chain_vectors_; }
   uint64_t handwritten() const { return handwritten_; }
   uint32_t failures() const { return failures_; }
   bool halted() const { return halted_; }
-  bool out_of_budget() const { return vectors_ >= options_.max_cycles; }
+  bool out_of_budget() const { return branch_vectors() + vectors_ >=
+                              options_.max_cycles; }
 
   std::string CoverageSummary() const {
-    std::string text;
+    std::string text = "alu_ops=";
     for (uint8_t op = 0; op < kOpCount; ++op) {
       if (op != 0) text += " ";
       text += std::string(kOpName[op]) + "=" + std::to_string(per_op_[op]);
     }
+    text += "; branch=" + std::to_string(branch_vectors_) + " vectors, chain=" +
+            std::to_string(chain_vectors_);
     return text;
   }
 
  private:
+  void CheckField(const std::string& where, const std::string& want,
+                  const std::string& got) {
+    const bool ok = want == got;
+    if (!ok) {
+      rep_->Mismatch(where, want, got);
+      Fail(where);
+    }
+    rep_->Check(ok, where);
+  }
+
+  void CheckFlag(const std::string& where, bool want, bool got) {
+    if (got != want) {
+      rep_->Mismatch(where, want ? "1" : "0", got ? "1" : "0");
+      Fail(where);
+    }
+    rep_->Check(got == want, where);
+  }
+
   void Fail(const std::string& what) {
     ++failures_;
     if (failures_ >= kMaxFailures && !halted_) {
@@ -409,6 +660,8 @@ class Bench {
   Vmosaic_alu_tb* top_;
 
   uint64_t vectors_ = 0;
+  uint64_t branch_vectors_ = 0;
+  uint64_t chain_vectors_ = 0;
   uint64_t handwritten_ = 0;
   uint32_t failures_ = 0;
   bool halted_ = false;
@@ -417,6 +670,18 @@ class Bench {
   uint32_t zero_result_ops_[kOpCount] = {};
   uint32_t nonzero_result_ops_[kOpCount] = {};
   uint32_t both_zero_ops_[kOpCount] = {};
+
+  uint64_t per_funct_[8] = {};
+  uint64_t taken_vectors_ = 0;
+  uint64_t not_taken_vectors_ = 0;
+  uint64_t not_taken_link_vectors_ = 0;
+  uint64_t jalr_vectors_ = 0;
+  uint64_t jal_vectors_ = 0;
+  uint64_t jalr_clears_bit0_vectors_ = 0;
+  uint64_t jalr_keeps_bit1_vectors_ = 0;
+  uint64_t cmp_true_vectors_ = 0;
+  uint64_t cmp_false_vectors_ = 0;
+  uint64_t cmp_x0_vectors_ = 0;
 
   bool saw_slt_negative_ = false;
   bool saw_sltu_negative_ = false;
@@ -450,7 +715,7 @@ int main(int argc, char** argv) {
   // ---- the reference model agrees with itself -------------------------------
   bench.CheckModelSelfConsistency();
 
-  // ---- hand-written invariants, straight from the RV64I pseudo-code ----------
+  // ---- hand-written ALU invariants, straight from the RV64I pseudo-code -----
   // These do not go through the model at all.
   {
     const uint64_t kMinusOne = 0xFFFFFFFFFFFFFFFFull;
@@ -502,6 +767,88 @@ int main(int argc, char** argv) {
                  0x0123456789ABCDEFull, false, "passb returns b unchanged");
   }
 
+  // ---- hand-written branch and comparison invariants ------------------------
+  {
+    const uint64_t kMinusOne = 0xFFFFFFFFFFFFFFFFull;
+    const uint64_t kMinusFour = 0xFFFFFFFFFFFFFFFCull;
+
+    // link is always pc + 4, including when that wraps and when the pc is odd.
+    bench.ExpectBranch(0, 0, false, kBeq, true, 4, 0, true,
+                       "link at pc=0 is pc+4 and the target is pc+imm");
+    bench.ExpectBranch(0xFFFFFFFFFFFFFFFCull, 0, true, kBne, false, 0,
+                       0xFFFFFFFFFFFFFFFCull, true,
+                       "link wraps to zero at the top of the address space");
+    bench.ExpectBranch(0xFFFFFFFFFFFFFFFCull, 4, true, kBne, true, 0,
+                       0x0000000000000000ull, true,
+                       "a JALR at the top of the address space links to zero");
+    bench.ExpectBranch(2, 0, false, kBeq, true, 6, 2, true,
+                       "an odd pc links to pc+4, unaligned");
+
+    // JALR clears bit 0 and nothing else.
+    bench.ExpectBranch(0, 1, true, kBne, true, 4, 0, true,
+                       "JALR clears bit 0 of the target");
+    bench.ExpectBranch(0, 2, true, kBne, true, 4, 2, true,
+                       "JALR keeps bit 1: a target 2 bytes past pc");
+    bench.ExpectBranch(0, 6, true, kBne, true, 4, 6, true,
+                       "JALR keeps bit 1 with a 6-byte offset");
+    bench.ExpectBranch(4, 2, true, kBne, true, 8, 6, true,
+                       "JALR clears bit 0 of pc+imm, not of imm");
+    bench.ExpectBranch(0, 0x000000007FFFFFFCull, true, kBne, true, 4,
+                       0x000000007FFFFFFCull, true,
+                       "JALR keeps bit 1 of a large misaligned target");
+
+    // A JAL does not clear anything: bit 1 of the target must survive so the
+    // core can raise the misaligned-target trap.
+    bench.ExpectBranch(0, 2, false, kBne, true, 4, 2, true,
+                       "JAL leaves a 2-byte-aligned target for the trap logic");
+    bench.ExpectBranch(0, 2, false, kBne, false, 4, 4, false,
+                       "a branch with bit 1 set in imm falls through to pc+4");
+
+    // A not-taken branch still produces pc + 4, so the sequential next PC never
+    // needs a second path.
+    bench.ExpectBranch(0x1000, 0x7F8, false, kBne, false, 0x1004, 0x1004, false,
+                       "an untaken forward branch yields pc+4");
+    bench.ExpectBranch(0x1000, kMinusFour, false, kBne, false, 0x1004, 0x1004,
+                       false, "an untaken backward branch yields pc+4");
+    bench.ExpectBranch(0x1000, 0x7F8, false, kBne, true, 0x1004, 0x17F8, true,
+                       "a taken forward branch yields pc+imm");
+
+    // funct3 010 and 011 name no condition; the unit still has to answer, and
+    // an answer of "transfers" is what lets a JAL reach a port list that has
+    // is_jalr but no is_jal.
+    bench.ExpectBranch(0x1000, 4, false, kFunctNoneA, false, 0x1004, 0x1004, true,
+                       "funct3 010 names no condition and still transfers");
+    bench.ExpectBranch(0x1000, 4, false, kFunctNoneB, false, 0x1004, 0x1004, true,
+                       "funct3 011 names no condition and still transfers");
+
+    // The six conditions. blt and bltu on (-1, 1) are the pair that separates
+    // the signed reading from the unsigned one in both directions, and the x0
+    // cases show the comparator reading a zero register as zero.
+    bench.ExpectCompare(kBeq, 7, 7, true, "beq(7,7) is true");
+    bench.ExpectCompare(kBeq, 7, 8, false, "beq(7,8) is false");
+    bench.ExpectCompare(kBne, 7, 7, false, "bne(7,7) is false");
+    bench.ExpectCompare(kBlt, kMinusOne, 1, true, "blt(-1,1) is true, signed");
+    bench.ExpectCompare(kBlt, 1, kMinusOne, false, "blt(1,-1) is false");
+    bench.ExpectCompare(kBge, kMinusOne, 1, false, "bge(-1,1) is false");
+    bench.ExpectCompare(kBge, 1, kMinusOne, true, "bge(1,-1) is true");
+    bench.ExpectCompare(kBltu, kMinusOne, 1, false,
+                        "bltu(-1,1) is false, -1 is the largest unsigned");
+    bench.ExpectCompare(kBgeu, kMinusOne, 1, true, "bgeu(-1,1) is true");
+    bench.ExpectCompare(kBlt, 0, kMinusOne, false,
+                        "blt(x0,-1) is false: x0 reads as zero");
+    bench.ExpectCompare(kBltu, 0, kMinusOne, true,
+                        "bltu(x0,-1) is true: x0 reads as zero");
+    bench.ExpectCompare(kBeq, 0, 0, true, "beq(x0,x0) is true");
+    bench.ExpectCompare(kBlt, 0x8000000000000000ull, 0x7FFFFFFFFFFFFFFFull, true,
+                        "blt(INT64_MIN,INT64_MAX) is true");
+    bench.ExpectCompare(kBltu, 0x8000000000000000ull, 0x7FFFFFFFFFFFFFFFull, false,
+                        "bltu(INT64_MIN,INT64_MAX) is false");
+    bench.ExpectCompare(kFunctNoneA, 1, 2, false,
+                        "funct3 010 compares as no condition");
+    bench.ExpectCompare(kFunctNoneB, 1, 2, false,
+                        "funct3 011 compares as no condition");
+  }
+
   // ---- the full 2x2 operand matrix, every op -------------------------------
   for (uint8_t op = 0;
        op < kOpCount && !bench.halted() && !bench.out_of_budget(); ++op) {
@@ -532,8 +879,69 @@ int main(int argc, char** argv) {
     }
   }
 
-  // ---- seeded random campaign over full-width operands ----------------------
+  // ---- the branch sweep ----------------------------------------------------
+  // pc x imm x all eight funct3 x both is_jalr x both branch_taken, with a
+  // sign-crossing comparator operand pair so that blt and bltu disagree on some
+  // of them.
+  const uint64_t kCmpPairA[] = {0, 1, 0xFFFFFFFFFFFFFFFFull,
+                                0x8000000000000000ull, 0x7FFFFFFFFFFFFFFFull};
+  const uint64_t kCmpPairB[] = {0, 1, 0xFFFFFFFFFFFFFFFFull,
+                                0x8000000000000000ull, 0x7FFFFFFFFFFFFFFFull};
+  constexpr size_t kCmpPairCount = sizeof(kCmpPairA) / sizeof(kCmpPairA[0]);
+
+  for (size_t f = 0; f < 8 && !bench.halted() && !bench.out_of_budget(); ++f) {
+    const uint8_t funct = static_cast<uint8_t>(f);
+    for (size_t p = 0;
+         p < kBranchPcCount && !bench.halted() && !bench.out_of_budget(); ++p) {
+      for (size_t m = 0;
+           m < kBranchImmCount && !bench.halted() && !bench.out_of_budget(); ++m) {
+        for (int jalr = 0; jalr < 2 && !bench.halted() && !bench.out_of_budget();
+             ++jalr) {
+          for (int taken = 0; taken < 2 && !bench.halted() &&
+                                !bench.out_of_budget();
+               ++taken) {
+            bench.ApplyBranch(kBranchPcs[p], kBranchImms[m], jalr != 0, funct,
+                              taken != 0, kCmpPairA[p % kCmpPairCount],
+                              kCmpPairB[m % kCmpPairCount], "branch-sweep");
+          }
+        }
+      }
+    }
+  }
+
+  // ---- the comparator over the full boundary operand set -------------------
+  for (uint8_t funct = 0; funct < 8 && !bench.halted() && !bench.out_of_budget();
+       ++funct) {
+    for (size_t i = 0; i < kValueCount && !bench.halted() && !bench.out_of_budget();
+         ++i) {
+      for (size_t j = 0;
+           j < kValueCount && !bench.halted() && !bench.out_of_budget(); ++j) {
+        bench.ApplyBranch(0x1000, 0x7F8, false, funct, false, kValues[i],
+                          kValues[j], "cmp-sweep");
+      }
+    }
+  }
+
+  // ---- the closed chain: DUT comparator into DUT target unit ---------------
+  for (uint8_t funct = 0; funct < 8 && !bench.halted() && !bench.out_of_budget();
+       ++funct) {
+    for (size_t i = 0; i < kValueCount && !bench.halted() && !bench.out_of_budget();
+         ++i) {
+      for (size_t p = 0;
+           p < kBranchPcCount && !bench.halted() && !bench.out_of_budget(); ++p) {
+        for (int jalr = 0; jalr < 2 && !bench.halted() && !bench.out_of_budget();
+             ++jalr) {
+          bench.ApplyChain(kBranchPcs[p], kBranchImms[i % kBranchImmCount],
+                           jalr != 0, funct, kValues[i], kValues[(i + 1) % kValueCount],
+                           "chain");
+        }
+      }
+    }
+  }
+
+  // ---- seeded random campaigns ---------------------------------------------
   mosaic::Rng rng(opt.seed);
+
   for (uint64_t n = 0;
        n < kRandomVectors && !bench.halted() && !bench.out_of_budget(); ++n) {
     uint64_t a = rng.Next();
@@ -578,6 +986,40 @@ int main(int argc, char** argv) {
     bench.Apply(a, b, op, "random");
   }
 
+  for (uint64_t n = 0; n < kRandomBranchVectors && !bench.halted() &&
+                       !bench.out_of_budget();
+       ++n) {
+    uint64_t pc = rng.Next();
+    uint64_t imm = rng.Next();
+    // Real immediates are small and mostly aligned; full-width randomness here
+    // would almost never produce the bit-0/bit-1 cases the rule is about.
+    if (rng.Chance(70)) imm = static_cast<uint64_t>(rng.Below(8192));
+    if (rng.Chance(70)) pc &= ~3ull;
+    const uint8_t funct = static_cast<uint8_t>(rng.Below(8));
+    const bool jalr = rng.Chance(25);
+    const bool taken = rng.Chance(50);
+    const uint32_t shape = rng.Below(100);
+    uint64_t rs1 = rng.Next();
+    uint64_t rs2 = rng.Next();
+    if (shape < 30) {
+      rs1 = kValues[rng.Below(static_cast<uint32_t>(kValueCount))];
+      rs2 = kValues[rng.Below(static_cast<uint32_t>(kValueCount))];
+    } else if (shape < 60) {
+      // Sign-crossing pairs equal in magnitude, which is the blt/bltu split.
+      const uint64_t low = rng.Next() & 0xFFFFFFFFull;
+      rs1 = low | (rng.Chance(50) ? 0xFFFFFFFF00000000ull : 0ull);
+      rs2 = low | (rng.Chance(50) ? 0xFFFFFFFF00000000ull : 0ull);
+    } else if (shape < 75) {
+      // One side is x0.
+      if (rng.Chance(50)) {
+        rs1 = 0;
+      } else {
+        rs2 = 0;
+      }
+    }
+    bench.ApplyBranch(pc, imm, jalr, funct, taken, rs1, rs2, "branch-random");
+  }
+
   bench.ReportCoverage();
   top->final();
   delete top;
@@ -585,15 +1027,17 @@ int main(int argc, char** argv) {
   if (bench.failures() > 0) {
     const std::string detail = std::to_string(bench.failures()) +
                                " failed checks over " +
-                               std::to_string(bench.vectors()) + " vectors";
+                               std::to_string(bench.vectors()) + " ALU and " +
+                               std::to_string(bench.branch_vectors()) +
+                               " branch vectors";
     return rep.Finish("FAIL", detail);
   }
 
-  const std::string detail = std::to_string(bench.vectors()) +
-                             " stimulus vectors (" +
-                             std::to_string(bench.handwritten()) +
-                             " hand-written invariants, seed " +
-                             std::to_string(opt.seed) + "); " +
-                             bench.CoverageSummary();
+  const std::string detail =
+      std::to_string(bench.vectors()) + " ALU and " +
+      std::to_string(bench.branch_vectors()) + " branch stimulus vectors (" +
+      std::to_string(bench.handwritten()) +
+      " hand-written invariants, seed " + std::to_string(opt.seed) + "); " +
+      bench.CoverageSummary();
   return rep.Finish("PASS", detail);
 }

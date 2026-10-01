@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "case": "decode.rv64im_reserved",
+  "verdict": "FAIL",
+  "detail": "1 instructions compared, 2 failure(s)",
+  "seed": 1,
+  "max_cycles": 200000,
+  "checks": 2,
+  "failures": 2,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-01T00:42:23Z",
+  "first_mismatch": "insn=0xfe530823.imm: expected 0xfffffffffffffff0, got 0xffffffffffffffe5",
+  "failed_checks": ["decoder disagrees with the reference at insn=0xfe530823", "decoder disagrees with the reference at insn=0xfe530823"]
+}
