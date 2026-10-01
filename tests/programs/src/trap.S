@@ -91,7 +91,7 @@ mosaic_traplog_overflow:
 /* its address, because mepc on a synchronous exception is the address  */
 /* of the faulting instruction.                                        */
 /* ================================================================== */
-    .section .text, "ax", @progbits
+    .section .text.boot, "ax", @progbits
     .balign 4
     .globl  trap_expect
     .type   trap_expect, @function

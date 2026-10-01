@@ -99,8 +99,8 @@ _start:
     la      a1, __scratch_end
     call    zero_region
 
-    la      a0, __bss_stack_start
-    la      a1, __bss_stack_end
+    la      a0, __stack_section_start
+    la      a1, __trapstack_section_end
     call    zero_region
 
     /* 5. FROMHOST override of input word 0.
@@ -143,9 +143,10 @@ mosaic_prog_inputs:
     .size   mosaic_prog_inputs, . - mosaic_prog_inputs
 
 /* ================================================================== */
-/* Shared runtime helpers                                              */
+/* Shared runtime helpers.  These live in the boot region because they  */
+/* are reached directly from the reset path, before the program code.   */
 /* ================================================================== */
-    .section .text, "ax", @progbits
+    .section .text.boot, "ax", @progbits
     .balign 4
 
 /* tohost_finish(a0 = code, a1 = pass_flag)

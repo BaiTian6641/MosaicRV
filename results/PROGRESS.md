@@ -302,3 +302,42 @@ Everything else in the checker — source-report hashes, heading coverage,
 task-field completeness, DAG acyclicity, references, links, git tracking and
 whitespace — is unmodified, and a failure of any of those is reported as a
 failure.
+
+---
+
+## 2026-09-30 — independent reference model — Spike built and running
+
+Verification tier B requires attempting whatever external references are
+installable, and recording the ones that are not. Outcome so far:
+
+| tool | outcome | evidence |
+|---|---|---|
+| Verilator 5.052 | present | primary simulator |
+| Yosys 0.69 | present (installed) | generic synthesis check |
+| slang 11.0 | present (installed) | AST/tidy second opinion on SystemVerilog |
+| SymbiYosys 0.69 | present (installed) | formal, for stage 6 |
+| `riscv64-elf-gcc` 16.2.0 | present | firmware corpus |
+| device-tree-compiler 1.8.1 | installed for Spike's build | |
+| **Spike (riscv-isa-sim)** | **built from source** | commit `0bff121`, installed to `~/mosaic-ref/install` |
+| NEMU / Difftest / XiangShan | not attempted yet | see below |
+| FPGA vendor flows, ASIC PDK | absent | no tool, no board, no PDK on this machine |
+
+`brew install spike` installs a **GUI application**, not the command-line
+simulator, so it is not usable as a reference. The CLI simulator was built from
+source instead: cloning riscv-isa-sim, `device-tree-compiler` was missing and was
+installed, then configure/make/install.
+
+**Proof it works, running this project's own firmware:**
+
+```
+$ spike --isa=rv64im_zicsr_zifencei --log-commits build/p01_addsub.i0.elf
+warning: tohost and fromhost symbols not in ELF; can't communicate with target
+core 0: 3 0x0000000000001000 (0x00000297) x5  0x0000000000001000
+core 0: 3 0x0000000080000000 (0x00005117) x2  0x0000000080005000
+core 0: 3 0x0000000080000010 (0x34029073) c832_mscratch 0x000000008800005680
+```
+
+Spike cannot yet *terminate* on this corpus because the firmware does not define
+`tohost`/`fromhost` symbols. Recorded as an open item for I-007 rather than
+worked around. This matters more than it looks: a reference the harness cannot
+stop is a reference it cannot diff.
