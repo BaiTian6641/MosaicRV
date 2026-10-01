@@ -10,7 +10,7 @@
   "image": "",
   "expect": "",
   "tool": "Verilator 5.052 2026-09-05",
-  "timestamp": "2026-10-01T01:20:13Z",
+  "timestamp": "2026-10-01T01:25:00Z",
   "first_mismatch": "p08_misaligned.i0 retire stream: expected /Users/flare/MosaicRV/results/unit/core.bringup_vs_reference/p08_misaligned.i0.reference.events.txt, got ",
   "failed_checks": ["no check failed"]
 }
