@@ -220,6 +220,9 @@
       "task": "I-017",
       "top": "mosaic_retire_tb",
       "rtl": [
+        "rtl/core/mosaic_pkg.sv",
+        "rtl/core/mosaic_rob.sv",
+        "rtl/core/mosaic_rename.sv",
         "rtl/core/mosaic_retire.sv"
       ],
       "sv": [

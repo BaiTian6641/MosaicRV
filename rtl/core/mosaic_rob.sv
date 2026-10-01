@@ -215,8 +215,32 @@ module mosaic_rob #(
     output logic                     cmp_bad_uop,
 
     // ---------------------------------------------------------------- retire
+    //
+    // `retire_req` / `retire_ack` are lane 0. The pair `retire_req_next` /
+    // `retire_ack_next`, and the `head1_*` view, are the **second lane of the
+    // same in-order pop**, added by I-017 because MOSAIC_RETIRE_WIDTH is 2 and a
+    // buffer that can only pop one entry per cycle caps retirement at one
+    // instruction per cycle no matter what decides eligibility.
+    //
+    // Lane 1 is not a second, independent decision point. It is the entry
+    // immediately behind the head, qualified by **the same predicate as the
+    // head** -- `head1_ready = head1_valid && head1_complete && !head1_exc &&
+    // head1_closed` -- and `retire_ack_next` additionally requires lane 0 to be
+    // acknowledged in the same cycle. So the second lane can only ever extend a
+    // pop that is already happening; it can never start one, and it can never
+    // reach past a blocked head. A design that consulted `obs_*` from a retire
+    // consumer would be a functional read of a port this file documents as a
+    // verification surface, which is why the view is exported properly here
+    // instead.
+    //
+    // Both lanes are optional in the sense that a caller which drives
+    // `retire_req_next` low is unaffected: every `head1_*` field is total and
+    // gated on validity, and lane 1's state update is conditioned on
+    // `retire_ack_next`.
     input  logic                     retire_req,
     output logic                     retire_ack,
+    input  logic                     retire_req_next,
+    output logic                     retire_ack_next,
     output logic                     head_valid,
     output logic                     head_ready,      // complete, clean and closed
     output logic                     head_replay,     // exceptional: replay here
@@ -230,6 +254,19 @@ module mosaic_rob #(
     output logic [CNT_W-1:0]         head_num_uops,
     output logic [MAX_UOPS-1:0]      head_done_mask,
     output logic [CNT_W-1:0]         head_done_cnt,
+    output logic                     head1_valid,
+    output logic                     head1_ready,     // the same predicate, one slot on
+    output logic                     head1_replay,
+    output logic                     head1_complete,
+    output logic                     head1_exc,
+    output logic                     head1_closed,
+    output logic [ROB_INDEX_W-1:0]   head1_index,
+    output logic [GEN_W-1:0]         head1_gen,
+    output logic [TAG_W-1:0]         head1_tag,
+    output logic [XLEN-1:0]          head1_pc,
+    output logic [CNT_W-1:0]         head1_num_uops,
+    output logic [MAX_UOPS-1:0]      head1_done_mask,
+    output logic [CNT_W-1:0]         head1_done_cnt,
 
     // ----------------------------------------------------------------- flush
     input  logic                     flush_valid,
@@ -471,6 +508,39 @@ module mosaic_rob #(
   assign head_replay    = head_valid && head_exc;
   assign retire_ack     = retire_req && head_ready && !flush_valid;
 
+  // ------------------------------------------------ second head view (I-017)
+  // The entry immediately behind the head, qualified by **the same predicate**:
+  // the same bitmap test, the same child-count mask, the same popcount, the same
+  // validity gate. It is not a restatement -- a restatement is exactly how two
+  // definitions of "done" come to exist, and the second one is the one that
+  // drifts out of step with the first.
+  logic [ROB_INDEX_W-1:0] head1_ptr;
+  logic [MAX_UOPS-1:0]    head1_raw_done;
+
+  assign head1_ptr       = NextIdx(head_ptr);
+  assign head1_raw_done  = slot_done[head1_ptr] &
+                           ExpectedMask(slot_count[head1_ptr]);
+  assign head1_done_mask = head1_valid ? head1_raw_done : {MAX_UOPS{1'b0}};
+  assign head1_done_cnt  = PopCount(head1_done_mask);
+  assign head1_valid     = slot_valid[head1_ptr];
+  assign head1_index     = head1_ptr;
+  assign head1_gen       = head1_valid ? slot_gen[head1_ptr]   : {GEN_W{1'b0}};
+  assign head1_tag       = head1_valid ? slot_tag[head1_ptr]   : {TAG_W{1'b0}};
+  assign head1_pc        = head1_valid ? slot_pc[head1_ptr]    : {XLEN{1'b0}};
+  assign head1_num_uops  = head1_valid ? slot_count[head1_ptr] : {CNT_W{1'b0}};
+  assign head1_complete  = head1_valid &&
+                           (head1_raw_done == ExpectedMask(slot_count[head1_ptr]));
+  assign head1_exc       = head1_valid && slot_exc[head1_ptr];
+  assign head1_closed    = head1_valid && slot_closed[head1_ptr];
+  assign head1_replay    = head1_valid && slot_exc[head1_ptr];
+  assign head1_ready     = head1_valid && head1_complete && !head1_exc &&
+                           head1_closed;
+
+  // Lane 1 rides **on top of** lane 0. `retire_ack` is the statement that the
+  // head is actually leaving this cycle; without it the "second" entry is just
+  // an unrelated slot, and acknowledging it would punch a hole in the queue.
+  assign retire_ack_next = retire_req_next && retire_ack && head1_ready && !flush_valid;
+
   // ------------------------------------------------------- observation view
   // The same shape as the head view, over an arbitrary index, and gated on
   // validity: a slot nobody has written reports a zeroed descriptor rather than
@@ -500,8 +570,13 @@ module mosaic_rob #(
       occ_cnt_next = {OCC_W{1'b0}};
     end else begin
       occ_cnt_next = occ_cnt;
-      if (alloc_ok)   occ_cnt_next = occ_cnt_next + OCC_W'(1);
-      if (retire_ack) occ_cnt_next = occ_cnt_next - OCC_W'(1);
+      if (alloc_ok)         occ_cnt_next = occ_cnt_next + OCC_W'(1);
+      // Lane 1's acknowledgement is a second, separate pop and is counted as
+      // one: a two-wide retire consumes two slots and must decrement twice, or
+      // the occupancy drifts up by one per two-wide retirement and the buffer
+      // reports itself full while it is not.
+      if (retire_ack)       occ_cnt_next = occ_cnt_next - OCC_W'(1);
+      if (retire_ack_next)  occ_cnt_next = occ_cnt_next - OCC_W'(1);
     end
   end
 
@@ -515,7 +590,14 @@ module mosaic_rob #(
       head_ptr_next  = alloc_ptr;
       alloc_ptr_next = alloc_ptr;
     end else begin
-      head_ptr_next  = retire_ack ? NextIdx(head_ptr) : head_ptr;
+      // The head advances by exactly as many slots as were acknowledged. Two
+      // explicit steps rather than an addition of the two ack bits, so the
+      // increment function -- which is the one place a non-power-of-two entry
+      // count could alias -- is applied to a value it has already been proven to
+      // range-check.
+      head_ptr_next  = head_ptr;
+      if (retire_ack)      head_ptr_next = NextIdx(head_ptr_next);
+      if (retire_ack_next) head_ptr_next = NextIdx(head_ptr_next);
       alloc_ptr_next = alloc_ok   ? NextIdx(alloc_ptr) : alloc_ptr;
     end
   end
@@ -561,8 +643,14 @@ module mosaic_rob #(
           if (cmp_exc) slot_exc[cmp_idx] <= 1'b1;
         end
 
+        // Both lanes clear a slot. Lane 1's slot is `head1_ptr`, captured from
+        // the same pre-edge `head_ptr` this block already reads, so a two-wide
+        // pop frees the head and the entry behind it in the one cycle they left.
         if (retire_ack) begin
           slot_valid[head_ptr] <= 1'b0;
+        end
+        if (retire_ack_next) begin
+          slot_valid[head1_ptr] <= 1'b0;
         end
       end
 
@@ -574,7 +662,12 @@ module mosaic_rob #(
         alloc_total <= alloc_total + 32'd1;
         gen_counter <= gen_counter + 32'd1;
       end
-      if (retire_ack)  retired_total  <= retired_total + 32'd1;
+      // Two acks, two retirements: the conservation identity
+      // `alloc == retired + squashed + occupied` is only meaningful if the
+      // retirement counter and the occupancy move together, and lane 1 moves
+      // both.
+      if (retire_ack)       retired_total <= retired_total + 32'd1;
+      if (retire_ack_next)  retired_total <= retired_total + 32'd1;
       // Explicitly widened rather than concatenated to 32 bits: OCC_W depends on
       // the entry count, so a fixed 24-bit pad is only the right width for a
       // 64-entry ROB and silently truncates for any other.

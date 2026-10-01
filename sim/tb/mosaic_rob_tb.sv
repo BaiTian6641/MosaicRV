@@ -115,8 +115,45 @@ module mosaic_rob_tb (
     output logic [31:0] o_id_w_o,
     output logic [31:0] o_pc_w_o,
     output logic [31:0] o_num_uops_w_o,
-    output logic [31:0] o_occ_w_o
+    output logic [31:0] o_occ_w_o,
+
+    // ------------------------------------------- I-017: the second retire lane
+    // Lane 1's qualification view, exported for observation. The case does not
+    // read it (it drives lane 1 inactive) but a floating *output* is harmless
+    // while a floating *input* would be random, and pinning every new pin is
+    // what keeps this build warning-free.
+    output logic        head1_valid_o,
+    output logic        head1_ready_o,
+    output logic        head1_replay_o,
+    output logic        head1_complete_o,
+    output logic        head1_exc_o,
+    output logic        head1_closed_o,
+    output logic [31:0] head1_index_o,
+    output logic [31:0] head1_gen_o,
+    output logic [31:0] head1_tag_o,
+    output logic [63:0] head1_pc_o,
+    output logic [31:0] head1_num_uops_o,
+    output logic [31:0] head1_done_mask_o,
+    output logic [31:0] head1_done_cnt_o,
+    output logic        retire_ack_next_o
 );
+
+
+  // --------------------------------------------------------------- I-017 pins
+  //
+  // `mosaic_rob` gained a second retirement lane and the `head1_*` view beside
+  // it (see the "second head view" block in rtl/core/mosaic_rob.sv). This
+  // wrapper drives lane 1 **inactive** and exports the view, so this case keeps
+  // testing exactly what it tested before: single-lane retirement. The lane is
+  // exercised where its contract lives -- CASE=commit.head_block_and_dual
+  // (sim/tb/mosaic_retire_tb.sv), which instantiates the same `mosaic_rob` and
+  // drives both lanes against an independent shadow of the two-lane pop.
+  //
+  // Tying `retire_req_next` to a constant rather than to an undriven input is
+  // deliberate: the runner builds with `--x-initial unique`, so a pin left
+  // floating would be a random value every run rather than a reproducible
+  // zero.
+  // The second lane's view, declared here and exported to the observation side.
 
   // The same rules mosaic_rob derives from the same generated package.
   localparam int unsigned ENTRIES = mosaic_cfg_pkg::MOSAIC_ROB_ENTRIES;
@@ -141,7 +178,21 @@ module mosaic_rob_tb (
   logic [INDEX_W-1:0]  obs_index;
   logic [BIT_W-1:0]    head_done_mask;
   logic [BIT_W-1:0]    obs_done_mask;
+  logic [63:0]         head1_pc;
 
+  // The second lane's view, declared here and exported to the observation side.
+  logic                retire_req_next;
+  logic [INDEX_W-1:0]  head1_index;
+  logic [ID_W-1:0]     head1_gen;
+  logic [ID_W-1:0]     head1_tag;
+  logic [CNT_W-1:0]    head1_num_uops;
+  logic [BIT_W-1:0]    head1_done_mask;
+  logic [CNT_W-1:0]    head1_done_cnt;
+
+  // Tying the request to a constant rather than leaving the pin floating is
+  // deliberate: the runner builds with `--x-initial unique`, so an undriven
+  // input would be a random value every run instead of a reproducible zero.
+  assign retire_req_next = 1'b0;
   assign alloc_num_uops = alloc_num_uops_i[CNT_W-1:0];
   assign alloc_tag      = alloc_tag_i[ID_W-1:0];
   assign close_index    = close_index_i[INDEX_W-1:0];
@@ -199,6 +250,22 @@ module mosaic_rob_tb (
       .head_num_uops    (head_num_uops_o[CNT_W-1:0]),
       .head_done_mask   (head_done_mask),
       .head_done_cnt    (head_done_cnt_o[CNT_W-1:0]),
+      .head1_valid      (head1_valid_o),
+      .head1_ready      (head1_ready_o),
+      .head1_replay     (head1_replay_o),
+      .head1_complete   (head1_complete_o),
+      .head1_exc        (head1_exc_o),
+      .head1_closed     (head1_closed_o),
+      .head1_index      (head1_index),
+      .head1_gen        (head1_gen),
+      .head1_tag        (head1_tag),
+      .head1_pc         (head1_pc_o),
+      .head1_num_uops   (head1_num_uops),
+      .head1_done_mask  (head1_done_mask),
+      .head1_done_cnt   (head1_done_cnt),
+
+      .retire_req_next  (retire_req_next),
+      .retire_ack_next  (retire_ack_next_o),
 
       .flush_valid      (flush_valid_i),
 

@@ -105,6 +105,20 @@ module mosaic_rename_tb (
     output logic                                       commit_accepted,
     output logic                                       commit_x0_dropped,
 
+    // ------------------------------------------------- I-017: second commit lane
+    // `mosaic_rename` gained a second commit lane for two-wide retirement. This
+    // case keeps testing exactly what it tested before -- single-lane commit --
+    // so the lane is tied **inactive inside this wrapper** rather than exposed
+    // as a port for the driver to leave floating: the runner builds with
+    // `--x-initial unique`, and an undriven input would be a random value every
+    // run instead of a reproducible zero.
+    //
+    // The lane is exercised where its contract lives, in
+    // CASE=commit.head_block_and_dual (sim/tb/mosaic_retire_tb.sv), which
+    // instantiates `mosaic_rename` and drives both lanes.
+    output logic                                       commit2_accepted,
+    output logic                                       commit2_x0_dropped,
+
     // recovery
     input  logic                                       ckpt_valid,
     input  logic                                       squash,
@@ -132,6 +146,18 @@ module mosaic_rename_tb (
     output logic [31:0]                                o_bank_rows,
     output logic [31:0]                                o_journal
 );
+
+  // The inactive second commit lane: named, typed, and tied to a constant so
+  // the connection below reads as a decision rather than as an omission.
+  logic                commit2_idle_valid;
+  logic [4:0]          commit2_idle_rd;
+  logic [TB_TAG_W-1:0] commit2_idle_tag;
+  logic [TB_GEN_W-1:0] commit2_idle_gen;
+
+  assign commit2_idle_valid = 1'b0;
+  assign commit2_idle_rd    = 5'd0;
+  assign commit2_idle_tag   = {TB_TAG_W{1'b0}};
+  assign commit2_idle_gen   = {TB_GEN_W{1'b0}};
 
   mosaic_rename u_ren (
       .clk              (clk),
@@ -179,6 +205,15 @@ module mosaic_rename_tb (
       .commit_gen       (commit_gen),
       .commit_accepted  (commit_accepted),
       .commit_x0_dropped(commit_x0_dropped),
+
+      // The inactive second lane, named so the connection reads as a decision
+      // rather than as an omission.
+      .commit2_valid    (commit2_idle_valid),
+      .commit2_rd       (commit2_idle_rd),
+      .commit2_tag      (commit2_idle_tag),
+      .commit2_gen      (commit2_idle_gen),
+      .commit2_accepted (commit2_accepted),
+      .commit2_x0_dropped(commit2_x0_dropped),
 
       .ckpt_valid       (ckpt_valid),
       .squash           (squash),

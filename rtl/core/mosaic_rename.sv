@@ -272,12 +272,30 @@ module mosaic_rename (
     // ------------------------------------------------------------ commit
     // In-order retire of an architectural register write. Updates the committed
     // map and releases the mapping that write superseded.
+    //
+    // `commit2_*` is the **second commit lane**, added by I-017: retire is
+    // MOSAIC_RETIRE_WIDTH wide, so a cycle can retire two instructions that both
+    // write an architectural register, and a one-commit port cannot install
+    // both mappings. The lane is applied strictly after lane 0, which is what
+    // makes two commits to the same rd in one cycle come out right: the younger
+    // mapping wins and the older tag is released.
+    //
+    // Both lanes default to inactive, so a caller that retires one-wide is
+    // unaffected: `commit2_valid` low makes every `commit2_*` output an
+    // acceptance refusal and leaves the maps and the free set exactly as they
+    // were.
     input  logic                                  commit_valid,
     input  logic [4:0]                            commit_rd,
     input  logic [REN_TAG_W-1:0]                  commit_tag,
     input  logic [REN_GEN_W-1:0]                  commit_gen,
     output logic                                  commit_accepted,
     output logic                                  commit_x0_dropped,  // a write to x0 retires
+    input  logic                                  commit2_valid,
+    input  logic [4:0]                            commit2_rd,
+    input  logic [REN_TAG_W-1:0]                  commit2_tag,
+    input  logic [REN_GEN_W-1:0]                  commit2_gen,
+    output logic                                  commit2_accepted,
+    output logic                                  commit2_x0_dropped,
 
     // ---------------------------------------------------------- recovery
     // `ckpt_valid` marks the current journal position as the recovery point.
@@ -412,6 +430,18 @@ module mosaic_rename (
     end
     return acc;
   endfunction
+
+  // Next-state images of the four map files. Declared here rather than beside
+  // the block that fills them, because the second commit lane reads `cmt_map_q`
+  // from the free-set block further down: lane 1 has to know what lane 0
+  // installed. Verilator resolves a forward reference and slang does not, so a
+  // declaration in the natural place is accepted by one tool and rejected by
+  // the other -- which is exactly the class of difference this project has been
+  // bitten by before.
+  logic [REN_TAG_W-1:0] spec_map_q [REN_ARCH_REGS];
+  logic [REN_GEN_W-1:0] spec_gen_q [REN_ARCH_REGS];
+  logic [REN_TAG_W-1:0] cmt_map_q  [REN_ARCH_REGS];
+  logic [REN_GEN_W-1:0] cmt_gen_q  [REN_ARCH_REGS];
 
 
   // --------------------------------------------------------- source read port
@@ -588,6 +618,28 @@ module mosaic_rename (
                              ((cmt_map[commit_rd] != commit_tag) ||
                               (cmt_gen[commit_rd] != commit_gen));
 
+  // ------------------------------------------------- the second commit lane
+  // The identical rule, one instruction further on in program order. Two commits
+  // to the same rd in one cycle are the case the lane exists for: lane 0
+  // installs its mapping and releases whatever rd pointed at before, lane 1
+  // installs the younger mapping and releases lane 0's tag. That is correct
+  // because by the time lane 1 commits, lane 0's tag really is superseded -- the
+  // architectural value of rd after the cycle is lane 1's, and lane 0's tag has
+  // no reader left.
+  assign commit2_x0_dropped = commit2_valid && (commit2_rd == 5'd0);
+  assign commit2_accepted   = commit2_valid && (commit2_rd != 5'd0);
+
+  logic commit2_supersedes;
+
+  // Compared against `cmt_map_q`, not `cmt_map`: lane 1 must see the map as
+  // lane 0 left it. Against the pre-edge map the "supersedes" test would miss
+  // the release of lane 0's tag whenever lane 0 and lane 1 write the same rd,
+  // leaking one tag per such cycle -- an exhaustion that surfaces dozens of
+  // instructions later with nothing pointing back here.
+  assign commit2_supersedes = commit2_accepted &&
+                              ((cmt_map_q[commit2_rd] != commit2_tag) ||
+                               (cmt_gen_q[commit2_rd] != commit2_gen));
+
   // --------------------------------------------------------------- recovery
   assign squash_underflow = squash && !ckpt_seen;
   assign squash_accepted  = squash && ckpt_seen;
@@ -655,6 +707,11 @@ module mosaic_rename (
     if (commit_supersedes) begin
       free_q[cmt_map[commit_rd]] = 1'b1;
     end
+    // Lane 1 releases what *lane 1* superseded, which in the same-rd case is
+    // lane 0's tag -- hence `cmt_map_q`, not `cmt_map`.
+    if (commit2_supersedes) begin
+      free_q[cmt_map_q[commit2_rd]] = 1'b1;
+    end
 
     // 3. The squash undoes every allocation made after the checkpoint, oldest
     //    entry first so the newest is applied last. Allocation is refused in a
@@ -701,11 +758,6 @@ module mosaic_rename (
   end
 
   // ---------------------------------------------------- next-state: the maps
-  logic [REN_TAG_W-1:0] spec_map_q [REN_ARCH_REGS];
-  logic [REN_GEN_W-1:0] spec_gen_q [REN_ARCH_REGS];
-  logic [REN_TAG_W-1:0] cmt_map_q  [REN_ARCH_REGS];
-  logic [REN_GEN_W-1:0] cmt_gen_q  [REN_ARCH_REGS];
-
   always_comb begin
     for (int unsigned a = 0; a < REN_ARCH_REGS; a++) begin
       spec_map_q[a] = spec_map[a];
@@ -715,10 +767,18 @@ module mosaic_rename (
     end
 
     // A commit is permanent, so it lands first and the squash restore reads the
-    // post-commit committed map.
+    // post-commit committed map. Lane 1 lands immediately after lane 0 and
+    // still before the restore, so a two-wide retirement that lands in a squash
+    // cycle reaches the speculative map through the committed map rather than
+    // being lost.
     if (commit_accepted) begin
       cmt_map_q[commit_rd] = commit_tag;
       cmt_gen_q[commit_rd] = commit_gen;
+    end
+
+    if (commit2_accepted) begin
+      cmt_map_q[commit2_rd] = commit2_tag;
+      cmt_gen_q[commit2_rd] = commit2_gen;
     end
 
     if (squash_accepted) begin
