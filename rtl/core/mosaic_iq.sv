@@ -443,13 +443,25 @@ module mosaic_iq #(
     // source. Slicing at a computed base rather than through a wider slice also
     // keeps both comparisons width-exact, instead of leaving a truncation implicit
     // in the assignment.
-    // No part-selects at all. A select of a function argument is legal
-    // SystemVerilog that Verilator accepts and slang rejects -- and the
-    // index+width form is flagged by Verilator as maybe-deprecated -- so the
-    // fields are reached by shifting instead. `id >> UOP_W` is exactly the
-    // {rob_index, rob_gen} prefix, and the right-hand side rebuilds the same
-    // prefix from the two values a kill names, at the same width.
-    UopIsMacro = (id >> UOP_W) == ((UOP_ID_W'(index) << ROB_GEN_W) | UOP_ID_W'(gen));
+    // The uop_index field is deliberately not compared: a kill names a *macro*,
+    // and every uop of that macro must go, so the low bits of `id` are genuinely
+    // unused here -- hence the lint_off around this function.
+    //
+    // The prefix is taken as one flat slice and compared against the expected
+    // {rob_gen, rob_index} built by concatenation. Two things that read more
+    // naturally are not portable here, and each was found by one lint tool while
+    // the other passed the same line: chaining a part-select inside a range select
+    // is legal SystemVerilog that one tool accepts and the other rejects, and
+    // comparing the wide slice directly against the narrower `gen` is a
+    // width-expansion warning, which is an error under this project's gate. The
+    // concatenation has plain widths and no replication, and the slice is
+    // compared against something of the same width, so neither tool objects.
+    // The order of the concatenation is {rob_index, rob_gen}, matching the slice
+    // and the documented layout of the identity; the other order is the same
+    // width and the same two values and matches the *wrong* field.
+    logic [ROB_GEN_W+ROB_INDEX_W-1:0] expected;
+    expected = {index, gen};
+    UopIsMacro = (id[UOP_ID_W-1 -: (ROB_INDEX_W + ROB_GEN_W)] == expected);
   endfunction
   /* verilator lint_on UNUSEDSIGNAL */
 

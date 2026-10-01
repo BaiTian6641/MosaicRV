@@ -1940,7 +1940,7 @@ void PhaseFullAndOrder(Bench& bench, mosaic::Reporter& rep) {
 
   for (int i = 0; i < static_cast<int>(kEntries); i++) {
     bench.Step(bench.Hold(bench.InsertOnly(MakeUop(60, 0, static_cast<uint32_t>(i)), true, true,
-                                           0, 0, 0, 0, 0xf0 + i, 1)));
+                                           0, 0, 0, 0, 0x78 + i, 1)));
   }
   rep.Check(bench.shadow(0)->count() == kEntries, "full: the queue is at capacity");
   rep.Check(bench.post_full(0), "full: o_full is high");
@@ -1953,7 +1953,7 @@ void PhaseFullAndOrder(Bench& bench, mosaic::Reporter& rep) {
   rep.Check(bench.coverage(0).full_cycles > 0, "full: the refusal was observed");
 
   // Drain: the shadow checks the order of every issue.
-  uint32_t next_expected = 0xf0;
+  uint32_t next_expected = 0x78;
   for (int i = 0; i < 16; i++) {
     bench.Idle();
     // This one asks "what was granted *during* the cycle just taken", so it reads
@@ -1965,8 +1965,10 @@ void PhaseFullAndOrder(Bench& bench, mosaic::Reporter& rep) {
     // expected sequence forward once per cycle instead of once per uop.
     if (bench.seen_grant_valid(0) && bench.seen_grant_ready(0)) {
       rep.Check(bench.seen_grant_dst_tag(0) == next_expected,
-                "full: entries issue in age order");
-      if (next_expected < 0xf0 + kEntries) next_expected++;
+                "full: entries issue in age order: got destination tag " +
+                    std::to_string(bench.seen_grant_dst_tag(0)) + ", expected " +
+                    std::to_string(next_expected));
+      if (next_expected < 0x78 + kEntries) next_expected++;
     }
   }
   rep.Check(bench.shadow(0)->count() == 0, "full: the queue drained");
