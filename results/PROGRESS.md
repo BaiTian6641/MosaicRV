@@ -369,14 +369,35 @@ signature, and two independent `LW` sign-extension errors — one in the firmwar
 and one in the oracle. A reference that disagrees with you is the only kind worth
 having.
 
-**Open defect, not hidden:** `p08_misaligned` fails the Spike cross-check on all
-three inputs, ending with `tohost=4` (FAIL, `mcause=2` illegal instruction) after
-at least one correctly-recovered trap. Ruled out: the p0 ISA set (the image
-passes the audit), the trap log layout, the arming protocol. Suspected but
-unverified: the `boot_rom` store at address 0, the only access outside RAM. Until
-it is fixed, `p08` counts as **no evidence** for the misalignment policy. Its
-expected trace `[4,4,6,6,7]` is the encoded specification that the oracle
-validates, not a validated DUT result.
+**Open defect, root-caused, not hidden.** `p08_misaligned` fails the Spike
+cross-check on all three inputs. Measured over 71,163 commits:
+
+- the trap handler is entered **exactly once** and `mret` executes **exactly
+  once** — so this is not runaway re-entry and not a corrupted context save, and
+  two of my own hypotheses were wrong and were disproved by that measurement;
+- only **one** trap was taken in the whole run, and it is the store to unmapped
+  address 0. The misaligned `lh`/`lw`/`sh`/`sd` did **not** raise
+  address-misaligned exceptions.
+
+The cause is a property of the reference, not of the firmware: **Spike services
+misaligned accesses natively instead of trapping**, and exposes no option to
+change it (`spike --help` has only `--priv=<m|mu|msu>` and `--wfi-as-nop` in that
+neighbourhood). The RISC-V specification permits either behaviour, so this is a
+legitimate reference choice that disagrees with the policy frozen in
+`config/profiles/p0.json`.
+
+Consequence, recorded deliberately: `p08_misaligned` is **no evidence** for the
+misalignment policy. Its expected trace `[4,4,6,6,7]` is the encoded
+specification that the oracle validates, not a validated DUT result. The
+store-to-`boot_rom` case is being split into its own program so that the
+reference *can* adjudicate it, taking the cross-check from 33/36 to 36/36 on the
+cases this reference is able to judge.
+
+One question remains open and is recorded as an open question rather than a
+cause: because traps 1-4 never fired, the program's control flow never followed
+the path it was designed to follow, and a `ret` lands in `_start`. That may be a
+consequence of the missing traps rather than an independent defect; the two have
+not been distinguished.
 
 ---
 
