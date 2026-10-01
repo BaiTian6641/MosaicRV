@@ -1654,3 +1654,36 @@ runnable without it), store-to-load forwarding is exercised through the core onl
 blocked-on-unknown-address and replay paths are never entered because dispatch reads every store
 operand before allocating, and no faults, misalignment or FENCE ordering are exercised at all.
 That list is the next wave's specification, and the CSR/trap integration is running now.
+
+---
+
+## 2026-10-01 — the out-of-order core runs the trap-dependent corpus
+
+`core.trap_csr_program` passes from a clean build: **428 642 retires, 26 traps, 17 144 009
+per-cycle comparisons**, and the two corpus programs that genuinely need traps — `p08_misaligned`
+and `p13_romstore` — run from the reset vector through crt0 on the out-of-order machine, each
+under three input patterns, with every signature matched against `tools/host_oracle.py`'s
+independent host computation. The trap taxonomy is real rather than directed-only (ECALL,
+EBREAK, an illegal CSR read, a read-only CSR write, a misaligned load, csrrwi, `mstatus` WARL),
+and five interrupt scenarios are driven, including WFI halt-then-wake and a masked-by-MIE case.
+
+The controls include the two that a trap implementation most often gets wrong, and they are
+mirror images deliberately: `TRAP_EPC_NEXT` (a *fault*'s `mepc` pointing at the instruction after
+the faulting one) and `IRQ_EPC_NEXT` (an *interrupt*'s `mepc` pointing at the interrupted
+instruction instead of the next one). A machine that writes one rule for both passes every
+directed test that only checks "a trap happened"; these two mutants fail by name, and the
+distinction is the reason the case drives both classes.
+
+Two expectation relationships are stated rather than claimed as raw oracle equality, and both are
+checked rather than assumed: p08's third signature is the oracle's with the eight-record fold that
+`trap.S`'s restore order produces, and p13's differs by one bit because the armed-trap recovery
+resumes at `mepc+4`, so the marker instruction after the store executes. Those are the honest
+forms of "the machine matches"; the dishonest form would have been to relax the comparison.
+
+**Where the machine is now.** It executes arithmetic, control flow, loads, stores, CSRs, traps
+and interrupts on real corpus programs, verified end to end against an independent host oracle,
+with every capability claim gated by a ledger that names what is *not* covered in the same breath
+as what is. The scalar base is advertised (`rv64im_zicsr_zihpm`). What is missing is ordering —
+there is no `FENCE` or `FENCE.I` anywhere in the machine — and that package (I-037) is running,
+followed by MMIO (I-038), the fabric remainder (I-029..I-032), and the widening of the corpus
+sweep from the handful of programs each case runs to all of them.

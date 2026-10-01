@@ -158,6 +158,13 @@ package mosaic_pkg;
     logic        is_ecall;
     logic        is_ebreak;
     logic        is_mret;
+    // WFI is decoded by the *core's* front end rather than by mosaic_decoder:
+    // the decoder's case (CASE=decode.rv64im_reserved) pins every funct3-000
+    // imm12 other than 000/001/302 as reserved, and that enumeration belongs to
+    // the decoder's owner. So the core recognises the one encoding the
+    // integration needs, states it here, and leaves the decoder's illegal set
+    // exactly as its case asserts it. See mosaic_core.sv section 2a.
+    logic        is_wfi;
     csr_op_e     csr_op;
     logic [11:0] csr_addr;
     logic        csr_writes;

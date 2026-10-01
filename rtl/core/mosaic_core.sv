@@ -266,6 +266,59 @@ module mosaic_core (
     // The fetch unit's own response classification and output register, so a
     // failing case can say why an instruction did or did not reach the decoder.
     output logic [127:0]                o_dbg_fetch_state,
+    // ------------------------------------------------- CSR / trap / interrupt
+    // The platform's interrupt sources and the time the CSR file reads for
+    // `time`. Level-sensitive and asynchronous in real time; mosaic_interrupt
+    // synchronises them. The p0 map wires these to the CLINT's msip and its
+    // timer comparison, and to the (absent) PLIC output.
+    input  logic                        irq_soft_i,
+    input  logic                        irq_timer_i,
+    input  logic                        irq_ext_i,
+    input  logic [CORE_XLEN-1:0]        mtime_i,
+
+    // The CSR file's architectural state, so a case can state what a trap left
+    // behind instead of inferring it from the retirement stream.
+    output logic [CORE_XLEN-1:0]        o_csr_mstatus,
+    output logic [CORE_XLEN-1:0]        o_csr_mtvec,
+    output logic [CORE_XLEN-1:0]        o_csr_mepc,
+    output logic [CORE_XLEN-1:0]        o_csr_mcause,
+    output logic [CORE_XLEN-1:0]        o_csr_mtval,
+    output logic [CORE_XLEN-1:0]        o_csr_mscratch,
+    output logic [CORE_XLEN-1:0]        o_csr_mie,
+    output logic [CORE_XLEN-1:0]        o_csr_mip,
+    output logic [31:0]                 o_csr_wr_ctr,
+    output logic [31:0]                 o_csr_illegal_wr_ctr,
+    output logic [31:0]                 o_csr_trap_ctr,
+    output logic [31:0]                 o_csr_mret_ctr,
+    // The trap entry as it was presented to the CSR file: the pulse, its class,
+    // its cause/tval, the interrupted PC and the vector the front end resumes
+    // at. A case checks `mepc`/`mcause`/`mtval` against these rather than
+    // against a value read back a cycle later.
+    output logic                        o_trap_valid,
+    output logic                        o_trap_is_irq,
+    output logic [CORE_XLEN-1:0]        o_trap_cause,
+    output logic [CORE_XLEN-1:0]        o_trap_tval,
+    output logic [CORE_XLEN-1:0]        o_trap_epc,
+    output logic [CORE_XLEN-1:0]        o_trap_target,
+    // MRET: the pulse the CSR file saw and the PC it returns to.
+    output logic                        o_mret_valid,
+    output logic [CORE_XLEN-1:0]        o_mret_target,
+    // The interrupt decision and the WFI halt, straight from mosaic_interrupt.
+    output logic                        o_irq_valid,
+    output logic [CORE_XLEN-1:0]        o_irq_cause,
+    output logic [7:0]                  o_irq_ctr,
+    output logic                        o_wfi_halt,
+    output logic [7:0]                  o_spurious_wake_ctr,
+    output logic [7:0]                  o_halt_cycles,
+    // Counters for the integration itself: system macros resolved at the head,
+    // exception payloads captured from the writeback path, traps taken from
+    // each source, and the two ways the capture could have been wrong.
+    output logic [31:0]                 o_sys_exec_ctr,
+    output logic [31:0]                 o_exc_capture_ctr,
+    output logic [31:0]                 o_exc_gen_mismatch_ctr,
+    output logic [31:0]                 o_trap_irq_ctr,
+    output logic [31:0]                 o_sys_redirect_ctr,
+
     // ------------------------------------------------------- debug observability
     // The instructions and the ROB head, so a failing case can say what the
     // machine was doing instead of only that a count was wrong.
@@ -377,6 +430,9 @@ module mosaic_core (
   logic                      ren_squash_underflow, ren_journal_overflow;
   logic                      ren_squash_not_committed, ren_ckpt_committed;
   logic                      ren_ckpt_valid, ren_squash, ren_squash_accepted;
+  logic                      ren_flush_restore;
+  logic                      fetch_redir_valid;
+  logic                      dbuf_purge;
   logic                      redirect_delay_q;
   logic [CORE_TAG_W:0]       ren_free_count;
 
@@ -529,6 +585,7 @@ module mosaic_core (
   // net, and the whole point of this file's ordering rule is that nothing is
   // declared where it happens to be convenient.
   logic                       disp_mem_valid, disp_mem_ready, disp_mem_is_store;
+  logic                       disp_store_faults;
   logic [CORE_XLEN-1:0]       disp_mem_base, disp_mem_imm, disp_mem_data;
   logic [2:0]                 disp_mem_size;
   logic                       disp_mem_signed;
@@ -593,6 +650,106 @@ module mosaic_core (
   logic [31:0] squash_nc_ctr;
   logic        core_stop_prev;
 
+  // ---------------------------------------------------- the CSR/trap path
+  // The CSR file (I-019), the interrupt decision (I-020), the single staging
+  // entry the system macros wait in, and the trap controller that turns an
+  // exception or an interrupt into a redirect.
+  logic [11:0]                csr_addr;
+  logic [63:0]                csr_rdata;
+  logic                       csr_illegal;
+  logic                       csr_wr_illegal;
+  logic                       csr_we;
+  logic                       csr_trap_valid;
+  logic [CORE_XLEN-1:0]       csr_trap_target;
+  logic                       csr_mret_valid;
+  logic [CORE_XLEN-1:0]       csr_mret_target;
+  logic                       csr_mip_we;
+  logic [1:0]                 csr_mip_op;
+  logic [63:0]                csr_mip_wdata;
+  logic [63:0]                irq_mip;
+  logic                       irq_valid;
+  logic [63:0]                irq_cause;
+  logic [7:0]                 irq_ctr, halt_cycles, spurious_wake_ctr;
+  logic                       wfi_halt;
+  logic                       core_can_trap;
+
+  // the staging entry: one macro at a time, because a system macro is resolved
+  // at the ROB head and only one entry can be the head
+  logic                       sys_valid_q;
+  logic [CORE_IDX_W-1:0]      sys_index_q;
+  logic [CORE_RGEN_W-1:0]     sys_gen_q;
+  logic [CORE_UOP_W-1:0]      sys_uop_q;
+  logic [11:0]                sys_csr_addr_q;
+  mosaic_pkg::csr_op_e        sys_csr_op_q;
+  logic                       sys_csr_reads_q, sys_csr_writes_q;
+  logic                       sys_ecall_q, sys_ebreak_q, sys_mret_q, sys_wfi_q;
+  logic [CORE_XLEN-1:0]       sys_src1_q;
+  logic [CORE_TAG_W-1:0]      sys_dst_tag_q;
+  logic [CORE_IGEN_W-1:0]     sys_dst_gen_q;
+  logic                       sys_dst_x0_q;
+  logic                       sys_head;
+  logic                       sys_exec;
+  logic                       sys_wb_want;
+  logic                       sys_wb_valid;
+  logic                       sys_wb_pending_q;
+  mosaic_uop_pkg::wb_event_t  sys_wb_ev;
+  logic                       sys_exc;
+  logic [63:0]                sys_exc_cause;
+  logic                       sys_trap_q;
+  logic [63:0]                sys_trap_cause_q;
+  logic                       port3_taken_sys;
+  logic                       lsu_wb_ready_int;
+  mosaic_uop_pkg::wb_event_t  wb3_ev;
+  logic                       wb3_valid;
+
+  // the trap controller
+  logic                       trap_decision;
+  logic                       trap_is_irq;
+  logic                       sys_trap_now;
+  logic                       sys_trap_take;
+  logic [63:0]                trap_cause, trap_tval, trap_epc;
+  logic [63:0]                exc_cause_head, exc_tval_head;
+  logic                       exc_capture;
+  logic [63:0]                exc_cause_win, exc_tval_win;
+  logic [CORE_RGEN_W-1:0]     exc_gen_match;
+  logic                       arb_sys_redirect;
+  logic                       sys_redirect_delay_q;
+  logic                       ret_req_gated;
+  logic                       trap_irq_prev;
+  logic [CORE_RET_N*CORE_XLEN-1:0] pay_exc_cause_vec;
+  logic [CORE_RET_N*CORE_XLEN-1:0] pay_exc_tval_vec;
+  logic                       head_exc_trap;
+  logic [63:0]                trap_epc_sync, trap_epc_irq;
+  logic                       sys_redir_req_valid, sys_redir_act_now;
+  logic [CORE_XLEN-1:0]       sys_redir_pc;
+  logic                       trap_vector_armed;
+
+  // ------------------------------------------------------- dispatch's sys bus
+  logic                       disp_sys_valid, sys_ins_ready_int;
+  logic [CORE_UOP_ID_W-1:0]   disp_sys_id;
+  logic [11:0]                disp_sys_csr_addr;
+  logic [1:0]                 disp_sys_csr_op;
+  logic                       disp_sys_csr_reads, disp_sys_csr_writes;
+  logic                       disp_sys_is_ecall, disp_sys_is_ebreak;
+  logic                       disp_sys_is_mret, disp_sys_is_wfi;
+  logic [CORE_XLEN-1:0]       disp_sys_src1_val;
+  logic [CORE_TAG_W-1:0]      disp_sys_dst_tag;
+  logic [CORE_IGEN_W-1:0]     disp_sys_dst_gen;
+  logic                       disp_sys_dst_x0;
+
+  // ---------------------------------------------------- the CSR/trap evidence
+  logic [31:0] sys_exec_ctr, exc_capture_ctr, exc_gen_mismatch_ctr;
+  logic [31:0] trap_irq_ctr, sys_redirect_ctr;
+
+  // The exception payload of each ROB entry, indexed by slot. The ROB carries
+  // the *bit* "this entry excepted"; the cause and tval are what the trap entry
+  // needs and the ROB's descriptor does not hold, so they are recorded here when
+  // the completion that raised the exception is accepted, tagged with the slot's
+  // generation so a stale record cannot be read for a recycled slot.
+  logic [63:0]                exc_cause_q [0:CORE_ROB_N-1];
+  logic [63:0]                exc_tval_q  [0:CORE_ROB_N-1];
+  logic [CORE_RGEN_W-1:0]     exc_rec_gen_q [0:CORE_ROB_N-1];
+
   // Leaf modules bring out observation and status outputs that this package
   // does not consume -- the fetch unit's delivery counters, the retire module's
   // event classification flags, the rename module's debug views, the second
@@ -617,7 +774,10 @@ module mosaic_core (
   // offered to the memory whenever fetch has a credit, and is handed to fetch
   // only in the cycle the memory took it, so exactly one request is issued and
   // one slot is spent.
-  assign want_imem_req      = !core_stop && !recovering;
+  // The WFI halt stops the front end the same way a recovery does: there is no
+  // instruction to fetch until the wake event, and fetching ahead of it would
+  // execute past the halt.
+  assign want_imem_req      = !core_stop && !recovering && !wfi_halt;
   assign imem_req_valid     = want_imem_req && fetch_slot_free;
   assign fetch_req_valid_int= imem_req_valid && imem_req_ready;
   assign fetch_req_fire     = fetch_req_valid_int;
@@ -630,7 +790,7 @@ module mosaic_core (
   always_ff @(posedge clk) begin
     if (rst) begin
       fetch_pc_q <= mosaic_cfg_pkg::MOSAIC_RESET_VECTOR;
-    end else if (redirect_valid) begin
+    end else if (fetch_redir_valid) begin
 `ifdef MOSAIC_CORE_MUTANT_REDIRECT_NEXT
       // NEGATIVE CONTROL: the front end resumes one instruction past the
       // redirect target instead of at it, so the first instruction of the
@@ -663,7 +823,7 @@ module mosaic_core (
       .rsp_data           (imem_rsp.rdata[31:0]),
       .rsp_len            (imem_rsp_len),
       .rsp_fault          (imem_rsp.fault),
-      .redirect_valid     (redirect_valid),
+      .redirect_valid     (fetch_redir_valid),
       .redirect_pc        (redirect_pc),
       .pred_valid         (1'b0),
       .pred_pc            ({CORE_XLEN{1'b0}}),
@@ -679,7 +839,7 @@ module mosaic_core (
       .upd_is_taken       (1'b0),
       .upd_target         ({CORE_XLEN{1'b0}}),
       .ckpt_valid         (1'b0),
-      .flush              (redirect_valid),
+      .flush              (fetch_redir_valid),
       .pred_next_valid    (fetch_pred_next_valid),
       .pred_next_pc       (fetch_pred_next_pc),
       .pred_squashed      (),
@@ -728,18 +888,38 @@ module mosaic_core (
   // decode; it is carried as an invalid control word, which dispatch refuses
   // and counts, and the machine stops cleanly at it. Taking the trap is
   // I-019's business, not this package's.
+  //
+  // WFI is recognised here rather than in mosaic_decoder, and the reason is a
+  // division of ownership rather than taste: CASE=decode.rv64im_reserved
+  // enumerates every funct3-000 imm12 other than 000/001/302 as reserved, and
+  // that enumeration belongs to the decoder's own case. Adding WFI to the
+  // decoder would falsify that case's reference model, so the integration
+  // recognises the one encoding it needs -- exact, from the raw word, with no
+  // other field of WFI's to decode -- and leaves the decoder's illegal set as
+  // its owner asserts it. `is_wfi` in the decode control is set here and
+  // nowhere else; the decoder never produces it.
+  localparam logic [31:0] WFI_WORD = 32'h1050_0073;
+
   always_comb begin
     dbuf_ctl_new = dec_ctl_comb;
     if (fetch_out_illegal || fetch_out_fault) begin
       dbuf_ctl_new.valid   = 1'b0;
       dbuf_ctl_new.illegal = 1'b1;
+    end else if (fetch_out_bits == WFI_WORD) begin
+      // WFI has no operands, writes nothing, and reads no CSR: `ctl` starts as
+      // the decoder's fully-illegal constant, and only the three fields that say
+      // "a system instruction, do not stop" change.
+      dbuf_ctl_new.valid     = 1'b1;
+      dbuf_ctl_new.illegal   = 1'b0;
+      dbuf_ctl_new.is_system = 1'b1;
+      dbuf_ctl_new.is_wfi    = 1'b1;
     end
   end
 
   assign dbuf_take = disp_take;
   assign dbuf_room = (dbuf_cnt < 2'd2) || dbuf_take;
-  assign dbuf_push = fetch_out_valid && dbuf_room && !core_stop;
-  assign fetch_out_ready = dbuf_room && !core_stop;
+  assign dbuf_push = fetch_out_valid && dbuf_room && !core_stop && !wfi_halt;
+  assign fetch_out_ready = dbuf_room && !core_stop && !wfi_halt;
 
   // The buffer's next state, one expression per slot. The valid entries are
   // always the contiguous run `[0 .. dbuf_cnt-1]`, oldest at slot 0:
@@ -800,7 +980,7 @@ module mosaic_core (
       dbuf_cnt      <= 2'd0;
       dbuf_valid[0] <= 1'b0;
       dbuf_valid[1] <= 1'b0;
-    end else if (redirect_valid || core_stop) begin
+    end else if (dbuf_purge || core_stop) begin
       // A redirect discards everything fetched before it; a stop freezes the
       // buffer where it is (the refused macro must stay refused).
 `ifdef MOSAIC_CORE_MUTANT_NO_PURGE
@@ -811,7 +991,7 @@ module mosaic_core (
       // the reference names it. CASE=core.corpus_branch must fail.
       if (1'b0) begin
 `else
-      if (redirect_valid) begin
+      if (dbuf_purge) begin
 `endif
         dbuf_valid[0] <= 1'b0;
         dbuf_valid[1] <= 1'b0;
@@ -927,6 +1107,7 @@ module mosaic_core (
       // map.
       .ckpt_valid       (ren_ckpt_valid),
       .squash           (ren_squash),
+      .flush_restore    (ren_flush_restore),
       .squash_accepted  (ren_squash_accepted),
       .squash_underflow (ren_squash_underflow),
       .squash_not_committed (ren_squash_not_committed),
@@ -1008,7 +1189,7 @@ module mosaic_core (
       .cmp_duplicate   (rob_cmp_duplicate),
       .cmp_stale       (rob_cmp_stale),
       .cmp_bad_uop     (rob_cmp_bad_uop),
-      .retire_req      (ret_req[0]),
+      .retire_req      (ret_req_gated),
       .retire_ack      (rob_retire_ack),
       .retire_req_next (rob_retire_req_next),
       .retire_ack_next (rob_retire_ack_next),
@@ -1279,10 +1460,13 @@ module mosaic_core (
       // The memory path's producer: a load's merged value or a store's
       // destination-less completion. One port, because the two can never be
       // offered in the same cycle (the core holds the store insert while a load
-      // result waits, and vice versa).
-      .wb_ev3              (lsu_wb_ev),
-      .wb_valid3           (lsu_wb_valid),
-      .wb_ready3           (lsu_wb_ready),
+      // result waits, and vice versa). The CSR/system unit shares this port
+      // rather than adding a fifth one: its completion is offered in the same
+      // register-transfer shape, and the core keeps the two apart by
+      // construction -- see section 10b.
+      .wb_ev3              (wb3_ev),
+      .wb_valid3           (wb3_valid),
+      .wb_ready3           (lsu_wb_ready_int),
       .prf_wr_en           (prf_wr_en),
       .prf_wr_gen_valid    (prf_wr_gen_valid),
       .prf_wr_tag          (prf_wr_tag),
@@ -1426,6 +1610,22 @@ module mosaic_core (
       .mem_ins_dst_tag  (disp_mem_dst_tag),
       .mem_ins_dst_gen  (disp_mem_dst_gen),
       .mem_ins_dst_x0   (disp_mem_dst_x0),
+      // ---------------------------------------------------------- system insert
+      .sys_ins_valid    (disp_sys_valid),
+      .sys_ins_ready    (sys_ins_ready_int),
+      .sys_ins_id       (disp_sys_id),
+      .sys_ins_csr_addr (disp_sys_csr_addr),
+      .sys_ins_csr_op   (disp_sys_csr_op),
+      .sys_ins_csr_reads(disp_sys_csr_reads),
+      .sys_ins_csr_writes(disp_sys_csr_writes),
+      .sys_ins_is_ecall (disp_sys_is_ecall),
+      .sys_ins_is_ebreak(disp_sys_is_ebreak),
+      .sys_ins_is_mret  (disp_sys_is_mret),
+      .sys_ins_is_wfi   (disp_sys_is_wfi),
+      .sys_ins_src1_val (disp_sys_src1_val),
+      .sys_ins_dst_tag  (disp_sys_dst_tag),
+      .sys_ins_dst_gen  (disp_sys_dst_gen),
+      .sys_ins_dst_x0   (disp_sys_dst_x0),
       .rq_valid         (disp_rq_valid),
       .rq_tag           (disp_rq_tag),
       .rq_gen           (disp_rq_gen),
@@ -1468,7 +1668,10 @@ module mosaic_core (
       .c1_ins_dst_tag   (c1_dst_tag),
       .c1_ins_dst_gen   (c1_dst_gen),
       .recovering       (recovering),
-      .barrier          (br_inflight),
+      // A WFI halt holds allocation exactly as an unresolved branch does: the
+      // front end has nothing to run until the wake event.
+      .barrier          (br_inflight | wfi_halt),
+      .trap_vector_armed_i(trap_vector_armed),
       .stop             (disp_unsupported),
       .o_take           (disp_take),
       .o_alloc_ctr      (disp_alloc_ctr),
@@ -1490,6 +1693,481 @@ module mosaic_core (
   assign core_stop = disp_unsupported;
 
   // ==========================================================================
+  // 10a. The CSR file and the interrupt decision (I-019, I-020)
+  // ==========================================================================
+  // Both modules are instantiated here and nowhere deeper, because both are
+  // *architectural boundary* devices: the CSR file's write port is strobed by
+  // the retire boundary, and the interrupt unit's decision is gated by
+  // `core_can_trap`, which only the integrator can define (a boundary is a
+  // property of the whole machine, not of the interrupt unit).
+  //
+  // The CSR read address is the staged macro's, always: the only consumer of the
+  // read port is the system unit, and it presents one macro at a time.
+
+  // "Software has installed a trap vector": see mosaic_dispatch's refusal rule.
+  // p0's mtvec resets to 0, and a machine with no handler installed stops at a
+  // trap-raising system instruction instead of vectoring into address 0.
+  assign trap_vector_armed = (o_csr_mtvec != {CORE_XLEN{1'b0}});
+
+  assign csr_addr = sys_csr_addr_q;
+  // The write is strobed exactly when a system macro's completion is accepted by
+  // the writeback path, so a CSR write is applied by the retirement of its
+  // instruction and by nothing else -- a squashed or trapping macro never
+  // strobes it. An *illegal* write is strobed too and refused by the CSR file's
+  // generated legality rule; that is what makes the illegal-access trap
+  // detectable without a second copy of the table here.
+  assign csr_we = sys_wb_valid && sys_csr_writes_q;
+
+  mosaic_csr u_csr (
+      .clk_i              (clk),
+      .rst_i              (rst),
+      .csr_addr_i         (csr_addr),
+      .csr_rdata_o        (csr_rdata),
+      .csr_illegal_o      (csr_illegal),
+      .csr_we_i           (csr_we),
+      .csr_op_i           (sys_csr_op_q),
+      .csr_wdata_i        (sys_src1_q),
+      .csr_wr_illegal_o   (csr_wr_illegal),
+      // mcycle counts every core cycle; minstret counts retired instructions,
+      // which is what the retire acknowledgement says.
+      .cnt_cycle_i        (1'b1),
+      .cnt_instret_i      (rob_retire_ack | rob_retire_ack_next),
+      .trap_valid_i       (csr_trap_valid),
+      .trap_cause_i       (trap_cause),
+      .trap_tval_i        (trap_tval),
+      .trap_epc_i         (trap_epc),
+      .trap_commit_o      (),
+      .trap_target_o      (csr_trap_target),
+      .mret_valid_i       (csr_mret_valid),
+      .mret_commit_o      (o_mret_valid),
+      .mret_target_o      (csr_mret_target),
+      .mip_i              (irq_mip),
+      .mip_we_o           (csr_mip_we),
+      .mip_op_o           (csr_mip_op),
+      .mip_wdata_o        (csr_mip_wdata),
+      .mtime_i            (mtime_i),
+      .o_mstatus_o        (o_csr_mstatus),
+      .o_mtvec_o          (o_csr_mtvec),
+      .o_mepc_o           (o_csr_mepc),
+      .o_mcause_o         (o_csr_mcause),
+      .o_mtval_o          (o_csr_mtval),
+      .o_mscratch_o       (o_csr_mscratch),
+      .o_mie_o            (o_csr_mie),
+      .o_mip_o            (o_csr_mip),
+      .o_misa_o           (),
+      .o_mcycle_o         (),
+      .o_minstret_o       (),
+      .o_wr_ctr           (o_csr_wr_ctr),
+      .o_illegal_wr_ctr   (o_csr_illegal_wr_ctr),
+      .o_trap_ctr         (o_csr_trap_ctr),
+      .o_mret_ctr         (o_csr_mret_ctr)
+  );
+
+  // `mideleg` is tied to zero rather than read out of the CSR file, and the tie
+  // is a statement the CSR file's own rule makes: p0 is M-only, so every bit of
+  // mideleg is WARL whose only legal value is 0, a write is accepted and
+  // canonicalises to zero, and the generated write mask is 0. There is no value
+  // this input could ever carry. A profile with an S mode would need the CSR
+  // file to bring the register out, and this is where that would be wired.
+  mosaic_interrupt u_irq (
+      .clk_i              (clk),
+      .rst_i              (rst),
+      .irq_soft_i         (irq_soft_i),
+      .irq_timer_i        (irq_timer_i),
+      .irq_ext_i          (irq_ext_i),
+      .mie_i              (o_csr_mie),
+      .mideleg_i          ({CORE_XLEN{1'b0}}),
+      .mstatus_mie_i      (o_csr_mstatus[3]),
+      .mip_we_i           (csr_mip_we),
+      // mosaic_csr publishes the mip write operation as the 2-bit encoding;
+      // the interrupt unit takes the csr_op_e the rest of the core uses.
+      .mip_op_i           (mosaic_pkg::csr_op_e'(csr_mip_op)),
+      .mip_wdata_i        (csr_mip_wdata),
+      .mip_o              (irq_mip),
+      .core_can_trap_i    (core_can_trap),
+      .irq_valid_o        (irq_valid),
+      .irq_cause_o        (irq_cause),
+      .irq_timer_pending_o(),
+      .o_irq_soft_pending (),
+      .o_irq_ext_pending  (),
+      .wfi_valid_i        (sys_wb_valid && sys_wfi_q),
+      .wfi_halt_o         (wfi_halt),
+      .o_irq_ctr          (irq_ctr),
+      .o_halt_cycles      (halt_cycles),
+      .o_wake_ctr         (),
+      .o_spurious_wake_ctr(spurious_wake_ctr)
+  );
+
+  // ==========================================================================
+  // 10b. The system unit and the trap controller
+  // ==========================================================================
+  //
+  // A CSR instruction cannot be executed by an execution unit and cannot produce
+  // its result speculatively:
+  //
+  //   * its *read* must return the CSR state left by every older instruction, so
+  //     it cannot run before those have retired;
+  //   * its *write* must not be visible until the instruction itself retires, so
+  //     it cannot run before that either.
+  //
+  // The machine therefore resolves a system macro at the ROB head, in the same
+  // cycle the entry would be retiring, and the completion it produces is the
+  // ordinary writeback completion: the CSR read value goes to the destination
+  // through the register file and the wakeup network, the ROB entry is marked
+  // done, and the write port is strobed on the same edge. Because the head is the
+  // oldest unretired instruction, "at the head" *is* "after every older
+  // instruction has committed", which is exactly the ordering both rules need.
+  // Nothing younger has to be held: a younger consumer simply waits for the
+  // wakeup of the destination tag it already named.
+  //
+  // The same unit resolves the three system instructions that are not CSR
+  // accesses: ECALL, EBREAK and MRET. ECALL and EBREAK (and an illegal CSR
+  // access) are delivered as an *exception completion* -- the writeback event
+  // carries `exc.valid`, so the ROB marks the entry exceptional through the same
+  // port every other fault uses, and the trap controller below then has exactly
+  // one synchronous source to look at.
+  //
+  // One macro at a time is staged, because only one entry can be the head. The
+  // staging entry is filled by dispatch in the same cycle the macro is allocated
+  // (dispatch holds the macro until the entry is free, so allocation order stays
+  // program order) and cleared by a redirect, whose flush discards everything at
+  // and above the head.
+
+  assign sys_head = sys_valid_q && rob_head_valid &&
+                    (rob_head_index == sys_index_q) && (rob_head_gen == sys_gen_q);
+  // The staging entry is free unless a macro is staged in it; that is what
+  // keeps one entry enough, because dispatch holds the macro until it can be
+  // taken.
+  assign sys_ins_ready_int = !sys_valid_q;
+
+  // The one thing that makes a system macro trap rather than complete. `csr_illegal`
+  // is "the address is not implemented"; `csr_wr_illegal` is "this write is not
+  // legal for that address" (a read-only CSR, or one the profile does not
+  // implement), and it is evaluated on the *intended* write, so it does not
+  // depend on the completion being accepted.
+  logic csr_access_illegal;
+
+  assign csr_access_illegal = (sys_csr_op_q != mosaic_pkg::CSR_NONE) &&
+                              (csr_illegal || (sys_csr_writes_q && csr_wr_illegal));
+
+  always_comb begin
+    sys_exc       = 1'b0;
+    sys_exc_cause = {CORE_XLEN{1'b0}};
+    if (sys_head && !rob_head_complete) begin
+      if (sys_ecall_q) begin
+        sys_exc       = 1'b1;
+        sys_exc_cause = mosaic_pkg::EXC_ECALL_M;
+      end else if (sys_ebreak_q) begin
+        sys_exc       = 1'b1;
+        sys_exc_cause = mosaic_pkg::EXC_BREAKPOINT;
+      end else if (csr_access_illegal) begin
+        sys_exc       = 1'b1;
+        sys_exc_cause = mosaic_pkg::EXC_ILLEGAL_INSN;
+      end
+    end
+  end
+
+  // Execution. A trap being taken in this cycle wins: the interrupt is blocked
+  // outright while a system macro is at the head (see `core_can_trap` below), and
+  // a synchronous exception on the head is not a system macro's to make.
+  // `sys_wb_pending_q` is the "one completion outstanding" rule the writeback
+  // arbiter's producers keep: the system macro is executed once and its
+  // completion is offered once. Without it the macro would be re-executed in the
+  // cycle the arbiter *publishes* that completion, because the ROB's done bit
+  // only lands at the end of that cycle -- which would commit a CSR write and an
+  // MRET twice.
+  assign sys_exec = sys_head && !rob_head_complete && !sys_wb_pending_q &&
+                    !head_exc_trap && !irq_valid &&
+                    !sys_trap_q && !recovering && !redirect_valid && !core_stop;
+  // The trap this macro resolves to, latched in the cycle its completion is
+  // accepted so that the trap controller sees it at the boundary one cycle later.
+  assign sys_trap_now = sys_head && !rob_head_complete && sys_exc;
+
+  // The completion, on the writeback arbiter's memory port (port 3). That port is
+  // shared rather than duplicated because the two producers can be kept apart by
+  // construction: while the system unit wants it, the memory path is held --
+  // a load result waits in the load queue, and a store insert is refused (which
+  // is what keeps `store_cmp_valid` from being offered and lost). The system unit
+  // in turn waits for the port to be free (`wb_ready3`), so a retry never
+  // re-applies a CSR write that the first attempt already made.
+  always_comb begin
+    sys_wb_ev.id.hart      = 1'b0;
+    sys_wb_ev.id.rob_index = sys_index_q;
+    sys_wb_ev.id.rob_gen   = sys_gen_q;
+    sys_wb_ev.id.uop_index = sys_uop_q;
+    sys_wb_ev.dst.tag      = sys_dst_x0_q ? {CORE_TAG_W{1'b0}} : sys_dst_tag_q;
+    sys_wb_ev.dst.gen      = {{(CORE_PGEN_W - CORE_IGEN_W){1'b0}}, sys_dst_gen_q};
+    sys_wb_ev.dst.x0       = sys_dst_x0_q;
+    sys_wb_ev.value_valid  = !sys_dst_x0_q;
+    sys_wb_ev.value        = sys_csr_reads_q ? csr_rdata : {CORE_XLEN{1'b0}};
+    // A system macro never raises its exception through the writeback path.
+    // The retire stream publishes one event per retired macro, and an
+    // exception completion would publish a second lane-0 event for a macro
+    // that never retired. ECALL/EBREAK/illegal-CSR are therefore *latched*
+    // here and taken by the trap controller below, at the boundary, one cycle
+    // later; a memory fault keeps the writeback route, because that is where
+    // the LSU reports it and where the ROB's exception bit comes from.
+    sys_wb_ev.exc.valid    = 1'b0;
+    sys_wb_ev.exc.cause    = {CORE_XLEN{1'b0}};
+    sys_wb_ev.exc.tval     = {CORE_XLEN{1'b0}};
+    sys_wb_ev.is_store     = 1'b0;
+    sys_wb_ev.is_load      = 1'b0;
+  end
+
+  assign sys_wb_want  = sys_exec;
+  assign port3_taken_sys = sys_wb_want;
+  assign sys_wb_valid = sys_wb_want && lsu_wb_ready_int;
+  assign wb3_valid    = port3_taken_sys ? sys_wb_valid : lsu_wb_valid;
+  assign wb3_ev       = port3_taken_sys ? sys_wb_ev : lsu_wb_ev;
+  assign lsu_wb_ready = lsu_wb_ready_int && !port3_taken_sys;
+
+  // MRET updates mstatus in its own execution cycle, exactly as a CSR write
+  // would, and its redirect is requested from the cycle its entry is complete --
+  // the arbiter's head-retire gate is what makes it act in the cycle the MRET
+  // instruction actually retires.
+  assign csr_mret_valid = sys_wb_valid && sys_mret_q;
+
+  // ------------------------------------------------------- the trap controller
+  // Two things can trap from the head, and they are the same event as far as
+  // everything downstream is concerned:
+  //
+  //   * a *synchronous* exception. The ROB carries the bit and this file carries
+  //     the payload (cause and tval), recorded from the completion that raised it
+  //     -- so a load/store fault from the LSU and an ECALL/EBREAK/illegal-CSR
+  //     from the system unit arrive here by one path.
+  //   * an *interrupt*, offered by mosaic_interrupt only at a boundary this file
+  //     declares legal.
+  //
+  // The PC written to mepc differs between the two and only by what the ISA says:
+  // for a synchronous exception it is the faulting instruction (the head, which
+  // does not retire), and for an interrupt it is the instruction that will
+  // execute after the return -- which is the same head, because the interrupt is
+  // taken *before* it retires.
+  assign exc_gen_match  = exc_rec_gen_q[rob_head_index];
+  assign exc_cause_head = (exc_gen_match == rob_head_gen)
+                          ? exc_cause_q[rob_head_index] : {CORE_XLEN{1'b0}};
+  assign exc_tval_head  = (exc_gen_match == rob_head_gen)
+                          ? exc_tval_q[rob_head_index] : {CORE_XLEN{1'b0}};
+
+  // The retire event's own payload: the same records, for both lanes. The trap
+  // event a memory fault emits on the retire stream therefore carries the cause
+  // and tval the fault reported, instead of the zero a second copy of the
+  // exception path would have supplied.
+  assign pay_exc_cause_vec = {
+      ((exc_rec_gen_q[rob_head1_index] == rob_head1_gen)
+       ? exc_cause_q[rob_head1_index] : {CORE_XLEN{1'b0}}),
+      exc_cause_head};
+  assign pay_exc_tval_vec = {
+      ((exc_rec_gen_q[rob_head1_index] == rob_head1_gen)
+       ? exc_tval_q[rob_head1_index] : {CORE_XLEN{1'b0}}),
+      exc_tval_head};
+
+  assign head_exc_trap = rob_head_valid && rob_head_exc &&
+                         !redirect_valid && !recovering;
+  // Every source of a trap is gated the same way, and the gate has to be here
+  // rather than only on the arrival of the redirect: a resolved system trap is
+  // held until the redirect that takes it, and without the gate it would be
+  // taken a second time in the very cycle that redirect is in flight -- as a
+  // second trap with a stale head. `irq_valid` is already gated this way by
+  // `core_can_trap`.
+  assign sys_trap_take = sys_trap_q && !redirect_valid && !recovering;
+  assign trap_is_irq   = !head_exc_trap && !sys_trap_take && irq_valid;
+  assign trap_decision = head_exc_trap || sys_trap_take || irq_valid;
+
+`ifdef MOSAIC_CORE_MUTANT_TRAP_EPC_NEXT
+  // NEGATIVE CONTROL: the exception Program Counter is the instruction *after*
+  // the faulting one. `mret` then resumes at the wrong instruction, and the
+  // failing program's own trap handler -- which compares mepc against the
+  // address it armed -- reports it.
+  assign trap_epc_sync = rob_head_pc + CORE_XLEN'(4);
+`else
+  assign trap_epc_sync = rob_head_pc;
+`endif
+`ifdef MOSAIC_CORE_MUTANT_IRQ_EPC_NEXT
+  // NEGATIVE CONTROL: the interrupted instruction is skipped by skipping its
+  // Program Counter, the mirror of the case above. mepc must name the instruction
+  // that will execute after `mret` -- the one the interrupt was taken before --
+  // not the one after it.
+  assign trap_epc_irq = rob_head_pc + CORE_XLEN'(4);
+`else
+  assign trap_epc_irq = rob_head_pc;
+`endif
+
+  assign trap_epc   = trap_is_irq ? trap_epc_irq : trap_epc_sync;
+  assign trap_cause = head_exc_trap ? exc_cause_head
+                      : (sys_trap_q ? sys_trap_cause_q : irq_cause);
+  assign trap_tval  = head_exc_trap ? exc_tval_head : {CORE_XLEN{1'b0}};
+
+  assign csr_trap_valid = trap_decision;
+
+  // The legal boundary the interrupt unit is allowed to offer a trap at. It is
+  // *not* a trap already being taken, not a redirect in flight, not a system
+  // macro waiting to be resolved (the CSR access owns the boundary), not a WFI
+  // halt, and the head must exist. A synchronous exception at the head is
+  // excluded too: the instruction's own fault is taken first, and the interrupt
+  // is offered again at the handler's first boundary.
+  assign core_can_trap = rob_head_valid && !rob_head_exc && !sys_head &&
+                         !redirect_valid && !recovering && !core_stop && !wfi_halt;
+
+  // Retirement is suppressed in the cycle a trap is decided, for the interrupt's
+  // sake: a completed instruction at the head would otherwise retire in the same
+  // cycle the interrupt was taken, and mepc would name an instruction that had
+  // already committed. (`rob_head_ready` already excludes the exceptional case.)
+  assign ret_req_gated = ret_req[0] && !trap_decision;
+
+  // The redirect request. A trap acts immediately (the trapping entry does not
+  // retire); an MRET acts through the ordinary head-retire gate, in the cycle the
+  // MRET instruction retires.
+`ifdef MOSAIC_CORE_MUTANT_MRET_PC_WRONG
+  // NEGATIVE CONTROL: MRET returns to the instruction after mepc. The failing
+  // program's interrupt round trip then resumes one instruction late.
+  assign sys_redir_pc = trap_decision ? csr_trap_target
+                                      : (csr_mret_target + CORE_XLEN'(4));
+`else
+  assign sys_redir_pc = trap_decision ? csr_trap_target : csr_mret_target;
+`endif
+  assign sys_redir_req_valid = trap_decision || (sys_head && sys_mret_q);
+  assign sys_redir_act_now   = trap_decision;
+
+  // -------------------------------------------------- the exception payload
+  // Recorded when the completion that raised the exception is accepted by the
+  // ROB, indexed by the slot it names and tagged with that slot's generation.
+  // The system unit's own exception completion takes the port it is offered on,
+  // so the payload is selected by the same "who owns port 3" rule the writeback
+  // path uses -- there is no second arbitration to disagree with.
+  // The LSU is the only producer of an exception completion (the system unit's
+  // is empty by construction, above), so the payload is the LSU's -- and it is
+  // taken in the cycle the writeback arbiter *accepts* it, not in the cycle the
+  // arbiter publishes it. Those are different cycles: the arbiter holds one
+  // completion per producer and publishes the lowest pending one, so the bus a
+  // later cycle carries a *different* producer's event. Sampling the bus at
+  // publish time captured the cause and tval of whatever happened to be offered
+  // then, which is exactly the defect this ordering removes.
+  logic exc_offer;
+  assign exc_offer   = lsu_wb_valid && lsu_wb_ready_int && !port3_taken_sys &&
+                       lsu_wb_ev.exc.valid;
+  assign exc_cause_win = lsu_wb_ev.exc.cause;
+  assign exc_tval_win  = lsu_wb_ev.exc.tval;
+  assign exc_capture   = exc_offer;
+
+  always_ff @(posedge clk) begin
+    if (rst) begin
+      for (int unsigned i = 0; i < CORE_ROB_N; i++) begin
+        exc_cause_q[i]   <= {CORE_XLEN{1'b0}};
+        exc_tval_q[i]    <= {CORE_XLEN{1'b0}};
+        exc_rec_gen_q[i] <= {CORE_RGEN_W{1'b0}};
+      end
+      sys_valid_q        <= 1'b0;
+      sys_index_q        <= {CORE_IDX_W{1'b0}};
+      sys_gen_q          <= {CORE_RGEN_W{1'b0}};
+      sys_uop_q          <= {CORE_UOP_W{1'b0}};
+      sys_csr_addr_q     <= 12'd0;
+      sys_csr_op_q       <= mosaic_pkg::CSR_NONE;
+      sys_csr_reads_q    <= 1'b0;
+      sys_csr_writes_q   <= 1'b0;
+      sys_ecall_q        <= 1'b0;
+      sys_ebreak_q       <= 1'b0;
+      sys_mret_q         <= 1'b0;
+      sys_wfi_q          <= 1'b0;
+      sys_src1_q         <= {CORE_XLEN{1'b0}};
+      sys_dst_tag_q      <= {CORE_TAG_W{1'b0}};
+      sys_dst_gen_q      <= {CORE_IGEN_W{1'b0}};
+      sys_dst_x0_q       <= 1'b1;
+      sys_redirect_delay_q <= 1'b0;
+      sys_wb_pending_q   <= 1'b0;
+      trap_irq_prev      <= 1'b0;
+      sys_trap_q         <= 1'b0;
+      sys_trap_cause_q   <= {CORE_XLEN{1'b0}};
+      sys_exec_ctr       <= 32'd0;
+      exc_capture_ctr    <= 32'd0;
+      exc_gen_mismatch_ctr <= 32'd0;
+      trap_irq_ctr       <= 32'd0;
+      sys_redirect_ctr   <= 32'd0;
+    end else begin
+      // One completion with an exception payload per cycle, and its slot's
+      // generation with it.
+      if (exc_capture) begin
+        exc_cause_q[lsu_wb_ev.id.rob_index]   <= exc_cause_win;
+        exc_tval_q[lsu_wb_ev.id.rob_index]    <= exc_tval_win;
+        exc_rec_gen_q[lsu_wb_ev.id.rob_index] <= lsu_wb_ev.id.rob_gen;
+      end
+
+      // The staging entry: filled with the inserted macro, freed when that macro
+      // retires, and cleared outright by a redirect (whose flush discards
+      // everything at and above the head -- which includes the staged macro
+      // whenever a redirect is issued).
+      if (redirect_valid) begin
+        sys_valid_q <= 1'b0;
+      end else if (sys_valid_q && rob_retire_ack && sys_head) begin
+        sys_valid_q <= 1'b0;
+      end else if (disp_sys_valid && sys_ins_ready_int) begin
+        sys_valid_q      <= 1'b1;
+        // The identity fields are the truncated uop id's own layout --
+        // {rob_index, rob_gen, uop_index}, most significant first, exactly as
+        // mosaic_uop_pkg defines it and as dispatch packs it.
+        sys_index_q      <= disp_sys_id[CORE_UOP_W + CORE_RGEN_W +: CORE_IDX_W];
+        sys_gen_q        <= disp_sys_id[CORE_UOP_W +: CORE_RGEN_W];
+        sys_uop_q        <= disp_sys_id[CORE_UOP_W-1:0];
+        sys_csr_addr_q   <= disp_sys_csr_addr;
+        sys_csr_op_q     <= mosaic_pkg::csr_op_e'(disp_sys_csr_op);
+        sys_csr_reads_q  <= disp_sys_csr_reads;
+        sys_csr_writes_q <= disp_sys_csr_writes;
+        sys_ecall_q      <= disp_sys_is_ecall;
+        sys_ebreak_q     <= disp_sys_is_ebreak;
+        sys_mret_q       <= disp_sys_is_mret;
+        sys_wfi_q        <= disp_sys_is_wfi;
+        sys_src1_q       <= disp_sys_src1_val;
+        sys_dst_tag_q    <= disp_sys_dst_tag;
+        sys_dst_gen_q    <= disp_sys_dst_gen;
+        sys_dst_x0_q     <= disp_sys_dst_x0;
+      end
+
+      sys_redirect_delay_q <= arb_sys_redirect;
+      trap_irq_prev        <= trap_is_irq;
+      // The completion in flight: offered once, released when the macro leaves.
+      if (redirect_valid || (sys_head && rob_retire_ack)) begin
+        sys_wb_pending_q <= 1'b0;
+      end else if (sys_wb_valid) begin
+        sys_wb_pending_q <= 1'b1;
+      end
+      // The resolved trap is held until the redirect that takes it, and cleared
+      // by that redirect like everything else at the head.
+      if (redirect_valid) begin
+        sys_trap_q <= 1'b0;
+      end else if (sys_wb_valid && sys_trap_now) begin
+        sys_trap_q       <= 1'b1;
+        sys_trap_cause_q <= sys_exc_cause;
+      end
+
+      if (sys_wb_valid)     sys_exec_ctr <= sys_exec_ctr + 32'd1;
+      if (exc_capture)      exc_capture_ctr <= exc_capture_ctr + 32'd1;
+      if (head_exc_trap && (exc_gen_match != rob_head_gen))
+        exc_gen_mismatch_ctr <= exc_gen_mismatch_ctr + 32'd1;
+      if (trap_is_irq && !trap_irq_prev) trap_irq_ctr <= trap_irq_ctr + 32'd1;
+      if (arb_sys_redirect) sys_redirect_ctr <= sys_redirect_ctr + 32'd1;
+    end
+  end
+
+  assign o_sys_exec_ctr        = sys_exec_ctr;
+  assign o_exc_capture_ctr     = exc_capture_ctr;
+  assign o_exc_gen_mismatch_ctr = exc_gen_mismatch_ctr;
+  assign o_trap_irq_ctr        = trap_irq_ctr;
+  assign o_sys_redirect_ctr    = sys_redirect_ctr;
+  assign o_trap_valid          = trap_decision;
+  assign o_trap_is_irq         = trap_is_irq;
+  assign o_trap_cause          = trap_cause;
+  assign o_trap_tval           = trap_tval;
+  assign o_trap_epc            = trap_epc;
+  assign o_trap_target         = csr_trap_target;
+  assign o_mret_target         = csr_mret_target;
+  assign o_irq_valid           = irq_valid;
+  assign o_irq_cause           = irq_cause;
+  assign o_irq_ctr             = irq_ctr;
+  assign o_wfi_halt            = wfi_halt;
+  assign o_spurious_wake_ctr   = spurious_wake_ctr;
+  assign o_halt_cycles         = halt_cycles;
+
+  // ==========================================================================
   // 11. Redirect arbitration
   // ==========================================================================
   mosaic_redirect_arb u_redir (
@@ -1501,6 +2179,16 @@ module mosaic_core (
       .req_rob_gen     ({c1_redir_gen, c0_redir_gen}),
       .req_taken       ({c1_redir_taken, c0_redir_taken}),
       .req_ack         (redir_ack_vec),
+      // The trap/MRET request. It is at the ROB head by construction and always
+      // redirects; `act_now` is the trap's licence to act on a head that is not
+      // retiring (an exception is architecturally final and never retires).
+      .sys_req_valid   (sys_redir_req_valid),
+      .sys_req_pc      (sys_redir_pc),
+      .sys_req_rob_index(rob_head_index),
+      .sys_req_rob_gen (rob_head_gen),
+      .sys_req_act_now (sys_redir_act_now),
+      .o_sys_act       (),
+      .o_sys_redirect  (arb_sys_redirect),
       .head_valid      (rob_head_valid),
       .head_index      (rob_head_index),
       .head_gen        (rob_head_gen),
@@ -1530,13 +2218,47 @@ module mosaic_core (
   // ==========================================================================
   // 12. Flush and recovery control
   // ==========================================================================
-  assign rob_flush_pulse      = redirect_valid;
+  // The kill a system redirect performs. The negative control removes it at one
+  // point, so "the trap killed the younger work" is one named decision and not a
+  // property that four separate wires happen to agree about.
+`ifdef MOSAIC_CORE_MUTANT_TRAP_NO_FLUSH
+  logic sys_redirect_kill;
+  assign sys_redirect_kill = 1'b0;
+`else
+  logic sys_redirect_kill;
+  assign sys_redirect_kill = arb_sys_redirect;
+`endif
+
+  // The trap's own flush is *not* the registered redirect: a trap must drop the
+  // entry at the head in the cycle it is taken. An exceptional entry is
+  // architecturally final and must not sit in the buffer for a cycle (the
+  // retire event stream would publish it twice), and an interrupted entry must
+  // not be able to retire in the cycle after the interrupt was taken. The
+  // *redirect* still comes from the arbiter one cycle later, exactly as a
+  // branch's does, and drives the front end, the clusters and the queues.
+  assign rob_flush_pulse      = redirect_valid | trap_decision;
   assign cluster_flush_pulse  = redirect_valid;
+
+  // The front end's own purge. It is the same redirect, with one distinction
+  // given to it by the negative control below: the fetch redirect and the
+  // buffer purge are what stop the *front end* from continuing down the
+  // interrupted path, while the ROB flush is what stops the young work already
+  // in the buffer. A trap that does one and not the other is still a defect, so
+  // the two are named separately.
+`ifdef MOSAIC_CORE_MUTANT_TRAP_NO_FETCH_REDIRECT
+  assign fetch_redir_valid = redirect_valid && !arb_sys_redirect;
+`else
+  assign fetch_redir_valid = redirect_valid;
+`endif
+  assign dbuf_purge = fetch_redir_valid;
 
   always_ff @(posedge clk) begin
     if (rst) begin
       recovering <= 1'b0;
-    end else if (redirect_valid) begin
+    end else if (redirect_valid || trap_decision) begin
+      // A trap holds the front end from the cycle after it is taken: the ROB
+      // flush at the trap cycle has already emptied the buffer, and nothing may
+      // allocate into it before the redirect has moved the fetch PC.
       recovering <= 1'b1;
     end else if (recovering && !c0_flush_busy && !c1_flush_busy) begin
       recovering <= 1'b0;
@@ -1571,8 +2293,16 @@ module mosaic_core (
   assign ren_ckpt_valid = redir_act_valid;
   assign ren_squash     = redirect_valid;
 `else
-  assign ren_ckpt_valid = redirect_valid;
-  assign ren_squash     = redirect_delay_q;
+  // A *trap* or MRET redirect is not a branch redirect and must not take a
+  // branch checkpoint: its boundary is not a committed one (the trapping
+  // instruction never committed, and younger work is in the machine), so the
+  // checkpoint would be refused and the speculative map left corrupt. It uses
+  // the CSR/trap path's full restore instead -- spec := cmt and free := ~cmt --
+  // in the same cycle as the flush, which is exactly "everything at and above
+  // the head is gone".
+  assign ren_ckpt_valid  = redirect_valid && !arb_sys_redirect;
+  assign ren_squash      = redirect_delay_q && !sys_redirect_delay_q;
+  assign ren_flush_restore = sys_redirect_kill | trap_decision;
 `endif
 
   always_ff @(posedge clk) begin
@@ -1690,8 +2420,8 @@ module mosaic_core (
       .pay_store_addr ({(CORE_RET_N*CORE_XLEN){1'b0}}),
       .pay_store_data ({(CORE_RET_N*CORE_XLEN){1'b0}}),
       .pay_store_size ({(CORE_RET_N*CORE_SIZE_W){1'b0}}),
-      .pay_exc_cause  ({(CORE_RET_N*CORE_XLEN){1'b0}}),
-      .pay_exc_tval   ({(CORE_RET_N*CORE_XLEN){1'b0}}),
+      .pay_exc_cause  (pay_exc_cause_vec),
+      .pay_exc_tval   (pay_exc_tval_vec),
       .flush_valid    (rob_flush_pulse),
       .retire_req     (ret_req),
       .trap_flush     (),
@@ -1971,12 +2701,124 @@ module mosaic_core (
   // file uses.
   assign disp_mem_full_id = {1'b0, disp_mem_id};
 
+  // ------------------------------------------------------ the store fault check
+  //
+  // A store's address is known before it is allocated -- dispatch holds the
+  // macro until its base operand and its payload are readable, and the address
+  // is `base + imm`, which this file computes once, the same way the endpoint
+  // computes it. So the two faults a store can take are decidable *before* the
+  // store retires, and a precise trap needs exactly that: the store must not
+  // have retired when its trap is taken, or mepc would name an instruction that
+  // had already committed.
+  //
+  // The store queue cannot supply this. Its contract is "a store may reach
+  // memory only when it is authorised *and* non-faulting", and the endpoint --
+  // which owns the fault boundary for the accesses it performs -- only learns
+  // about an access fault when the store *drains*, which is after retirement. So
+  // the decision this file needs is not the drain's: it is "may this store be
+  // allocated at all", and it is made here, from the same address and the same
+  // configuration the platform's own rules come from.
+  //
+  // The rules are the platform's, from `config/memory/p0.json` through the
+  // generated `mosaic_cfg_pkg.svh`: an access must lie inside one region, and
+  // the region must be writable. boot_rom is readable and executable but not
+  // writable; the test-harness window defines no writable register (the frozen
+  // protocol's TOHOST and FROMHOST live in RAM); uart, clint and ram are
+  // writable. The precedence is the endpoint's: misalignment is decided from the
+  // address alone, before the map is consulted, so a misaligned store to an
+  // unmapped page reports a misaligned store and not an access fault.
+  //
+  // A faulting store is *not* allocated into the store queue: its completion is
+  // the fault, delivered on the same writeback port a load's fault uses, so the
+  // ROB marks the entry exceptional exactly as it does for a load and the trap
+  // controller takes it with the store's PC in mepc.
+  localparam logic [1:0] STORE_OK       = 2'd0;
+  localparam logic [1:0] STORE_MISALIGN = 2'd1;
+  localparam logic [1:0] STORE_ACCESS   = 2'd2;
+
+  function automatic logic [1:0] store_fault_kind(input logic [CORE_XLEN-1:0] addr,
+                                                  input logic [2:0] size);
+    logic [CORE_XLEN-1:0] bytes;
+    logic covered;
+    logic writable;
+    logic in_region;
+    begin
+      bytes    = (CORE_XLEN'(1) << size);
+      covered  = 1'b0;
+      writable = 1'b0;
+      in_region = 1'b0;
+      // "the access lies inside this region, whole": the subtraction is the
+      // containment test and it cannot be fooled by an address below the base,
+      // because the wrapped difference is then far larger than any size.
+      // boot_rom: readable and executable, not writable.
+      if ((addr - mosaic_cfg_pkg::MOSAIC_BOOT_ROM_BASE) <
+          mosaic_cfg_pkg::MOSAIC_BOOT_ROM_SIZE) begin
+        covered   = 1'b1;
+        writable  = 1'b0;
+        in_region = (((addr - mosaic_cfg_pkg::MOSAIC_BOOT_ROM_BASE) + bytes) <=
+                     mosaic_cfg_pkg::MOSAIC_BOOT_ROM_SIZE);
+      end
+      if ((addr - mosaic_cfg_pkg::MOSAIC_UART_BASE) <
+          mosaic_cfg_pkg::MOSAIC_UART_SIZE) begin
+        covered   = 1'b1;
+        writable  = 1'b1;
+        in_region = (((addr - mosaic_cfg_pkg::MOSAIC_UART_BASE) + bytes) <=
+                     mosaic_cfg_pkg::MOSAIC_UART_SIZE);
+      end
+      // The test-harness window is mapped and defines no writable register; the
+      // frozen protocol's TOHOST and FROMHOST live in RAM.
+      if ((addr - mosaic_cfg_pkg::MOSAIC_TEST_HARNESS_BASE) <
+          mosaic_cfg_pkg::MOSAIC_TEST_HARNESS_SIZE) begin
+        covered   = 1'b1;
+        writable  = 1'b0;
+        in_region = (((addr - mosaic_cfg_pkg::MOSAIC_TEST_HARNESS_BASE) + bytes) <=
+                     mosaic_cfg_pkg::MOSAIC_TEST_HARNESS_SIZE);
+      end
+      if ((addr - mosaic_cfg_pkg::MOSAIC_CLINT_BASE) <
+          mosaic_cfg_pkg::MOSAIC_CLINT_SIZE) begin
+        covered   = 1'b1;
+        writable  = 1'b1;
+        in_region = (((addr - mosaic_cfg_pkg::MOSAIC_CLINT_BASE) + bytes) <=
+                     mosaic_cfg_pkg::MOSAIC_CLINT_SIZE);
+      end
+      if ((addr - mosaic_cfg_pkg::MOSAIC_RAM_BASE) <
+          mosaic_cfg_pkg::MOSAIC_RAM_SIZE) begin
+        covered   = 1'b1;
+        writable  = 1'b1;
+        in_region = (((addr - mosaic_cfg_pkg::MOSAIC_RAM_BASE) + bytes) <=
+                     mosaic_cfg_pkg::MOSAIC_RAM_SIZE);
+      end
+
+      if ((addr & (bytes - CORE_XLEN'(1))) != {CORE_XLEN{1'b0}}) begin
+        store_fault_kind = STORE_MISALIGN;
+      end else if (!covered || !in_region || !writable) begin
+        store_fault_kind = STORE_ACCESS;
+      end else begin
+        store_fault_kind = STORE_OK;
+      end
+    end
+  endfunction
+
+  logic [CORE_XLEN-1:0] disp_store_addr;
+  logic [1:0]           disp_store_fault;
+
+  assign disp_store_addr  = disp_mem_base + disp_mem_imm;
+  assign disp_store_fault = store_fault_kind(disp_store_addr, disp_mem_size);
+  assign disp_store_faults = disp_mem_valid && disp_mem_is_store &&
+                             (disp_store_fault != STORE_OK);
+
+  // A store that faults takes the *completion* path and not the queue's: it is
+  // never allocated into the store queue (the queue's contract is that only a
+  // non-faulting store may reach memory) and its completion is the fault. A
+  // store that does not fault takes the queue exactly as before.
   assign disp_mem_ready = disp_mem_is_store
-      ? (sq_alloc_ready && lsu_wb_ready && !lq_result_valid)
+      ? (disp_store_faults ? (lsu_wb_ready && !lq_result_valid)
+                           : (sq_alloc_ready && lsu_wb_ready && !lq_result_valid))
       : lq_alloc_ready;
 
   assign lq_alloc_valid  = disp_mem_valid && !disp_mem_is_store && disp_mem_ready;
-  assign sq_alloc_valid  = disp_mem_valid &&  disp_mem_is_store && disp_mem_ready;
+  assign sq_alloc_valid  = disp_mem_valid &&  disp_mem_is_store && !disp_store_faults &&
+                           disp_mem_ready;
   assign store_cmp_valid = disp_mem_valid &&  disp_mem_is_store && disp_mem_ready;
 
   // A store is complete when both its operands are captured: no register value,
@@ -1989,11 +2831,16 @@ module mosaic_core (
     store_wb_ev.dst.x0      = 1'b1;
     store_wb_ev.value_valid = 1'b0;
     store_wb_ev.value       = {CORE_XLEN{1'b0}};
-    store_wb_ev.exc.valid   = 1'b0;
-    store_wb_ev.exc.cause   = {CORE_XLEN{1'b0}};
-    store_wb_ev.exc.tval    = {CORE_XLEN{1'b0}};
     store_wb_ev.is_store    = 1'b1;
     store_wb_ev.is_load     = 1'b0;
+    // The completion of a faulting store carries the fault and nothing else, so
+    // the ROB marks the entry exceptional through the same path a load's fault
+    // uses and the store never retires.
+    store_wb_ev.exc.valid   = disp_store_faults;
+    store_wb_ev.exc.cause   = (disp_store_fault == STORE_MISALIGN)
+                              ? mosaic_pkg::EXC_STORE_MISALIGNED
+                              : mosaic_pkg::EXC_STORE_ACCESS;
+    store_wb_ev.exc.tval    = disp_store_addr;
   end
 
   // A load's completion carries the merged, sign-extended value the load queue

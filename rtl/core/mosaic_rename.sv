@@ -558,6 +558,27 @@ module mosaic_rename (
     // caller should sample in the cycle it asserts `ckpt_valid`.
     input  logic                                  ckpt_valid,
     input  logic                                  squash,
+    // ---------------------------------------------------------- full restore
+    // A precise trap boundary cannot use the branch checkpoint rule. A branch
+    // redirects *after it retires*, so the recovery point it takes is at a
+    // committed boundary (`spec == cmt`). A synchronous exception redirects
+    // *instead of retiring*, and the instructions younger than it are already
+    // in the machine and have already allocated tags -- and the trapping
+    // instruction's own destination is one of them. There is therefore no
+    // cycle in which `spec == cmt` holds, and the checkpoint the branch path
+    // takes would be refused.
+    //
+    // What a trap needs is exact and unconditional: the machine keeps every
+    // *committed* mapping and nothing else. So this input restores
+    //
+    //     spec := cmt (post-commit)          free := ~{ tags named by cmt }
+    //
+    // which is precisely "everything at and above the head is gone". It also
+    // (re)establishes a recovery point, because after it `spec == cmt` really
+    // does hold. It is a one-cycle pulse, asserted in the same cycle as the
+    // ROB flush, and allocation is refused in that cycle for the same reason
+    // the squash path refuses it.
+    input  logic                                  flush_restore = 1'b0,
     output logic                                  squash_accepted,
     output logic                                  squash_underflow,      // squash with no checkpoint
     output logic                                  squash_not_committed,  // squash to a non-boundary checkpoint
@@ -798,6 +819,14 @@ module mosaic_rename (
 
   assign alloc2_wants_tag = alloc2_req && (alloc2_rd != 5'd0);
 
+  // "Allocation may not proceed this cycle": a squash owns the cycle, and so does
+  // the trap path's full restore. Both are states in which the free set is being
+  // recomputed from the committed map and an allocation would race that
+  // recomputation. Naming the rule once keeps the two refusal reasons in step --
+  // every refusal below is one of them plus the group's own requirement.
+  logic alloc_blocked;
+  assign alloc_blocked = squash || flush_restore;
+
   // How many tags the group needs is how many of its lanes write a real
   // destination: 0, 1 or 2. The two-bit sum is deliberate -- a one-bit sum would
   // report a two-tag group as needing none, which is the "always stall on 2"
@@ -808,10 +837,10 @@ module mosaic_rename (
   // before any tag is taken -- is what makes the group atomic.
   assign group_enough = (REN_FCNT_W'(free_count) >= REN_FCNT_W'(group_need));
 
-  assign alloc_squashed  = alloc_req && squash;
-  assign alloc2_squashed = alloc2_req && squash;
-  assign alloc_is_x0     = alloc_req && (alloc_rd == 5'd0) && !squash;
-  assign alloc2_is_x0    = alloc2_req && (alloc2_rd == 5'd0) && !squash;
+  assign alloc_squashed  = alloc_req && alloc_blocked;
+  assign alloc2_squashed = alloc2_req && alloc_blocked;
+  assign alloc_is_x0     = alloc_req && (alloc_rd == 5'd0) && !alloc_blocked;
+  assign alloc2_is_x0    = alloc2_req && (alloc2_rd == 5'd0) && !alloc_blocked;
 
 `ifdef MOSAIC_RENAME_MUTANT_NO_EXHAUST_CHECK
   // NEGATIVE CONTROL 4 (I-013): exhaustion is not detected. A group is taken and
@@ -820,20 +849,20 @@ module mosaic_rename (
   // accepted, so the defect is visible whichever lane wants the tag.
   assign alloc_exhausted  = 1'b0;
   assign alloc2_exhausted = 1'b0;
-  assign alloc_accepted   = alloc_req && !squash;
-  assign alloc2_accepted  = alloc_req && alloc2_req && !squash;
+  assign alloc_accepted   = alloc_req && !alloc_blocked;
+  assign alloc2_accepted  = alloc_req && alloc2_req && !alloc_blocked;
 `elsif MOSAIC_RENAME_MUTANT_NONATOMIC_GROUP
   // NEGATIVE CONTROL 7 (I-014): the group is not atomic. Each lane is accepted on
   // its *own* requirement, so a group that needs two tags and finds one allocates
   // lane 0 and stalls lane 1 -- the half-allocated group the card forbids. Lane 0
   // is left holding a tag the ROB never records as allocated, and lane 1's
   // instruction is refused after its predecessor's tag has been consumed.
-  assign alloc_exhausted  = alloc_req && !squash && lane0_wants_tag && (free_count == 0);
-  assign alloc2_exhausted = alloc_req && alloc2_req && !squash && alloc2_wants_tag &&
+  assign alloc_exhausted  = alloc_req && !alloc_blocked && lane0_wants_tag && (free_count == 0);
+  assign alloc2_exhausted = alloc_req && alloc2_req && !alloc_blocked && alloc2_wants_tag &&
                             (free_count == 0);
-  assign alloc_accepted   = alloc_req && !squash &&
+  assign alloc_accepted   = alloc_req && !alloc_blocked &&
                             ((free_count != 0) || (alloc_rd == 5'd0));
-  assign alloc2_accepted  = alloc_req && alloc2_req && !squash &&
+  assign alloc2_accepted  = alloc_req && alloc2_req && !alloc_blocked &&
                             ((free_count != 0) || (alloc2_rd == 5'd0));
 `else
   // The two refusal reasons are mutually exclusive, and they have to be. A squash
@@ -846,11 +875,11 @@ module mosaic_rename (
   // group of two real destinations with one free tag is refused whole, and the
   // tag it did not take is still free for the next cycle's single-width
   // allocation. Both lanes report the same refusal, because it is one decision.
-  assign alloc_exhausted  = alloc_req && !squash && (group_need != 2'd0) && !group_enough;
-  assign alloc2_exhausted = alloc_req && alloc2_req && !squash && (group_need != 2'd0) &&
+  assign alloc_exhausted  = alloc_req && !alloc_blocked && (group_need != 2'd0) && !group_enough;
+  assign alloc2_exhausted = alloc_req && alloc2_req && !alloc_blocked && (group_need != 2'd0) &&
                             !group_enough;
-  assign alloc_accepted   = alloc_req && !squash && group_enough;
-  assign alloc2_accepted  = alloc_req && alloc2_req && !squash && group_enough;
+  assign alloc_accepted   = alloc_req && !alloc_blocked && group_enough;
+  assign alloc2_accepted  = alloc_req && alloc2_req && !alloc_blocked && group_enough;
 `endif
 
 `ifdef MOSAIC_RENAME_MUTANT_X0_ALLOC
@@ -1215,6 +1244,19 @@ module mosaic_rename (
   logic [REN_GEN_W-1:0]   gen_q  [REN_ENTRIES];
   logic [REN_ENTRIES-1:0] wbd_q;
 
+  // Which physical tags the committed map names, as a bitmap: the ownership
+  // that a trap restore preserves. Taken from the *post-commit* map, so a commit
+  // landing in the restore cycle keeps its tag owned -- the same ordering rule
+  // the maps block follows.
+  logic [REN_ENTRIES-1:0] owned_from_cmt;
+
+  always_comb begin
+    owned_from_cmt = {REN_ENTRIES{1'b0}};
+    for (int unsigned a = 0; a < REN_ARCH_REGS; a++) begin
+      owned_from_cmt[cmt_map_q[a]] = 1'b1;
+    end
+  end
+
   always_comb begin
     free_q = free_bits;
     genv_q = gen_valid;
@@ -1306,6 +1348,35 @@ module mosaic_rename (
     if (wb_accepted) begin
       wbd_q[wb_tag] = 1'b1;
     end
+
+    // 5. The trap path's full restore, and it is last because it is absolute:
+    //    the free set becomes exactly the complement of the committed map.
+    //
+    //    The branch squash above is a *delta* -- it undoes the window since the
+    //    last checkpoint. That is the right shape when the redirecting
+    //    instruction retained its effects (it retired), and the wrong shape for
+    //    a trap, where the discarded set is "everything at and above the head"
+    //    and no checkpoint exists at that boundary. Recomputing the set from the
+    //    committed map needs no journal at all and cannot restore less than the
+    //    truth: after a precise trap, the only mappings that may exist are the
+    //    committed ones.
+    //
+    //    Generations are deliberately *not* rolled back. The generation counts
+    //    allocations, and every allocation of a reclaimed tag steps it; a late
+    //    writeback from a discarded instruction carries the generation that
+    //    allocation produced, so it stops matching the moment the tag is handed
+    //    to a new owner. Rolling it back would make an old writeback match a new
+    //    owner, which is the ABA the generation exists to prevent.
+`ifdef MOSAIC_RENAME_MUTANT_FLUSH_NO_FREE
+    // NEGATIVE CONTROL: the trap restore puts the speculative map back but
+    // leaves every tag the discarded instructions allocated marked owned, so the
+    // free set leaks one tag per squashed instruction -- a register file that
+    // quietly shrinks until allocation stalls.
+`else
+    if (flush_restore) begin
+      free_q = ~owned_from_cmt;
+    end
+`endif
   end
 
   // ---------------------------------------------------- next-state: the maps
@@ -1338,6 +1409,23 @@ module mosaic_rename (
         spec_gen_q[a] = cmt_gen_q[a];
       end
     end
+
+    // The trap path's restore. Same assignment as the squash, a different
+    // precondition: it is unconditional, because it does not restore *to* a
+    // sampled boundary -- it re-derives the boundary from the committed map.
+`ifdef MOSAIC_RENAME_MUTANT_FLUSH_NO_SPEC
+    // NEGATIVE CONTROL: the free set is restored but the speculative map is not,
+    // so an architectural register whose writer was discarded still points at a
+    // tag that was just reclaimed. The next reader of that register gets whatever
+    // the new owner wrote.
+`else
+    if (flush_restore) begin
+      for (int unsigned a = 0; a < REN_ARCH_REGS; a++) begin
+        spec_map_q[a] = cmt_map_q[a];
+        spec_gen_q[a] = cmt_gen_q[a];
+      end
+    end
+`endif
 
     if (alloc_new_valid) begin
       spec_map_q[alloc_rd] = scan_tag;
@@ -1378,7 +1466,12 @@ module mosaic_rename (
   logic [REN_JIDX_W-1:0] j_idx1;
   logic [REN_JLEN_W-1:0] j_tail;
 
-  assign j_tail = (ckpt_valid && !squash) ? {REN_JLEN_W{1'b0}} : j_len;
+  // A checkpoint (a branch redirect's recovery point) and the trap path's full
+  // restore both empty the window, and both do it *before* this cycle's entries
+  // would be appended. A squash cycle clears it too, because the squash
+  // consumes the window.
+  assign j_tail = ((ckpt_valid && !squash) || flush_restore)
+                  ? {REN_JLEN_W{1'b0}} : j_len;
 
 `ifdef MOSAIC_RENAME_MUTANT_CKPT_ALLOC_LEAK
   // NEGATIVE CONTROL 12 (I-014): a checkpoint cycle's allocations are not
@@ -1492,7 +1585,13 @@ module mosaic_rename (
 
       j_len      <= j_len_q;
       j_overflow <= j_overflow_q;
-      if (ckpt_valid && !squash) begin
+      if (flush_restore) begin
+        // The restore leaves `spec == cmt` by construction, so the very next
+        // branch redirect has a usable recovery point even though no branch
+        // checkpoint was taken on this path.
+        ckpt_seen        <= 1'b1;
+        ckpt_at_boundary <= 1'b1;
+      end else if (ckpt_valid && !squash) begin
         ckpt_seen <= 1'b1;
         // The recovery point is the state at the start of this cycle, so the
         // boundary test is the pre-edge comparison, not one made after the

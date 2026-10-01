@@ -124,6 +124,11 @@
 //   RO_WRITE_ACCEPTED a write to a read-only CSR is reported legal
 //   CYCLE_WRITABLE  writes to the cycle/instret shadows are accepted and land
 //                   in mcycle/minstret
+//   NO_FIELD_MASK   the mstatus write is not masked to the generated writable
+//                   fields, so bits the profile declares unmodifiable land in
+//                   the register (exercised through the core by
+//                   CASE=core.trap_csr_program, which reads mstatus back after
+//                   writing all ones)
 // ============================================================================
 
 `default_nettype none
@@ -426,9 +431,19 @@ module mosaic_csr (
                 | MSTATUS_MPP;
     end else if (wr_accept) begin
       case (csr_addr_i)
+`ifdef MOSAIC_CSR_MUTANT_NO_FIELD_MASK
+        // MUTANT: the mstatus write does not apply the generated field mask, so
+        // a value whose bits the profile declares unmodifiable lands in the
+        // register. The mask is not written here -- it is generated from
+        // config/csr/mode_m.json -- which is why this control is about the
+        // *use* of the mask and not about a table that could drift.
+        mosaic_csr_pkg::MOSAIC_CSR_ADDR_MSTATUS:
+          mstatus_d = csr_op_result;
+`else
         mosaic_csr_pkg::MOSAIC_CSR_ADDR_MSTATUS:
           mstatus_d = (mstatus_q & ~mosaic_csr_pkg::MOSAIC_CSR_WMASK_MSTATUS)
                     | (csr_op_result & mosaic_csr_pkg::MOSAIC_CSR_WMASK_MSTATUS);
+`endif
         mosaic_csr_pkg::MOSAIC_CSR_ADDR_MIE:
           mie_d = (mie_q & ~mosaic_csr_pkg::MOSAIC_CSR_WMASK_MIE)
                 | (csr_op_result & mosaic_csr_pkg::MOSAIC_CSR_WMASK_MIE);

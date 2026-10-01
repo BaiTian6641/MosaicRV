@@ -95,8 +95,68 @@ CORE_MEM_MUTANTS = [
     ),
 ]
 
+# CASE=core.trap_csr_program's controls. Each names the rule it breaks and the
+# text of the first failure the mutation must produce.
+TRAP_MUTANTS = [
+    (
+        "MOSAIC_CORE_MUTANT_TRAP_EPC_NEXT",
+        "a synchronous trap writes the PC *after* the faulting instruction into "
+        "mepc, so mret resumes at the wrong instruction",
+        "names the faulting instruction",
+    ),
+    (
+        "MOSAIC_CORE_MUTANT_IRQ_EPC_NEXT",
+        "an interrupt writes the PC after the interrupted instruction into mepc, "
+        "so the instruction it was taken before is skipped on return",
+        "the retirement stream follows the reference",
+    ),
+    (
+        "MOSAIC_CORE_MUTANT_TRAP_NO_FLUSH",
+        "the trap's redirect does not flush the ROB or restore the rename state, "
+        "so the trapping instruction and everything younger stay in the machine "
+        "and the trap is re-taken",
+        "the rename recovery counters stay zero",
+    ),
+    (
+        "MOSAIC_CORE_MUTANT_TRAP_NO_FETCH_REDIRECT",
+        "the trap redirects neither the fetch PC nor the decode buffer, so the "
+        "front end keeps running down the interrupted path and retires it",
+        "the retirement stream follows the reference",
+    ),
+    (
+        "MOSAIC_CORE_MUTANT_MRET_PC_WRONG",
+        "MRET returns to the instruction after mepc instead of mepc",
+        "the retirement stream follows the reference",
+    ),
+    (
+        "MOSAIC_CSR_MUTANT_MRET_NO_RESTORE",
+        "MRET sets MPIE but does not restore MIE from it, so the interrupt enable "
+        "the trap cleared never comes back",
+        "retire 71207 value",
+    ),
+    (
+        "MOSAIC_CSR_MUTANT_NO_FIELD_MASK",
+        "the mstatus write does not apply the generated field mask, so bits the "
+        "profile declares unmodifiable land in the register",
+        "retire 110 value",
+    ),
+    (
+        "MOSAIC_INTERRUPT_MUTANT_MIE_IGNORED",
+        "the global enable is dropped, so an interrupt is offered and taken while "
+        "mstatus.MIE is clear",
+        "an interrupt is only offered at a legal boundary",
+    ),
+    (
+        "MOSAIC_INTERRUPT_MUTANT_PRIORITY_REVERSED",
+        "the interrupt priority order is inverted, so the timer wins over the "
+        "software interrupt",
+        "cause is the configured source",
+    ),
+]
+
 MUTANTS_BY_CASE = {
     "core.mem_program": CORE_MEM_MUTANTS,
+    "core.trap_csr_program": TRAP_MUTANTS,
 }
 
 

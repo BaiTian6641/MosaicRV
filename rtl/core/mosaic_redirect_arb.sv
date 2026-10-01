@@ -97,6 +97,33 @@ module mosaic_redirect_arb (
     input  logic [RDA_N-1:0]           req_taken,
     output logic [RDA_N-1:0]           req_ack,     // consumed: acted on or dropped
 
+    // ------------------------------------------------- the system/trap request
+    // This is the third thing that can redirect the front end: a trap entry or
+    // an MRET. It is not a cluster branch, and it is deliberately *not* another
+    // element of the `req_*` array, because its two rules differ:
+    //
+    //   * it is always at the ROB head by construction -- the core raises it
+    //     only for the entry it is looking at this cycle -- so it is always the
+    //     oldest live request and always wins;
+    //   * `sys_req_act_now` lets it act in the cycle its entry is the head even
+    //     when that entry is *not* retiring. A trapping instruction never
+    //     retires (its exception is architecturally final and the flush drops
+    //     it), so the branch rule's `head_retire` gate would make a trap
+    //     impossible to take. An MRET *does* retire, so it leaves act_now low
+    //     and uses the ordinary head-retire gate.
+    //
+    // `sys_req_taken` is implicitly 1: a trap or an MRET always redirects.
+    input  logic                       sys_req_valid,
+    input  logic [RDA_XLEN-1:0]        sys_req_pc,
+    input  logic [RDA_IDX_W-1:0]       sys_req_rob_index,
+    input  logic [RDA_RGEN_W-1:0]      sys_req_rob_gen,
+    input  logic                       sys_req_act_now,
+    // The system request acted (this cycle) and the redirect it caused is now
+    // registered. The core uses `o_sys_act`/`o_sys_redirect` to route the trap
+    // path's recovery (a full restore) instead of a branch's checkpoint.
+    output logic                       o_sys_act,
+    output logic                       o_sys_redirect,
+
     // ------------------------------------------------- the ROB's head view
     // The ROB retires two entries per cycle, and a resolved branch can be in
     // either lane. "The head" for the purpose of this rule is therefore *both*
@@ -170,6 +197,33 @@ module mosaic_redirect_arb (
     end
   end
 
+  // ----------------------------------------------------- the system candidate
+  // The same liveness test and the same generation test, evaluated once for the
+  // one extra port. Because the core only ever raises this request for the
+  // entry it is looking at, the offset is 0 in every legal use; the offset
+  // comparison below is what makes "oldest wins" true for it too, rather than
+  // an assumption this module would be silently relying on.
+  logic                 sys_cand;
+  logic                 sys_dead;
+  logic [RDA_IDX_W-1:0] sys_off;
+
+  always_comb begin
+    sys_off  = sys_req_rob_index - head_index;
+    sys_cand = sys_req_valid && head_valid &&
+               (RDA_OCC_W'(sys_off) < head_occupied);
+    sys_dead = sys_req_valid && !sys_cand;
+    if (sys_req_valid && sys_cand && (sys_off == {RDA_IDX_W{1'b0}}) &&
+        (sys_req_rob_gen != head_gen)) begin
+      sys_dead = 1'b1;
+      sys_cand = 1'b0;
+    end
+    if (sys_req_valid && sys_cand && (sys_off == RDA_IDX_W'(1)) && head1_valid &&
+        (sys_req_rob_gen != head1_gen)) begin
+      sys_dead = 1'b1;
+      sys_cand = 1'b0;
+    end
+  end
+
   // ----------------------------------------------------------------- winner
   // Oldest = closest behind the head = smallest offset.
   logic        win_found;
@@ -193,8 +247,32 @@ module mosaic_redirect_arb (
   end
 
   // ---------------------------------------------------------------- the action
-  logic act;
+  logic act_sys;
   logic at_head0, at_head1;
+  logic sys_at_head0, sys_at_head1;
+  logic sys_win;
+  logic act_win;
+
+  // The system request is older than the cluster winner whenever its offset is
+  // smaller. It is at the head in every legal use, so this is normally decisive
+  // on the first comparison; a cluster request can never tie with it, because
+  // two requests cannot name the same entry with different meanings.
+  always_comb begin
+    sys_win = sys_cand && (!win_found || (sys_off < off[win_i]));
+  end
+
+  // The system request acting. `act_now` is the trap's licence to act on a head
+  // that is not retiring; an MRET uses the ordinary gate.
+  always_comb begin
+    sys_at_head0 = head_valid && (sys_req_rob_index == head_index) &&
+                   (sys_req_rob_gen == head_gen);
+    sys_at_head1 = head1_valid && (sys_req_rob_index == head1_index) &&
+                   (sys_req_rob_gen == head1_gen);
+    act_sys = sys_win &&
+              ((sys_req_act_now && (sys_at_head0 || sys_at_head1)) ||
+               (sys_at_head0 && head_retire) ||
+               (sys_at_head1 && head1_retire));
+  end
 
 `ifdef MOSAIC_REDIRECT_MUTANT_NO_HEAD_WAIT
   // NEGATIVE CONTROL 2: the winner acts immediately, without waiting for its
@@ -202,7 +280,7 @@ module mosaic_redirect_arb (
   // flight and is about to be squashed by a restore that does not cover it.
   assign at_head0 = 1'b0;
   assign at_head1 = 1'b0;
-  assign act      = win_found;
+  assign act_win  = act_sys || (win_found && !sys_win);
 `else
   // Identity equality, not an offset: the request names the instruction, and it
   // may act when the entry being retired this cycle *is* that instruction -- in
@@ -214,8 +292,17 @@ module mosaic_redirect_arb (
   assign at_head1 = head1_valid && head1_retire &&
                     (req_rob_index[win_i] == head1_index) &&
                     (req_rob_gen[win_i] == head1_gen);
-  assign act      = win_found && (at_head0 || at_head1);
+  assign act_win  = act_sys || (win_found && !sys_win && (at_head0 || at_head1));
 `endif
+
+  // Whether the request that supplied this cycle's redirect had its transfer
+  // taken: a system request always redirects; a cluster request only when its
+  // branch resolved taken.
+  logic win_taken;
+
+  assign win_taken = act_sys ? 1'b1 : req_taken[win_i];
+
+  assign o_sys_act = act_sys;
 
   always_comb begin
     for (int unsigned i = 0; i < RDA_N; i++) begin
@@ -223,13 +310,20 @@ module mosaic_redirect_arb (
       if (dead[i]) begin
         req_ack[i] = 1'b1;
       end
-      if (act && (RDA_WIN_W'(i) == win_i)) begin
+      if (act_win && !act_sys && (RDA_WIN_W'(i) == win_i)) begin
+        req_ack[i] = 1'b1;
+      end
+      // A system redirect is a trap entry or an MRET: it discards everything at
+      // and above the head, so every outstanding cluster request is consumed --
+      // it belongs to an instruction that no longer exists.
+      if (act_sys && req_valid[i]) begin
         req_ack[i] = 1'b1;
       end
       // Young taken losers are wrong-path: the winner's redirect flushes them.
       // A not-taken winner drops nothing -- a younger taken branch behind a
       // not-taken one is on the correct path and must keep its request.
-      if (act && req_taken[win_i] && (RDA_WIN_W'(i) != win_i) && req_taken[i]) begin
+      if (act_win && !act_sys && req_taken[win_i] && (RDA_WIN_W'(i) != win_i) &&
+          req_taken[i]) begin
         req_ack[i] = 1'b1;
       end
     end
@@ -238,22 +332,28 @@ module mosaic_redirect_arb (
   // ------------------------------------------------------- registered pulse
   logic              redirect_q;
   logic [RDA_XLEN-1:0] redirect_pc_q;
+  logic              sys_redirect_q;
 
   assign redirect_valid = redirect_q;
   assign redirect_pc    = redirect_pc_q;
-  assign o_act_valid    = act;
-  assign o_act_taken    = act && req_taken[win_i];
+  assign o_sys_redirect = sys_redirect_q;
+  assign o_act_valid    = act_win;
+  assign o_act_taken    = act_win && win_taken;
 
   always_ff @(posedge clk) begin
     if (rst) begin
       redirect_q    <= 1'b0;
       redirect_pc_q <= {RDA_XLEN{1'b0}};
+      sys_redirect_q <= 1'b0;
     end else begin
       // One cycle, always: a redirect the core does not consume must not be
       // re-issued, and a second redirect cannot be raised while the first is
       // still in flight because the ROB is empty until the flush completes.
-      redirect_q    <= act && req_taken[win_i];
-      redirect_pc_q <= (act && req_taken[win_i]) ? req_pc[win_i] : redirect_pc_q;
+      redirect_q     <= act_win && win_taken;
+      redirect_pc_q  <= (act_win && win_taken)
+                        ? (act_sys ? sys_req_pc : req_pc[win_i])
+                        : redirect_pc_q;
+      sys_redirect_q <= act_sys;
     end
   end
 
@@ -267,11 +367,15 @@ module mosaic_redirect_arb (
     loser_sum = 32'd0;
     dead_sum  = 32'd0;
     for (int unsigned i = 0; i < RDA_N; i++) begin
-      taken_loser[i] = act && req_taken[win_i] && (RDA_WIN_W'(i) != win_i) && req_taken[i];
+      taken_loser[i] = act_win && !act_sys && req_taken[win_i] &&
+                       (RDA_WIN_W'(i) != win_i) && req_taken[i];
       req_sum   = req_sum   + {31'd0, req_valid[i]};
       loser_sum = loser_sum + {31'd0, taken_loser[i]};
       dead_sum  = dead_sum  + {31'd0, dead[i]};
     end
+    // A system request that named an entry the buffer no longer holds is a dead
+    // request for the same reason a cluster's is.
+    if (sys_dead) dead_sum = dead_sum + 32'd1;
   end
 
   always_ff @(posedge clk) begin
@@ -284,13 +388,15 @@ module mosaic_redirect_arb (
       nothing_ctr <= 32'd0;
     end else begin
       req_ctr     <= req_ctr  + req_sum;
-      act_ctr     <= act_ctr  + {31'd0, act};
+      act_ctr     <= act_ctr  + {31'd0, act_win};
       drop_ctr    <= drop_ctr + loser_sum;
       dead_ctr    <= dead_ctr + dead_sum;
       // A live request that could not act is the evidence that the arbiter waited
-      // for older work instead of redirecting early.
-      wait_ctr    <= wait_ctr + {31'd0, (win_found && !act)};
-      nothing_ctr <= nothing_ctr + {31'd0, act && !req_taken[win_i]};
+      // for older work instead of redirecting early. A live *system* request that
+      // could not act is the same statement about a trap or an MRET.
+      wait_ctr    <= wait_ctr + {31'd0, ((win_found && !act_win) ||
+                                         (sys_cand && !act_sys && !sys_win))};
+      nothing_ctr <= nothing_ctr + {31'd0, act_win && !win_taken};
     end
   end
 

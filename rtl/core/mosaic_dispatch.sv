@@ -22,14 +22,13 @@
 //
 // ------------------------------------------------------- unsupported macros
 //
-// This package **does not** service UOP_SYSTEM or fence/fence.i. The CSR/trap
-// path is I-019/I-020 and FENCE/FENCE.I is I-037. Dispatching one of them into
-// an execution unit that cannot complete it would leave a macro in the ROB that
-// never completes -- a hang dressed up as execution. So they are refused,
-// loudly and counted, and the refusal happens **before the group is presented to
-// rename**: nothing is allocated, nothing is leaked, and the machine stops
-// cleanly at that instruction instead of executing something wrong. That
-// ordering is the whole reason the check sits here rather than at the issue
+// This package **does not** service fence/fence.i (I-037). Dispatching one of
+// them into an execution unit that cannot complete it would leave a macro in the
+// ROB that never completes -- a hang dressed up as execution. So they are
+// refused, loudly and counted, and the refusal happens **before the group is
+// presented to rename**: nothing is allocated, nothing is leaked, and the
+// machine stops cleanly at that instruction instead of executing something wrong.
+// That ordering is the whole reason the check sits here rather than at the issue
 // queue: rename has already allocated by the time the issue queue could have
 // refused.
 //
@@ -38,6 +37,12 @@
 // dedicated insert port below instead of through a cluster. It cannot hang,
 // because the LSU always completes a load and a store is complete the moment its
 // operands are -- see mosaic_core.sv.
+//
+// CSR and system macros were on that list too, and are not any more: I-019's CSR
+// file and I-020's interrupt decision are integrated, and a system macro leaves
+// through its own insert port, to be resolved by the core's system unit when it
+// reaches the ROB head. See the system insert port's note for why that boundary
+// and not an execution unit.
 //
 // ---------------------------------------------------------------- operands
 //
@@ -252,6 +257,39 @@ module mosaic_dispatch (
     output logic [DSP_IGEN_W-1:0]       mem_ins_dst_gen,
     output logic                        mem_ins_dst_x0,
 
+    // ------------------------------------------------- system insert (I-019)
+    // A CSR write/read, ECALL, EBREAK, MRET or WFI leaves dispatch here instead
+    // of entering a cluster or a memory queue. It has no execution unit: it is
+    // *resolved at the architectural boundary*, because a CSR read must see the
+    // CSR state left by every older instruction and a CSR write must not be
+    // visible until its own instruction retires. So the macro is allocated into
+    // the ROB like any other and its payload is staged for the core's system
+    // unit (mosaic_core.sv section 10a), which acts when the macro reaches the
+    // ROB head.
+    //
+    // The transport rule is the cluster's: `valid` with the payload held stable
+    // until `ready`. The operand is the CSR instruction's write operand -- the
+    // rs1 register value for the register forms and the zero-extended 5-bit
+    // `zimm` for the immediate forms -- and it is captured here for the same
+    // reason a store's operands are: there is no issue queue behind this macro
+    // to deliver a later wakeup, so a source that is not yet written has no
+    // value to capture and the insert waits.
+    output logic                        sys_ins_valid,
+    input  logic                        sys_ins_ready,
+    output logic [DSP_UOP_ID_W-1:0]     sys_ins_id,
+    output logic [11:0]                 sys_ins_csr_addr,
+    output logic [1:0]                  sys_ins_csr_op,
+    output logic                        sys_ins_csr_reads,
+    output logic                        sys_ins_csr_writes,
+    output logic                        sys_ins_is_ecall,
+    output logic                        sys_ins_is_ebreak,
+    output logic                        sys_ins_is_mret,
+    output logic                        sys_ins_is_wfi,
+    output logic [DSP_XLEN-1:0]         sys_ins_src1_val,
+    output logic [DSP_TAG_W-1:0]        sys_ins_dst_tag,
+    output logic [DSP_IGEN_W-1:0]       sys_ins_dst_gen,
+    output logic                        sys_ins_dst_x0,
+
     // ------------------------------------------- cluster insert (one per cluster)
     output logic                        c0_ins_valid,
     input  logic                        c0_ins_ready,
@@ -288,6 +326,15 @@ module mosaic_dispatch (
     // ------------------------------------------------------------ control
     input  logic                        recovering,
     input  logic                        barrier,
+    // "Software has installed a trap vector" (mtvec is no longer at its reset
+    // value). Until it has, an instruction whose whole architectural effect is
+    // "take a trap" is refused rather than taken: the p0 reset value of mtvec is
+    // 0, and a machine that took an ECALL before any handler was installed would
+    // vector into unprogrammed memory instead of stopping where the operator can
+    // see it. Once a vector is installed -- which every real program does before
+    // it can trap -- ECALL and EBREAK are dispatched and trapped normally. See
+    // the refusal rule below.
+    input  logic                        trap_vector_armed_i,
     output logic                        stop,           // unsupported macro seen
     // The lane-0 macro left the input this cycle: it was allocated, or it was
     // refused as unsupported and the machine is stopping at it. The decode
@@ -336,6 +383,17 @@ module mosaic_dispatch (
     logic                    s2_x0;
     logic                    s2_const;   // value supplied by dispatch (the immediate)
     logic [DSP_XLEN-1:0]     s2_cval;
+    // The system payload, carried exactly as the decode produced it, because the
+    // system unit resolves the macro from this packet and not by re-decoding.
+    logic                    sys;
+    logic [11:0]             sys_csr_addr;
+    mosaic_pkg::csr_op_e     sys_csr_op;
+    logic                    sys_csr_reads;
+    logic                    sys_csr_writes;
+    logic                    sys_ecall;
+    logic                    sys_ebreak;
+    logic                    sys_mret;
+    logic                    sys_wfi;
   } disp_ent_t;
 
   disp_ent_t            q_mem [0:DSP_DEPTH-1];
@@ -356,6 +414,13 @@ module mosaic_dispatch (
   logic [DSP_TAG_W-1:0] rs1_tag_v, rs2_tag_v;
   logic [DSP_IGEN_W-1:0] rs1_gen_v, rs2_gen_v;
   logic                 s1_needs_read, s2_needs_read;
+  // "This macro's first operand is the CSR immediate form's zimm, not a
+  // register": decided from lane 0's decode at the head, and used both when the
+  // entry is built and when its operand is selected.
+  logic                 sys_imm_form;
+  logic                 head_is_sys;
+  logic                 sys_ins_offer;
+  logic [DSP_XLEN-1:0]  sys_src1_val;
   // The initial-mapping fold stored in a queue entry: the shipping build passes
   // rename's flag through, and the two negative controls replace it with one
   // half of the wrong rule each. See the operands section of the header.
@@ -388,16 +453,24 @@ module mosaic_dispatch (
   assign stop = stop_q;
   assign o_take = alloc_ok || l0_unsupported;
 
+  logic l0_trap_unarmed;
+
+  assign l0_trap_unarmed = dec_valid[0] && dec_ctl0.is_system &&
+                           (dec_ctl0.is_ecall || dec_ctl0.is_ebreak) &&
+                           !trap_vector_armed_i;
+
   always_comb begin
     l0_illegal     = dec_valid[0] && !dec_ctl0.valid;
     // Memory macros are services now: a load or a store is executed by the LSU
-    // and allocated into its queue through the memory insert port below. What
-    // remains refused is everything the machine still has no path for: an
-    // invalid decode, a CSR/system macro (I-019/I-020) and FENCE/FENCE.I
-    // (I-037). Refusing them *before* rename is what stops a macro entering the
-    // ROB that no unit can complete.
-    l0_unsupported = dec_valid[0] && (!dec_ctl0.valid ||
-                                      dec_ctl0.is_system || dec_ctl0.is_miscmem);
+    // and allocated into its queue through the memory insert port below. A
+    // CSR/system macro is a service too: it is allocated into the ROB and
+    // resolved by the core's system unit at the architectural boundary (see the
+    // system insert port's note). What remains refused is everything the
+    // machine still has no path for: an invalid decode, FENCE/FENCE.I (I-037),
+    // and -- until a trap vector is installed -- the two system instructions
+    // whose entire architectural effect is to trap.
+    l0_unsupported = dec_valid[0] && (!dec_ctl0.valid || dec_ctl0.is_miscmem) ||
+                     l0_trap_unarmed;
   end
 
   // --------------------------------------------------------------------------
@@ -483,8 +556,17 @@ module mosaic_dispatch (
   // A source the instruction does not use is addressed as x0, so rename reports
   // it ready with value zero and the issue queue sees exactly one readiness
   // rule.
-  assign rs1_addr = dec_ctl0.uses_rs1 ? dec_ctl0.rs1 : 5'd0;
+  //
+  // The CSR *immediate* forms are the one exception to "uses_rs1 means read
+  // rs1": there the 5-bit field is a zimm, and the decoder says so with
+  // `csr_imm_form`. Reading it as a register index would make `csrrwi t0, mscratch,
+  // 17` read x17, so the address is forced to x0 and the value is folded as a
+  // ready constant below (the same slot the AUIPC PC uses).
+  assign rs1_addr = (dec_ctl0.is_system && dec_ctl0.csr_imm_form) ? 5'd0
+                    : (dec_ctl0.uses_rs1 ? dec_ctl0.rs1 : 5'd0);
   assign rs2_addr = dec_ctl0.uses_rs2 ? dec_ctl0.rs2 : 5'd0;
+
+  assign sys_imm_form = dec_ctl0.is_system && dec_ctl0.csr_imm_form;
 
   assign rs1_tag_v = rs1_tag;
   assign rs2_tag_v = rs2_tag;
@@ -546,7 +628,19 @@ module mosaic_dispatch (
         q_mem[i].s1_const<= 1'b0;
         q_mem[i].s2_x0   <= 1'b0;
         q_mem[i].s2_const<= 1'b0;
+        q_mem[i].sys     <= 1'b0;
       end
+    end else if (recovering) begin
+      // A redirect drops every macro from the ROB at and above the head, and
+      // this queue holds only *allocated* macros -- all of them at or above the
+      // head, because allocation is in program order and the head is the oldest
+      // unretired entry. So a redirect empties this queue as well: a stale entry
+      // left here would be offered to a completion path for a macro that no
+      // longer exists, and for the system path -- which stages a macro until it
+      // retires -- that entry could never leave. The queue is refilled by the
+      // fetch of the redirect target, and dispatch allocates nothing while
+      // `recovering` is high, so this can only ever discard stale entries.
+      q_cnt <= {DSP_CNT_W{1'b0}};
     end else begin
       q_cnt <= q_cnt_next;
       // Shift down on a pop, then place the new entry at the tail.
@@ -570,8 +664,9 @@ module mosaic_dispatch (
         // AUIPC PC uses. `s1_init_fold` and `is_auipc` are mutually exclusive
         // (AUIPC reads no rs1, so its rs1_addr is x0 and rename reports
         // `rs1_is_x0`, which clears the fold), so the constant is unambiguous.
-        q_mem[push_at].s1_const <= dec_ctl0.is_auipc || s1_init_fold;
-        q_mem[push_at].s1_cval  <= s1_init_fold ? {DSP_XLEN{1'b0}} : dec_pc0;
+        q_mem[push_at].s1_const <= dec_ctl0.is_auipc || s1_init_fold || sys_imm_form;
+        q_mem[push_at].s1_cval  <= sys_imm_form ? {59'd0, dec_ctl0.rs1}
+                                  : (s1_init_fold ? {DSP_XLEN{1'b0}} : dec_pc0);
         q_mem[push_at].s2_tag   <= rs2_is_x0 ? {DSP_TAG_W{1'b0}} : rs2_tag_v;
         q_mem[push_at].s2_gen   <= rs2_is_x0 ? {DSP_IGEN_W{1'b0}} : rs2_gen_v;
         q_mem[push_at].s2_x0    <= rs2_is_x0;
@@ -579,6 +674,15 @@ module mosaic_dispatch (
         // it for the ISA reference.
         q_mem[push_at].s2_const <= !dec_ctl0.uses_rs2 || s2_init_fold;
         q_mem[push_at].s2_cval  <= s2_init_fold ? {DSP_XLEN{1'b0}} : dec_ctl0.imm;
+        q_mem[push_at].sys          <= dec_ctl0.is_system;
+        q_mem[push_at].sys_csr_addr <= dec_ctl0.csr_addr;
+        q_mem[push_at].sys_csr_op   <= dec_ctl0.csr_op;
+        q_mem[push_at].sys_csr_reads <= dec_ctl0.csr_reads;
+        q_mem[push_at].sys_csr_writes <= dec_ctl0.csr_writes;
+        q_mem[push_at].sys_ecall    <= dec_ctl0.is_ecall;
+        q_mem[push_at].sys_ebreak   <= dec_ctl0.is_ebreak;
+        q_mem[push_at].sys_mret     <= dec_ctl0.is_mret;
+        q_mem[push_at].sys_wfi      <= dec_ctl0.is_wfi;
       end
     end
   end
@@ -733,6 +837,7 @@ module mosaic_dispatch (
   assign head_is_mem = (head.meta.class_ == mosaic_uop_pkg::UOP_LOAD) ||
                        (head.meta.class_ == mosaic_uop_pkg::UOP_STORE);
   assign head_is_store = (head.meta.class_ == mosaic_uop_pkg::UOP_STORE);
+  assign head_is_sys = head.sys;
 
   // A memory macro *captures* its operands into its queue at insert: there is
   // no issue queue behind it to deliver a later wakeup, so an operand that is
@@ -752,12 +857,25 @@ module mosaic_dispatch (
   assign s1_val_ready = head.s1_x0 || head.s1_const || (rq_written[0] && s1_value_ok);
   assign s2_val_ready = head.s2_x0 || head.s2_const || (rq_written[1] && s2_value_ok);
 
-  assign ins_ok_cluster = head_valid && !recovering && !head_is_mem &&
+  assign ins_ok_cluster = head_valid && !recovering && !head_is_mem && !head_is_sys &&
                           s1_value_ok && s2_value_ok && ins_ready_sel;
   assign mem_ins_offer  = head_valid && !recovering && head_is_mem &&
                           s1_val_ready && s2_val_ready;
   assign mem_ins_valid  = mem_ins_offer;
-  assign head_fire      = ins_ok_cluster || (mem_ins_offer && mem_ins_ready);
+  // The system macro captures its one operand for the same reason: it has no
+  // issue queue behind it, and its CSR read happens at the architectural
+  // boundary, where a source that is still in flight would already be too late.
+  // The folded constant comes first, exactly as the cluster insert orders it:
+  // for the CSR *immediate* forms the value is the zimm in the constant slot
+  // while the address is x0, so testing `s1_x0` first would substitute zero for
+  // every `csrrwi`/`csrrsi`/`csrrci` operand.
+  assign sys_src1_val   = head.s1_const ? head.s1_cval
+                          : (head.s1_x0 ? {DSP_XLEN{1'b0}} : s1_val_sel);
+  assign sys_ins_offer  = head_valid && !recovering && head_is_sys &&
+                          s1_val_ready;
+  assign sys_ins_valid  = sys_ins_offer;
+  assign head_fire      = ins_ok_cluster || (mem_ins_offer && mem_ins_ready) ||
+                          (sys_ins_offer && sys_ins_ready);
 
   // --------------------------------------------------------------------------
   // Insert bus
@@ -840,6 +958,31 @@ module mosaic_dispatch (
     mem_ins_dst_x0   = head_is_store || head.dst_x0;
     mem_ins_dst_tag  = head_is_store ? {DSP_TAG_W{1'b0}} : head.dst_tag;
     mem_ins_dst_gen  = head_is_store ? {DSP_IGEN_W{1'b0}} : head.dst_gen;
+  end
+
+  // --------------------------------------------------------------------------
+  // System insert bus
+  // --------------------------------------------------------------------------
+  // Everything the system unit needs to resolve this macro at the ROB head,
+  // taken from the entry rather than re-decoded: the CSR address and operation,
+  // the architectural-intent flags (does it read, does it write -- which are
+  // not derivable from the opcode alone, because csrrw with rd == x0 reads
+  // nothing and csrrs with rs1 == x0 writes nothing), the system instruction's
+  // identity, the captured write operand and the destination identity.
+  always_comb begin
+    sys_ins_id         = head.id;
+    sys_ins_csr_addr   = head.sys_csr_addr;
+    sys_ins_csr_op     = head.sys_csr_op;
+    sys_ins_csr_reads  = head.sys_csr_reads;
+    sys_ins_csr_writes = head.sys_csr_writes;
+    sys_ins_is_ecall   = head.sys_ecall;
+    sys_ins_is_ebreak  = head.sys_ebreak;
+    sys_ins_is_mret    = head.sys_mret;
+    sys_ins_is_wfi     = head.sys_wfi;
+    sys_ins_src1_val   = sys_src1_val;
+    sys_ins_dst_x0     = head.dst_x0;
+    sys_ins_dst_tag    = head.dst_x0 ? {DSP_TAG_W{1'b0}} : head.dst_tag;
+    sys_ins_dst_gen    = head.dst_x0 ? {DSP_IGEN_W{1'b0}} : head.dst_gen;
   end
 
   // --------------------------------------------------------------------------
