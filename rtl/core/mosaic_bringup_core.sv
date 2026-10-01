@@ -488,6 +488,15 @@ module mosaic_bringup_core #(
   // Decode
   // ==========================================================================
 
+  // Opcode 0111011 is OP-32: addw, subw, sllw, srlw and sraw.  It is a
+  // separate opcode from OP (0110011) because a 32-bit result must be
+  // sign-extended back into the 64-bit destination and a shift amount is masked
+  // to five bits rather than six.  mosaic_pkg does not name it, because the
+  // package documents the opcodes the shared decoder and core share as a set;
+  // naming it here keeps this module self-contained without inventing a second
+  // spelling for anything the package already provides.
+  localparam logic [6:0]  OP_OP_32     = 7'b0111011;
+
   // Opcode 1000011 is OP-FP: FMADD/FMSUB/FNMSUB/FNMADD, i.e. the F and D
   // extensions.  It is absent from mosaic_pkg's opcode map precisely because
   // those extensions are not in p0, so it has no localparam there.  The
@@ -728,15 +737,49 @@ module mosaic_bringup_core #(
             default:    d = illegal_op();
           endcase
         end else if (funct7 == 7'b0100000) begin
-          // Only sub exists in this form.  srawi and its relatives are
-          // immediate-form instructions and are not encodable with rs2.
+          // On this opcode funct7 = 0100000 selects exactly two operations:
+          // `sub` and `sra`.  The W forms live on OP-32 (0111011), not here,
+          // and srawi is an immediate form, so every other funct3 is reserved.
           d.uses_alu  = 1'b1;
           d.reg_write = 1'b1;
-          if (funct3 == F3_ADD_SUB) d.alu_op = ALU_SUB;
-          else                      d = illegal_op();
+          case (funct3)
+            F3_ADD_SUB: d.alu_op = ALU_SUB;
+            F3_SRL_SRA: d.alu_op = ALU_SRA;
+            default:    d = illegal_op();
+          endcase
         end else begin
           d = illegal_op();
         end
+      end
+
+      // ------------------------------------------------- OP-32 (reg, reg, W)
+      // addw subw sllw srlw sraw.  Distinct from OP because a 32-bit result has
+      // to be sign-extended back into the 64-bit destination, and because a
+      // shift amount is masked to five bits rather than six.
+      OP_OP_32: begin
+        d.uses_rs1  = 1'b1;
+        d.uses_rs2  = 1'b1;
+        d.uses_alu  = 1'b1;
+        d.reg_write = 1'b1;
+        d.valid     = 1'b1;
+        case (funct7)
+          7'b0000000: begin
+            case (funct3)
+              F3_ADD_SUB: d.alu_op = ALU_ADDW;
+              F3_SLL:     d.alu_op = ALU_SLLW;
+              F3_SRL_SRA: d.alu_op = ALU_SRLW;
+              default:    d = illegal_op();
+            endcase
+          end
+          7'b0100000: begin
+            case (funct3)
+              F3_ADD_SUB: d.alu_op = ALU_SUBW;
+              F3_SRL_SRA: d.alu_op = ALU_SRAW;
+              default:    d = illegal_op();
+            endcase
+          end
+          default: d = illegal_op();
+        endcase
       end
 
       // -------------------------------------------------------------- SYSTEM

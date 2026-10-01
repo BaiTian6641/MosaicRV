@@ -410,7 +410,7 @@ the disassembly audit sees exactly what was written.
 
 ## 8. Verification actually run
 
-### Build — 36 ELFs, 12 programs × 3 inputs
+### Build — 39 ELFs, 13 programs × 3 inputs
 
 ```
 $ make -C tests/programs all
@@ -434,7 +434,7 @@ ok   build/p01_addsub.i0.elf                        221 instructions, entry=0x80
 ...
 ok   build/p12_memwalk.i2.elf                       225 instructions, entry=0x80000000
 
-audit: 36 ELF(s), 7998 instructions, all in rv64im_zicsr_zifencei; no libgcc, no libc, no relocations, entry 0x80000000
+audit: 39 ELF(s), 8649 instructions, all in rv64im_zicsr_zifencei; no libgcc, no libc, no relocations, entry 0x80000000
 ```
 
 Per ELF the audit enforces four hard failures:
@@ -472,7 +472,7 @@ p08_misaligned  0 0x0123456789abcdef 0xfedcba9876543210 0x5a5a5a5a5a5a5a 0x00000
 ...
 p12_memwalk     2 0x8000000000000000 0xaaaaaaaaaaaaaaaa 0x8                0x7ffffffffffffb2e 0x5555555555555166 0x0000000000000000 0x800000005555555d -
 
-36 case(s) computed
+39 case(s) computed
 oracle agrees with the declared expectations and the golden file for every case; all three inputs of every program give a distinct signature.
 EXIT=0
 ```

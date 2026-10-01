@@ -18,6 +18,7 @@ import os
 import shutil
 import sys
 import tempfile
+import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -243,6 +244,72 @@ class NegativeControls(object):
                     (fixed if to_fixed else writable).append(field)
                     return True
             return False
+
+        # ---- declared CSR absence ----
+        # A table may deliberately define nothing and instead declare CSR ranges
+        # the profile leaves unimplemented. Those three rules had no control in the
+        # suite, so a refactor could drop the important one and everything would
+        # stay green.
+
+        def hypervisor_table():
+            """The hypervisor table only matters to a profile that actually loads
+            it. Mutating it for a profile that does not reference it would change
+            nothing and the control would pass for the wrong reason -- the same
+            mistake as the VLEN control was."""
+            profile_path = os.path.join(self.config_root, "profiles", "%s.json" % self.profile)
+            with open(profile_path) as handle:
+                files = json.load(handle).get("csr_files", [])
+            if "csr/hypervisor.json" not in files:
+                return None
+            path = os.path.join(self.config_root, "csr", "hypervisor.json")
+            return path if os.path.exists(path) else None
+
+        def define_inside_absent(sandbox: str) -> None:
+            path = hypervisor_table()
+            if path is None:
+                raise unittest.SkipTest("no hypervisor table in this profile")
+            sandbox_path = os.path.join(sandbox, "csr", "hypervisor.json")
+            with open(sandbox_path) as handle:
+                table = json.load(handle)
+            table["modes"] = [{
+                "mode": "M",
+                "csrs": [{
+                    "name": "hstatus", "address": 1536, "width": 64, "access": "ro",
+                    "behavior": "fixed", "reset": 0, "spec_clause": "injected",
+                }],
+            }]
+            _write_json(sandbox_path, table)
+
+        def empty_table_without_ranges(sandbox: str) -> None:
+            path = hypervisor_table()
+            if path is None:
+                raise unittest.SkipTest("no hypervisor table in this profile")
+            sandbox_path = os.path.join(sandbox, "csr", "hypervisor.json")
+            with open(sandbox_path) as handle:
+                table = json.load(handle)
+            table["modes"] = []
+            table["absent_csr_ranges"] = []
+            _write_json(sandbox_path, table)
+
+        def inverted_absent_range(sandbox: str) -> None:
+            path = hypervisor_table()
+            if path is None:
+                raise unittest.SkipTest("no hypervisor table in this profile")
+            sandbox_path = os.path.join(sandbox, "csr", "hypervisor.json")
+            with open(sandbox_path) as handle:
+                table = json.load(handle)
+            if not table.get("absent_csr_ranges"):
+                raise unittest.SkipTest("table declares no absent ranges")
+            table["absent_csr_ranges"][0]["first"] = 1700
+            table["absent_csr_ranges"][0]["last"] = 1500
+            _write_json(sandbox_path, table)
+
+        if hypervisor_table() is not None:
+            self.case("a CSR defined inside a declared-absent range",
+                      define_inside_absent)
+            self.case("an empty CSR table declaring nothing absent",
+                      empty_table_without_ranges)
+            self.case("an inverted absent range", inverted_absent_range)
 
         # These controls only mean anything for a profile that actually claims the
         # extension: for one that does not, a read-only-zero extension-state field
