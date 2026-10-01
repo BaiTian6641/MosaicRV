@@ -155,6 +155,21 @@
       ],
       "max_cycles": 4000000,
       "seed": 1
+    },
+    "predictor.btb_aliasing": {
+      "task": "I-021",
+      "top": "mosaic_predictor_tb",
+      "rtl": [
+        "rtl/core/mosaic_predictor.sv"
+      ],
+      "sv": [
+        "sim/tb/mosaic_predictor_tb.sv"
+      ],
+      "cpp": [
+        "sim/unit/tb_predictor.cpp"
+      ],
+      "max_cycles": 200000,
+      "seed": 1
     }
   }
 }
