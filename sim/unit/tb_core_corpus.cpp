@@ -109,13 +109,26 @@
 
 #include "Vmosaic_core_tb.h"
 #include "elf_loader.h"
+#include "mem_ref.h"
+#include "memory_model.h"
 #include "sim_common.h"
+
+// The reference interpreter and the DUT's data memory live in mem_ref.h so that
+// this case and CASE=core.mem_program cannot disagree about either.
+using mosaic_ref::DataMem;
+using mosaic_ref::RefInsn;
+using mosaic_ref::RefResult;
 
 namespace {
 
 constexpr int kResetCycles = 4;
-constexpr int kQuiesceCycles = 32;
-// A stopped machine whose ROB will not drain: bounded, then reported.
+// The program must reach its exit protocol within this many cycles. The run is a
+// few hundred cycles long; this bound is only reached if the machine stopped
+// making progress, and reporting it as a timeout is more useful than exhausting
+// --max-cycles.
+constexpr int kTraceCycles = 20000;
+// How long the machine is given, after the predicted stream ends, for the stores
+// that were already authorised to reach memory.
 constexpr int kDrainCycles = 256;
 // A stall is a defect with a location, not a timeout. The whole run is a few
 // hundred cycles; this bound is only reached if the machine stopped making
@@ -192,6 +205,7 @@ class ProgImage {
     }
     entry_ = image.entry;
     segments_ = image.segments;
+    image_ = image;
     for (const mosaic::Segment& seg : image.segments) {
       for (uint64_t off = 0; off + 4 <= seg.memsz; off += 4) {
         uint32_t word = 0;
@@ -224,235 +238,37 @@ class ProgImage {
 
   uint64_t entry() const { return entry_; }
   const std::vector<mosaic::Segment>& segments() const { return segments_; }
+  const mosaic::Image& image() const { return image_; }
   uint64_t lowest() const { return lo_; }
   uint64_t highest() const { return hi_; }
 
  private:
   std::map<uint64_t, uint32_t> words_;
   std::vector<mosaic::Segment> segments_;
+  mosaic::Image image_;
   uint64_t entry_ = 0;
   uint64_t lo_ = 0;
   uint64_t hi_ = 0;
 };
 
 // ============================================================================
-// The independent reference: an RV64IM interpreter
+// The independent reference: an RV64IM interpreter with memory
 // ============================================================================
 // Decoded from the same words the machine is fed, from the ISA text. It stops
-// where dispatch is documented to refuse a macro, so the length of its trace is
-// a prediction too. A word it does not implement stops the trace (dispatch
-// would refuse it); a word *it* implements that the decoder rejects would make
-// the DUT retire more than the reference and the comparison would say so.
-struct RefInsn {
-  uint64_t pc = 0;
-  uint32_t rd = 0;
-  bool reg_we = false;
-  uint64_t value = 0;
-  bool is_control = false;   // branch, JAL or JALR
-  bool taken = false;        // the control transfer redirects the front end
-  bool is_branch = false;
-  bool is_jal = false;
-  bool is_jalr = false;
-  bool back_edge = false;    // target <= pc
-  uint64_t next_pc = 0;
-};
-
-struct RefResult {
-  std::vector<RefInsn> trace;
-  uint32_t control_total = 0;
-  uint32_t taken_total = 0;
-  uint32_t branches = 0;
-  uint32_t branch_taken = 0;
-  uint32_t jal = 0;
-  uint32_t jalr = 0;
-  uint32_t back_edges = 0;
-  uint64_t stop_pc = 0;      // the first instruction dispatch refuses
-  uint32_t stop_word = 0;
-  bool stopped = false;
-};
-
-RefResult ReferenceRun(const ProgImage& img, uint64_t start) {
-  RefResult out;
-  uint64_t regs[32] = {};
-  uint64_t pc = start;
-  for (int step = 0; step < kMaxModelSteps; step++) {
-    const uint32_t w = img.Word(pc);
-    const uint32_t opcode = w & 0x7Fu;
-    const uint32_t rd = (w >> 7) & 0x1Fu;
-    const uint32_t f3 = (w >> 12) & 0x7u;
-    const uint32_t rs1 = (w >> 15) & 0x1Fu;
-    const uint32_t rs2 = (w >> 20) & 0x1Fu;
-    const uint32_t f7 = (w >> 25) & 0x7Fu;
-    const int32_t imm_i = static_cast<int32_t>(w) >> 20;
-    const int32_t imm_s =
-        (static_cast<int32_t>(w) >> 25 << 5) | static_cast<int32_t>((w >> 7) & 0x1Fu);
-    const int32_t imm_b =
-        ((static_cast<int32_t>(w) >> 31) << 12) |
-        (((w >> 7) & 1u) << 11) | (((w >> 25) & 0x3Fu) << 5) |
-        (((w >> 8) & 0xFu) << 1);
-    const uint32_t imm_u = w & 0xFFFFF000u;
-    const int32_t imm_j =
-        ((static_cast<int32_t>(w) >> 31) << 20) | (((w >> 12) & 0xFFu) << 12) |
-        (((w >> 20) & 1u) << 11) | (((w >> 21) & 0x3FFu) << 1);
-
-    RefInsn rec;
-    rec.pc = pc;
-    bool supported = true;
-    uint64_t value = 0;
-    bool reg_we = false;
-    uint64_t next = pc + 4;
-
-    switch (opcode) {
-      case 0x37u:  // LUI
-        value = static_cast<uint64_t>(static_cast<int64_t>(static_cast<int32_t>(imm_u)));
-        reg_we = true;
-        break;
-      case 0x17u:  // AUIPC
-        value = pc + static_cast<uint64_t>(
-                        static_cast<int64_t>(static_cast<int32_t>(imm_u)));
-        reg_we = true;
-        break;
-      case 0x6Fu: {  // JAL
-        value = pc + 4;
-        reg_we = true;
-        next = pc + static_cast<uint64_t>(static_cast<int64_t>(imm_j));
-        rec.is_control = true;
-        rec.taken = true;
-        rec.is_jal = true;
-        out.control_total++;
-        out.taken_total++;
-        out.jal++;
-        if (next <= pc) out.back_edges++;
-        break;
-      }
-      case 0x67u: {  // JALR
-        if (f3 != 0u) { supported = false; break; }
-        value = pc + 4;
-        reg_we = true;
-        next = (regs[rs1] + static_cast<uint64_t>(
-                                 static_cast<int64_t>(imm_i))) & ~UINT64_C(1);
-        rec.is_control = true;
-        rec.taken = true;
-        rec.is_jalr = true;
-        out.control_total++;
-        out.taken_total++;
-        out.jalr++;
-        if (next <= pc) out.back_edges++;
-        break;
-      }
-      case 0x63u: {  // the six conditional branches
-        const int64_t a = static_cast<int64_t>(regs[rs1]);
-        const int64_t b = static_cast<int64_t>(regs[rs2]);
-        const uint64_t ua = regs[rs1];
-        const uint64_t ub = regs[rs2];
-        bool take = false;
-        switch (f3) {
-          case 0x0u: take = (ua == ub); break;
-          case 0x1u: take = (ua != ub); break;
-          case 0x4u: take = (a < b); break;
-          case 0x5u: take = (a >= b); break;
-          case 0x6u: take = (ua < ub); break;
-          case 0x7u: take = (ua >= ub); break;
-          default: supported = false; break;
-        }
-        if (!supported) break;
-        reg_we = false;
-        next = take ? (pc + static_cast<uint64_t>(static_cast<int64_t>(imm_b)))
-                    : (pc + 4);
-        rec.is_control = true;
-        rec.taken = take;
-        rec.is_branch = true;
-        out.control_total++;
-        out.branches++;
-        if (take) {
-          out.taken_total++;
-          out.branch_taken++;
-          if (next <= pc) out.back_edges++;
-        }
-        break;
-      }
-      case 0x13u: {  // OP-IMM
-        const uint64_t a = regs[rs1];
-        switch (f3) {
-          case 0x0u: value = a + static_cast<uint64_t>(static_cast<int64_t>(imm_i)); break;
-          case 0x2u: value = static_cast<uint64_t>(static_cast<int64_t>(a) <
-                                                   static_cast<int64_t>(imm_i)); break;
-          case 0x3u: value = static_cast<uint64_t>(a < static_cast<uint64_t>(
-                                                          static_cast<int64_t>(imm_i))); break;
-          case 0x4u: value = a ^ static_cast<uint64_t>(static_cast<int64_t>(imm_i)); break;
-          case 0x6u: value = a | static_cast<uint64_t>(static_cast<int64_t>(imm_i)); break;
-          case 0x7u: value = a & static_cast<uint64_t>(static_cast<int64_t>(imm_i)); break;
-          case 0x1u: {
-            // RV64 SLLI: funct6 (bits 31:26) is zero and the shift amount is
-            // the six-bit field at bits 25:20.
-            if (((w >> 26) & 0x3Fu) != 0u) { supported = false; break; }
-            value = a << ((w >> 20) & 0x3Fu);
-            break;
-          }
-          case 0x5u: {
-            const uint32_t funct6 = (w >> 26) & 0x3Fu;
-            const uint32_t shamt = (w >> 20) & 0x3Fu;
-            if (funct6 == 0x00u) {
-              value = a >> shamt;
-            } else if (funct6 == 0x10u) {
-              value = static_cast<uint64_t>(static_cast<int64_t>(a) >> shamt);
-            } else {
-              supported = false;
-            }
-            break;
-          }
-          default: supported = false; break;
-        }
-        reg_we = true;
-        break;
-      }
-      case 0x33u: {  // OP
-        const uint64_t a = regs[rs1];
-        const uint64_t b = regs[rs2];
-        if (f7 == 0x01u) { supported = false; break; }  // the M extension: not here
-        switch (f3) {
-          case 0x0u:
-            value = (f7 == 0x20u) ? (a - b) : (a + b);
-            break;
-          case 0x1u: value = a << (b & 0x3Fu); break;
-          case 0x2u: value = static_cast<uint64_t>(static_cast<int64_t>(a) <
-                                                   static_cast<int64_t>(b)); break;
-          case 0x3u: value = static_cast<uint64_t>(a < b); break;
-          case 0x4u: value = a ^ b; break;
-          case 0x5u:
-            value = (f7 == 0x20u) ? static_cast<uint64_t>(static_cast<int64_t>(a) >> (b & 0x3Fu))
-                                  : (a >> (b & 0x3Fu));
-            break;
-          case 0x6u: value = a | b; break;
-          case 0x7u: value = a & b; break;
-          default: supported = false; break;
-        }
-        if (supported && (f7 != 0x00u) && (f7 != 0x20u)) supported = false;
-        reg_we = true;
-        break;
-      }
-      default:
-        supported = false;
-        break;
-    }
-
-    if (!supported) {
-      out.stop_pc = pc;
-      out.stop_word = w;
-      out.stopped = true;
-      break;
-    }
-
-    rec.rd = reg_we ? rd : 0u;
-    rec.reg_we = reg_we && (rd != 0u);
-    rec.value = value;
-    rec.next_pc = next;
-    if (rec.reg_we) regs[rd] = value;
-    out.trace.push_back(rec);
-    pc = next;
-    if (out.trace.size() >= static_cast<size_t>(kMaxModelSteps - 2)) break;
-  }
-  return out;
+// where dispatch refuses a macro (an illegal encoding, a CSR/system instruction
+// or FENCE/FENCE.I) and after the program reaches its exit protocol, so the
+// length of its trace is a prediction too: a machine that executes more, or
+// stops somewhere else, disagrees.
+//
+// It lives in sim/unit/mem_ref.h with the DUT's data memory, because
+// CASE=core.mem_program needs exactly the same two things, and one copy is one
+// place for them to be right. Its memory is its own `mosaic::MemoryModel`
+// instance: a load reads what the reference's own stores wrote, and the two
+// byte-granular rules the machine's memory system depends on (which byte a
+// byte store owns, and what a faulting access leaves behind) are stated once.
+RefResult ReferenceRun(const ProgImage& img, uint64_t start,
+                       mosaic::MemoryModel* mem) {
+  return mosaic_ref::RunReference(img, start, mem);
 }
 
 // ============================================================================
@@ -583,8 +399,9 @@ uint64_t PackedLane(uint64_t packed, uint32_t lane, uint32_t width) {
 class Harness {
  public:
   Harness(Vmosaic_core_tb* dut, mosaic::Reporter* reporter, uint64_t max_cycles,
-          const ProgImage* img)
-      : dut_(dut), reporter_(reporter), max_cycles_(max_cycles), imem_(img) {}
+          const ProgImage* img, mosaic::MemoryModel* mem)
+      : dut_(dut), reporter_(reporter), max_cycles_(max_cycles), imem_(img),
+        dmem_(mem) {}
 
   void Configure(const Geometry& g) {
     g_ = g;
@@ -641,7 +458,29 @@ class Harness {
     last_progress_ = 0;
     last_commit_ = 0;
     imem_.Reset();
+    dmem_.Reset();
   }
+
+  // The reference's whole trace has been retired. The run stops there: the
+  // program has reached its exit protocol and everything after it is the park
+  // loop, which is not part of the prediction (see mem_ref.h).
+  bool Complete() const {
+    return expected_ != nullptr && retires_.size() >= expected_->size();
+  }
+
+  // From here on nothing is compared against the reference: the run continues
+  // only so the stores that were already authorised can reach memory, which is
+  // what makes the exit protocol observable. The redirect-target comparison
+  // must stop too -- the program is in its park loop and redirects on every
+  // iteration -- while the redirects already observed, and the counters read
+  // before this call, are what the case checks.
+  void StopComparing() {
+    expected_ = nullptr;
+    expected_targets_ = nullptr;
+  }
+
+  const DataMem& dmem() const { return dmem_; }
+  size_t dbg_txns_ = 0;
 
   void Reset(int cycles) {
     for (int i = 0; i < cycles; i++) Cycle(true);
@@ -673,6 +512,23 @@ class Harness {
     dut_->arb_req_valid1_i = 0;
     dut_->arb_head_valid_i = 0;
     dut_->arb_head_retire_i = 0;
+
+    // ------------------------------------------------------------- data port
+    // The memory system's side of the LSU endpoint's protocol. A request is
+    // taken whenever the endpoint offers one; the response is presented for as
+    // many cycles as it takes the endpoint to consume it, which is a real
+    // back-pressure case rather than the trivial always-ready one.
+    dut_->dmem_req_ready_i = 1;
+    if (dmem_.HasResponse()) {
+      const DataMem::Rsp& r = dmem_.CurrentResponse();
+      dut_->dmem_rsp_valid_i = 1;
+      dut_->dmem_rsp_rdata_i = r.rdata;
+      dut_->dmem_rsp_fault_i = r.fault ? 1 : 0;
+    } else {
+      dut_->dmem_rsp_valid_i = 0;
+      dut_->dmem_rsp_rdata_i = 0;
+      dut_->dmem_rsp_fault_i = 0;
+    }
     dut_->eval();
 
     if (!rst) Observe();
@@ -685,6 +541,28 @@ class Harness {
       imem_.PopResponse();
     }
     imem_.Advance();
+
+    if ((dut_->dmem_req_valid_o != 0) && (dut_->dmem_req_ready_i != 0)) {
+      DataMem::Request r;
+      r.we = dut_->dmem_req_we_o != 0;
+      r.addr = dut_->dmem_req_addr_o;
+      r.size = dut_->dmem_req_size_o;
+      r.wstrb = dut_->dmem_req_wstrb_o;
+      r.wdata = dut_->dmem_req_wdata_o;
+      dmem_.Accept(r, cycles_);
+    }
+    if ((dut_->dmem_rsp_valid_i != 0) && (dut_->dmem_rsp_ready_o != 0)) {
+      dmem_.PopResponse();
+    }
+    dmem_.Advance();
+    if (std::getenv("MOSAIC_CORPUS_MEM") != nullptr && dmem_.txns().size() != dbg_txns_) {
+      dbg_txns_ = dmem_.txns().size();
+      const DataMem::Txn& t = dmem_.txns().back();
+      std::printf("  [dmem] cycle=%llu #%zu we=%d addr=%s size=%u wstrb=%02x wdata=%s\n",
+                  static_cast<unsigned long long>(cycles_), dmem_.txns().size(),
+                  t.req.we ? 1 : 0, U64(t.req.addr).c_str(), t.req.size, t.req.wstrb,
+                  U64(t.req.wdata).c_str());
+    }
 
     dut_->clk = 0;
     dut_->eval();
@@ -913,6 +791,7 @@ class Harness {
   mosaic::Reporter* reporter_;
   uint64_t max_cycles_;
   Imem imem_;
+  DataMem dmem_;
   Geometry g_;
   uint32_t ret_mask_ = 0;
   std::string phase_;
@@ -944,11 +823,21 @@ void EmitLi32(uint32_t rd, uint32_t v32, std::vector<uint32_t>* out) {
   if (lo12 != 0) out->push_back(EncAddi(rd, rd, lo12));
 }
 
+void EmitLi64Full(uint32_t rd, uint32_t scratch, uint64_t v, std::vector<uint32_t>* out);
+
 void EmitLi64(uint32_t rd, uint32_t scratch, uint64_t v, std::vector<uint32_t>* out) {
   if ((v >> 32) == 0) {
     EmitLi32(rd, static_cast<uint32_t>(v), out);
     return;
   }
+  EmitLi64Full(rd, scratch, v, out);
+}
+
+// The same, without the "it fits in 32 bits" shortcut. `EmitLi32` sign-extends
+// its immediate, so it cannot materialise a value whose bit 31 is set -- the
+// corpus's own RAM base (0x80000000) is one -- and the shortcut would give
+// 0xffffffff80000000 for it.
+void EmitLi64Full(uint32_t rd, uint32_t scratch, uint64_t v, std::vector<uint32_t>* out) {
   EmitLi32(rd, static_cast<uint32_t>(v >> 32), out);
   out->push_back(EncSlli(rd, rd, 32));            // the sign extension shifts out
   EmitLi32(scratch, static_cast<uint32_t>(v), out);
@@ -963,6 +852,7 @@ void EmitLi64(uint32_t rd, uint32_t scratch, uint64_t v, std::vector<uint32_t>* 
 constexpr uint32_t kRegA0 = 10;
 constexpr uint32_t kRegA1 = 11;
 constexpr uint32_t kRegA2 = 12;
+constexpr uint32_t kRegS0 = 8;    // the corpus programs' signature base (platform.h)
 constexpr uint32_t kRegScratch = 31;
 
 // The MOSAIC_LOAD_INPUTS pattern (platform.h): `la s2, mosaic_prog_inputs`
@@ -1075,9 +965,6 @@ const CorpusInput kInputs[3] = {
      UINT64_C(0x29), UINT64_C(0x3), UINT64_C(0x2), UINT64_C(0xffffffffffffffff)},
 };
 
-constexpr uint32_t kSigRegs[4] = {5, 19, 29, 28};  // t0, s3, t4, t3
-const char* const kSigNames[4] = {"sig0(t0)", "sig1(s3)", "sig2(t4)", "sig3(t3)"};
-
 // ============================================================================
 // One (program, input) run
 // ============================================================================
@@ -1088,11 +975,16 @@ RunResult RunOnce(Vmosaic_core_tb* dut, mosaic::Reporter* reporter, uint64_t max
   result.entry = prologue.after;
 
   // ---- the harness brick: the three inputs, then a jump into the program ----
+  // The brick also establishes the signature base register, which main's own
+  // MOSAIC_SETUP_BASES would have set had the run started there. It is needed
+  // now that the program's SIG0..SIG3 stores actually execute: without it they
+  // would write through s0 = 0, which is the read-only boot ROM.
   ProgImage image = program;
   std::vector<uint32_t> brick;
   EmitLi64(kRegA0, kRegScratch, input.a, &brick);
   EmitLi64(kRegA1, kRegScratch, input.b, &brick);
   EmitLi64(kRegA2, kRegScratch, input.c, &brick);
+  EmitLi64Full(kRegS0, kRegScratch, MOSAIC_SIGNATURE_ADDR, &brick);
   brick.push_back(EncJ(static_cast<int32_t>(prologue.after -
                                              (geometry.reset_vector + 4 * brick.size())),
                        0));
@@ -1109,8 +1001,26 @@ RunResult RunOnce(Vmosaic_core_tb* dut, mosaic::Reporter* reporter, uint64_t max
     Fail("run", "the harness brick reaches the corpus program's own body");
   }
 
+  // ---- memory: one model for the DUT's data port, one for the reference ----
+  // Two instances, loaded from the same image, so a store the DUT performs can
+  // never be the value the reference loads: the reference's own stores are the
+  // only thing that reaches the reference's memory.
+  mosaic::MemoryModel dut_mem;
+  mosaic::MemoryModel ref_mem;
+  {
+    std::string mem_detail;
+    if (!dut_mem.LoadImage(program.image(), &mem_detail)) Fail("run", mem_detail);
+    if (!ref_mem.LoadImage(program.image(), &mem_detail)) Fail("run", mem_detail);
+  }
+
   // ---- the expectation: an independent RV64IM interpreter on the same words --
-  result.reference = ReferenceRun(image, geometry.reset_vector);
+  result.reference = ReferenceRun(image, geometry.reset_vector, &ref_mem);
+  if (std::getenv("MOSAIC_CORPUS_TRACE") != nullptr) {
+    std::printf("  [ref] size=%zu stopped=%d reason=%s stop_pc=%s exited=%d exit_pc=%s\n",
+                result.reference.trace.size(), result.reference.stopped ? 1 : 0,
+                result.reference.stop_reason.c_str(), U64(result.reference.stop_pc).c_str(),
+                result.reference.exited ? 1 : 0, U64(result.reference.exit_pc).c_str());
+  }
 
   // The brick builds the inputs with a scratch register. Nothing in the corpus
   // program may write it, or the brick's own arithmetic would be visible as a
@@ -1123,7 +1033,7 @@ RunResult RunOnce(Vmosaic_core_tb* dut, mosaic::Reporter* reporter, uint64_t max
   }
 
   // ---- run ----
-  Harness harness(dut, reporter, max_cycles, &image);
+  Harness harness(dut, reporter, max_cycles, &image, &dut_mem);
   harness.Configure(geometry);
   harness.Phase("run-input" + Dec(index));
 
@@ -1139,37 +1049,34 @@ RunResult RunOnce(Vmosaic_core_tb* dut, mosaic::Reporter* reporter, uint64_t max
   dut->rst = 1;
   dut->eval();
   harness.Reset(kResetCycles);
-  // The free-list occupancy after reset is the baseline the run has to give
-  // back: the architectural reset mappings own one tag per register, so "full"
-  // is not "every entry". Comparing against the baseline the machine itself
-  // started from is a conservation check, not a convention this driver invents.
-  const uint64_t free_baseline = dut->o_free_count_o;
   harness.ClearTrace();
 
-  int quiet = 0;
-  int stopped_at = -1;
-  while (quiet < kQuiesceCycles) {
+  // Run until the reference's whole trace has retired AND every taken transfer
+  // in it has been acted on. The second half matters because the arbiter's
+  // redirect is registered: the last transfer of the prediction is the park
+  // loop's own branch, which retires in cycle T and redirects in T+1, so a loop
+  // that stopped at the retirement would read one redirect short. Waiting for
+  // that redirect is safe -- the next park-loop iteration retires some twenty
+  // cycles later -- and the retire comparison stays armed the whole time, so an
+  // extra retirement is still named rather than silently accepted.
+  while (!harness.Complete() ||
+         harness.redirects().size() < expected_targets.size()) {
     harness.Cycle(false);
-    if (harness.Stopped()) {
-      if (stopped_at < 0) stopped_at = static_cast<int>(harness.cycles());
-      if (!harness.Occupied()) {
-        quiet++;
-      } else {
-        quiet = 0;
-        // A stopped machine that still holds work is a stuck machine, not a
-        // timeout: hand it to the comparisons, which say which instruction it
-        // is stuck on.
-        if (static_cast<int>(harness.cycles()) - stopped_at > kDrainCycles) break;
-      }
-    } else {
-      quiet = 0;
-      stopped_at = -1;
-    }
-    if (harness.cycles() > 20000) {
-      Fail("run-input" + Dec(index), "the machine did not stop after 20000 cycles: " +
-                                         harness.State());
+    if (harness.cycles() > kTraceCycles) {
+      Fail("run-input" + Dec(index),
+           "the program did not reach its exit protocol within " + Dec(kTraceCycles) +
+               " cycles: " + harness.State());
     }
   }
+
+  // The counters are read at the instant the predicted stream ends, after a
+  // short settle window: the rename squash is issued the cycle *after* the
+  // redirect (`ren_squash = redirect_delay_q` in mosaic_core.sv), so the last
+  // recovery's counters land one cycle later. The comparison stays armed for
+  // these four cycles, so a machine that retired or redirected again in them is
+  // still named rather than tolerated; the park loop's next iteration is an
+  // order of magnitude further away, so they are quiet.
+  for (int i = 0; i < 4; i++) harness.Cycle(false);
 
   result.cycles = harness.cycles();
   result.comparison_count = harness.comparisons();
@@ -1181,6 +1088,13 @@ RunResult RunOnce(Vmosaic_core_tb* dut, mosaic::Reporter* reporter, uint64_t max
   result.ckpt = dut->o_ckpt_o;
   result.unsupported_ctr = dut->o_unsupported_o;
   result.stop_ctr = dut->o_stop_o;
+  const uint64_t redirects_at_end = harness.redirects().size();
+
+  // Let the authorised stores drain. Nothing is compared from here on; the
+  // machine is executing the program's own park loop, which the reference does
+  // not predict because the program has already ended.
+  harness.StopComparing();
+  for (int i = 0; i < kDrainCycles && !dut_mem.finished(); i++) harness.Cycle(false);
 
   const std::string ph = "run-input" + Dec(index);
   const RefResult& ref = result.reference;
@@ -1188,14 +1102,15 @@ RunResult RunOnce(Vmosaic_core_tb* dut, mosaic::Reporter* reporter, uint64_t max
 
   if (std::getenv("MOSAIC_CORPUS_TRACE") != nullptr) {
     std::printf("  [trace] %zu retires, brick=%zu words at %s..%s, entry=%s, ref=%zu "
-                "instructions (control=%u taken=%u), act=%s wait=%s dead=%s redirects=%zu "
-                "ckpt=%s squash=%s\n",
+                "instructions (control=%u taken=%u), act=%s wait=%s dead=%s redirects=%s "
+                "ckpt=%s squash=%s tohost=%s\n",
                 got.size(), brick.size(), U64(geometry.reset_vector).c_str(),
                 U64(result.brick_end).c_str(), U64(prologue.after).c_str(),
                 ref.trace.size(), ref.control_total, ref.taken_total,
                 Dec(result.act_ctr).c_str(), Dec(result.wait_ctr).c_str(),
-                Dec(result.dead_ctr).c_str(), harness.redirects().size(),
-                Dec(result.ckpt).c_str(), Dec(result.squash_acc).c_str());
+                Dec(result.dead_ctr).c_str(), Dec(redirects_at_end).c_str(),
+                Dec(result.ckpt).c_str(), Dec(result.squash_acc).c_str(),
+                U64(dut_mem.exit_code()).c_str());
     for (size_t i = 0; i < got.size(); i++) {
       std::printf("  [trace] retire %3zu pc=%s rd=%2u we=%u value=%s\n", i,
                   U64(got[i].pc).c_str(), got[i].rd, got[i].reg_we ? 1 : 0,
@@ -1211,8 +1126,8 @@ RunResult RunOnce(Vmosaic_core_tb* dut, mosaic::Reporter* reporter, uint64_t max
   }
 
   // ---- 1. every redirect goes to the resolved transfer's target ----
-  if (harness.redirects().size() != expected_targets.size()) {
-    Fail(ph, "the arbiter issued " + Dec(harness.redirects().size()) +
+  if (redirects_at_end != expected_targets.size()) {
+    Fail(ph, "the arbiter issued " + Dec(redirects_at_end) +
                  " redirects, the reference executed " + Dec(expected_targets.size()) +
                  " taken control transfers");
   }
@@ -1314,67 +1229,84 @@ RunResult RunOnce(Vmosaic_core_tb* dut, mosaic::Reporter* reporter, uint64_t max
                         " checkpoints and accepted " + Dec(result.squash_acc) +
                         " squashes, all at a committed boundary");
 
-  // ---- 6. the machine stopped cleanly ----
-  if (dut->o_stopped_o == 0) {
-    Fail(ph, "the machine did not stop at the refused macro");
+  // ---- 6. the program reached its exit protocol ----
+  // The frames this replaces asserted that the machine *stopped* at the first
+  // macro dispatch refuses. That was true of a machine with no memory path:
+  // every corpus program's first refused macro used to be a load or a store.
+  // Now they execute, the program runs on to the frozen exit protocol, and the
+  // stronger statement is available: it wrote TOHOST with the PASS bit set, and
+  // the four signature words it published are in memory where the protocol says
+  // they are -- through the store path, not through a register read.
+  if (!dut_mem.finished()) {
+    Fail(ph, "the program never wrote TOHOST, so it never reached its exit protocol "
+             "(the reference stops with: " + ref.stop_reason + ")");
   }
-  if (dut->o_rob_occupied_o != 0) {
-    Fail(ph, "the ROB is not empty after the run: occupied=" + Dec(dut->o_rob_occupied_o));
+  if (!dut_mem.passed()) {
+    Fail(ph, "the program wrote TOHOST = " + U64(dut_mem.exit_code()) +
+                 ", whose bit 0 is not set: the frozen protocol reads that as FAIL");
   }
-  if (dut->o_rename_boundary_o == 0) {
-    Fail(ph, "the machine did not quiesce at a rename boundary");
+  if (dut_mem.exit_code() != 1) {
+    Fail(ph, "the program wrote TOHOST = " + U64(dut_mem.exit_code()) +
+                 "; a conforming pass writes exactly MOSAIC_PASS_CODE (1)");
   }
-  if (dut->o_free_count_o != free_baseline) {
-    Fail(ph, "the free list did not return to its reset occupancy: " +
-                 Dec(dut->o_free_count_o) + " free, " + Dec(free_baseline) +
-                 " after reset (of " + Dec(geometry.prf_entries) + " tags)");
+  if (ref.stop_reason != "the program reached its exit protocol") {
+    Fail(ph, "the reference stopped for another reason (" + ref.stop_reason +
+                 " at " + U64(ref.stop_pc) +
+                 "), so the machine reaching the exit protocol is not the same "
+                 "prediction");
   }
-  reporter->Check(true, ph + ": the machine stopped at the refused macro (" +
-                        U64(ref.stop_pc) + ") with an empty ROB at a rename boundary and "
-                        "a full free list");
+  reporter->Check(true, ph + ": the program reached its exit protocol (TOHOST = PASS at " +
+                        U64(ref.exit_pc) + ")");
 
   // ---- 7. the host oracle's signature values ----
+  // The expectation is the host oracle's four words. It is compared twice and
+  // through two different paths:
+  //
+  //   * against the memory the DUT's own SIG stores wrote -- the end-to-end
+  //     check, because those four stores are ordinary `sd`s that went through
+  //     the store queue, the endpoint and the memory system;
+  //   * against the memory the *reference interpreter* wrote while executing
+  //     the same program. That second comparison is what makes the first one
+  //     meaningful: if this driver's interpreter disagreed with the oracle, an
+  //     agreement between the machine and the interpreter would prove nothing,
+  //     and this fails instead.
   const uint64_t oracle[4] = {input.sig0, input.sig1, input.sig2, input.sig3};
+
+  std::vector<uint64_t> ref_signature;
+  if (!ref_mem.ReadSignature(&ref_signature) || ref_signature.size() != 4) {
+    Fail(ph, "the reference's signature area is not readable");
+  }
   for (int k = 0; k < 4; k++) {
-    uint64_t observed = 0;
-    bool found = false;
-    for (const Harness::Retire& r : got) {
-      if (r.reg_we && r.rd == kSigRegs[k]) {
-        observed = r.value;
-        found = true;
-      }
-    }
-    if (!found) {
-      Fail(ph, std::string("the program never retired a write to ") + kSigNames[k]);
-    }
-    if (observed != oracle[k]) {
-      Fail(ph, std::string(kSigNames[k]) + ": the host oracle computes " +
-                   U64(oracle[k]) + ", the machine retired " + U64(observed));
+    if (ref_signature[k] != oracle[k]) {
+      Fail(ph, "the reference interpreter disagrees with the host oracle on signature "
+               "word " + Dec(k) + ": " + U64(ref_signature[k]) + " vs " +
+               U64(oracle[k]));
     }
   }
-  // The oracle's four values must be exactly the four registers' final values --
-  // and the reference interpreter must agree with the oracle on all four, which
-  // is what makes agreeing with the DUT meaningful.
+  reporter->Check(true, ph + ": the independent RV64IM interpreter agrees with the host "
+                        "oracle on all four signature words (sig0=" + U64(oracle[0]) +
+                        " sig1=" + U64(oracle[1]) + " sig2=" + U64(oracle[2]) +
+                        " sig3=" + U64(oracle[3]) + ")");
+
+  std::vector<uint64_t> signature;
+  if (!dut_mem.ReadSignature(&signature) || signature.size() != 4) {
+    Fail(ph, "the signature area is not readable in the memory model");
+  }
   for (int k = 0; k < 4; k++) {
-    uint64_t model = 0;
-    for (const RefInsn& insn : ref.trace) {
-      if (insn.reg_we && insn.rd == kSigRegs[k]) model = insn.value;
-    }
-    if (model != oracle[k]) {
-      Fail(ph, std::string("the reference interpreter disagrees with the host oracle on ") +
-                   kSigNames[k] + ": " + U64(model) + " vs " + U64(oracle[k]));
+    if (signature[k] != oracle[k]) {
+      Fail(ph, "signature word " + Dec(k) + " in memory: the host oracle computes " +
+                   U64(oracle[k]) + ", the machine's stores left " + U64(signature[k]));
     }
   }
-  reporter->Check(true, ph + ": the four signature registers equal the host oracle's "
-                        "values (sig0=" + U64(oracle[0]) + " sig1=" + U64(oracle[1]) +
-                        " sig2=" + U64(oracle[2]) + " sig3=" + U64(oracle[3]) + ")");
+  reporter->Check(true, ph + ": the four signature words in memory equal the host "
+                        "oracle's values, written by the program's own SIG stores");
 
   std::printf("  [run %d] a=%s b=%s c=%s: %zu retires, %u control transfers (%u taken, "
-              "%u branches, %u jal, %u jalr, %u back edges), %zu redirects, act=%s "
-              "wait=%s, cycles=%s\n",
+              "%u branches, %u jal, %u jalr, %u back edges), %u loads, %u stores, "
+              "%s redirects, act=%s wait=%s, cycles=%s\n",
               index, U64(input.a).c_str(), U64(input.b).c_str(), U64(input.c).c_str(),
               got.size(), ref.control_total, ref.taken_total, ref.branches, ref.jal,
-              ref.jalr, ref.back_edges, harness.redirects().size(),
+              ref.jalr, ref.back_edges, ref.loads, ref.stores, Dec(redirects_at_end).c_str(),
               Dec(result.act_ctr).c_str(), Dec(result.wait_ctr).c_str(),
               Dec(result.cycles).c_str());
   return result;

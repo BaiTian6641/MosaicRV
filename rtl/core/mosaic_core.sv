@@ -117,6 +117,12 @@ localparam int unsigned CORE_MEM_CNT_W = $clog2(CORE_LQ_N + 1);   // == clog2(SQ
 // (data_valid, data, size, imm, base, id at those offsets); the case asserts the
 // three-way agreement at startup rather than trusting three copies of a formula.
 localparam int unsigned CORE_MEM_ID_W  = $bits(mosaic_uop_pkg::uop_id_t);
+// Only the pre-commit negative control reads the exported entry view by hand,
+// so this offset exists only in that build: an always-present localparam would
+// be an unused parameter in the shipping build, which is a lint failure here.
+`ifdef MOSAIC_CORE_MUTANT_STORE_PRECOMMIT
+localparam int unsigned CORE_SQ_OFF_ID  = 2 + CORE_XLEN + 3 + CORE_XLEN + CORE_XLEN;
+`endif
 localparam int unsigned CORE_SQ_ENTRY_W =
     2 + CORE_XLEN + 3 + CORE_XLEN + CORE_XLEN + CORE_MEM_ID_W;
 
@@ -566,6 +572,7 @@ module mosaic_core (
   logic [CORE_RGEN_W-1:0]     sq_squash_gen;
   logic [CORE_MEM_CNT_W-1:0]  sq_count, sq_auth_cnt;
   logic [CORE_SQ_N*CORE_SQ_ENTRY_W-1:0] sq_entry_pay;
+  logic [2:0]                 sq_alloc_size;
   logic [31:0]                sq_alloc_ctr, sq_commit_ctr, sq_commit_stale_ctr;
   logic [31:0]                sq_drain_ctr, sq_squash_ctr, sq_spared_ctr, sq_fault_ctr;
 
@@ -1866,6 +1873,18 @@ module mosaic_core (
       .o_entry_pay          ()
   );
 
+  // One access class gets the wrong size: the store queue is always told the
+  // access is a word, whatever the instruction asked for. The strobe mask and
+  // the byte count then disagree with the ISA for every byte, half and double
+  // store, and the bytes the program publishes differ from the reference's --
+  // which is what makes this a control for "the size of one access class is
+  // wrong" rather than a control for the drain.
+`ifdef MOSAIC_CORE_MUTANT_STORE_SIZE_WORD
+  assign sq_alloc_size = mosaic_pkg::SZ_WORD;
+`else
+  assign sq_alloc_size = disp_mem_size;
+`endif
+
   mosaic_store_queue u_sq (
       .clk                  (clk),
       .rst                  (rst),
@@ -1880,7 +1899,7 @@ module mosaic_core (
       .alloc_id_i           (disp_mem_full_id),
       .alloc_base_i         (disp_mem_base),
       .alloc_imm_i          (disp_mem_imm),
-      .alloc_size_i         (disp_mem_size),
+      .alloc_size_i         (sq_alloc_size),
       .alloc_addr_valid_i   (1'b1),
       .alloc_data_i         (disp_mem_data),
       .alloc_data_valid_i   (1'b1),
@@ -2002,24 +2021,35 @@ module mosaic_core (
   // stores, so both authorisation ports are driven from the lanes that actually
   // retired in this cycle. `uop_index` is zero because this core allocates one
   // uop per macro (mosaic_dispatch).
+`ifndef MOSAIC_CORE_MUTANT_STORE_PRECOMMIT
   assign sq_commit_valid  = rob_retire_ack      && desc_is_store0;
   assign sq_commit_id     = {1'b0, rob_head_index,  rob_head_gen,  {CORE_UOP_W{1'b0}}};
   assign sq_commit2_valid = rob_retire_ack_next && desc_is_store1 && rob_retire_ack;
   assign sq_commit2_id    = {1'b0, rob_head1_index, rob_head1_gen, {CORE_UOP_W{1'b0}}};
-
-`ifdef MOSAIC_CORE_MUTANT_STORE_PRECOMMIT
-  // NEGATIVE CONTROL: the store is authorised as it is *allocated* instead of
-  // when it retires -- the tempting "its address and data are ready, so it can
-  // go now". A store that is the only resident entry names the first
-  // unauthorised entry, so the store queue accepts it and offers it to memory
-  // before the store has retired. The driver's "no store reaches memory before
-  // the instruction that owns it retires" check (writes seen <= stores retired)
-  // is what names it; the final memory image is unchanged, which is exactly why
-  // an end-state-only comparison would not catch it.
-  assign sq_commit_valid  = sq_alloc_valid;
-  assign sq_commit_id     = disp_mem_full_id;
-  assign sq_commit2_valid = 1'b0;
-  assign sq_commit2_id    = {CORE_MEM_ID_W{1'b0}};
+`else
+  // NEGATIVE CONTROL: a store is also authorised the moment it is *allocated*,
+  // whenever the queue holds nothing else unauthorised -- the tempting "its
+  // address and data are ready, so it can go now". The retirement authorisation
+  // is kept as well, so the machine still finishes; what changes is that the
+  // store reaches the endpoint before the instruction that owns it has retired.
+  // CASE=core.mem_program's "no store reaches memory before its instruction
+  // retires" check names it; the final memory image is unchanged, which is
+  // exactly why an end-state-only comparison would not catch it.
+  // The identity of the store at the authorisation watermark -- the first
+  // unauthorised resident entry -- read out of the store queue's exported entry
+  // view. Authorising *that* entry is what the retire path does; the mutant
+  // drives it every cycle instead of waiting for the ROB.
+  logic precommit_c;
+  logic [CORE_MEM_ID_W-1:0] sq_first_unauth_id;
+  assign sq_first_unauth_id =
+      sq_entry_pay[32'(sq_auth_cnt) * CORE_SQ_ENTRY_W + CORE_SQ_OFF_ID +: CORE_MEM_ID_W];
+  assign precommit_c      = (sq_count != sq_auth_cnt);
+  assign sq_commit_valid  = (rob_retire_ack && desc_is_store0) || precommit_c;
+  assign sq_commit_id     = precommit_c
+                            ? sq_first_unauth_id
+                            : {1'b0, rob_head_index, rob_head_gen, {CORE_UOP_W{1'b0}}};
+  assign sq_commit2_valid = rob_retire_ack_next && desc_is_store1 && rob_retire_ack;
+  assign sq_commit2_id    = {1'b0, rob_head1_index, rob_head1_gen, {CORE_UOP_W{1'b0}}};
 `endif
 
   // A redirect withdraws everything the recovery decided is dead. The whole

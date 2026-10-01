@@ -29,12 +29,27 @@ struct Segment {
   }
 };
 
+// One entry of .symtab, as far as a harness needs one. `value` is the symbol's
+// address for the STT_FUNC/STT_OBJECT/STT_NOTYPE symbols a testbench looks up.
+struct Symbol {
+  std::string name;
+  uint64_t value = 0;
+  uint64_t size = 0;
+  uint8_t info = 0;      // st_info: binding in the high nibble, type in the low
+  uint16_t shndx = 0;
+};
+
 struct Image {
   std::vector<Segment> segments;
   uint64_t entry = 0;
   std::string source;
+  // Best effort: a stripped image simply has no symbols, and that is not a load
+  // failure -- the segment map is what the loader guarantees. A harness that
+  // needs a symbol says so itself, with a named failure, when it is missing.
+  std::vector<Symbol> symbols;
 
   const Segment* Find(uint64_t address) const;
+  const Symbol* FindSymbol(const std::string& name) const;
   uint64_t LowestAddress() const;
 };
 

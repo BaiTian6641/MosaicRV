@@ -62,6 +62,48 @@ MUTANTS = [
 ]
 
 
+# CASE=core.mem_program's controls. Each names the wiring decision it breaks and
+# the text of the first failure the mutation must produce.
+CORE_MEM_MUTANTS = [
+    (
+        "MOSAIC_CORE_MUTANT_STORE_PRECOMMIT",
+        "the store is authorised when it is *allocated* instead of when it "
+        "retires, so a store reaches memory before the instruction that owns it "
+        "has retired",
+        "no store reaches memory before its instruction retires",
+    ),
+    (
+        "MOSAIC_LQ_MUTANT_YOUNGER_FORWARDS",
+        "the load queue forwards from the youngest covering store with no regard "
+        "for whether that store is older than the load, so a load takes a value "
+        "from a store that has not happened yet",
+        "the retirement stream follows the reference",
+    ),
+    (
+        "MOSAIC_CORE_MUTANT_MEM_BEHIND_BRANCH",
+        "dispatch lets a load or store through the branch barrier, so the "
+        "instructions after an unresolved branch are allocated into the queues "
+        "and issued to the endpoint before the redirect discards them",
+        "exactly one data transaction per load and per store reached the data port",
+    ),
+    (
+        "MOSAIC_CORE_MUTANT_STORE_SIZE_WORD",
+        "the store queue is told every store is a word, so the byte strobes and "
+        "the bytes written disagree with the instruction for byte, half and "
+        "double stores; the first load that reads such a store back names it",
+        "the retirement stream follows the reference",
+    ),
+]
+
+MUTANTS_BY_CASE = {
+    "core.mem_program": CORE_MEM_MUTANTS,
+}
+
+
+def mutants_for(case_id: str) -> list:
+    return MUTANTS_BY_CASE.get(case_id, MUTANTS)
+
+
 def build(entry: dict, case_id: str, defines: list, build_dir: str) -> str:
     """Build one configuration from an empty directory; returns the log."""
     shutil.rmtree(build_dir, ignore_errors=True)
@@ -90,6 +132,13 @@ def build(entry: dict, case_id: str, defines: list, build_dir: str) -> str:
     cmd += ["-o", os.path.join(build_dir, case_id)]
     cmd += sources
 
+    # The directory was deleted above, so this build cannot reuse a shipping
+    # object; the command is written next to it so a mutant's `-D` is on the
+    # record for whoever reads the evidence later, exactly as run_unit keeps
+    # `build_command.txt` for the shipping build.
+    with open(os.path.join(build_dir, "build_command.txt"), "w") as handle:
+        handle.write(" ".join(cmd))
+
     result = run_unit.run(cmd)
     log = result.stdout.decode("utf-8", "replace")
     if result.returncode != 0:
@@ -106,6 +155,12 @@ def run_case(binary: str, case_id: str, out_dir: str, max_cycles: int):
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
     )
+
+
+def sha256_of(path: str) -> str:
+    import hashlib
+    with open(path, "rb") as handle:
+        return hashlib.sha256(handle.read()).hexdigest()
 
 
 def first_result_line(log: str) -> str:
@@ -144,11 +199,13 @@ def main() -> int:
               "anything")
         return 1
 
+    mutants = mutants_for(args.case)
     failures = 0
+    print("shipping binary sha256: %s" % sha256_of(shipping))
     print()
     print("%-46s %-5s %s" % ("mutant", "exit", "result"))
     print("-" * 110)
-    for define, defect, expected in MUTANTS:
+    for define, defect, expected in mutants:
         if args.only is not None and args.only not in define:
             continue
         mutant_dir = os.path.join(root, define)
@@ -161,6 +218,7 @@ def main() -> int:
             continue
         mutant = os.path.join(mutant_dir, args.case)
         differs = subprocess.run(["cmp", "-s", shipping, mutant]).returncode != 0
+        mutant_hash = sha256_of(mutant)
         result = run_case(mutant, args.case, os.path.join(root, "out-" + define),
                           max_cycles)
         log = result.stdout.decode("utf-8", "replace")
@@ -176,6 +234,9 @@ def main() -> int:
             status += " (expected %r)" % expected
         print("%-46s %-5d %s" % (define, result.returncode, status))
         print("    injects: %s" % defect)
+        print("    sha256:  %s" % mutant_hash)
+        print("    build:   %s" % os.path.relpath(
+            os.path.join(mutant_dir, "build_command.txt"), REPO_ROOT))
         print("    %s" % first_result_line(log))
         if not (differs and caught):
             failures += 1
@@ -185,7 +246,7 @@ def main() -> int:
         print("%d mutant(s) were not caught as required" % failures)
         return 1
     print("all %d mutants mutate the binary, exit 1 and name the check they break"
-          % (len(MUTANTS) if args.only is None else 1))
+          % (len(mutants) if args.only is None else 1))
     return 0
 
 

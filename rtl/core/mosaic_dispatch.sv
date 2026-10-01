@@ -366,6 +366,7 @@ module mosaic_dispatch (
   logic                 s1_bad, s2_bad;
   logic                 ins_ready_sel;
   logic                 ins_ok_cluster;
+  logic                 s1_val_ready, s2_val_ready;
   logic                 head_is_mem;
   logic                 head_is_store;
   logic                 mem_ins_offer;
@@ -403,8 +404,23 @@ module mosaic_dispatch (
   // Allocation
   // --------------------------------------------------------------------------
   assign queue_has_room = (q_cnt < DSP_CNT_W'(DSP_DEPTH));
+`ifdef MOSAIC_CORE_MUTANT_MEM_BEHIND_BRANCH
+  // NEGATIVE CONTROL: the branch barrier does not hold a *memory* macro, so the
+  // instructions after an unresolved branch are dispatched and their loads and
+  // stores are allocated into the queues and issued to the endpoint before the
+  // redirect discards them -- "a squashed access still reaching memory". The
+  // store side is still safe (the entry never retires, so it is never
+  // authorised and never writes), which is why an end-state comparison alone
+  // would not catch this: CASE=core.mem_program's "exactly one data transaction
+  // per load and per store reached the data port" is what names it.
+  assign alloc_now      = dec_valid[0] && !l0_unsupported && !recovering && !stop_q &&
+                          (!barrier ||
+                           (dec_ctl0.mem_kind != mosaic_pkg::MEM_NONE)) &&
+                          queue_has_room && rob_free_any;
+`else
   assign alloc_now      = dec_valid[0] && !l0_unsupported && !recovering && !stop_q &&
                           !barrier && queue_has_room && rob_free_any;
+`endif
   assign alloc_ok       = alloc_now && alloc_accepted && rob_alloc_ok;
 
   assign alloc_req = alloc_now;
@@ -717,10 +733,29 @@ module mosaic_dispatch (
   assign head_is_mem = (head.meta.class_ == mosaic_uop_pkg::UOP_LOAD) ||
                        (head.meta.class_ == mosaic_uop_pkg::UOP_STORE);
   assign head_is_store = (head.meta.class_ == mosaic_uop_pkg::UOP_STORE);
+
+  // A memory macro *captures* its operands into its queue at insert: there is
+  // no issue queue behind it to deliver a later wakeup, so an operand that is
+  // not written yet has no value to capture and the insert must wait. That is a
+  // stronger condition than the cluster path's, which deliberately inserts a
+  // not-ready uop and lets the issue queue fill the value in:
+  // `s1_value_ok`/`s2_value_ok` are *not* readiness -- they are satisfied by
+  // `!rq_written`, precisely because the cluster path does not need the value.
+  // `rq_written[k] && sN_value_ok` is the conjunction that means "this value is
+  // the final value of that operand".
+  //
+  // Without this, a store whose base register was written in the previous cycle
+  // is inserted with the register file's stale content and stores at the wrong
+  // address -- which is exactly what CASE=core.corpus_branch caught when the
+  // program's exit store used a TOHOST address materialised one instruction
+  // earlier.
+  assign s1_val_ready = head.s1_x0 || head.s1_const || (rq_written[0] && s1_value_ok);
+  assign s2_val_ready = head.s2_x0 || head.s2_const || (rq_written[1] && s2_value_ok);
+
   assign ins_ok_cluster = head_valid && !recovering && !head_is_mem &&
                           s1_value_ok && s2_value_ok && ins_ready_sel;
   assign mem_ins_offer  = head_valid && !recovering && head_is_mem &&
-                          s1_value_ok && s2_value_ok;
+                          s1_val_ready && s2_val_ready;
   assign mem_ins_valid  = mem_ins_offer;
   assign head_fire      = ins_ok_cluster || (mem_ins_offer && mem_ins_ready);
 

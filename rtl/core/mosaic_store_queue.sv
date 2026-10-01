@@ -883,10 +883,13 @@ module mosaic_store_queue #(
       if (alloc_ok_c)         alloc_ctr_q        <= alloc_ctr_q + 32'd1;
       if (fill_apply_c)       fill_ctr_q         <= fill_ctr_q + 32'd1;
       if (fill_stale_o)       fill_stale_ctr_q   <= fill_stale_ctr_q + 32'd1;
-      if (commit_ok_c)        commit_ctr_q       <= commit_ctr_q + 32'd1;
-      if (commit2_ok_c)       commit_ctr_q       <= commit_ctr_q + 32'd1;
-      if (commit_stale_o)     commit_stale_ctr_q <= commit_stale_ctr_q + 32'd1;
-      if (commit2_stale_o)    commit_stale_ctr_q <= commit_stale_ctr_q + 32'd1;
+      // Both ports can authorise in one cycle, so the increment is the sum. Two
+      // separate non-blocking assignments to one signal would make the second
+      // overwrite the first, and the counter would silently under-count exactly
+      // the back-to-back stores the second port exists for.
+      commit_ctr_q       <= commit_ctr_q + {31'd0, commit_ok_c} + {31'd0, commit2_ok_c};
+      commit_stale_ctr_q <= commit_stale_ctr_q + {31'd0, commit_stale_o} +
+                            {31'd0, commit2_stale_o};
       if (drain_accept_c)     drain_ctr_q        <= drain_ctr_q + 32'd1;
       if (squash_drop_cnt_c != {CNT_W{1'b0}}) begin
         squash_ctr_q <= squash_ctr_q + 32'(squash_drop_cnt_c);

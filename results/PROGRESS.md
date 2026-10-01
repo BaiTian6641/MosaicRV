@@ -1615,3 +1615,42 @@ byte accesses, misaligned faults — run on the machine itself rather than on th
 That integration is what stands between "an out-of-order core that executes arithmetic and
 branches" and "a core that can run the corpus", and after it come FENCE (I-037), MMIO (I-038),
 CSR/trap integration, and only then the privileged and vector stages.
+
+---
+
+## 2026-10-01 — the out-of-order core runs the corpus: memory path integrated
+
+`core.mem_program` passes from a clean build: two corpus programs (`p03_loadstore`,
+`p09_storeload`) under three input patterns, 9 543 comparisons over 1 017 cycles, 306 retires,
+63 loads, 84 stores, 147 data transactions, 96 bytes forwarded from the store queue, and each
+program's signature matched **against `tools/host_oracle.py`'s independent host computation**
+rather than against the DUT. The four core cases and the three memory-module cases all pass
+together, which is the first time the machine has been exercised as a whole.
+
+Two defects were found by that work, and both are worth naming because of where they hid:
+
+* **Dispatch captured stale operands for memory macros.** The cluster path's operand-ready test
+  is satisfied by the issue queue filling a not-ready uop later, but a *memory* macro captures
+  its operands at insert. A store whose base register had just been written therefore took the
+  register file's stale content and stored to address 0 instead of TOHOST — the program ran, the
+  store executed, and it wrote the wrong place. The check that caught it was the corpus case's
+  exit-protocol condition, not a directed memory test.
+* **The store queue's commit counter incremented twice in one cycle.** Two separate non-blocking
+  assignments to the same signal when both commit ports fired meant the second overwrote the
+  first: 14 authorisations counted as 12. A counter that is *nearly* right is worse than one that
+  is obviously wrong, and only a conservation identity checks the difference.
+
+The controls that make the integration's claims mean something are the two that would otherwise
+be argued in prose: `MOSAIC_CORE_MUTANT_STORE_PRECOMMIT` (a store authorised at allocation
+instead of retirement, so it reaches memory before it retires) and
+`MOSAIC_CORE_MUTANT_MEM_BEHIND_BRANCH` (a memory macro bypassing the branch barrier, so the
+wrong-path load at the entry branch's fall-through is issued) — both fail by name, both are the
+precise behaviours the plan forbids.
+
+**What is still missing from the core, in the lane's own words**: the CSR/trap path (which is
+what `crt0`'s boot sequence, `p08_misaligned` and `p13_romstore` need — `p13` is simply not
+runnable without it), store-to-load forwarding is exercised through the core only by `p09` (in
+`p03` the stores have already drained when the loads complete), the load queue's
+blocked-on-unknown-address and replay paths are never entered because dispatch reads every store
+operand before allocating, and no faults, misalignment or FENCE ordering are exercised at all.
+That list is the next wave's specification, and the CSR/trap integration is running now.

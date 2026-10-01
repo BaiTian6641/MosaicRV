@@ -89,6 +89,16 @@ uint64_t Image::LowestAddress() const {
   return lowest == UINT64_MAX ? 0 : lowest;
 }
 
+// The first definition wins. A `.globl` symbol and its local aliases can share a
+// name only in the linker's accounting, never with two different values, so
+// "first" is deterministic rather than arbitrary.
+const Symbol* Image::FindSymbol(const std::string& name) const {
+  for (const Symbol& symbol : symbols) {
+    if (symbol.name == name) return &symbol;
+  }
+  return nullptr;
+}
+
 LoadStatus LoadFlatBinary(const std::string& path, uint64_t address, Image* out,
                           std::string* detail) {
   std::vector<uint8_t> raw;
@@ -317,6 +327,58 @@ LoadStatus LoadElf(const std::string& path, Image* out, std::string* detail) {
 #else
   out->entry = entry;
 #endif
+
+  // ------------------------------------------------------------ symbol table
+  // Best effort, and deliberately so: the loader's contract is the segment map,
+  // and a stripped image is a legal image. A harness that needs `main` reports
+  // its absence itself. Every bound is checked before it is used, so a
+  // malformed table produces no symbols rather than a wild read.
+  {
+    const uint64_t shoff = ReadU64(raw, 40);
+    const uint16_t shentsize = ReadU16(raw, 58);
+    const uint16_t shnum = ReadU16(raw, 60);
+    const size_t kShdrSize = 64;
+    const size_t kSymSize = 24;
+    if (shoff != 0 && shnum != 0 && shentsize == kShdrSize &&
+        shoff + static_cast<uint64_t>(shnum) * kShdrSize <= raw.size() &&
+        shoff <= raw.size()) {
+      for (uint16_t s = 0; s < shnum; ++s) {
+        const size_t sh = static_cast<size_t>(shoff) + static_cast<size_t>(s) * kShdrSize;
+        const uint32_t sh_type = ReadU32(raw, sh + 4);
+        if (sh_type != 2u) continue;  // SHT_SYMTAB
+        const uint64_t sym_off = ReadU64(raw, sh + 24);
+        const uint64_t sym_size = ReadU64(raw, sh + 32);
+        const uint32_t sym_link = ReadU32(raw, sh + 40);
+        const uint64_t sym_entsize = ReadU64(raw, sh + 56);
+        if (sym_entsize != kSymSize || sym_link >= shnum) break;
+        if (sym_off + sym_size > raw.size()) break;
+        const size_t str_sh =
+            static_cast<size_t>(shoff) + static_cast<size_t>(sym_link) * kShdrSize;
+        const uint64_t str_off = ReadU64(raw, str_sh + 24);
+        const uint64_t str_size = ReadU64(raw, str_sh + 32);
+        if (str_off + str_size > raw.size()) break;
+        for (uint64_t off = 0; off + kSymSize <= sym_size; off += kSymSize) {
+          const size_t e = static_cast<size_t>(sym_off) + static_cast<size_t>(off);
+          const uint32_t name_off = ReadU32(raw, e + 0);
+          if (name_off == 0 || str_off + name_off >= raw.size()) continue;
+          const size_t begin = static_cast<size_t>(str_off + name_off);
+          if (begin >= str_off + str_size) continue;
+          size_t end = begin;
+          while (end < raw.size() && raw[end] != 0) ++end;
+          if (end >= str_off + str_size && end >= raw.size()) continue;
+          Symbol symbol;
+          symbol.name.assign(reinterpret_cast<const char*>(&raw[begin]), end - begin);
+          symbol.info = raw[e + 4];
+          symbol.shndx = ReadU16(raw, e + 6);
+          symbol.value = ReadU64(raw, e + 8);
+          symbol.size = ReadU64(raw, e + 16);
+          if (symbol.shndx == 0) continue;  // undefined
+          out->symbols.push_back(std::move(symbol));
+        }
+      }
+    }
+  }
+
   detail->clear();
   return LoadStatus::kOk;
 }

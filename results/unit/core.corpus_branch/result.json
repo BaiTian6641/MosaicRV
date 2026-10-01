@@ -2,14 +2,14 @@
   "schema_version": 1,
   "case": "core.corpus_branch",
   "verdict": "PASS",
-  "detail": "checks=28 comparisons=8907 cycles=1783 retires=256 control=96 taken=74 branches=48(taken 26) jal=27 jalr=21 back_edges=35 inputs=3 seed=1",
+  "detail": "checks=31 comparisons=9264 cycles=1846 retires=322 control=102 taken=80 branches=48(taken 26) jal=30 jalr=24 back_edges=41 inputs=3 seed=1",
   "seed": 1,
   "max_cycles": 4000000,
-  "checks": 29,
+  "checks": 32,
   "failures": 0,
   "image": "",
   "expect": "",
   "tool": "Verilator 5.052 2026-09-05",
-  "timestamp": "2026-10-01T21:29:30Z",
+  "timestamp": "2026-10-01T22:21:20Z",
   "first_mismatch": ""
 }
