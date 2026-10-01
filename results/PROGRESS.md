@@ -168,3 +168,61 @@ specific it sounds the more it deserves to be checked against the tool's raw out
 
 The five existing mutants have still never been run, so they remain an unmet
 acceptance criterion. I-008 stays open.
+
+---
+
+## 2026-09-30 — V-001 and V-003 DONE; V-002, V-004, V-005 BLOCKED
+
+**V-001 — upstream closure and source ledger.** `tools/check_upstream.py` probes
+the live environment rather than reading a stored string: source checkouts by HEAD
+commit and tree cleanliness, tools by executing them and capturing their own
+version output. Everything present carries an immutable identity, a source and a
+licence.
+
+```
+$ python3 tools/check_upstream.py
+source checkouts
+  ok      riscv-isa-sim    0bff12123b1f  clean=True  Merge pull request #2450 ...
+  ok      riscv-v-spec     2f68ef7256d6  clean=True  Merge pull request #939 ...
+tools
+  ok      verilator            Verilator 5.052 2026-09-05
+  ok      yosys                Yosys 0.69+post
+  ok      slang-tidy           slang-tidy version 11.0.0+0
+  ok      sby                  SBY v0.69
+  ok      riscv64-elf-gcc      riscv64-elf-gcc (GCC) 16.2.0
+  ok      riscv64-elf-objdump  GNU objdump (GNU Binutils) 2.47.20260726
+absent references, each with what would unblock it
+  BLOCKED XiangShan    gate=V-005  clone and build OpenXiangShan/XiangShan (sbt/Chisel)
+  BLOCKED NEMU         gate=V-004  clone and build OpenXiangShan/NEMU
+  BLOCKED Sail         gate=V-002  install sail-riscv; optional next to Spike for p0
+  BLOCKED ACT4         gate=V-002  obtain the ACT4 distribution and licence
+PASS every present input has an immutable identity, a source and a licence
+```
+
+`--require <name>` makes an absent input a hard failure, which is how a gate that
+depends on one refuses to run rather than proceeding with a reference that is not
+there.
+
+**V-003 — isolated environment and failure exit.** `tools/check_isolation.py` runs
+the three scenarios the plan names, each paired with a **healthy control** so that a
+checker which always reported "unsafe" could not pass: a missing simulator, an
+unknown profile with no fallback, a foreign-architecture binary, a non-executable
+file, and an output path that cannot be a directory. Eleven checks, all holding.
+
+The binary probe understands **both** ELF and Mach-O. My first version assumed ELF
+and the healthy control failed — a macOS binary is Mach-O, so an ELF-only probe
+rejects every native binary on this platform. That is the third time this session a
+checker of mine was wrong in a way that looked like the code under test.
+
+**V-002, V-004 and V-005 are BLOCKED, not done.** The capability-intersection
+matrix needs XiangShan, NEMU, Sail and ACT4; the NEMU ABI work needs NEMU; the
+XiangShan positive control needs XiangShan. None of them is on this machine. Their
+absence is named with the specific thing that would unblock each, and no package
+depending on them is marked deferred-and-passed.
+
+**A bookkeeping error I made twice in a row.** I marked the I-008 item complete
+while it is demonstrably not, and then marked `V-001..V-005` complete while three
+of the five are BLOCKED. Both were caught and reopened in the same turn. The habit
+of marking a tracker item "done" because the agent returned is the precise habit
+this project exists to break; the tracker is only worth keeping if it can be
+*less* optimistic than the person filling it in.
