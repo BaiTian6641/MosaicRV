@@ -1,0 +1,252 @@
+{
+  "schema_version": 1,
+  "comment": "Declared capabilities of every model this project compares against. Each `evidence` string says HOW the claim was established, and each `class_evidence` entry does the same per instruction class. tools/check_capability_matrix.py refuses any claim without recorded evidence, because a capability matrix built on assumption is how a test quietly ends up running against something that does not implement what the test needs.",
+  "scope": "These declarations establish what each model CAN adjudicate. They are not evidence that any model PASSED anything.",
+  "models": {
+    "mosaicrv": {
+      "installed": true,
+      "role": "DUT",
+      "xlen": 64,
+      "privilege": [
+        "M"
+      ],
+      "classes": [
+        "I",
+        "M",
+        "Zicsr",
+        "Zifencei"
+      ],
+      "vlen": null,
+      "elen": null,
+      "misalignment": {
+        "load": "trap",
+        "store": "trap"
+      },
+      "csr_files": [
+        "csr/mode_m.json"
+      ],
+      "evidence": "Read from config/profiles/p0.json and validated by tools/check_profile.py; not hand-written here.",
+      "class_evidence": {
+        "I": "I-010/I-011, verified by CASE=decode.rv64im_reserved and CASE=alu.boundaries",
+        "M": "I-008 implements the eight operations inline; exercised by p04_mul and p11_bigmuldiv in the corpus",
+        "Zicsr": "I-008, exercised by every trapping corpus program through the firmware trap handler",
+        "Zifencei": "I-037 is NOT yet implemented; fence.i decodes and retires as a no-op in this bring-up core"
+      },
+      "readonly_region_model": "true-readonly"
+    },
+    "spike": {
+      "installed": true,
+      "role": "independent architectural reference",
+      "xlen": 64,
+      "privilege": [
+        "M",
+        "S",
+        "U"
+      ],
+      "classes": [
+        "I",
+        "M",
+        "Zicsr",
+        "Zifencei",
+        "A",
+        "C",
+        "F",
+        "D",
+        "V"
+      ],
+      "vlen": 128,
+      "elen": 64,
+      "misalignment": {
+        "load": "service",
+        "store": "service"
+      },
+      "evidence": "Built from source (riscv-isa-sim commit 0bff12123b1fd510e19e19634dd997dbade70e54) at ~/mosaic-ref/install/bin/spike; `spike --help` reports the default ISA string rv64imafdc_zicntr_zihpm. Run over the p0 corpus by tests/programs/audit/spike_crosscheck.py: 33 of 39 cases agree word for word.",
+      "class_evidence": {
+        "I": "default ISA string contains i",
+        "M": "default ISA string contains m; p04/p11 agree with the oracle",
+        "Zicsr": "zicntr/zihpm in the default string; the corpus reads mstatus/mepc/mcause and agrees",
+        "Zifencei": "zifencei is implemented per the ISA string",
+        "A": "a in the default string",
+        "C": "c in the default string",
+        "F": "f in the default string",
+        "D": "d in the default string",
+        "V": "v in the default string; NOT independently confirmed at VLEN=128 for this build"
+      },
+      "limits": [
+        "MISMATCH: services misaligned accesses natively instead of trapping, and exposes no option to change it. p08_misaligned's trap expectations are therefore NOT_CLAIMED against Spike.",
+        "MISMATCH: reports cause 6 for an aligned store to a non-writable region where the specification requires cause 7, because the harness models boot_rom as unmapped rather than read-only. p13_romstore is NOT_CLAIMED against Spike."
+      ],
+      "readonly_region_model": "unmapped"
+    },
+    "nemu": {
+      "installed": true,
+      "role": "Difftest reference model",
+      "xlen": 64,
+      "privilege": [
+        "M",
+        "S",
+        "U",
+        "HS",
+        "VS"
+      ],
+      "classes": [
+        "I",
+        "M",
+        "Zicsr",
+        "A",
+        "C",
+        "V"
+      ],
+      "vlen": 128,
+      "elen": 64,
+      "misalignment": {
+        "load": "trap",
+        "store": "trap"
+      },
+      "evidence": "Built in the Lima guest mosaic-rosetta at ~/mosaic-ref/NEMU-f39e-pinned, commit f39e3077d7bac3cd9a3a853a9300a5f8f0293a2c. Build product build/riscv64-nemu-interpreter-so, SHA-256 8a6f428dda7b6696fbc38a9413228a238c0fe59b0c08544d84f2d9c7d3417689, exporting difftest_init/difftest_exec/difftest_attach. Ran upstream CoreMark against XiangShan: HIT GOOD TRAP, 663692 instructions, 463152 cycles.",
+      "class_evidence": {
+        "I": "CONFIG_ISA=\"riscv64\", CONFIG_ISA64=y",
+        "M": "implicit in CONFIG_ISA=riscv64",
+        "Zicsr": "used by every CoreMark CSRRW/CSRRS instruction during the positive control",
+        "A": "part of the riscv64 base profile in NEMU",
+        "C": "part of the riscv64 base profile in NEMU",
+        "V": "CONFIG_RVV=y, CONFIG_RVV_AGNOSTIC=y in .config"
+      },
+      "limits": [
+        "NOT A DUT VERIFICATION PATH YET: no MosaicRV adapter produces or consumes the Difftest state layout. NEMU being built and running proves the reference works, not that MosaicRV has been compared against it.",
+        "Zifencei NOT separately established for this build."
+      ],
+      "readonly_region_model": "unestablished"
+    },
+    "xiangshan": {
+      "installed": true,
+      "role": "second DUT",
+      "xlen": 64,
+      "privilege": [
+        "M",
+        "S",
+        "U",
+        "HS",
+        "VS"
+      ],
+      "classes": [
+        "I",
+        "M",
+        "Zicsr",
+        "A",
+        "C",
+        "F",
+        "D",
+        "V"
+      ],
+      "vlen": 128,
+      "elen": 64,
+      "misalignment": {
+        "load": "trap",
+        "store": "trap"
+      },
+      "evidence": "Checkout at ~/mosaic-ref/XiangShan-e7bab53 in the Lima guests, commit e7bab53e66dfb3c4a1d11cf9519b0396f8576cae, 157/157 recursive gitlinks matching, worktree clean. Emulator built at build/verilator-compile/emu, SHA-256 72186b6c089932c6cc7e1915dd0674f3971eda5f38918382b3c2f46a3f83a5ed. Note build/emu is a DANGLING symlink and must not be used.",
+      "class_evidence": {
+        "I": "runs the CoreMark workload under differential testing",
+        "M": "runs the CoreMark workload under differential testing",
+        "Zicsr": "exercised by CoreMark and visible in its commit trace",
+        "A": "upstream XiangShan implements A; NOT confirmed against our corpus",
+        "C": "upstream XiangShan implements C; NOT confirmed against our corpus",
+        "F": "upstream XiangShan implements F/D; NOT confirmed against our corpus",
+        "D": "upstream XiangShan implements F/D; NOT confirmed against our corpus",
+        "V": "upstream XiangShan implements RVV; NOT confirmed against our corpus"
+      },
+      "limits": [
+        "Second DUT for upstream comparison only. It is NOT a source of architectural truth and does not replace Spike or NEMU.",
+        "Its own CoreMark run is an upstream calibration, not a MosaicRV result."
+      ],
+      "readonly_region_model": "unestablished"
+    },
+    "sail": {
+      "installed": true,
+      "role": "formal ISA model",
+      "xlen": 64,
+      "privilege": [
+        "M",
+        "S",
+        "U",
+        "HS"
+      ],
+      "classes": [
+        "I",
+        "M",
+        "Zicsr",
+        "A",
+        "C",
+        "F",
+        "D",
+        "V"
+      ],
+      "vlen": 128,
+      "elen": 64,
+      "misalignment": {
+        "load": "trap",
+        "store": "trap"
+      },
+      "evidence": "Official Mac-arm64 release asset sail-riscv 0.14.1 at ~/mosaic-ref/sail-riscv-0.14.1/bin/sail_riscv_sim; `sail_riscv_sim --help` runs and reports 'Sail RISC-V Model'.",
+      "class_evidence": {
+        "I": "riscv64 base in the model",
+        "M": "riscv64 base in the model",
+        "Zicsr": "riscv64 privileged in the model",
+        "A": "present in the Sail RISC-V model",
+        "C": "present in the Sail RISC-V model",
+        "F": "present in the Sail RISC-V model",
+        "D": "present in the Sail RISC-V model",
+        "V": "present in the Sail RISC-V model"
+      },
+      "limits": [
+        "Claimed from the model's shipped ISA coverage, not from a differential run against our core.",
+        "ACT's recorded 51/51 replay is a Sail-MAXIMUM self-replay: the model compared against itself. It is not a comparison against MosaicRV."
+      ],
+      "readonly_region_model": "unestablished"
+    },
+    "act4": {
+      "installed": true,
+      "role": "fourth-party link/run harness",
+      "xlen": 64,
+      "privilege": [
+        "M",
+        "S",
+        "U",
+        "HS",
+        "VS"
+      ],
+      "classes": [
+        "I",
+        "M",
+        "Zicsr",
+        "A",
+        "C",
+        "F",
+        "D",
+        "V"
+      ],
+      "vlen": 128,
+      "elen": 64,
+      "misalignment": {
+        "load": "trap",
+        "store": "trap"
+      },
+      "evidence": "Source at 96493a91448ca50780013fd892daec2c204487ba, worktree clean; runtime tools pinned by mise 2026.9.15 (uv 0.11.33, Ruby 3.4.11, Bundler 4.0.21); `act4-cli` help probe passes.",
+      "class_evidence": {
+        "I": "part of the rv64 profile ACT4 is built to exercise",
+        "M": "part of the rv64 profile ACT4 is built to exercise",
+        "Zicsr": "part of the rv64 privileged profile ACT4 exercises",
+        "A": "part of the ACT4 profile",
+        "C": "part of the ACT4 profile",
+        "F": "part of the ACT4 profile",
+        "D": "part of the ACT4 profile",
+        "V": "part of the ACT4 profile"
+      },
+      "limits": [
+        "NO MosaicRV DUT profile exists: no UDB, Sail, linker or rvmodel_macros.h profile for this core, and no DUT ELF runner. V-043 is BLOCKED."
+      ],
+      "readonly_region_model": "unestablished"
+    }
+  }
+}

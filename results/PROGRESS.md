@@ -512,3 +512,50 @@ symlink** pointing at `/work/build/verilator-compile/emu`, a path from the origi
 container that does not exist in the guest. Anything scripted against `build/emu`
 fails with a bare "No such file or directory" that looks like a missing build rather
 than a stale link.
+
+---
+
+## 2026-10-01 — V-002: capability intersection, computed from evidence
+
+`tools/check_capability_matrix.py` and `config/capability/models.json`, wired into
+`make check`. The card's rule is blunt — p0 may only generate RV64IM_Zicsr_Zifencei
+M-mode programs, and a test outside the intersection may be skipped only after the
+skip is declared — so the checker refuses to guess in three places.
+
+**Requirements are derived, not declared.** A program's ISA classes come from
+mapping the mnemonics in its `covers` list. An unmapped mnemonic is a hard error
+rather than a widened intersection, which is what happened on the first run: the
+corpus uses `RET`, `BNEZ` and `TRAP`, none of which were mapped. Guessing would have
+silently widened every workload's requirements to "everything".
+
+**A capability claim without evidence fails.** Every model declares `evidence` for
+how its capabilities were established, and `class_evidence` per instruction class.
+Five negative controls, each mutating a field the checker actually consults:
+three on evidence, one that leaves `p08_misaligned` with no model able to adjudicate
+it, one that removes a model's read-only-region claim. Two of my first five controls
+were worthless — they mutated fields nothing read — and said so by passing.
+
+**The instruction set is not sufficient, and the first version got that wrong.**
+With classes alone, every program came out "runnable on all", including
+`p08_misaligned`, which directly contradicts the measurement that Spike *cannot*
+adjudicate it. So a workload now carries behaviour requirements as well as classes:
+
+| workload | requires | adjudicated by | excluded |
+|---|---|---|---|
+| `p08_misaligned` | I, Zicsr + `misaligned_trap` | MosaicRV, NEMU, XiangShan, Sail, ACT4 | **Spike** — services misaligned accesses natively |
+| `p13_romstore` | I, Zicsr + `pma_readonly` | MosaicRV only | all four references report a different cause |
+
+That table now matches what was actually measured rather than what the ISA strings
+suggest, which is the whole point of computing it.
+
+**Where the declared capabilities came from.** NEMU from its own `.config`
+(`CONFIG_ISA="riscv64"`, `CONFIG_RVV=y`) and the exported symbol set of the built
+`.so`; Spike from `spike --help` plus the 33/39 cross-check; XiangShan from the
+built emulator's SHA-256 and a CoreMark run; Sail and ACT4 from their shipped
+provenance. Claims I could not establish — Sail's and ACT4's per-class coverage,
+XiangShan's F/D/V against our corpus — are recorded as `unestablished` rather than
+asserted.
+
+**V-002 remains open.** This establishes which model *may* adjudicate which program.
+It does not run a single one of those comparisons. The next step is the actual
+per-model differential, which is where the real evidence is.

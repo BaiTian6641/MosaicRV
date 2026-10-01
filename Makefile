@@ -39,7 +39,7 @@ SLANG_TIDY ?= slang-tidy
 # toolchain will turn into a silently different netlist.
 VERILATOR_LINT_FLAGS := --lint-only -Wall -Wno-DECLFILENAME
 
-.PHONY: all help check check-config check-contracts check-coverage check-upstream check-upstream-pinned check-isolation check-docs manifest lint lint-slang lint-cpp \
+.PHONY: all help check check-config check-contracts check-coverage check-capability-matrix check-upstream check-upstream-pinned check-isolation check-docs manifest lint lint-slang lint-cpp \
         unit sim synth-generic test clean distclean verify-tools
 
 all: check check-docs manifest lint unit
@@ -51,6 +51,7 @@ help:
 	@echo "  make check-config      validate profiles, PMA, CSRs, geometry"
 	@echo "  make check-contracts   validate interface contracts and tag arithmetic"
 	@echo "  make check-upstream    report pinned and optional external inputs"
+	@echo "  make check-capability-matrix  per-workload model intersection"
 	@echo "  make check-upstream-pinned require calibrated upstream pins and the ACT4 runtime"
 	@echo "  make manifest          generate build/$(PROFILE)/manifest.json and RTL config"
 	@echo "  make lint              Verilator lint of the whole design"
@@ -177,6 +178,12 @@ check-coverage:
 check-upstream:
 	$(PYTHON) tools/check_upstream.py
 
+# The per-workload capability intersection: which models may adjudicate which
+# corpus programs, and why the rest may not. An unevidenced claim fails.
+check-capability-matrix:
+	$(PYTHON) tools/check_capability_matrix.py --profile $(PROFILE) --verbose
+	$(PYTHON) tools/check_capability_matrix.py --negative
+
 check-upstream-pinned:
 	$(PYTHON) tools/check_upstream.py \
 	  --require XiangShan-e7bab53 \
@@ -196,7 +203,7 @@ check-upstream-pinned:
 check-isolation:
 	$(PYTHON) tools/check_isolation.py
 
-check: check-config check-contracts check-coverage check-upstream check-isolation
+check: check-config check-contracts check-coverage check-capability-matrix check-upstream check-isolation
 
 # ---------------------------------------------------------------------- clean
 
