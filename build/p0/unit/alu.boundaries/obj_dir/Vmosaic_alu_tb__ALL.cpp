@@ -4,4 +4,5 @@
 #include "Vmosaic_alu_tb___024root__0.cpp"
 #include "Vmosaic_alu_tb___024root__Slow.cpp"
 #include "Vmosaic_alu_tb___024root__0__Slow.cpp"
+#include "Vmosaic_alu_tb___024unit__Slow.cpp"
 #include "Vmosaic_alu_tb__Syms__Slow.cpp"

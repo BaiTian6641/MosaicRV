@@ -154,6 +154,10 @@
 
 `default_nettype none
 
+// File-scope, not inside the module: an import written in the module body does
+// not reach the port list, which is elaborated first.
+import mosaic_pkg::*;
+
 module mosaic_bringup_core #(
     parameter int XLEN = 64
 ) (
@@ -207,9 +211,6 @@ module mosaic_bringup_core #(
     output logic [XLEN-1:0]  dbg_pc_o,
     output logic [2:0]       dbg_state_o
 );
-
-  import mosaic_pkg::*;
-
   // ==========================================================================
   // Frozen constants, all traceable to configuration
   // ==========================================================================
@@ -267,10 +268,6 @@ module mosaic_bringup_core #(
   localparam logic [11:0] CSR_TIME       = 12'hC01;
   localparam logic [11:0] CSR_INSTRET    = 12'hC02;
 
-  // Opcode 1000011 is OP-FP: FMADD/FMSUB/FNMSUB/FNMADD, i.e. the F and D
-  // extensions.  It is absent from mosaic_pkg's opcode map precisely because
-  // those extensions are not in p0, so it has no localparam there.
-  localparam logic [6:0]  OP_FP         = 7'b1000011;
 
   // ==========================================================================
   // Architectural state
@@ -424,24 +421,29 @@ module mosaic_bringup_core #(
   function automatic logic [XLEN-1:0] muldiv_eval(input logic [XLEN-1:0] a,
                                                   input logic [XLEN-1:0] b,
                                                   input logic [2:0]      op);
-    logic [2*XLEN-1:0]   prod_ss;
-    logic [2*XLEN-1:0]   prod_su;
-    logic [2*XLEN-1:0]   prod_uu;
+    logic [XLEN-1:0]        prod_ss_hi;
+    logic [XLEN-1:0]        prod_su_hi;
+    logic [XLEN-1:0]        prod_uu_hi;
+    logic [XLEN-1:0]        prod_uu_lo;
     logic signed [XLEN-1:0] sa;
     logic signed [XLEN-1:0] sb;
 
     sa = a;
     sb = b;
 
-    prod_ss = {{XLEN{a[XLEN-1]}}, a} * {{XLEN{b[XLEN-1]}}, b};
-    prod_su = {{XLEN{a[XLEN-1]}}, a} * {{XLEN{1'b0}},   b};
-    prod_uu = {{XLEN{1'b0}},   a} * {{XLEN{1'b0}},   b};
+    // Only the halves each operation actually returns are kept, so no 128-bit
+    // temporary is left holding bits nobody reads.
+    prod_ss_hi = XLEN'(({{XLEN{a[XLEN-1]}}, a} * {{XLEN{b[XLEN-1]}}, b}) >> XLEN);
+    prod_su_hi = XLEN'(({{XLEN{a[XLEN-1]}}, a} * {{XLEN{1'b0}},   b}) >> XLEN);
+    prod_uu_hi = XLEN'(({{XLEN{1'b0}},   a} * {{XLEN{1'b0}},   b}) >> XLEN);
+    prod_uu_lo = {{XLEN{1'b0}}, a} * {{XLEN{1'b0}}, b};
 
     case (op)
-      MD_MUL:    muldiv_eval = prod_uu[XLEN-1:0];
-      MD_MULH:   muldiv_eval = prod_ss[2*XLEN-1:XLEN];
-      MD_MULHSU: muldiv_eval = prod_su[2*XLEN-1:XLEN];
-      MD_MULHU:  muldiv_eval = prod_uu[2*XLEN-1:XLEN];
+      MD_MUL:    muldiv_eval = prod_uu_lo;
+      MD_MULH:   muldiv_eval = prod_ss_hi;
+      MD_MULHSU: muldiv_eval = prod_su_hi;
+      MD_MULHU:  muldiv_eval = prod_uu_hi;
+
 
       // Division by zero is defined, not undefined: the quotient is all ones
       // and the remainder is the dividend.  Signed overflow (most-negative
@@ -481,6 +483,16 @@ module mosaic_bringup_core #(
   // ==========================================================================
   // Decode
   // ==========================================================================
+
+  // Opcode 1000011 is OP-FP: FMADD/FMSUB/FNMSUB/FNMADD, i.e. the F and D
+  // extensions.  It is absent from mosaic_pkg's opcode map precisely because
+  // those extensions are not in p0, so it has no localparam there.  The
+  // constant exists only inside the negative control: in the shipping build the
+  // opcode simply falls through to `illegal_op()` and a constant with no
+  // reader would be dead weight the linter is right to complain about.
+`ifdef MOSAIC_BRINGUP_MUTANT_2
+  localparam logic [6:0]  OP_FP         = 7'b1000011;
+`endif
 
   function automatic decode_ctl_t decode(input logic [31:0] ir);
     decode_ctl_t      d;
@@ -867,7 +879,15 @@ module mosaic_bringup_core #(
   // architectural writes made on the closing edge of S_EXEC or S_DWAIT.
   // ==========================================================================
 
+  // Verilator reports the bits of `ctl` that no elaborated mux arm reads as
+  // unused.  That is an artefact of which branch of the operand-selection mux a
+  // given path takes, not a defect: the decode struct is shared with the real
+  // front end and this single-issue path simply does not consume every field
+  // (is_fence_i, md_signed and the immediate of a memory instruction, for
+  // example).  The waiver covers this one declaration.
+  /* verilator lint_off UNUSEDSIGNAL */
   decode_ctl_t      ctl;
+  /* verilator lint_on UNUSEDSIGNAL */
   logic [XLEN-1:0]  rs1_val;
   logic [XLEN-1:0]  rs2_val;
   logic [XLEN-1:0]  alu_a;
@@ -1102,90 +1122,165 @@ module mosaic_bringup_core #(
   end
 
   // ==========================================================================
-  // Commit helpers
-  // ==========================================================================
-
-  // One architectural event, always at commit, always in program order.
+  // The commit point
   //
-  // A trap is never dressed up as a retire.  MOSAIC_BRINGUP_MUTANT_5 breaks
-  // exactly that rule while leaving the machine's behaviour correct, which is
-  // the failure mode docs/implementation-plan.md section 1.3 warns about: the
-  // DUT keeps passing every functional check while the event stream a
-  // differential comparator consumes has lost the trap entirely.
-  task automatic emit_event(input logic           is_trap,
-                            input logic [XLEN-1:0] cause_i,
-                            input logic [XLEN-1:0] tval_i,
-                            input logic [31:0]     insn_i);
-    evt_valid_o      <= 1'b1;
-    evt_pc_o         <= pc_q;
-    evt_insn_o       <= insn_i;
-    evt_cause_o      <= {XLEN{1'b0}};
-    evt_tval_o       <= {XLEN{1'b0}};
-    evt_epc_o        <= {XLEN{1'b0}};
-    evt_is_store_o   <= 1'b0;
-    evt_store_addr_o <= {XLEN{1'b0}};
-    evt_store_data_o <= {XLEN{1'b0}};
-    evt_store_size_o <= {XLEN{1'b0}};
+  // One instruction finishes in exactly one of four states, and each of them
+  // says so here.  Everything downstream -- the event, the CSR file, the PC --
+  // is driven from these five signals, so there is one commit point rather than
+  // four copies of it.
+  // ==========================================================================
 
-`ifdef MOSAIC_BRINGUP_MUTANT_5
-    // NEGATIVE CONTROL: report the trapping instruction as an ordinary retire,
-    // with a register write and a fall-through PC.  The machine still redirects
-    // correctly, so the program still finishes and every signature still
-    // matches; only the event stream is wrong.
-    evt_trap_o     <= 1'b0;
-    evt_next_pc_o  <= pc_q + 64'd4;
-    evt_has_rd_o   <= 1'b1;
-    evt_rd_o       <= ctl.rd;
-    evt_rd_value_o <= rd_val;
-`else
-    if (is_trap) begin
-      evt_trap_o     <= 1'b1;
-      evt_next_pc_o  <= mtvec_q;
-      evt_has_rd_o   <= 1'b0;
-      evt_rd_o       <= ctl.rd;
-      evt_rd_value_o <= {XLEN{1'b0}};
-      evt_cause_o    <= cause_i;
-      evt_tval_o     <= tval_i;
-      evt_epc_o      <= pc_q;
-    end else begin
-      evt_trap_o     <= 1'b0;
-      evt_next_pc_o  <= next_pc;
-      evt_has_rd_o   <= rd_we;
-      evt_rd_o       <= ctl.rd;
-      evt_rd_value_o <= rd_val;
+  logic            commit_now;      // this cycle closes an instruction
+  logic            commit_is_trap;  // ... and it trapped
+  logic [XLEN-1:0] commit_cause;
+  logic [XLEN-1:0] commit_tval;
+  logic [31:0]     commit_insn;
+
+  always_comb begin
+    commit_now     = 1'b0;
+    commit_is_trap = 1'b0;
+    commit_cause   = {XLEN{1'b0}};
+    commit_tval    = {XLEN{1'b0}};
+    commit_insn    = ir_q;
+    case (state_q)
+      S_FETCH: begin
+        // IALIGN is 32 in this build.  This is the one trap that needs no
+        // instruction, so it is taken before the fetch request is posted.
+        if (pc_q[1:0] != 2'b00) begin
+          commit_now     = 1'b1;
+          commit_is_trap = 1'b1;
+          commit_cause   = EXC_INSN_MISALIGNED;
+          commit_tval    = pc_q;
+        end
+      end
+      S_FWAIT: begin
+        if (ifetch_ack_i && ifetch_fault_i) begin
+          commit_now     = 1'b1;
+          commit_is_trap = 1'b1;
+          commit_cause   = EXC_INSN_ACCESS;
+          commit_tval    = pc_q;
+          commit_insn    = 32'h00000000;   // nothing was fetched
+        end
+      end
+      S_EXEC: begin
+        if (trap_now) begin
+          commit_now     = 1'b1;
+          commit_is_trap = 1'b1;
+          commit_cause   = trap_cause;
+          commit_tval    = trap_tval;
+        end else if (ctl.mem_kind == MEM_NONE) begin
+          commit_now     = 1'b1;
+          commit_is_trap = 1'b0;
+        end
+      end
+      S_DWAIT: begin
+        if (dmem_ack_i) begin
+          commit_now     = 1'b1;
+          commit_is_trap = dmem_fault_i;
+          commit_cause   = (ctl.mem_kind == MEM_STORE) ? EXC_STORE_ACCESS
+                                                       : EXC_LOAD_ACCESS;
+          commit_tval    = daddr_q;
+        end
+      end
+      default: ;
+    endcase
+  end
+
+  // Next value of every architectural register, so the sequential block below is
+  // one unconditional assignment per register and there is exactly one writer
+  // each.  The defaults are "unchanged", which is what lets a trap leave the
+  // register file alone without an explicit inhibit.
+  logic [XLEN-1:0] mstatus_n;
+  logic [XLEN-1:0] medeleg_n;
+  logic [XLEN-1:0] mideleg_n;
+  logic [XLEN-1:0] mie_n;
+  logic [XLEN-1:0] mtvec_n;
+  logic [XLEN-1:0] mscratch_n;
+  logic [XLEN-1:0] mepc_n;
+  logic [XLEN-1:0] mcause_n;
+  logic [XLEN-1:0] mtval_n;
+  logic [XLEN-1:0] mip_n;
+  logic [XLEN-1:0] mcycle_n;
+  logic [XLEN-1:0] minstret_n;
+  logic [XLEN-1:0] pc_n;
+  state_e          state_n;
+
+  // MIE <- MPIE, MPIE <- old MIE: the trap-entry swap.
+  function automatic logic [XLEN-1:0] mstatus_on_trap(input logic [XLEN-1:0] s);
+    mstatus_on_trap = ((s & ~MSTATUS_WMASK) |
+                       (s[MSTATUS_MIE_BIT]  ? MSTATUS_MPIE : {XLEN{1'b0}}) |
+                       (s[MSTATUS_MPIE_BIT] ? MSTATUS_MIE  : {XLEN{1'b0}})) |
+                      MSTATUS_MPP_M;
+  endfunction
+
+  // MIE <- MPIE, MPIE <- 1: mret.  MPP is fixed at M by the CSR file.
+  function automatic logic [XLEN-1:0] mstatus_on_mret(input logic [XLEN-1:0] s);
+    mstatus_on_mret = ((s & ~MSTATUS_WMASK) |
+                       (s[MSTATUS_MPIE_BIT] ? MSTATUS_MIE : {XLEN{1'b0}}) |
+                       MSTATUS_MPIE) | MSTATUS_MPP_M;
+  endfunction
+
+  always_comb begin
+    mstatus_n  = mstatus_q;
+    medeleg_n  = medeleg_q;
+    mideleg_n  = mideleg_q;
+    mie_n      = mie_q;
+    mtvec_n    = mtvec_q;
+    mscratch_n = mscratch_q;
+    mepc_n     = mepc_q;
+    mcause_n   = mcause_q;
+    mtval_n    = mtval_q;
+    mip_n      = mip_q;
+    mcycle_n   = mcycle_q + 64'd1;      // one increment per clock, not per event
+    minstret_n = minstret_q;
+    pc_n       = next_pc;
+    state_n    = S_FETCH;
+
+    case (state_q)
+      S_FETCH:  if (pc_q[1:0] == 2'b00) state_n = S_FWAIT;
+      S_FWAIT:  if (ifetch_ack_i && !ifetch_fault_i) state_n = S_EXEC;
+      S_EXEC:   if (!trap_now && (ctl.mem_kind != MEM_NONE)) state_n = S_DREQ;
+      S_DREQ:   state_n = S_DWAIT;
+      S_DWAIT:  if (dmem_ack_i && !dmem_fault_i) state_n = S_FETCH;
+      default:  state_n = S_FETCH;
+    endcase
+
+    if (commit_now) begin
+      if (commit_is_trap) begin
+        mepc_n    = pc_q;
+        mcause_n  = commit_cause;
+        mtval_n   = commit_tval;
+        mstatus_n = mstatus_on_trap(mstatus_q);
+        pc_n      = mtvec_q;
+        state_n   = S_FETCH;
+      end else begin
+        minstret_n = minstret_q + 64'd1;
+        pc_n       = next_pc;
+        state_n    = S_FETCH;
+        if (csr_writes) begin
+          case (ctl.csr_addr)
+            CSR_MSTATUS:   mstatus_n  = csr_written(ctl.csr_addr, csr_wdata);
+            CSR_MEDELEG:   medeleg_n  = csr_written(ctl.csr_addr, csr_wdata);
+            CSR_MIDELEG:   mideleg_n  = csr_written(ctl.csr_addr, csr_wdata);
+            CSR_MIE:       mie_n      = csr_written(ctl.csr_addr, csr_wdata);
+            CSR_MTVEC:     mtvec_n    = csr_written(ctl.csr_addr, csr_wdata);
+            CSR_MSCRATCH:  mscratch_n = csr_written(ctl.csr_addr, csr_wdata);
+            CSR_MEPC:      mepc_n     = csr_written(ctl.csr_addr, csr_wdata);
+            CSR_MCAUSE:    mcause_n   = csr_written(ctl.csr_addr, csr_wdata);
+            CSR_MTVAL:     mtval_n    = csr_written(ctl.csr_addr, csr_wdata);
+            CSR_MIP:       mip_n      = csr_written(ctl.csr_addr, csr_wdata);
+            CSR_MCYCLE:    mcycle_n   = csr_written(ctl.csr_addr, csr_wdata);
+            CSR_MINSTRET:  minstret_n = csr_written(ctl.csr_addr, csr_wdata);
+            default: ;
+          endcase
+        end
+        if (ctl.is_mret) mstatus_n = mstatus_on_mret(mstatus_q);
+      end
     end
-`endif
-  endtask
-
-  // Take a trap: write the three trap CSRs, do the MIE/MPIE swap, redirect.
-  // MPP is already fixed at M by the CSR file, so there is no privilege
-  // transition to perform -- this hart is M-mode and it stays M-mode.
-  task automatic take_trap(input logic [XLEN-1:0] cause_i,
-                            input logic [XLEN-1:0] tval_i,
-                            input logic [31:0]     insn_i);
-    mepc_q    <= pc_q;
-    mcause_q  <= cause_i;
-    mtval_q   <= tval_i;
-    mstatus_q <= ((mstatus_q & ~MSTATUS_WMASK) |
-                  (mstatus_q[MSTATUS_MIE_BIT]  ? MSTATUS_MPIE : {XLEN{1'b0}}) |
-                  (mstatus_q[MSTATUS_MPIE_BIT] ? MSTATUS_MIE  : {XLEN{1'b0}})) |
-                 MSTATUS_MPP_M;
-    emit_event(1'b1, cause_i, tval_i, insn_i);
-    pc_q <= mtvec_q;
-  endtask
-
-  task automatic commit_retire(input logic [31:0] insn_i);
-    emit_event(1'b0, {XLEN{1'b0}}, {XLEN{1'b0}}, insn_i);
-    if (commit_store) begin
-      evt_is_store_o   <= 1'b1;
-      evt_store_addr_o <= daddr_q;
-      evt_store_data_o <= dwdata_q;
-      evt_store_size_o <= dsize_q;
-    end
-  endtask
+  end
 
   // ==========================================================================
-  // Sequential
+  // Sequential.  One writer per register, one commit point, no tasks.
   // ==========================================================================
 
   integer ri;
@@ -1209,113 +1304,111 @@ module mosaic_bringup_core #(
       daddr_q    <= {XLEN{1'b0}};
       dwdata_q   <= {XLEN{1'b0}};
       dsize_q    <= SZ_DBL;
-      evt_valid_o    <= 1'b0;
-      evt_trap_o     <= 1'b0;
-      evt_pc_o       <= {XLEN{1'b0}};
-      evt_next_pc_o  <= {XLEN{1'b0}};
-      evt_insn_o     <= 32'h00000000;
-      evt_has_rd_o   <= 1'b0;
-      evt_rd_o       <= 5'd0;
-      evt_rd_value_o <= {XLEN{1'b0}};
-      evt_cause_o    <= {XLEN{1'b0}};
-      evt_tval_o     <= {XLEN{1'b0}};
-      evt_epc_o      <= {XLEN{1'b0}};
-      evt_is_store_o <= 1'b0;
+      evt_valid_o      <= 1'b0;
+      evt_trap_o       <= 1'b0;
+      evt_pc_o         <= {XLEN{1'b0}};
+      evt_next_pc_o    <= {XLEN{1'b0}};
+      evt_insn_o       <= 32'h00000000;
+      evt_has_rd_o     <= 1'b0;
+      evt_rd_o         <= 5'd0;
+      evt_rd_value_o   <= {XLEN{1'b0}};
+      evt_cause_o      <= {XLEN{1'b0}};
+      evt_tval_o       <= {XLEN{1'b0}};
+      evt_epc_o        <= {XLEN{1'b0}};
+      evt_is_store_o   <= 1'b0;
       evt_store_addr_o <= {XLEN{1'b0}};
       evt_store_data_o <= {XLEN{1'b0}};
-      evt_store_size_o <= {XLEN{1'b0}};
+      evt_store_size_o <= 3'b000;
       for (ri = 0; ri < 32; ri = ri + 1) begin
         regs_q[ri] <= {XLEN{1'b0}};
       end
     end else begin
-      // One architectural event per cycle at most, because one instruction is
-      // in flight; the default clears the pulse and any task below overrides.
-      evt_valid_o  <= 1'b0;
-      mcycle_q     <= mcycle_q + 64'd1;
+      // At most one architectural event per cycle, because one instruction is in
+      // flight; the default clears the pulse.
+      evt_valid_o      <= 1'b0;
+      evt_trap_o       <= 1'b0;
+      evt_cause_o      <= {XLEN{1'b0}};
+      evt_tval_o       <= {XLEN{1'b0}};
+      evt_epc_o        <= {XLEN{1'b0}};
+      evt_is_store_o   <= 1'b0;
+      evt_store_addr_o <= {XLEN{1'b0}};
+      evt_store_data_o <= {XLEN{1'b0}};
+      evt_store_size_o <= 3'b000;
 
-      case (state_q)
-        // ------------------------------------------------------------- FETCH
-        S_FETCH: begin
-          // The instruction-address-misaligned check is the only trap that does
-          // not need an instruction, so it happens before the request is posted.
-          // IALIGN is 32 in this build.
-          if (pc_q[1:0] != 2'b00) begin
-            take_trap(EXC_INSN_MISALIGNED, pc_q, ir_q);
-            state_q <= S_FETCH;
-          end else begin
-            state_q <= S_FWAIT;
+      state_q    <= state_n;
+      pc_q       <= pc_n;
+      mstatus_q  <= mstatus_n;
+      medeleg_q  <= medeleg_n;
+      mideleg_q  <= mideleg_n;
+      mie_q      <= mie_n;
+      mtvec_q    <= mtvec_n;
+      mscratch_q <= mscratch_n;
+      mepc_q     <= mepc_n;
+      mcause_q   <= mcause_n;
+      mtval_q    <= mtval_n;
+      mip_q      <= mip_n;
+      mcycle_q   <= mcycle_n;
+      minstret_q <= minstret_n;
+
+      if ((state_q == S_FWAIT) && ifetch_ack_i && !ifetch_fault_i) begin
+        ir_q <= ifetch_rdata_i;
+      end
+
+      if ((state_q == S_EXEC) && !trap_now && (ctl.mem_kind != MEM_NONE)) begin
+        daddr_q  <= eff_addr;
+        dsize_q  <= ctl.mem_size;
+        dwdata_q <= (ctl.mem_kind == MEM_STORE)
+                      ? (rs2_val & size_mask(ctl.mem_size))
+                      : {XLEN{1'b0}};
+      end
+
+      // ---- the commit point ------------------------------------------------
+      if (commit_now) begin
+        evt_valid_o  <= 1'b1;
+        evt_pc_o     <= pc_q;
+        evt_insn_o   <= commit_insn;
+        evt_rd_o     <= ctl.rd;
+
+`ifdef MOSAIC_BRINGUP_MUTANT_5
+        // NEGATIVE CONTROL: report the trapping instruction as an ordinary
+        // retire, with a register write and a fall-through PC.  The machine
+        // still redirects correctly, so the program still finishes and every
+        // signature still matches -- only the event stream is wrong, which is
+        // exactly the ABA/aliasing hazard section 1.3 names.
+        evt_trap_o     <= 1'b0;
+        evt_next_pc_o  <= pc_q + 64'd4;
+        evt_has_rd_o   <= 1'b1;
+        evt_rd_value_o <= rd_val;
+        if (!commit_is_trap && rd_we) regs_q[ctl.rd] <= rd_val;
+`else
+        if (commit_is_trap) begin
+          // A trap is never dressed up as a retire: no destination register, no
+          // store, and the next PC is the trap vector.
+          evt_trap_o     <= 1'b1;
+          evt_next_pc_o  <= mtvec_q;
+          evt_has_rd_o   <= 1'b0;
+          evt_rd_value_o <= {XLEN{1'b0}};
+          evt_cause_o    <= commit_cause;
+          evt_tval_o     <= commit_tval;
+          evt_epc_o      <= pc_q;
+        end else begin
+          evt_trap_o     <= 1'b0;
+          evt_next_pc_o  <= next_pc;
+          evt_has_rd_o   <= rd_we;
+          evt_rd_value_o <= rd_val;
+          if (rd_we) regs_q[ctl.rd] <= rd_val;
+          if (commit_store) begin
+            evt_is_store_o   <= 1'b1;
+            evt_store_addr_o <= daddr_q;
+            evt_store_data_o <= dwdata_q;
+            evt_store_size_o <= dsize_q;
           end
         end
-
-        // ------------------------------------------------------------- FWAIT
-        S_FWAIT: begin
-          if (ifetch_ack_i) begin
-            if (ifetch_fault_i) begin
-              take_trap(EXC_INSN_ACCESS, pc_q, 32'h00000000);
-              state_q <= S_FETCH;
-            end else begin
-              ir_q    <= ifetch_rdata_i;
-              state_q <= S_EXEC;
-            end
-          end
-        end
-
-        // -------------------------------------------------------------- EXEC
-        S_EXEC: begin
-          if (trap_now) begin
-            take_trap(trap_cause, trap_tval, ir_q);
-            state_q <= S_FETCH;
-          end else if (ctl.mem_kind != MEM_NONE) begin
-            daddr_q  <= eff_addr;
-            dsize_q  <= ctl.mem_size;
-            dwdata_q <= (ctl.mem_kind == MEM_STORE)
-                          ? (rs2_val & size_mask(ctl.mem_size))
-                          : {XLEN{1'b0}};
-            state_q  <= S_DREQ;
-          end else begin
-            commit_retire(ir_q);
-            if (rd_we) regs_q[ctl.rd] <= rd_val;
-            if (csr_writes) csr_write(ctl.csr_addr, csr_wdata);
-            if (ctl.is_mret) begin
-              // MIE <- MPIE, MPIE <- 1.  MPP is fixed at M by the CSR file.
-              mstatus_q <= ((mstatus_q & ~MSTATUS_WMASK) |
-                            (mstatus_q[MSTATUS_MPIE_BIT] ? MSTATUS_MIE
-                                                         : {XLEN{1'b0}}) |
-                            MSTATUS_MPIE) | MSTATUS_MPP_M;
-            end
-            minstret_q <= minstret_q + 64'd1;
-            pc_q       <= next_pc;
-            state_q    <= S_FETCH;
-          end
-        end
-
-        // -------------------------------------------------------------- DREQ
-        S_DREQ: begin
-          state_q <= S_DWAIT;
-        end
-
-        // ------------------------------------------------------------- DWAIT
-        S_DWAIT: begin
-          if (dmem_ack_i) begin
-            if (dmem_fault_i) begin
-              take_trap((ctl.mem_kind == MEM_STORE) ? EXC_STORE_ACCESS
-                                                    : EXC_LOAD_ACCESS,
-                        daddr_q, ir_q);
-              state_q <= S_FETCH;
-            end else begin
-              commit_retire(ir_q);
-              if (rd_we) regs_q[ctl.rd] <= rd_val;
-              minstret_q <= minstret_q + 64'd1;
-              pc_q       <= next_pc;
-              state_q    <= S_FETCH;
-            end
-          end
-        end
-
-        default: state_q <= S_FETCH;
-      endcase
+`endif
+      end
     end
   end
+
 
 endmodule : mosaic_bringup_core
 

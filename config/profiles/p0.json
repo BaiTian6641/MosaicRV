@@ -33,8 +33,8 @@
   "memory_map_file": "memory/p0.json",
   "geometry_file": "geometry/p0.json",
   "test_protocol": {
-    "tohost": 1056768,
-    "fromhost": 1056776,
+    "tohost": 2147487744,
+    "fromhost": 2147487752,
     "signature": 2147484672,
     "pass_code": 1,
     "signature_words": 4
@@ -45,6 +45,7 @@
   },
   "derived_notes": [
     "p0 deliberately does NOT claim A, C, F, D, V, S, U, Sv39 or any cache; docs/implementation-plan.md#1.1 lists these as forbidden early claims.",
-    "Two clusters exist in p0 because the execution fabric (I-022..I-032) is in scope for the p0 gate; clusters are an internal structure and are not architectural state."
+    "Two clusters exist in p0 because the execution fabric (I-022..I-032) is in scope for the p0 gate; clusters are an internal structure and are not architectural state.",
+    "The test protocol lives in RAM, not in the test_harness device region: HTIF, and therefore Spike, can only poll a tohost address that is real memory, and placing tohost in memory is the universal bare-metal convention. The test_harness region remains mapped for the harness to recognise, but TOHOST itself is an ordinary memory word the harness observes after the run."
   ]
 }

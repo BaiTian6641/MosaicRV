@@ -52,8 +52,8 @@
   "memory_map_file": "memory/p2.json",
   "geometry_file": "geometry/p2.json",
   "test_protocol": {
-    "tohost": 1056768,
-    "fromhost": 1056776,
+    "tohost": 2147487744,
+    "fromhost": 2147487752,
     "signature": 2147484672,
     "pass_code": 1,
     "signature_words": 4
@@ -64,6 +64,7 @@
   },
   "derived_notes": [
     "VLEN is fixed for the whole life of a hart; runtime lane quota changes (I-059) must never change architectural VLEN.",
-    "Zkt/Zvkt apply only to instructions actually implemented; an unimplemented instruction cannot be excused by claiming Zkt."
+    "Zkt/Zvkt apply only to instructions actually implemented; an unimplemented instruction cannot be excused by claiming Zkt.",
+    "The test protocol lives in RAM, not in the test_harness device region: HTIF, and therefore Spike, can only poll a tohost address that is real memory, and placing tohost in memory is the universal bare-metal convention. The test_harness region remains mapped for the harness to recognise, but TOHOST itself is an ordinary memory word the harness observes after the run."
   ]
 }

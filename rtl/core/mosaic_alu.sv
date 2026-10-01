@@ -62,6 +62,15 @@
 
 `default_nettype none
 
+// The `alu_op_e` encoding is the contract with the decoder (I-010) and with the
+// testbenches; nothing here may invent a second numbering. The import sits in the
+// module body, which is enough because this module's port list uses only plain
+// vectors: a $unit-scope `import mosaic_pkg::*` is an IMPORTSTAR warning, and
+// Verilator 5.052 rejects the narrower `import mosaic_pkg::alu_op_e::*`. A port
+// declaration that needs a package type would have to be written with the
+// qualified name or with a file-scope import.
+import mosaic_pkg::*;
+
 module mosaic_alu #(
     parameter int XLEN = 64
 ) (
@@ -71,10 +80,6 @@ module mosaic_alu #(
     output logic [XLEN-1:0]  result,
     output logic             zero     // result == 0
 );
-  // The enum encoding is the contract with the decoder (I-010) and with the
-  // testbenches; nothing here is allowed to invent a second numbering.
-  import mosaic_pkg::*;
-
   // ---------------------------------------------------------------- geometry
   // The W forms are 32 bits in RV64 whatever XLEN is; the rest follow XLEN.
   localparam int WLEN     = 32;

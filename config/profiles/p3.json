@@ -55,8 +55,8 @@
   "memory_map_file": "memory/p3.json",
   "geometry_file": "geometry/p3.json",
   "test_protocol": {
-    "tohost": 1056768,
-    "fromhost": 1056776,
+    "tohost": 2147487744,
+    "fromhost": 2147487752,
     "signature": 2147484672,
     "pass_code": 1,
     "signature_words": 4
@@ -67,6 +67,7 @@
   },
   "derived_notes": [
     "Sha, Supm/Ssnpm PMLEN=0/7 and the two-stage guest VM obligations are RVA23S64 items tracked by I-092..I-098 and are NOT implied by this profile file; they remain unclaimed until their matrix rows pass.",
-    "Sv48, CFI, Zvkng/Zvksg and the remaining S expansions stay NOT_CLAIMED unless separately selected and verified."
+    "Sv48, CFI, Zvkng/Zvksg and the remaining S expansions stay NOT_CLAIMED unless separately selected and verified.",
+    "The test protocol lives in RAM, not in the test_harness device region: HTIF, and therefore Spike, can only poll a tohost address that is real memory, and placing tohost in memory is the universal bare-metal convention. The test_harness region remains mapped for the harness to recognise, but TOHOST itself is an ordinary memory word the harness observes after the run."
   ]
 }

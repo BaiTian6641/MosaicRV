@@ -15,6 +15,7 @@
 
 // INCLUDE MODULE CLASSES
 #include "Vmosaic_alu_tb___024root.h"
+#include "Vmosaic_alu_tb___024unit.h"
 
 // SYMS CLASS (contains all model state)
 class alignas(VL_CACHE_LINE_BYTES) Vmosaic_alu_tb__Syms final : public VerilatedSyms {

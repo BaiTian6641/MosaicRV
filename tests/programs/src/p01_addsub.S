@@ -31,11 +31,16 @@ main:
     andi    t2, a2, 63
     sra     t3, t0, t2                 /* sig2: arithmetic shift of the sum */
 
+    /* sig3: sltu(a, b) picks between the sum and the difference, then folds
+     * in a zero-extend + NOT path so that the byte-extension instructions
+     * contribute an observable, input-dependent result instead of being
+     * dead code. */
     sltu    t4, a0, a1
     sub     t5, a0, a1
-    /* sig3 also folds a zero-extend + NOT path so that the byte-extension
-     * instructions contribute an observable, input-dependent result instead
-     * of being dead code. */
+    add     t6, a0, a1
+    beqz    t4, 1f
+    mv      t5, t6                      /* a <u b: take the sum */
+1:
     slli    t2, a1, 56
     srli    t2, t2, 56                 /* zero-extend b[7:0] */
     xori    t2, t2, -1                 /* NOT                  */

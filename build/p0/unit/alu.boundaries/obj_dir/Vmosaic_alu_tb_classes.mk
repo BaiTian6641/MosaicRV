@@ -34,6 +34,7 @@ VM_CLASSES_FAST += \
 VM_CLASSES_SLOW += \
   Vmosaic_alu_tb___024root__Slow \
   Vmosaic_alu_tb___024root__0__Slow \
+  Vmosaic_alu_tb___024unit__Slow \
 
 # Generated support classes, fast-path, compile with highest optimization
 VM_SUPPORT_FAST += \

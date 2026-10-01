@@ -312,13 +312,13 @@ def p01_addsub(a: int, b: int, c: int) -> tuple:
     sum_ab = u64(a + b)
     diff_ab = u64(a - b)
     select = a < b                       # SLTU: unsigned compare
-    base = diff_ab if select else sum_ab
+    base = sum_ab if select else diff_ab
 
     # Second derivation of the select: the firmware branches, this computes
     # both sides and merges them with a mask built from the comparison.  The
     # two agree only if the unsigned comparison itself is right.
     mask = MASK64 if select else 0
-    merged = u64((diff_ab & mask) | (sum_ab & u64(~mask)))
+    merged = u64((sum_ab & mask) | (diff_ab & u64(~mask)))
     _check(base == merged, "p01 select branch=%#x mask=%#x" % (base, merged))
 
     term = u64(~zext(b, 8)) & 0xFF

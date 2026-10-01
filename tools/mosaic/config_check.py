@@ -650,14 +650,26 @@ def _check_cross_references(bundle: Bundle) -> None:
             return None
 
         for key in ("tohost", "fromhost"):
-            region = region_of(protocol[key])
+            address = protocol[key]
+            region = region_of(address)
             if region is None:
                 bundle.fail("test protocol", "%s address 0x%x is not inside any mapped region"
-                            % (key, protocol[key]))
-            elif region.get("device") != "test_harness":
-                bundle.fail("test protocol", "%s address 0x%x lands in region %r, not in the "
-                            "test_harness device region the firmware writes to"
-                            % (key, protocol[key], region["name"]))
+                            % (key, address))
+            elif address % 8 != 0:
+                bundle.fail("test protocol", "%s address 0x%x is not 8-byte aligned" % (key, address))
+            elif not region["writable"] or region.get("device"):
+                # HTIF, and therefore Spike, can only poll a tohost that is real
+                # memory; a device address cannot be used as one.
+                bundle.fail(
+                    "test protocol",
+                    "%s address 0x%x is in region %r, which is %s; the test protocol must "
+                    "be an ordinary writable memory word so an external reference model "
+                    "can poll it" % (key, address, region["name"],
+                                     "a device" if region.get("device") else "not writable"),
+                )
+        if abs(protocol["fromhost"] - protocol["tohost"]) < 8:
+            bundle.fail("test protocol", "fromhost at 0x%x overlaps tohost at 0x%x"
+                        % (protocol["fromhost"], protocol["tohost"]))
         signature = protocol["signature"]
         region = region_of(signature)
         if region is None:
