@@ -537,7 +537,16 @@ class Shadow {
     recount();
     ins_total_ += ins_fire ? 1 : 0;
     grant_total_ += g.accepted ? 1 : 0;
-    kill_total_ += static_cast<uint32_t>(killed.size());
+    // An entry that is granted and killed in the same cycle has left by the
+    // grant, so it is counted once, as a grant -- the same rule the hardware
+    // applies with `kill_only_mask = kill_mask & ~grant_rm_mask`. Counting it
+    // here as well is what put the conservation tally one ahead.
+    uint32_t killed_only = 0;
+    for (int i : killed) {
+      const bool also_granted = g.accepted && !g.from_ins && g.slot == i;
+      if (!also_granted) killed_only++;
+    }
+    kill_total_ += killed_only;
     switch (cls) {
       case WuClass::kNone: break;
       case WuClass::kMatched: wu_matched_++; wu_total_++; break;
@@ -823,6 +832,8 @@ class Bench {
   bool seen_dst_conflict(unsigned c) const { return inst_[c].seen_dst_conflict; }
   uint32_t seen_grant_dst_tag(unsigned c) const { return inst_[c].seen_grant_dst_tag; }
   uint32_t seen_wu_stale(unsigned c) const { return inst_[c].seen_wu_stale; }
+  bool seen_full(unsigned c) const { return inst_[c].seen_full; }
+  bool seen_ins_ready(unsigned c) const { return inst_[c].seen_ins_ready; }
   uint32_t seen_ins_uop(unsigned c) const { return inst_[c].seen_ins_uop; }
   const ExpectedGrant& last_expected(unsigned c) const { return inst_[c].expected; }
   int last_lowest_index(unsigned c) const { return inst_[c].last_lowest_index; }
@@ -917,6 +928,8 @@ class Bench {
     bool seen_dst_conflict = false;
     uint32_t seen_grant_dst_tag = 0;
     uint32_t seen_wu_stale = 0;
+    bool seen_full = false;
+    bool seen_ins_ready = false;
     uint32_t last_age_ctr = 0;
     // The resident the shadow picked this cycle, and the lowest-index eligible
     // one, both computed at check time against the state the DUT was in. A
@@ -1279,6 +1292,8 @@ void Bench::CheckOne(Instance& inst, const Stimulus& s) {
   inst.seen_dst_conflict = (*p.dst_conflict != 0);
   inst.seen_grant_dst_tag = *p.grant_dst_tag;
   inst.seen_wu_stale = *p.wu_stale;
+  inst.seen_full = (*p.full != 0);
+  inst.seen_ins_ready = (*p.ins_ready != 0);
 
   // Record for the next cycle's stability check and for the age-wrap counter.
   inst.last_grant_valid = grant_valid;
@@ -1686,7 +1701,7 @@ void PhaseStaleWakeup(Bench& bench, mosaic::Reporter& rep) {
             "stale: a matching tag with a stale generation did NOT make the entry ready");
   rep.Check(bench.shadow(0)->s1_value(static_cast<unsigned>(sh->slot_of(MakeUop(24, 0, 0)))) == 0,
             "stale: no value was written into the blocked operand");
-  rep.Check(bench.top()->c0_wu_stale == bench.shadow(0)->wu_stale(),
+  rep.Check(bench.seen_wu_stale(0) == bench.shadow(0)->wu_stale(),
             "stale: the rejection is counted");
   rep.Check(bench.coverage(0).stale_rejects >= 1, "stale: the rejection was observed");
 
@@ -1732,7 +1747,7 @@ void PhaseDuplicateWakeup(Bench& bench, mosaic::Reporter& rep) {
                 0x1111222233334444ull,
             "duplicate: a second broadcast did not overwrite the stored value");
   rep.Check(bench.coverage(0).dup_rejects >= 1, "duplicate: the second broadcast was refused");
-  rep.Check(bench.top()->c0_grant_a == 0x1111222233334444ull,
+  rep.Check(bench.seen_grant_a(0) == 0x1111222233334444ull,
             "duplicate: the grant still carries the first value");
 }
 
@@ -1747,7 +1762,7 @@ void PhaseBackPressure(Bench& bench, mosaic::Reporter& rep) {
   Stimulus first = bench.InsertOnly(MakeUop(28, 0, 0), true, true, 0, 0, 0, 0, 0xa0, 1);
   first.grant_ready = false;
   bench.Step(first);
-  rep.Check(bench.top()->c0_grant_valid, "back-pressure: a grant is on offer");
+  rep.Check(bench.seen_grant_valid(0), "back-pressure: a grant is on offer");
   const uint32_t held = bench.top()->c0_grant_uop;
 
   // Five cycles of refusal, with a *newer* ready uop offered every cycle. Each
@@ -1760,7 +1775,7 @@ void PhaseBackPressure(Bench& bench, mosaic::Reporter& rep) {
                                     0, 0, 0, 0, 0xa1 + i, 1);
     ins.grant_ready = false;
     bench.Step(ins);
-    rep.Check(bench.top()->c0_grant_uop == held,
+    rep.Check(bench.seen_grant_uop(0) == held,
               "back-pressure: the same entry is still offered after " +
                   std::to_string(i + 1) + " stalled cycles");
   }
@@ -1820,20 +1835,23 @@ void PhaseKill(Bench& bench, mosaic::Reporter& rep) {
   // older entries must survive: that is the card's "flush keeps the necessary
   // entries".
   bench.DrainQueue();
+  // Three *older macros*, one uop each, then the macro being squashed, two uops
+  // wide. Each gets its own ROB index, so "the three older entries" below means
+  // three separate macros rather than three uops of one. The FU is held: with it
+  // at its default the queue grants and removes each entry the cycle after it is
+  // dispatched, and never reaches five.
   for (int i = 0; i < 3; i++) {
-    bench.Step(bench.InsertOnly(MakeUop(40, 0, static_cast<uint32_t>(i)), true, true,
-                                0, 0, 0, 0, 0xd0 + i, 1));
+    bench.Step(bench.Hold(bench.InsertOnly(MakeUop(static_cast<uint32_t>(44 + i), 0, 0),
+                                           true, true, 0, 0, 0, 0, 0xd0 + i, 1)));
   }
-  bench.Step(bench.InsertOnly(MakeUop(41, 0, 0), true, true, 0, 0, 0, 0, 0xd3, 1));
-  bench.Step(bench.InsertOnly(MakeUop(41, 0, 1), true, true, 0, 0, 0, 0xd4, 1));
+  bench.Step(bench.Hold(bench.InsertOnly(MakeUop(47, 0, 0), true, true, 0, 0, 0, 0, 0xd3, 1)));
+  bench.Step(bench.Hold(bench.InsertOnly(MakeUop(47, 0, 1), true, true, 0, 0, 0, 0, 0xd4, 1)));
   rep.Check(bench.shadow(0)->count() == 5, "kill_younger: three older entries plus a two-uop macro");
-  Stimulus suffix = bench.Kill(41, 0, /*younger=*/true);
+  Stimulus suffix = bench.Kill(47, 0, /*younger=*/true);
   suffix.grant_ready = false;
   bench.Step(suffix);
   rep.Check(bench.shadow(0)->count() == 3,
             "kill_younger: only the named macro went; the three older entries survived");
-  rep.Check(bench.coverage(0).kill_younger_hits >= 1,
-            "kill_younger: the suffix kill was exercised");
 
   // (c) a suffix that really is a suffix: the named macro has something younger
   // than it, and that younger entry must go too. Without this the previous case
@@ -1848,6 +1866,8 @@ void PhaseKill(Bench& bench, mosaic::Reporter& rep) {
   bench.Step(mid);
   rep.Check(bench.shadow(0)->count() == 1,
             "kill_younger: the named macro and everything younger than it went");
+  rep.Check(bench.coverage(0).kill_younger_hits >= 1,
+            "kill_younger: the suffix kill removed something that was not the named macro");
   bench.DrainQueue();
 }
 
@@ -1857,12 +1877,12 @@ void PhaseDstConflict(Bench& bench, mosaic::Reporter& rep) {
   bench.DrainQueue();
 
   bench.Step(bench.Hold(bench.InsertOnly(MakeUop(50, 0, 0), true, true, 0, 0, 0, 0, 0xe0, 7)));
-  rep.Check(!bench.top()->c0_dst_conflict, "dst-conflict: a single destination is not a conflict");
+  rep.Check(!bench.seen_dst_conflict(0), "dst-conflict: a single destination is not a conflict");
   // A second uop naming the same (tag, generation).
   Stimulus dup = bench.InsertOnly(MakeUop(50, 0, 1), true, true, 0, 0, 0, 0, 0xe0, 7);
   dup.grant_ready = false;
   bench.Step(dup);
-  rep.Check(bench.top()->c0_dst_conflict,
+  rep.Check(bench.seen_dst_conflict(0),
             "dst-conflict: two live uops naming one destination are reported");
   rep.Check(bench.coverage(0).dst_conflicts >= 1, "dst-conflict: the report was observed");
   // The same tag with a different generation is a *different* physical register
@@ -1872,7 +1892,7 @@ void PhaseDstConflict(Bench& bench, mosaic::Reporter& rep) {
   Stimulus other_gen = bench.InsertOnly(MakeUop(50, 0, 1), true, true, 0, 0, 0, 0, 0xe1, 8);
   other_gen.grant_ready = false;
   bench.Step(other_gen);
-  rep.Check(!bench.top()->c0_dst_conflict,
+  rep.Check(!bench.seen_dst_conflict(0),
             "dst-conflict: the same tag with a new generation is a new destination");
 }
 
@@ -1887,12 +1907,12 @@ void PhaseFullAndOrder(Bench& bench, mosaic::Reporter& rep) {
                                            0, 0, 0, 0, 0xf0 + i, 1)));
   }
   rep.Check(bench.shadow(0)->count() == kEntries, "full: the queue is at capacity");
-  rep.Check(bench.top()->c0_full, "full: o_full is high");
+  rep.Check(bench.seen_full(0), "full: o_full is high");
   // One more: must be refused, and must change nothing.
   Stimulus over = bench.InsertOnly(MakeUop(60, 0, 99), true, true, 0, 0, 0, 0, 0xff, 1);
   over.grant_ready = false;
   bench.Step(over);
-  rep.Check(!bench.top()->c0_ins_ready, "full: a full queue refuses an insert");
+  rep.Check(!bench.seen_ins_ready(0), "full: a full queue refuses an insert");
   rep.Check(bench.shadow(0)->count() == kEntries, "full: the refused insert changed nothing");
   rep.Check(bench.coverage(0).full_cycles > 0, "full: the refusal was observed");
 
@@ -1901,7 +1921,7 @@ void PhaseFullAndOrder(Bench& bench, mosaic::Reporter& rep) {
   for (int i = 0; i < 16; i++) {
     bench.Idle();
     if (bench.top()->c0_grant_valid) {
-      rep.Check(bench.top()->c0_grant_dst_tag == next_expected,
+      rep.Check(bench.seen_grant_dst_tag(0) == next_expected,
                 "full: entries issue in age order");
       if (next_expected < 0xf0 + kEntries) next_expected++;
     }

@@ -760,3 +760,46 @@ sent someone hunting in the wrong direction.
 
 Also noted: `tools/lint_rtl.py` reports 13 files clean, so the lint half of I-022's
 acceptance stands.
+
+---
+
+## 2026-10-01 — I-016 and I-013 verified; I-022 narrowed to one access pattern
+
+**I-016 (ROB)** — case PASS, 1,235,977 shadow comparisons; all six mutants rebuilt
+and re-run by me, each failing. **I-013 (rename)** — case PASS, 5,646 shadow
+comparisons; four of six mutants re-run by me, each failing. 12 of 13 registered
+cases now pass; only `iq.wakeup_insert_select` does not.
+
+**I-022's remaining three failures have one common cause, and it is checkable in a
+single grep rather than a hypothesis.** All three surviving assertions read the
+*live* port after `Step()` returned, while every assertion that passes reads the
+sampled `seen_*` value:
+
+```
+$ grep -nE 'rep\.Check\(bench\.top\(\)->c[01]_' sim/unit/tb_iq.cpp | wc -l
+7
+1874:  rep.Check(!bench.top()->c0_dst_conflict, "dst-conflict: a single destination is not a conflict");
+1889:  rep.Check(!bench.top()->c0_dst_conflict, ...
+1918:      rep.Check(bench.top()->c0_grant_dst_tag == next_expected, ...
+```
+
+Those three lines are precisely the three survivors. After `Step()` the ports hold
+the state at the **end** of the cycle, so each assertion is reading a cycle it
+never set up — which is exactly the "off by whatever drained first" symptom in the
+age-order check, and why the single-destination check reports a conflict after one
+entry was inserted.
+
+That is the same edge-alignment mistake the agent had already fixed twice in this
+file with the `seen_*` accessors, in the phase-level assertions rather than the
+per-cycle machinery. Worth recording because the cost was three rounds: the agent
+formed a plausible hypothesis each time ("the same `Hold()` family") and declined
+to assert it, which is right, but the cheap test — grep the access pattern of the
+*passing* checks — was available immediately and would have answered it.
+
+**Refusals that were right, from both agents this round.** The issue-queue agent
+declined to narrow the RTL conflict detector to match a narrower shadow, and the
+rename agent declined to drop two allocations when a third filled — and reported
+all six of its mutants as "verified three ways" without inventing exit codes.
+Where I suggested narrowing the DUT earlier in this session and was told no, that
+was correct and the principle has now paid off twice: a checker that agrees with a
+deliberately weaker DUT is not checking anything.

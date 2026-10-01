@@ -2,15 +2,15 @@
   "schema_version": 1,
   "case": "iq.wakeup_insert_select",
   "verdict": "FAIL",
-  "detail": "34752447 failed of 57388175 checks over 199800 cycles",
+  "detail": "34386041 failed of 57388176 checks over 199800 cycles",
   "seed": 1,
   "max_cycles": 200000,
-  "checks": 57388175,
-  "failures": 34752447,
+  "checks": 57388176,
+  "failures": 34386041,
   "image": "",
   "expect": "",
   "tool": "Verilator 5.052 2026-09-05",
-  "timestamp": "2026-10-01T07:19:37Z",
+  "timestamp": "2026-10-01T07:22:28Z",
   "first_mismatch": "c0 back-pressure: expected grant_valid still high, got grant_valid dropped",
-  "failed_checks": ["kill_younger: three older entries plus a two-uop macro", "kill_younger: only the named macro went; the three older entries survived", "kill_younger: the suffix kill was exercised", "dst-conflict: a single destination is not a conflict", "dst-conflict: the same tag with a new generation is a new destination", "full: entries issue in age order", "full: entries issue in age order", "full: entries issue in age order", "full: entries issue in age order", "full: entries issue in age order", "full: entries issue in age order", "full: entries issue in age order", "c0: grant_valid matches the shadow's prediction", "c0: granted uop identity", "c0: granted alu_op", "c0: granted immediate", "c0: granted operand a", "c0: granted operand b", "c0: granted dst tag", "c0: granted dst generation", "c0: o_grant_total", "c0: o_grant_total", "c0: grant_valid matches the shadow's prediction", "c0: granted uop identity", "c0: granted alu_op", "c0: granted immediate", "c0: granted operand a", "c0: granted operand b", "c0: granted dst tag", "c0: granted dst generation", "c0: o_grant_total", "c0: o_grant_total"]
+  "failed_checks": ["dst-conflict: a single destination is not a conflict", "dst-conflict: the same tag with a new generation is a new destination", "full: entries issue in age order", "full: entries issue in age order", "full: entries issue in age order", "full: entries issue in age order", "full: entries issue in age order", "full: entries issue in age order", "full: entries issue in age order", "c0: grant_valid matches the shadow's prediction", "c0: granted uop identity", "c0: granted alu_op", "c0: granted immediate", "c0: granted operand a", "c0: granted operand b", "c0: granted dst tag", "c0: granted dst generation", "c0: o_grant_total", "c0: o_grant_total", "c0: grant_valid matches the shadow's prediction", "c0: granted uop identity", "c0: granted alu_op", "c0: granted immediate", "c0: granted operand a", "c0: granted operand b", "c0: granted dst tag", "c0: granted dst generation", "c0: o_grant_total", "c0: o_grant_total", "c0: o_grant_total", "c0: o_grant_total", "c0: o_grant_total"]
 }
