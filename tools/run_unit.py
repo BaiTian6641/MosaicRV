@@ -90,6 +90,13 @@ def build_case(profile: str, case_id: str, entry: dict) -> str:
     # sources rather than of any one case, for the same reason sim_common.cpp is.
     cmd += ["-I%s" % os.path.join(REPO_ROOT, "rtl", "core")]
     cmd += ["-I%s" % os.path.join(REPO_ROOT, "rtl", "common")]
+    # The generated RTL config package. Verilator does NOT search the including
+    # file's own directory, so an RTL file that does `include "mosaic_cfg_pkg.svh"`
+    # cannot find it unless the generated directory is on the include path. The
+    # linter and lint-slang already pass this directory; the runner did not, which
+    # pushed RTL toward hardcoding sizes the geometry file controls. Reported by an
+    # agent rather than diagnosed here.
+    cmd += ["-I%s" % os.path.join(REPO_ROOT, "build", profile, "rtl")]
     cmd += ["-CFLAGS", "-I%s" % SIM_COMMON]
     cmd += ["-CFLAGS", "-I%s" % os.path.join(REPO_ROOT, "build", profile, "sim")]
     cmd += ["-o", binary]
