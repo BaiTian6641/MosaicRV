@@ -3,7 +3,7 @@
     {
       "case": "core.bringup_vs_reference",
       "exit_code": 0,
-      "seconds": 17.94,
+      "seconds": 18.03,
       "verdict": "PASS"
     }
   ],

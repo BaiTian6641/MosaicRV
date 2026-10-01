@@ -618,3 +618,51 @@ Worth noting for the record: this is the second defect in this session that a
 subagent found in tooling I own. The linter's package ordering and the harness
 sampling race were found by running things; this one was found by an agent reading a
 build error I had not looked at closely enough.
+
+---
+
+## 2026-10-01 — I-021 delivered and independently verified
+
+`rtl/core/mosaic_predictor.sv`: bimodal direction table, PC-indexed BTB with tag
+and kind, and a RAS, sized entirely from the generated `mosaic_cfg_pkg`. Verified
+here rather than accepted on report — case PASS, lint clean, and **all five mutants
+rebuilt and re-run by me, each failing with exit 1**: `NO_BTB_TAG`, `NO_RAS_FLUSH`,
+`NO_TRAIN`, `NO_RESET_VALID`, `NO_RAS_UNDERFLOW_REPORT`.
+
+The coverage the card named as discriminating is present and does what it claims:
+
+- **Aliasing distinguished, not merely detected** — two PCs colliding in the index
+  must resolve to different targets, *and* the converse phase proves a retrained pair
+  must HIT. Without the converse, a predictor that reported a miss every time would
+  pass.
+- **Training observable in both directions** — `NO_TRAIN` fails, so a static
+  predictor cannot pass this suite.
+- **Reset determinism** — same program, reset, byte-identical output; `NO_RESET_VALID`
+  fails.
+- **RAS defined at both ends** — overflow saturates and pulses `ras_overflow`; a
+  return on an empty stack drops the pop, pulses `ras_underflow` and falls through to
+  the BTB. Both asserted.
+
+**One real RTL bug the shadow model caught.** The RTL incremented an uninitialised
+counter on first training, so the first trained prediction depended on power-up
+contents rather than on the resolved branch outcome. That is exactly the class of
+defect an uninitialised state creates in a predictor, and it was found by comparing
+against an independent model rather than by reading the code.
+
+**Decisions worth keeping.** Index bits are `[IDX_W:1]`; an index beyond the depth
+is a guaranteed **miss with updates dropped**, never wrapped — wrapping would
+manufacture a false hit, so the failure mode is lost coverage rather than a wrong
+answer. The range check is generated away entirely when the depth is a power of two,
+because emitting a provably-constant comparison is the dead logic `-Wall` exists to
+report. The module takes no `upd_mispredict` input: it corrects itself by being
+rewritten from resolved values, and `-Wall` rejected the unused port rather than the
+agent inventing a use for it.
+
+**The advisory boundary is enforced, not just asserted.** A predictor that is wrong
+without saying so is worse than one that never predicts, so the driver checks two
+invariants every cycle: `redirect` and `miss` are never both high, and `redirect`
+never rises without a reported source. `pred_btb_miss` is load-bearing — on a miss
+the target is the sequential `pc+4`, so "no target" and "my target is the
+fall-through address" would otherwise be the same 64-bit value.
+
+Stage 1 is open. Stage 0 remains 11 of 239 work packages.

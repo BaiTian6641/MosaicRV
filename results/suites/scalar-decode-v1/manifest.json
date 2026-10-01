@@ -3,13 +3,13 @@
     {
       "case": "decode.rv64im_reserved",
       "exit_code": 0,
-      "seconds": 0.172,
+      "seconds": 0.19,
       "verdict": "PASS"
     },
     {
       "case": "alu.boundaries",
       "exit_code": 0,
-      "seconds": 0.222,
+      "seconds": 0.237,
       "verdict": "PASS"
     }
   ],
