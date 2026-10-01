@@ -502,6 +502,20 @@ class Machine(object):
                 elif ir == 0x30200073:
                     is_mret = True
                     next_pc = self.mepc
+                    # MRET is not just "pc = mepc".  Privileged Specification
+                    # v1.12, section 2.1.6.1: "When executing an xRET
+                    # instruction, supposing xPP holds the value y, xIE is set
+                    # to xPIE; the privilege mode is changed to y; xPIE is set
+                    # to 1; and xPP is set to the least-privileged supported
+                    # mode."  p0 implements no mode below M (see
+                    # config/profiles/p0.json), so MPP stays 0b11 and only MIE
+                    # (bit 3) and MPIE (bit 7) move.  This was the one place the
+                    # reference left mstatus untouched, which made it disagree
+                    # with the specification; see results/reports/I-008-bringup.md.
+                    old_mstatus = self.mstatus
+                    self.mstatus = ((old_mstatus & ~0x88) |
+                                    (0x08 if (old_mstatus & 0x80) else 0) |
+                                    0x80) | 0x1800
                 else:
                     illegal = True
             elif funct3 == 4:

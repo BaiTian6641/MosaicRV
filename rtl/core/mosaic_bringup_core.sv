@@ -277,6 +277,18 @@ module mosaic_bringup_core #(
   localparam logic [11:0] CSR_TIME       = 12'hC01;
   localparam logic [11:0] CSR_INSTRET    = 12'hC02;
 
+  // Zicsr funct3.  These are deliberately *not* the mosaic_pkg F3_* names: that
+  // set names the OP/OP-IMM encodings, and reusing it here is what shifted the
+  // CSR table by one.  001/010/011 are the register forms csrrw/csrrs/csrrc,
+  // 101/110/111 the immediate forms, and 100 is reserved.
+  localparam logic [2:0] F3_CSR_RESERVED = 3'b100;
+  localparam logic [2:0] F3_CSRRW        = 3'b001;
+  localparam logic [2:0] F3_CSRRS        = 3'b010;
+  localparam logic [2:0] F3_CSRRC        = 3'b011;
+  localparam logic [2:0] F3_CSRRWI       = 3'b101;
+  localparam logic [2:0] F3_CSRRSI       = 3'b110;
+  localparam logic [2:0] F3_CSRRCI       = 3'b111;
+
 
   // ==========================================================================
   // Architectural state
@@ -859,20 +871,28 @@ module mosaic_bringup_core #(
             d = illegal_op();   // sfence.vma, sret, wfi, everything else
           end
           d.valid = 1'b1;
-        end else if (funct3 == F3_SLTU) begin
+        end else if (funct3 == F3_CSR_RESERVED) begin
           d = illegal_op();     // funct3 == 100 is reserved
         end else begin
           d.valid        = 1'b1;
           d.uses_rs1     = 1'b1;
           d.csr_addr     = ir[31:20];
           d.csr_imm_form = 1'b0;
+          // Zicsr has its *own* funct3 encoding, which is not the OP/OP-IMM one
+          // the F3_* names in mosaic_pkg denote: 001/101 are csrrw, 010/110 are
+          // csrrs and 011/111 are csrrc, with the high bit selecting the
+          // immediate (zimm) form.  Selecting this table with F3_ADD_SUB,
+          // F3_SLL and F3_SLT shifts the whole table by one -- csrrw decodes as
+          // csrrs, so `csrw x, csr, x0` reads the CSR and ORs the old contents
+          // back in, which silently discards the write.  The literals are
+          // therefore spelled out rather than aliased to misleading names.
           case (funct3)
-            F3_ADD_SUB: d.csr_op = CSR_RW;   // csrrw  / csrrwi
-            F3_SLL:     d.csr_op = CSR_RS;   // csrrs  / csrrsi
-            F3_SLT:     d.csr_op = CSR_RC;   // csrrc  / csrrci
-            F3_SLTU:    begin d.csr_op = CSR_RW; d.csr_imm_form = 1'b1; end
-            F3_SRL_SRA: begin d.csr_op = CSR_RS; d.csr_imm_form = 1'b1; end
-            F3_XOR:     begin d.csr_op = CSR_RC; d.csr_imm_form = 1'b1; end
+            F3_CSRRW:  d.csr_op = CSR_RW;   // csrrw
+            F3_CSRRS:  d.csr_op = CSR_RS;   // csrrs
+            F3_CSRRC:  d.csr_op = CSR_RC;   // csrrc
+            F3_CSRRWI: begin d.csr_op = CSR_RW; d.csr_imm_form = 1'b1; end
+            F3_CSRRSI: begin d.csr_op = CSR_RS; d.csr_imm_form = 1'b1; end
+            F3_CSRRCI: begin d.csr_op = CSR_RC; d.csr_imm_form = 1'b1; end
             default:    d = illegal_op();
           endcase
         end

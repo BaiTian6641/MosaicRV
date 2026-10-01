@@ -2,7 +2,7 @@
 
 正式项目名：**MosaicRV**（Mosaic Processor for RISC-V）。命名含义：多个独立执行 tile 在固定物理硬件上动态分区、租借、聚合，而每个 RISC-V hart 保持精确 architectural semantics。远程仓库历史上登记为 `git@github.com:BaiTian6641/MosaicRV.git`；规划文档不代表已推送的处理器实现。
 
-**当前交付仅为架构审查与实施计划；尚无处理器 RTL、functional prototype、Verilator 运行结果、FPGA bitstream 或实板验证结果。** 后续目标是可证伪的高性能/可扩展非传统执行织构：完整功能原型、XiangShan 辅助程序化正确性校验、GW5A/Zynq/Virtex UltraScale+ 三家族实板验证、可移植 ASIC 转换，以及完整的 ratified RVA23U64/S64 mandatory ISA/执行环境与逐项可选能力。动态调度和聚合收益必须以等资源 fixed/dynamic 对照实测，不能从研究论文直接继承数字。
+**当前仓库已进入 RTL bring-up 阶段：包含 p0 配置、SystemVerilog RTL、C++/Verilator harness 与有限的 unit/reference smoke evidence；这不等于完整 RISC-V CPU，也不代表所有 p0 ISA 声明已验收。** 当前交付边界见 [实现状态](config/status/implementation_status.json) 与 [进度记录](results/PROGRESS.md)。XiangShan 辅助验证、GW5A/Zynq/Virtex UltraScale+ 三家族实板验证、可移植 ASIC 转换、完整 RVA23U64/S64 mandatory ISA/执行环境与逐项 ratified optional 能力仍需分别闭合。动态调度和聚合收益必须以等资源 fixed/dynamic 对照实测，不能从研究论文直接继承数字。
 
 
 ## 阅读顺序
@@ -48,4 +48,4 @@
 
 原始报告位于根目录，保持原名与内容。Git 已初始化；原文与规划文档均需由最终跟踪检查纳入 index。首次提交尝试因本机没有 Git author identity 失败；未伪造姓名/邮箱、未修改全局或本地 author 配置。**Git-tracked/staged 不等于已产生 commit**。仓库作者配置由用户自行设置后，可正常提交已审核文档；本轮没有 push。
 
-更新：2026-09-29，按审查意见细化 p0 cacheless 依赖、Core/Secure/Safety 与物理声明门槛、真实故障重放、pointer masking 起源/设备边界、vector crypto 扩展和小模型交接。原报告保持原样；后续每项实现仍需同步检查 source/task/reference coverage 并重跑 [文档检查](docs/verification.md)。
+更新：2026-09-30，修正文档中过期的“仅规划、无 RTL”项目状态，并锁定与 Sail 0.14.1 配对的 ACT4 revision；本次文档与本机外部工具验证边界见 [验证记录](docs/verification.md)。原始报告保持原样；后续实现仍需同步检查 source/task/reference coverage 并重跑 [文档检查](docs/verification.md)。

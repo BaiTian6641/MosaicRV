@@ -725,6 +725,20 @@ class Machine(object):
                 elif ir == 0x30200073:
                     is_mret = True
                     next_pc = self.mepc
+                    # MRET is not just "pc = mepc".  Privileged Specification
+                    # v1.12, section 2.1.6.1: "When executing an xRET
+                    # instruction, supposing xPP holds the value y, xIE is set
+                    # to xPIE; the privilege mode is changed to y; xPIE is set
+                    # to 1; and xPP is set to the least-privileged supported
+                    # mode."  p0 implements no mode below M (see
+                    # config/profiles/p0.json), so MPP stays 0b11 and only MIE
+                    # (bit 3) and MPIE (bit 7) move.  This was the one place the
+                    # reference left mstatus untouched, which made it disagree
+                    # with the specification; see results/reports/I-008-bringup.md.
+                    old_mstatus = self.mstatus
+                    self.mstatus = ((old_mstatus & ~0x88) |
+                                    (0x08 if (old_mstatus & 0x80) else 0) |
+                                    0x80) | 0x1800
                 else:
                     illegal = True
             elif funct3 == 4:
@@ -1176,16 +1190,16 @@ class Dut {
 // results/reports/I-008-bringup.md.  The harness writes the probe selector to
 // kPselBase before each run, so one image covers every probe.
 const char* kProbeImageBase64 =
-    "twIIAJuC8gCTksIAA7MCABMTMwCXAwAAk4NDATMDcwADPgMAZwAOAGgAAIAAAAAAhAAAgAAAAA"
-    "DIAACAAAAAAPgAAIAAAAAASAEAgAAAAACEAQCAAAAAALABAIAAAAAAtAEAgAAAAAATAFAAswIA"
-    "ABsDEAATE/MBEwMDQCMwUwBvAAAYlwIAAJOCghVzkFIwN9XSAhsFNS0TFcUAEwXV0hMVxQATBT"
-    "UtExXVABMFpaVzJQB9mwIQAJOS8gGTggJAI7CiAG8AwBOXAgAAk4JCEXOQUjC3xa0Lm4XlDRMG"
-    "8P/zFRYwmwIQAJOS8gGTggJAI7CyAG8AwBCXAgAAk4JCDnOQUjC3oqr6m4JSVZOSwgCTgrJak5"
-    "LCAJOCUqqTksIAk4JSVXOQAjRzIwA0cy4ANJsDEACTk/MBk4MDQCOwwwEjtGMAbwDAC5cCAACT"
-    "gkIJc5BSMDcOCAAbDh4AEx7OALcyIhGbgkI0IyBeAAMVHgCbAhAAk5LyAZOCAkAjsKIAbwAACJ"
-    "cCAACTgoIFc5BSMLfFrQubheUNQwAAApsCEACTkvIBk4ICQCOwsgBvAEAFbwAAAJcCAACTgoIC"
-    "c5BSMBMFUAUjIKAAmwIQAJOS8gGTggJAI7CiAG8AgALzIhA0cyMgNBsOEAATHv4BEw4OQCM8bg"
-    "CTgkIAc5ASNHMAIDATBQAAkwUQALcjEAAjsKMAbwAAABMAAAA=";
+    "twIIAJuC8gCTksIAA7MCABMTMwCXAwAAk4NDATMDcwADPgMAZwAOAGgAAIAAAAAAhAAAgAAA"
+    "AADIAACAAAAAAPgAAIAAAAAASAEAgAAAAACEAQCAAAAAALABAIAAAAAAtAEAgAAAAAATAFAA"
+    "swIAABsDEAATE/MBEwMDQCMwUwBvAAAYlwIAAJOCghVzkFIwN9XSAhsFNS0TFcUAEwXV0hMV"
+    "xQATBTUtExXVABMFpaVzJQB9mwIQAJOS8gGTggJAI7CiAG8AwBOXAgAAk4JCEXOQUjC3xa0L"
+    "m4XlDRMG8P/zFRYwmwIQAJOS8gGTggJAI7CyAG8AwBCXAgAAk4JCDnOQUjC3oqr6m4JSVZOS"
+    "wgCTgrJak5LCAJOCUqqTksIAk4JSVXOQAjRzIxAwcy4ANJsDEACTk/MBk4MDQCOwwwEjtGMA"
+    "bwDAC5cCAACTgkIJc5BSMDcuAIAbDg4AEx4OALcyIhGbgkI0IyBeAAMVHgCbAhAAk5LyAZOC"
+    "AkAjsKIAbwAACJcCAACTgoIFc5BSMLfFrQubheUNQwAAApsCEACTkvIBk4ICQCOwsgBvAEAF"
+    "bwAAAJcCAACTgoICc5BSMBMFUAUjIKAAmwIQAJOS8gGTggJAI7CiAG8AgALzIhA0cyMgNBsO"
+    "EAATHv4BEw4OQCM8bgCTgkIAc5ASNHMAIDATBQAAkwUQALcjEAAjsKMAbwAAABMAAAA=";
 
 struct ProbeResult {
   Outcome outcome = Outcome::kCycleLimit;
@@ -1195,15 +1209,15 @@ struct ProbeResult {
   uint64_t pc = 0;
 };
 
-void RunProbe(Dut* dut, uint64_t selector, uint64_t max_cycles, ProbeResult* result) {
+void RunProbe(Dut* dut, uint64_t selector, uint64_t max_cycles,
+              mosaic::EventTap* tap, ProbeResult* result) {
   dut->ClearMemory();
   const std::string bytes = Base64Decode(kProbeImageBase64);
   dut->LoadSegment(MOSAIC_RESET_VECTOR, reinterpret_cast<const uint8_t*>(bytes.data()),
                    bytes.size());
   dut->WriteWord(kPselBase, selector);
 
-  mosaic::EventTap tap;
-  result->outcome = dut->Run(max_cycles, &tap, &result->cycles);
+  result->outcome = dut->Run(max_cycles, tap, &result->cycles);
   result->tohost = dut->tohost();
   result->pc = dut->pc();
   for (int i = 0; i < 4; ++i) {
@@ -1541,78 +1555,102 @@ int main(int argc, char** argv) {
         uint64_t selector;
         const char* name;
         const char* rule;
-        bool expect_pass_tohost;
         uint64_t sig[4];
         bool check_sig0, check_sig1, check_cause;
       };
       // sig[] is the value each signature word must hold; 0 with the matching
       // check_ flag false means "not asserted".
+      //
+      // The frozen probe image has no pass-signal exit.  Its common tail
+      // writes 0 to TOHOST and then parks in a self-branch, and
+      // config/profiles/p0.json makes a *non-zero* write to TOHOST the
+      // end-of-program signal, so a zero write does not end the run.  Every
+      // probe except `never_tohost` therefore runs to the cycle limit, and the
+      // assertion that carries the rule is the signature word plus the
+      // event-for-event comparison against the reference.  Asserting
+      // "(tohost & 1) == pass_code" here would be asserting something the image
+      // cannot do.
       const Probe probes[] = {
-          {0, "x0", "x0 reads as zero and discards writes", true,
+          {0, "x0", "x0 reads as zero and discards writes",
            {0x0, 0, 0, 0}, true, false, false},
           {1, "illegal_csr", "a CSR number absent from mode_m.json is illegal "
-                              "instruction and writes no register", true,
+                              "instruction and writes no register",
            {0x5a5a5a5a5a5a5a5aull, 0, 0, 2}, true, false, true},
           {2, "ro_csr", "writing a read-only CSR is illegal instruction and "
-                        "writes no register", true,
+                        "writes no register",
            {0x0badc0deull, 0, 0, 2}, true, false, true},
-          {3, "csrrs_x0", "csrrs with rs1 == x0 reads but does not write",
-           true, {0xaaaa5555aaaa5555ull, 0xaaaa5555aaaa5555ull, 0, 0}, true, true, false},
-          {4, "misaligned_load", "a misaligned load traps with cause 4", true,
+          {3, "csrrs_x0", "csrrs with rs1 == x0 reads but does not write: "
+                           "mscratch keeps its value, and a read-only CSR with a "
+                           "zero source is a plain read rather than an illegal "
+                           "write",
+           {0xaaaa5555aaaa5555ull, 0x8000000000001100ull, 0, 0}, true, true, false},
+          {4, "misaligned_load", "a misaligned load traps with cause 4",
            {0, 0, 0, 4}, false, false, true},
-          {5, "fext", "an F/D instruction is illegal instruction in p0", true,
+          {5, "fext", "an F/D instruction is illegal instruction in p0",
            {0x0badc0deull, 0, 0, 2}, true, false, true},
           {6, "never_tohost", "a program that never writes TOHOST hits the "
-                               "cycle limit", false, {0, 0, 0, 0}, false, false, false},
-          {7, "rom_store", "a store to boot_rom faults with cause 7", true,
+                              "cycle limit", {0, 0, 0, 0}, false, false, false},
+          {7, "rom_store", "a store to boot_rom faults with cause 7",
            {0, 0, 0, 7}, false, false, true},
       };
 
       constexpr uint64_t kProbeCycles = 20000;
       const std::string probe_bytes = Base64Decode(kProbeImageBase64);
       const std::string probe_manifest = options.out_dir + "/probe.image.txt";
-      {
-        std::ofstream out(probe_manifest);
-        if (!out) Fail("cannot write " + probe_manifest);
-        out << "seg " << std::hex << MOSAIC_RESET_VECTOR << " " << std::dec
-            << probe_bytes.size() << " ";
-        std::ostringstream hex;
-        hex << std::hex << std::setfill('0');
-        for (const char c : probe_bytes) {
-          hex.width(2);
-          hex << static_cast<unsigned>(static_cast<unsigned char>(c));
-        }
-        out << hex.str() << "\n";
-      }
 
       for (const Probe& probe : probes) {
+        // The reference gets the selector as a second manifest segment.  Without
+        // it the reference reads 0 out of kPselBase on every probe, so every
+        // probe was compared against selector 0's stream and seven of the eight
+        // comparisons were vacuous.  The DUT gets the same word through its
+        // loader backdoor, so the two runs really do see the same machine.
+        {
+          std::ofstream out(probe_manifest);
+          if (!out) Fail("cannot write " + probe_manifest);
+          out << "seg " << std::hex << MOSAIC_RESET_VECTOR << " " << std::dec
+              << probe_bytes.size() << " ";
+          std::ostringstream hex;
+          hex << std::hex << std::setfill('0');
+          for (const char c : probe_bytes) {
+            hex.width(2);
+            hex << static_cast<unsigned>(static_cast<unsigned char>(c));
+          }
+          out << hex.str() << "\n";
+          // The manifest carries bytes, and both the reference and the DUT
+          // loader assemble a word little-endian, so the selector is emitted as
+          // eight bytes in address order rather than as one big-endian literal.
+          out << "seg " << std::hex << kPselBase << " 8 ";
+          hex.str("");
+          for (int b = 0; b < 8; ++b) {
+            hex << std::hex << std::setw(2) << std::setfill('0')
+                << ((probe.selector >> (8 * b)) & 0xff);
+          }
+          out << hex.str() << "\n";
+        }
+
+        mosaic::EventTap tap;
         ProbeResult result;
-        RunProbe(&dut, probe.selector, kProbeCycles, &result);
+        RunProbe(&dut, probe.selector, kProbeCycles, &tap, &result);
 
         ReferenceResult expected;
         std::string reference_events, reference_detail;
+        // The DUT is bounded in *cycles* and the reference in *retired
+        // instructions*, so handing both the same number compares a stream
+        // truncated at the cycle limit against one truncated at the step limit
+        // and every probe reports a length mismatch that has nothing to do with
+        // the architecture.  The reference is given the DUT's event count as
+        // its step budget instead: both then stop after the same number of
+        // retired instructions, whether that is because the program wrote
+        // TOHOST or because the budget ran out.
         if (!RunReference(repo, probe_manifest, options.out_dir, "probe",
-                          kProbeCycles, &expected, &reference_events)) {
+                          static_cast<uint64_t>(tap.size()), &expected,
+                          &reference_events)) {
           Fail(std::string("probe ") + probe.name + ": " + reference_detail);
         }
 
         std::ostringstream stream_path;
         stream_path << options.out_dir << "/probe_" << probe.name << ".events.txt";
         std::string save_detail;
-
-        dut.ClearMemory();
-        dut.LoadSegment(MOSAIC_RESET_VECTOR,
-                        reinterpret_cast<const uint8_t*>(probe_bytes.data()),
-                        probe_bytes.size());
-        dut.WriteWord(kPselBase, probe.selector);
-        mosaic::EventTap tap;
-        uint64_t cycles = 0;
-        dut.Run(kProbeCycles, &tap, &cycles);
-        uint64_t signature_words[4] = {0, 0, 0, 0};
-        for (int i = 0; i < 4; ++i) {
-          signature_words[i] =
-              dut.ReadWord(signature + 8 * static_cast<uint64_t>(i));
-        }
         if (!tap.Save(stream_path.str(), &save_detail)) {
           Fail(std::string("probe ") + probe.name + ": " + save_detail);
         }
@@ -1623,18 +1661,16 @@ int main(int argc, char** argv) {
         reporter.Check(!differs, std::string("probe ") + probe.name +
                                     ": retire stream matches the independent "
                                     "reference (" + compare_detail + ")");
+        const uint64_t* signature_words = result.signature;
 
-        if (probe.expect_pass_tohost) {
-          reporter.Check(result.outcome == Outcome::kTohost,
-                         std::string("probe ") + probe.name + ": ends by writing TOHOST");
-          reporter.Check((result.tohost & 1) == pass_code,
-                         std::string("probe ") + probe.name + ": TOHOST reports pass");
-        } else {
-          reporter.Check(result.outcome == Outcome::kCycleLimit,
-                         std::string("probe ") + probe.name +
-                             ": never writes TOHOST and is stopped by the cycle "
-                             "limit, not by anything else");
-        }
+        // The image's tail writes 0 to TOHOST and parks, and a zero write is
+        // not the end-of-program signal, so every probe here is bounded by the
+        // cycle limit.  What is asserted is that the run ended there and not by
+        // the PC escaping mapped memory, which is the other way a probe can
+        // stop early and still look like a pass.
+        reporter.Check(result.outcome == Outcome::kCycleLimit,
+                       std::string("probe ") + probe.name +
+                           ": runs until the cycle limit and is not stopped early");
         if (probe.check_sig0) {
           reporter.Check(signature_words[0] == probe.sig[0],
                          std::string("probe ") + probe.name + ": signature[0] is " +
@@ -1670,6 +1706,12 @@ int main(int argc, char** argv) {
     detail = "check failed: " + failure.what;
   }
 
-  reporter.Check(passed, "no check failed");
-  return reporter.Finish(passed ? "PASS" : "FAIL", detail);
+  // A check that is recorded as failed and not reflected in the verdict is the
+  // one failure mode a differential harness cannot be allowed to have: the log
+  // fills with "CHECK FAILED" lines and the RESULT line still says PASS.
+  // Reporter::Check is the only thing that records a check, so its own failure
+  // count is the authority here, alongside the thrown Failure from the corpus.
+  const bool ok = passed && (reporter.failures() == 0);
+  reporter.Check(ok, "no check failed");
+  return reporter.Finish(ok ? "PASS" : "FAIL", detail);
 }

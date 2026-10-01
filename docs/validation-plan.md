@@ -2,7 +2,7 @@
 
 ## 0. 文档状态与结论边界
 
-本文是**实施前的研究与工作分解**，不是已有验证系统的说明。仓库目前没有本文约定的 RTL、C++ harness、适配器、测试生成器或 CLI。本轮只阅读原始报告及上游主源；没有安装、克隆、构建、运行模拟器、运行处理器测试或触碰硬件。文中数量是未来有限验收集的设计，不是已运行结果、错误率保证或覆盖率宣传。项目集成关系见 [实施计划](implementation-plan.md)、[架构审查](architecture-review.md)、[平台计划](platform-plan.md)。
+本文是**体系级验证计划与验收合同**，不是当前能力完成报告。仓库已进入 RTL bring-up：包含 profile/contracts、SystemVerilog RTL、C++/Verilator harness、unit/reference smoke paths；这些不构成完整 CPU，也不证明所有 p0 ISA claims。90 个 V 工作包仍定义后续 gate；XiangShan/NEMU/Sail/ACT4 是否可用于特定 DUT/profile 必须以 capability、配置、ABI 与实跑证据闭合，环境实况另记于[验证记录](verification.md)。表内数量是预先设计的有限验收集，不是已运行结果、错误率保证或覆盖率宣传。项目集成关系见 [实施计划](implementation-plan.md)、[架构审查](architecture-review.md)、[平台计划](platform-plan.md)。
 
 核心关系必须保持如下：
 
@@ -25,8 +25,8 @@
 | XiangShan Mill | `0.12.3` | 冻结 `.mill-version`。Dockerfile 基镜像是 `ghcr.io/openxiangshan/xs-env:latest`，这**不是可重现 pin**；实施时解析镜像 digest、所有包版本、JDK/Chisel/firtool 依赖闭包。[VR-002] |
 | Verilator | `v5.052`，tag object `efa4927be48e75c3cd08fc848b198d1d9d237f00` → commit `ea338be98e1e838d3518809ce8899f85a009963c`，tag 日期 2026-09-05 | 当前在线手册标示 5.052；是原生 SV+C++ 的候选基线，不声称与 XiangShan 候选组合已实测兼容。[VR-008] |
 | Spike 主线 | `0bff12123b1fd510e19e19634dd997dbade70e54`，2026-09-28 | 主线 CLI/语义对照候选；C++ 内部接口不受公开 API 稳定性保证。XiangShan 的 `riscv64-spike-so` 来自 OpenXiangShan fork，**不是**主线 Spike 原生提供 NEMU ABI。[VR-004、VR-006] |
-| Sail RISC-V model | release `0.14.1` → `e4b243f4eb5d1ed05bbbc030ad338c2a32c45d72` | 与下面 ACT4 当前 README 指定的版本配对；这是模型版本，不是 Sail 编译器版本。该 README 要求 Sail compiler ≥0.20.2；冻结具体 compiler/release binary 校验和。[VR-007、VR-009] |
-| riscv-arch-test / ACT4 | `6e8a45123f14cebfb3df151a0e7b849b4389b33b`，2026-09-08 | 当前主流程是 ACT4，不是已弃用 RISCOF；Make/Python、UDB、Sail 0.14.1 生成自检 ELF。默认扩展排除项需要展开审计；并非完整微架构验证。[VR-009] |
+| Sail RISC-V model | release `0.14.1` → commit `e4b243f4eb5d1ed05bbbc030ad338c2a32c45d72`；ACT4 固定 README 也指定 `0.14.1` | 它是 Sail 模型版本，不是 Sail compiler 版本；源码构建需 Sail compiler ≥0.20.2，但本地验证采用官方 Mac-arm64 release asset，SHA-256 `bc35be7b45a21f60d32915ccd8f9f1746f5a342399e4d65a8fb2b7c1e81babdf`。其他平台 artifact hash 分开冻结。[VR-007、VR-009] |
+| riscv-arch-test / ACT4 | `96493a91448ca50780013fd892daec2c204487ba`，2026-09-30 | 该日固定 README 配对 Sail 0.14.1，并列 GCC 15/Binutils 2.44 或 LLVM/Clang 22；ACT4 替代已弃用 RISCOF，经 UDB/Sail 生成自检 ELF，但官方明确 ACT 不是 verification tests，且每个适用 ELF 必须由 DUT testbench 实跑。默认 exclusions 仍需逐项审计。[VR-009] |
 
 其余 XiangShan 子模块按完整树递归锁定；未展开在表中不等于允许浮动。规范使用正式批准版本及对应文件 hash；当前 main/snapshot 的 normative 文本只用于本次研究定位，不自动选作产品 ISA 版本。HERD `.cat`、riscv-formal、生成器、交叉工具链在进入对应阶段前固定 SHA/配置/许可证及依赖，不在此伪造未核实版本。
 
@@ -36,7 +36,7 @@
 
 容器禁止只记录 `latest`、隐式联网下载和主机 `/usr/local` 的偶然工具；记录 OCI digest、arch、locale、uid、编译器、libc、RAM/存储峰值和线程数，源码/输入只读挂载，输出单独目录。资源需求由首次可重放校准测量，不编造“需要若干 GB”硬指标。多 hart `dlmopen` 路径依赖 Linux/glibc 语义，不能假设 macOS 上相同；自定义适配器可以用进程隔离参考实例，但必须证明共享内存事件同步。[VR-003]
 
-## 2. 命令证据等级与未来 CLI 契约
+## 2. Upstream command evidence and staged project entrypoints
 
 #### A. 已在上游原文核实的示例；本轮没有执行
 
@@ -73,12 +73,20 @@ Spike 原文 `spike pk hello` 需要对应 pk、编译后的 `hello` 和完整 I
 
 ACT4 原文配置后生成入口为 `CONFIG_FILES=<your_config_directory>/test_config.yaml make`，生成结果在 `WORKDIR/<config_name>/elfs`；这里路径是用户需要替换的上游占位参数。全部产生的适用 ELF 都需运行，不能只看到生成成功便记通过。[VR-009]
 
-#### B. 本项目未来实现契约；现在不存在、不可当作可执行工具
+#### B. Current MosaicRV entrypoints (limited; not the full ISA gate)
 
 ```sh
+make check PROFILE=p0
+make unit CASE=<registered-case-id> PROFILE=p0
+python3 tools/verify.py --profile p0 --list
 make sim PROFILE=p0
-make unit CASE=<case-id> PROFILE=p0
-python3 tools/verify.py --profile <p0|p1|p2|p3> --suite <suite-id> --seed <n> --out <dir>
+```
+
+`tools/verify.py` currently orchestrates registered local unit cases only. `tests/suites/registry.json` is empty in the present tree, so `make sim` and `--all` fail closed; neither is evidence of an architectural ISA suite. The project has no completed general architectural-event/reference simulator or ACT ELF runner yet. Current per-package acceptance status is in `config/status/implementation_status.json`; live run evidence is in `results/PROGRESS.md` and `docs/verification.md`.
+
+#### C. Future architectural simulator contract; not an existing command
+
+```sh
 python3 tools/experiment.py --matrix <json> --out <dir>
 build/<profile>/eaf-sim --elf <path> --platform <json> --ref <so> --seed <u64> --events <jsonl> --max-cycles <u64> --max-retire <u64> --out <dir>
 ```
@@ -1177,7 +1185,7 @@ RVA23U64/S64 mandatory conformance 增加 V-085–V-087，S64 必须包含 U64 �
 | VR-006 | [Spike 主线 README](https://github.com/riscv-software-src/riscv-isa-sim)、[revision API](https://api.github.com/repos/riscv-software-src/riscv-isa-sim/commits/master)；commit 2026-09-28 | ISA 模型、RVV v1、SC 内存执行子集、C++ 非稳定 API、`spike pk hello` 前提 | SC 执行覆盖所有 RVWMO 行为、pk 支持 p0、主线直接导出 NEMU ABI |
 | VR-007 | [Sail 当前官方 README](https://github.com/riscv/sail-riscv)、[0.14.1 tag API](https://api.github.com/repos/riscv/sail-riscv/git/ref/tags/0.14.1)、[固定 README](https://raw.githubusercontent.com/riscv/sail-riscv/e4b243f4eb5d1ed05bbbc030ad338c2a32c45d72/README.md) | RISC-V International 采用的 Sail 语义、配置 schema、ELF CLI、F/D/V/Sv39 支持列表、source-build compiler 要求 | 执行 Sail 就形式证明 DUT；所有非确定性策略与 DUT 相同；必然支持所有实验扩展 |
 | VR-008 | [Verilator arguments](https://verilator.org/guide/latest/exe_verilator.html)、[C++ example](https://verilator.org/guide/latest/example_cc.html)、[connecting](https://verilator.org/guide/latest/connecting.html)、[installation](https://verilator.org/guide/latest/install.html)、[v5.052 tag](https://api.github.com/repos/verilator/verilator/git/ref/tags/v5.052)、[tag object](https://api.github.com/repos/verilator/verilator/git/tags/efa4927be48e75c3cd08fc848b198d1d9d237f00)；5.052/tag 2026-09-05 | `--cc --exe --build`、eval/final/DPI/timing、源码依赖与确切 tag commit | 仿真等于四态/CDC/板级时序验证、与全部上游组合已兼容 |
-| VR-009 | [ACT4/riscv-arch-test 官方 README](https://github.com/riscv/riscv-arch-test)、[revision API](https://api.github.com/repos/riscv/riscv-arch-test/commits/main)；commit 2026-09-08 | ACT4 替代 RISCOF、UDB/rvmodel/linker/Sail 0.14.1、全部适用自检 ELF、默认排除项、非充分验证 | 通过 ACT 即完整 CPU 正确或已取得认证；主源默认排除可静默继承 |
+| VR-009 | [validation-plan.md](validation-plan.md) | [ACT4 固定 README](https://raw.githubusercontent.com/riscv/riscv-arch-test/96493a91448ca50780013fd892daec2c204487ba/README.md)、[固定 commit metadata](https://api.github.com/repos/riscv/riscv-arch-test/commits/96493a91448ca50780013fd892daec2c204487ba)；commit 2026-09-30 | ACT4 替代 RISCOF、UDB/Sail 自检 ELF 的配置/生成/执行流程及 GCC 15/Binutils 2.44 或 LLVM 22；官方明确 ACTs 不是 verification tests，必须在 DUT testbench 运行适用 ELF，生成通过不等于 DUT 通过；默认排除项不能静默继承。 |
 | VR-010 | [RISCV-DV 官方 README](https://github.com/chipsalliance/riscv-dv)；检索时主线 | RV32/64 IMAFDC、privilege/MMU/随机指令覆盖；UVM simulator 前提 | 已支持完整 V、现成流程必然在指定 Verilator 版本运行；随机数多等于正确 |
 | VR-011 | [riscv-formal 官方 README](https://github.com/YosysHQ/riscv-formal)；检索时主线 | RVFI/processor wrapper、RV32I/RV64I 主要关注、proof/assumption/cover 思路 | 已有完整 OoO/RVV/multi-hart 证明；bounded verification 就全状态证明 |
 | VR-012 | [RISC-V ISA Manual 官方仓库](https://github.com/riscv/riscv-isa-manual)、[正式规范入口](https://riscv.org/specifications/) | 正式/草稿版本边界与整数、扩展、privilege 语义的规范来源；实施时逐条 pin | 主线重构文件路径/最新草稿等于项目批准的 ISA 版本；未读条款可据 README 凭空补充 |

@@ -42,6 +42,7 @@ SOURCES = [
         "name": "riscv-isa-sim",
         "role": "Spike: independent architectural reference",
         "path": os.path.join(REF_ROOT, "riscv-isa-sim"),
+        "expected_commit": "0bff12123b1fd510e19e19634dd997dbade70e54",
         "licence": "BSD-3-Clause",
         "used_for": ["I-007", "I-008", "V-001", "V-002"],
     },
@@ -51,6 +52,14 @@ SOURCES = [
         "path": os.path.join(REF_ROOT, "riscv-v-spec"),
         "licence": "CC-BY-4.0",
         "used_for": ["I-001"],
+    },
+    {
+        "name": "riscv-arch-test",
+        "role": "ACT4 architectural certification test generator",
+        "path": os.path.join(REF_ROOT, "riscv-arch-test"),
+        "expected_commit": "96493a91448ca50780013fd892daec2c204487ba",
+        "licence": "Apache-2.0 / BSD-3-Clause / CC-BY-4.0 (per file)",
+        "used_for": ["V-002", "V-043"],
     },
 ]
 
@@ -64,25 +73,26 @@ TOOLS = [
     {"name": "sby", "cmd": ["sby", "--version"], "licence": "BSD-2-Clause",
      "used_for": ["formal"]},
     {"name": "riscv64-elf-gcc", "cmd": ["riscv64-elf-gcc", "--version"],
-     "licence": "GPL-3.0 with GCC Runtime Library Exception", "used_for": ["I-007"]},
+     "licence": "GPL-3.0 with GCC Runtime Library Exception", "used_for": ["I-007", "V-043"]},
     {"name": "riscv64-elf-objdump", "cmd": ["riscv64-elf-objdump", "--version"],
-     "licence": "GPL-3.0 with GCC Runtime Library Exception", "used_for": ["I-007", "I-010"]},
+     "licence": "GPL-3.0 with GCC Runtime Library Exception", "used_for": ["I-007", "I-010", "V-043"]},
+    {"name": "spike", "cmd": [os.path.join(REF_ROOT, "install", "bin", "spike"), "--help"],
+     "licence": "BSD-3-Clause", "used_for": ["V-002", "V-006"]},
+    {"name": "sail_riscv_sim",
+     "cmd": [os.path.join(REF_ROOT, "sail-riscv-0.14.1", "bin", "sail_riscv_sim"), "--version"],
+     "licence": "Other (see upstream LICENCE)", "used_for": ["V-002", "V-006", "V-043"]},
 ]
 
-# References and second DUTs the plan requires but that are absent here. Listed so
-# their absence is explicit rather than discovered mid-gate.
+# References and second DUTs blocked on the documented Linux x86-64 environment.
 ABSENT = [
     {"name": "XiangShan", "role": "second DUT and Difftest host", "gate": "V-005",
-     "unblocked_by": "clone and build https://github.com/OpenXiangShan/XiangShan (sbt/Chisel); "
-                     "a large build, and not needed for the p0 gate"},
+     "unblocked_by": ("checkout pinned XiangShan e7bab53e66dfb3c4a1d11cf9519b0396f8576cae with all recursive gitlinks and build on Linux x86-64; "
+                      "current host is Darwin arm64 with no container runtime or configured remote host")},
     {"name": "NEMU", "role": "Difftest reference with a pinned commit trace", "gate": "V-004",
-     "unblocked_by": "clone and build https://github.com/OpenXiangShan/NEMU with its own "
-                     "RISC-V toolchain"},
-    {"name": "Sail", "role": "formal ISA model", "gate": "V-002",
-     "unblocked_by": "install sail-riscv; optional next to Spike for p0"},
-    {"name": "ACT4", "role": "fourth-party reference", "gate": "V-002",
-     "unblocked_by": "obtain the ACT4 distribution and licence"},
+     "unblocked_by": ("build NEMU f39e3077d7bac3cd9a3a853a9300a5f8f0293a2c in the isolated Linux x86-64 environment; "
+                      "current host is Darwin arm64")},
 ]
+
 
 
 def run(cmd, cwd=None):
@@ -99,15 +109,22 @@ def probe_source(entry):
     if not os.path.isdir(os.path.join(path, ".git")):
         return {"name": entry["name"], "role": entry["role"], "status": "BLOCKED",
                 "licence": entry["licence"], "used_for": entry["used_for"],
+                "expected_commit": entry.get("expected_commit"),
                 "reason": "not checked out at %s" % path}
     code, out = run(["git", "rev-parse", "HEAD"], cwd=path)
     commit = out.strip() if code == 0 else ""
     _, dirty = run(["git", "status", "--porcelain"], cwd=path)
     _, subject = run(["git", "log", "-1", "--format=%s"], cwd=path)
+    expected = entry.get("expected_commit")
+    if expected and commit != expected:
+        return {"name": entry["name"], "role": entry["role"], "status": "BLOCKED",
+                "licence": entry["licence"], "used_for": entry["used_for"],
+                "expected_commit": expected, "path": path, "commit": commit,
+                "reason": "source revision mismatch; expected %s, found %s" % (expected, commit)}
     return {"name": entry["name"], "role": entry["role"], "status": "PRESENT",
             "licence": entry["licence"], "used_for": entry["used_for"],
-            "path": path, "commit": commit, "subject": subject.strip(),
-            "working_tree_clean": dirty.strip() == ""}
+            "expected_commit": expected, "path": path, "commit": commit,
+            "subject": subject.strip(), "working_tree_clean": dirty.strip() == ""}
 
 
 def probe_tool(entry):

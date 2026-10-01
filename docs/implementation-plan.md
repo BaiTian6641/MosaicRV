@@ -1,10 +1,10 @@
 # MosaicRV 细粒度实现计划
 
-状态：**规划，不是已实现处理器**。本次只维护文档；下列 RTL、程序、脚本、命令和结果目录均为后续交付契约，不表示它们已存在或已运行。架构裁决见 [architecture-review.md](architecture-review.md)，正确性方法见 [validation-plan.md](validation-plan.md)，板级与 ASIC 路径见 [platform-plan.md](platform-plan.md)。原始报告及逐节覆盖见 [source-inventory.md](source-inventory.md)。
+状态：**部分实现，非完整处理器**。`config/status/implementation_status.json` 是已接受工作包的权威账本，目前记录 I-001–I-006；RTL bring-up、C++/Verilator harness、unit tests 与有限参考对照已经存在，但不构成完整 p0 ISA 验收。此计划仍定义完整交付合同；命令/结果只有在对应状态和可重放证据中登记后才算完成。架构裁决见 [architecture-review.md](architecture-review.md)，正确性方法见 [validation-plan.md](validation-plan.md)，板级与 ASIC 路径见 [platform-plan.md](platform-plan.md)。原始报告及逐节覆盖见 [source-inventory.md](source-inventory.md)。
 
 ## 1. 实现决策与不可变边界
 
-采用 **portable synthesizable SystemVerilog + C++ Verilator harness + Python 标准库编排 + Make**。当前仓库只有研究文档，无现存 RTL/构建约定可继承；选择 SV 是减少 Gowin/Vivado/ASIC 间生成器与语言前端差异的工程决策，不是声称 Chisel 不可移植。XiangShan 保留它自己的 Chisel/生成 RTL/Verilator 工程，作为第二 DUT 与验证基础设施参考；不把整个 XiangShan 后端搬进本项目，也不把它当 ISA 金标准。
+采用 **portable synthesizable SystemVerilog + C++ Verilator harness + Python 标准库编排 + Make**。仓库现已包含 p0 配置、`rtl/common/` 与 `rtl/core/` RTL、仿真 harness 和单元测试；当前实现结构不替代后续 fabric/vector/SoC/platform 目标。选择 SV 是减少 Gowin/Vivado/ASIC 间生成器与语言前端差异的工程决策，不是声称 Chisel 不可移植。XiangShan 保留它自己的 Chisel/生成 RTL/Verilator 工程，作为第二 DUT 与验证基础设施参考；不把整个 XiangShan 后端搬进本项目，也不把它当 ISA 金标准。
 
 - 软件可见：标准 RISC-V hart、指令、CSR、异常、内存语义；每 hart 独立 architectural state。
 - 硬件可变：已有 queue/FU/PRF-port/network/completion/lane 资源的分配与路由；不在每条指令中实例化硬件，不用 DFX 模拟执行发射。
@@ -47,18 +47,20 @@ RTL 编码宽度由容量与寿命上界推导，禁止把“64-bit sequence”�
 
 ## 2. 项目布局与命令合同
 
-后续实现才创建：`rtl/common/`（packet/FIFO/RAM contract），`rtl/core/`（frontend/rename/ROB/LSU），`rtl/fabric/`，`rtl/vector/`，`rtl/soc/`，`platform/{generic,gowin,amd,asic}/`，`sim/`，`tests/{unit,directed,random,litmus,programs}/`，`formal/`，`config/`，`tools/`，`build/`，`results/`。公共 core 不引用 vendor primitive；器件 IP 在 platform wrapper。工具链、ISA、memory map、test corpus、reference 与 config hash 都进入 manifest。
+当前仓库布局：`config/`、`rtl/common/`、`rtl/core/`、`sim/{common,harness,tb,unit}/`、`tests/{programs,unit,suites}/`、`tools/`、`results/`。后续扩展为 `rtl/fabric/`、`rtl/vector/`、`rtl/soc/`、`platform/{generic,gowin,amd,asic}/`、`formal/`、完整 directed/random/litmus suites 等；目录存在不等于该阶段能力已交付。公共 core 不引用 vendor primitive；器件 IP 在 platform wrapper。工具链、ISA、memory map、test corpus、reference 与 config hash 都进入 manifest。
 
-以下是 **待 I-003/I-004 实现的本项目 CLI**，不是现有命令：
+目前可执行的入口与范围：
 
 ```sh
-make sim PROFILE=p0
-make unit CASE=rename.same_cycle_chain PROFILE=p0
-python3 tools/verify.py --profile p0 --suite scalar-directed-v1 --seed 0 --out results/scalar-directed
-python3 tools/experiment.py --matrix config/experiments/fixed-vs-dynamic.json --out results/fabric-ab
+make check PROFILE=p0
+make unit CASE=<registered-case-id> PROFILE=p0
+python3 tools/verify.py --profile p0 --list
+python3 tools/verify.py --profile p0 --suite <registered-suite-id> --seed 0 --out results/suites
 ```
 
-约定：命令成功退出 0；mismatch/assertion/timeout/未实现配置退出非零；输出 JSON manifest、逐项 verdict、seed、完整命令、工具版本、ELF/config/RTL/reference hash。`--suite` 不识别必须失败，不能跑空集合返回成功。后文每个 `CASE=` 名称是该任务必须交付的 case；若 case 尚未实现，该任务未完成。运行整个未知后端是不合格的替代验收。Verilator upstream 构建与 XiangShan upstream 命令以 validation-plan 的锁定版本为准。
+`tools/verify.py` 目前只是已注册 unit-case 的套件编排器；`tests/suites/registry.json` 为空时 `make sim` / `--all` 必须失败关闭，不能作为通过的 ISA gate。完整 architectural event/reference simulator CLI、`tools/experiment.py` 与 `build/<profile>/eaf-sim` 仍是目标接口，尚不能照抄为现存工具。
+
+实现约定：成功退出 0；mismatch/assertion/timeout/未实现配置退出非零；输出 JSON manifest、逐项 verdict、seed、完整命令、工具版本、ELF/config/RTL/reference hash。未知 suite 与空集合必须失败。后文每个 `CASE=` 名称是目标交付 case；未注册/未实现即未完成。运行一个不相关或未知后端不能替代指定验收。Verilator upstream 构建与 XiangShan upstream 命令以 validation-plan 锁定版本为准。
 
 ## 3. 阶段门槛与并行边界
 

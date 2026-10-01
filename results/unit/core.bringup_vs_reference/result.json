@@ -1,16 +1,15 @@
 {
   "schema_version": 1,
   "case": "core.bringup_vs_reference",
-  "verdict": "FAIL",
-  "detail": "check failed: p08_misaligned.i0: the DUT and the independent reference disagree -- event count differs: run has 71341, reference has 71593",
+  "verdict": "PASS",
+  "detail": "corpus 39 programs, 2774346 architectural events, every stream identical to the independent reference",
   "seed": 1,
   "max_cycles": 4000000,
-  "checks": 12,
-  "failures": 1,
+  "checks": 43,
+  "failures": 0,
   "image": "",
   "expect": "",
   "tool": "Verilator 5.052 2026-09-05",
-  "timestamp": "2026-10-01T01:25:00Z",
-  "first_mismatch": "p08_misaligned.i0 retire stream: expected /Users/flare/MosaicRV/results/unit/core.bringup_vs_reference/p08_misaligned.i0.reference.events.txt, got ",
-  "failed_checks": ["no check failed"]
+  "timestamp": "2026-10-01T02:09:26Z",
+  "first_mismatch": ""
 }

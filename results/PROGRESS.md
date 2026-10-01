@@ -226,3 +226,88 @@ of the five are BLOCKED. Both were caught and reopened in the same turn. The hab
 of marking a tracker item "done" because the agent returned is the precise habit
 this project exists to break; the tracker is only worth keeping if it can be
 *less* optimistic than the person filling it in.
+
+---
+
+## 2026-09-30 — I-008 — delivered, with one mutation control that cannot fail
+
+`python3 tools/run_unit.py --case core.bringup_vs_reference` prints **PASS**, exit 0,
+across all 39 corpus ELFs. Verified here, not taken on report: the case passes, all
+nine RTL files lint clean, and **39 of 39 event streams are byte-identical** to the
+independent reference when diffed directly (`diff` reports no difference on any ELF).
+The one stream that differs is `probe`, which is a negative-control fixture and is
+*meant* to differ.
+
+### The root cause behind the whole divergence
+
+The SYSTEM funct3 decode table was selected with the OP/OP-IMM `F3_*` names from
+`mosaic_pkg`, but the Zicsr funct3 space is offset by one from them. So `csrrw`
+(funct3 `001`) matched `F3_SLL` and decoded as **`csrrs`**. Every CSR instruction in
+the firmware trap handler therefore did `csr_wdata = csr_rdata | csr_operand`,
+which for `csrrw sp, mscratch, sp` is `mscratch | sp` — a **self-write**. `mscratch`
+never changed, so the handler's exit `csrrw` restored `sp` to the trap-stack top
+instead of the interrupted value, all seventeen caller-saved registers came back
+zero, and `main` resumed with a register that made its misaligned word load read
+aligned memory at address 0.
+
+That one decode error produced *every* observable symptom at once: the missing
+`csrrw` write, the wrong `mscratch`, and the missing cause-7 trap. The missing
+cause-7 was **not** a PMA defect — the testbench modelled `boot_rom` correctly
+throughout. Fixing the decode fixed all of it, and `p08_misaligned.i0` now produces
+exactly the trap trace its own source documents.
+
+The discriminator that settled it was reading `mscratch` out of band immediately
+after the first trap's entry: still holding the crt0 value proved the write never
+landed at all, rather than landing with a wrong operand. Inspection had already
+shown `csr_operand = rs1_val` as a pre-edge register read and the commit path as
+correct — so the defect was not where reading pointed.
+
+### Defects fixed in this pass
+
+- **DUT**: the Zicsr funct3 table offset, as above.
+- **Reference**: `mret` did not update `mstatus`. Privileged Specification v1.12
+  §2.1.6.1 requires `xIE ← xPIE`, `xPIE ← 1`, `xPP ← least-privileged mode` on
+  `xRET`; the reference implemented trap entry but treated `mret` as a bare jump.
+  Established from the specification, not from the DUT's output.
+- **Harness**: `Reporter::Check` failures did not feed the verdict, so the case
+  could print `RESULT PASS` while its log held twenty-two `CHECK FAILED` lines —
+  the exact shape of a checker that reports success while failing. The verdict is
+  now `passed && reporter.failures() == 0`.
+- **Harness**: the reference never received the probe selector, so all eight probes
+  were compared against selector 0's stream, and the probe reference was given a
+  cycle budget where the DUT got a step budget. Both meant probe comparisons were
+  producing meaningless results rather than passing ones.
+
+### `MOSAIC_BRINGUP_MUTANT_4` cannot fail, and that is the finding
+
+Four of the five mutants fail, which I confirmed by rebuilding and running each
+one: `MUTANT_1` exit 1 on `p01_addsub.i0`, `MUTANT_2` exit 1, `MUTANT_3` exit 1 on
+`p08_misaligned.i0`, `MUTANT_5` exit 1 on `p01_addsub.i0`. **`MUTANT_4` exits 0.**
+
+The agent reported this as INCOMPLETE rather than quietly dropping the mutant, and
+its explanation holds up under my own check of the `csr_written` mapping. The
+mutant lets `csrrs`/`csrrc` with `rs1 == x0` write, and its only effect is to write
+a CSR's own contents back into itself. Every writable CSR in this profile is
+idempotent under that write: `mstatus` is always stored masked with `MPP` forced,
+`mtvec` and `mepc` always store bits `[1:0]` as zero, `mie`/`mip` are stored masked,
+and the rest store `value` unchanged.
+
+So the injected defect is **unobservable by construction** — a control that cannot
+fail is not evidence of anything, and pretending otherwise would be worse than
+reporting the gap. I am recording it rather than deleting the mutant: the next
+person to add a probe needs to know that this rule currently has no observable
+consequence in this profile, which is a real limitation of the verification, not of
+the hardware.
+
+**One refinement to the agent's table**, checked against the RTL: it marks
+`mcycle`/`minstret` as *not* idempotent, since `csr_written = value`. But the
+mutant writes `csr_rdata`, which for those two *is* the current counter value, so
+the write is a no-op in effect. The conclusion is unchanged and slightly stronger
+than stated: the mutant is unobservable for **every** writable CSR, not most of them.
+
+### Status
+
+I-008 is delivered with one documented open item: a mutation control that cannot
+fail, and therefore one architectural rule — that `csrrs`/`csrrc` with `rs1 == x0`
+must not write — that has no observable coverage in this profile. The hardware is
+not in question; the coverage gap is.
