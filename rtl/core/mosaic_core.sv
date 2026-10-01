@@ -102,6 +102,11 @@ localparam int unsigned CORE_RD_W    = 5;
 localparam int unsigned CORE_CSR_W   = 12;
 localparam int unsigned CORE_SIZE_W  = 3;
 localparam int unsigned CORE_OCC_W   = $clog2(CORE_ROB_N + 1);
+// Readiness observability: the rename state a stuck operand is diagnosed from,
+// sized from the same generated geometry rename uses so the widths cannot drift.
+localparam int unsigned CORE_ARCH_N  = mosaic_cfg_pkg::MOSAIC_ARCH_INT_REGS;
+localparam int unsigned CORE_PRF_N   = mosaic_cfg_pkg::MOSAIC_INT_PRF_ENTRIES;
+localparam int unsigned CORE_MAP_W   = CORE_TAG_W + CORE_IGEN_W;
 
 module mosaic_core (
     input  logic                        clk,
@@ -222,7 +227,21 @@ module mosaic_core (
     output logic [4:0]                  o_dbg_desc_rd0,
     output logic [4:0]                  o_dbg_desc_rd1,
     output logic [31:0]                 o_dbg_alloc_ctr,
-    output logic [31:0]                 o_dbg_ins_ctr
+    output logic [31:0]                 o_dbg_ins_ctr,
+    // The rename readiness state, so a case that stops making progress can name
+    // the mapping that stalled instead of only that nothing retired:
+    //   o_dbg_spec_map  one {generation, tag} pair per architectural register,
+    //                   entry a at bits a*MAP_W +: MAP_W;
+    //   o_dbg_gen_valid one bit per physical tag: "an allocation has taken this
+    //                   tag since reset" (clear means the mapping, if any, is the
+    //                   architectural initial mapping);
+    //   o_dbg_wb_done   one bit per physical tag: "this tag's value has been
+    //                   written back".
+    // A tag named by a source with gen_valid clear and wb_done clear is exactly
+    // the operand no wakeup will ever arrive for.
+    output logic [CORE_ARCH_N*CORE_MAP_W-1:0] o_dbg_spec_map,
+    output logic [CORE_PRF_N-1:0]       o_dbg_gen_valid,
+    output logic [CORE_PRF_N-1:0]       o_dbg_wb_done
 );
 
   // ==========================================================================
@@ -284,6 +303,11 @@ module mosaic_core (
   logic [CORE_IGEN_W-1:0]    ren_new_gen;
   logic [4:0]                ren_rs1_addr, ren_rs2_addr;
   logic                      ren_rs1_is_x0, ren_rs2_is_x0;
+  // rename's per-tag allocation validity, read out on its `dbg_gen_valid` port.
+  // It is the input to dispatch's architectural-initial-mapping fold: a tag whose
+  // bit is clear has never been allocated, so a source that names it reads the
+  // architectural initial value, zero.
+  logic [CORE_PRF_N-1:0]     ren_gen_valid;
   logic [CORE_TAG_W-1:0]     ren_rs1_tag, ren_rs2_tag;
   logic [CORE_IGEN_W-1:0]    ren_rs1_gen, ren_rs2_gen;
   logic                      ren_wb_valid;
@@ -790,10 +814,10 @@ module mosaic_core (
       .journal_overflow (ren_journal_overflow),
       .free_count       (ren_free_count),
       .dbg_free_mask    (),
-      .dbg_gen_valid    (),
-      .dbg_wb_done      (),
+      .dbg_gen_valid    (ren_gen_valid),
+      .dbg_wb_done      (o_dbg_wb_done),
       .dbg_tag_gen      (),
-      .dbg_spec_map     (),
+      .dbg_spec_map     (o_dbg_spec_map),
       .dbg_cmt_map      (),
       .dbg_j_len        ()
   );
@@ -1243,6 +1267,7 @@ module mosaic_core (
       .rs1_gen          (ren_rs1_gen),
       .rs2_tag          (ren_rs2_tag),
       .rs2_gen          (ren_rs2_gen),
+      .gen_valid        (ren_gen_valid),
       .rob_free_any     (rob_free_rob != {CORE_OCC_W{1'b0}}),
       .rob_alloc_valid  (rob_alloc_valid),
       .rob_alloc_tag    (rob_alloc_tag),
@@ -1690,6 +1715,10 @@ module mosaic_core (
   assign o_dbg_desc_rd1      = desc_rd1;
   assign o_dbg_alloc_ctr     = disp_alloc_ctr;
   assign o_dbg_ins_ctr       = disp_ins_ctr;
+  // The readiness state the stall diagnosis reads: rename's map, its per-tag
+  // allocation validity (the same vector dispatch folds from) and its per-tag
+  // writeback-done bits.
+  assign o_dbg_gen_valid     = ren_gen_valid;
 
   assign o_commit_ctr    = commit_ctr;
   assign o_redirect_ctr  = redirect_ctr;

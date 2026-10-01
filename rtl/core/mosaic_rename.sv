@@ -125,6 +125,45 @@
 // handled at both ends: allocation allocates nothing for rd == 0, and a commit
 // with rd == 0 frees nothing.
 //
+// ------------------------------------- the architectural initial mapping
+//
+// Reset maps every architectural register i to physical tag i at generation 0
+// (see "reset" below). Nothing writes those tags, so nothing will ever
+// broadcast a wakeup for one of them: a source that resolves to the initial
+// mapping is a source whose producer does not exist. A machine that inserts
+// such a source not-ready and waits deadlocks on the first instruction that
+// reads a register the program has not written -- x31 in a crt0, or any
+// register a program initialises on only one path. That is the defect
+// CASE=core.unwritten_reg_read reproduces.
+//
+// The architectural contract is that such a read yields zero: this project's
+// software assumes zero-initialised registers, and mosaic_bringup_core.sv
+// already models an architectural register file that reads 0 before any write.
+// The consumer therefore *recognises* the initial mapping and supplies a ready
+// constant zero instead of waiting (mosaic_dispatch.sv owns that fold, and its
+// header states the rule; this section states the state it rests on).
+//
+// What that recognition needs is exactly one bit of this module's state:
+// `gen_valid[tag]`, "an allocation has taken this tag since reset". It is the
+// only thing that separates the architectural initial mapping of a register from
+// the *first allocation* of the same tag, because that first allocation also
+// carries generation 0 -- a tag that was never allocated starts its life at
+// generation 0, which is what makes a `(tag, generation)` test alone wrong here.
+// `gen_valid` is set by an allocation and cleared only by the undo of that same
+// allocation, which also rolls the mapping back, so a tag with `gen_valid` clear
+// is a tag no allocation has taken. It is exposed as `dbg_gen_valid` below, and
+// that read-out is the one verification output the design consumes: see the port
+// group comment.
+//
+// Two consequences, both of which the consumer relies on:
+//
+//   * a *written* register is never mistaken for an initial mapping: its
+//     mapping came from an allocation, so that tag's `gen_valid` is set and it
+//     takes the ordinary ready/wakeup path;
+//   * x0 is untouched: it is reported by `rs*_is_x0`, and the recognition
+//     excludes it, so "x0 is zero" and "the initial mapping is zero" stay two
+//     statements about two different things.
+//
 // ---------------------------------------------------------- reset
 //
 // Synchronous, active high. It clears the two maps to the architectural reset
@@ -323,6 +362,13 @@
 //                    a squash to a checkpoint taken with older writers in flight
 //                    is accepted: the restore silently loses their mappings and
 //                    leaves their tags unreachable.
+//
+// The architectural-initial-mapping rule above has no mutant here, because this
+// module's half of it is a pure observation of `gen_valid` that adds no state
+// and no behaviour: the rule's behaviour is the fold in mosaic_dispatch.sv, and
+// the two controls that break it (`MOSAIC_DISPATCH_MUTANT_NO_INIT_CONST` and
+// `MOSAIC_DISPATCH_MUTANT_ALL_INIT_CONST`) live there, where the fold is.
+// CASE=core.unwritten_reg_read fails on the first and on the second.
 // ============================================================================
 
 `default_nettype none
@@ -525,8 +571,15 @@ module mosaic_rename (
 
     // ------------------------------------------------ verification output
     // These exist so the unit test can compare the *whole* state every cycle
-    // instead of a projection of it. They are read-only observation; nothing
-    // in the design consumes them.
+    // instead of a projection of it. They are read-only observation, and exactly
+    // one of them is also read by the design: `dbg_gen_valid` is the input to the
+    // architectural-initial-mapping recognition (see the header and
+    // mosaic_dispatch.sv), because `gen_valid` is the only state that separates an
+    // initial mapping from the first allocation of the same tag. It is carried on
+    // this read-out rather than on a new dedicated port because adding a port to
+    // this module means updating every instantiation -- this Verilator's
+    // PINMISSING is fatal -- and the unit testbench for that port is not part of
+    // this wave. The name is historical: the signal is functional.
     output logic [REN_ENTRIES-1:0]                dbg_free_mask,
     output logic [REN_ENTRIES-1:0]                dbg_gen_valid,
     output logic [REN_ENTRIES-1:0]                dbg_wb_done,

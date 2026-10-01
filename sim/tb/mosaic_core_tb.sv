@@ -33,6 +33,11 @@ localparam int unsigned TB_SEQ_W    = $clog2(2 * mosaic_cfg_pkg::MOSAIC_ROB_ENTR
 localparam int unsigned TB_RD_W     = 5;
 localparam int unsigned TB_SIZE_W   = 3;
 localparam int unsigned TB_OCC_W    = $clog2(mosaic_cfg_pkg::MOSAIC_ROB_ENTRIES + 1);
+// Readiness probes: the same generated geometry the core and rename derive, so
+// the wrapper never invents a width.
+localparam int unsigned TB_ARCH_N   = mosaic_cfg_pkg::MOSAIC_ARCH_INT_REGS;
+localparam int unsigned TB_PRF_N    = mosaic_cfg_pkg::MOSAIC_INT_PRF_ENTRIES;
+localparam int unsigned TB_MAP_W    = 2 * TB_TAG_W;
 
 /* verilator lint_off PINCONNECTEMPTY */
 module mosaic_core_tb (
@@ -169,6 +174,13 @@ module mosaic_core_tb (
     output logic [4:0]  o_dbg_desc_rd1_o,
     output logic [31:0] o_dbg_alloc_ctr_o,
     output logic [31:0] o_dbg_ins_ctr_o,
+
+    // ------------------------------------------- readiness state (diagnosis)
+    // What rename believes, so a case that stops making progress names the
+    // stalled mapping instead of only that nothing retired.
+    output logic [TB_ARCH_N*TB_MAP_W-1:0] o_dbg_spec_map_o,
+    output logic [TB_PRF_N-1:0] o_dbg_gen_valid_o,
+    output logic [TB_PRF_N-1:0] o_dbg_wb_done_o,
 
     // ------------------------------------------------------------- geometry
     // Taken from the generated packages and from the elaborated core, never
@@ -317,7 +329,10 @@ module mosaic_core_tb (
       .o_dbg_desc_rd0   (o_dbg_desc_rd0_o),
       .o_dbg_desc_rd1   (o_dbg_desc_rd1_o),
       .o_dbg_alloc_ctr  (o_dbg_alloc_ctr_o),
-      .o_dbg_ins_ctr    (o_dbg_ins_ctr_o)
+      .o_dbg_ins_ctr    (o_dbg_ins_ctr_o),
+      .o_dbg_spec_map   (o_dbg_spec_map_o),
+      .o_dbg_gen_valid  (o_dbg_gen_valid_o),
+      .o_dbg_wb_done    (o_dbg_wb_done_o)
   );
 
   // ------------------------------------------- standalone redirect arbiter DUT

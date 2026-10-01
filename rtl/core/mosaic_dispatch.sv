@@ -45,7 +45,22 @@
 //   * `alu_a = is_auipc ? pc : (uses_rs1 ? rs1_val : 0)`, so AUIPC's first
 //     operand is the macro's own PC, also folded here as a ready constant;
 //   * a source the instruction does not use is addressed as x0, which rename
-//     reports ready with value zero.
+//     reports ready with value zero;
+//   * a source that resolves to the **architectural initial mapping** -- a
+//     register the program has not written since reset -- is folded to a ready
+//     constant zero by the same mechanism. Waiting for its writeback is the
+//     deadlock CASE=core.unwritten_reg_read reproduces: the initial mapping's
+//     producer does not exist, so the wakeup the issue queue would wait for is
+//     never broadcast. The recognition is `!rsN_is_x0 && !gen_valid[rsN_tag]`,
+//     exact and not a guess: rename's `gen_valid[tag]` is set by an allocation
+//     and cleared only by the undo of that same allocation, so a tag with it
+//     clear is a tag no allocation has ever taken -- which is what an initial
+//     mapping is. A `(tag, generation)` test would *not* do: the first
+//     allocation of a tag also carries generation 0, and a register a real
+//     producer wrote must take the ordinary ready/wakeup path rather than be
+//     shadowed by the constant. (Two negative controls break one half each:
+//     `MOSAIC_DISPATCH_MUTANT_NO_INIT_CONST` removes the fold, and
+//     `MOSAIC_DISPATCH_MUTANT_ALL_INIT_CONST` applies it to every source.)
 //
 // A source whose producer has already written (`rsN_ready`) has its final value
 // in the PRF, and the value is read there **at insert time**, not at allocation:
@@ -105,6 +120,7 @@ localparam int unsigned DSP_RGEN_W = mosaic_id_pkg::MOSAIC_ID_W_ROB_GEN;
 localparam int unsigned DSP_UOP_W  = 3;
 localparam int unsigned DSP_UOP_ID_W = DSP_IDX_W + DSP_RGEN_W + DSP_UOP_W;
 localparam int unsigned DSP_BANKS  = mosaic_cfg_pkg::MOSAIC_PRF_BANKS;
+localparam int unsigned DSP_ENTRIES = mosaic_cfg_pkg::MOSAIC_INT_PRF_ENTRIES;
 // Depth 4: one allocation in flight plus the insert latencies of two clusters
 // and the few cycles a bank conflict on the operand read can add. The argument
 // that the depth cannot deadlock is in the header.
@@ -152,6 +168,12 @@ module mosaic_dispatch (
     input  logic [DSP_IGEN_W-1:0]       rs1_gen,
     input  logic [DSP_TAG_W-1:0]        rs2_tag,
     input  logic [DSP_IGEN_W-1:0]       rs2_gen,
+    // rename's per-tag allocation validity: `gen_valid[tag]` is high once an
+    // allocation has taken that tag since reset. The architectural initial
+    // mapping is recognised with `!gen_valid[tag]` -- see the operands section of
+    // the header for why this bit and not `(tag, generation)` is the exact test.
+    // rename exposes it on its `dbg_gen_valid` read-out.
+    input  logic [DSP_ENTRIES-1:0]      gen_valid,
 
     // ---------------------------------------------------------- ROB allocate
     // "the ROB has room for one more entry". A single bit, not the occupancy
@@ -296,6 +318,10 @@ module mosaic_dispatch (
   logic [DSP_TAG_W-1:0] rs1_tag_v, rs2_tag_v;
   logic [DSP_IGEN_W-1:0] rs1_gen_v, rs2_gen_v;
   logic                 s1_needs_read, s2_needs_read;
+  // The initial-mapping fold stored in a queue entry: the shipping build passes
+  // rename's flag through, and the two negative controls replace it with one
+  // half of the wrong rule each. See the operands section of the header.
+  logic                 s1_init_fold, s2_init_fold;
   logic [1:0][1:0]      bank_of_src;
   logic                 s1_present, s2_present;
   logic                 s1_value_ok, s2_value_ok, s1_conflict, s2_conflict;
@@ -400,6 +426,32 @@ module mosaic_dispatch (
   assign rs1_gen_v = rs1_gen;
   assign rs2_gen_v = rs2_gen;
 
+  // ------------------------------------------------- the initial-mapping fold
+  // A source that resolves to the architectural initial mapping is a ready
+  // constant zero: waiting for its wakeup is the deadlock this fold removes.
+`ifdef MOSAIC_DISPATCH_MUTANT_NO_INIT_CONST
+  // NEGATIVE CONTROL: the initial mapping is not folded, so a never-written
+  // register is inserted not-ready and waits for a writeback that cannot
+  // arrive. CASE=core.unwritten_reg_read must fail on it.
+  assign s1_init_fold = 1'b0;
+  assign s2_init_fold = 1'b0;
+`elsif MOSAIC_DISPATCH_MUTANT_ALL_INIT_CONST
+  // NEGATIVE CONTROL: *every* source is folded, so a register a real producer
+  // wrote is shadowed by the constant zero and its consumer reads 0 instead of
+  // the produced value. CASE=core.unwritten_reg_read must fail on it.
+  assign s1_init_fold = !rs1_is_x0;
+  assign s2_init_fold = !rs2_is_x0;
+`else
+  // The architectural initial mapping: a source that does not address x0 and
+  // whose mapping is a tag no allocation has taken since reset. It has no
+  // producer, so its architectural value -- zero -- is supplied as a ready
+  // constant instead of waiting for a wakeup that cannot arrive. `gen_valid` is
+  // set by allocation and cleared only by the undo of that same allocation, which
+  // also rolls the mapping back, so this test is exact; see the header.
+  assign s1_init_fold = !rs1_is_x0 && !gen_valid[rs1_tag];
+  assign s2_init_fold = !rs2_is_x0 && !gen_valid[rs2_tag];
+`endif
+
   // ------------------------------------------------------- cluster affinity
   // Fixed, deterministic, and stated rather than emergent: the first macro of a
   // fetched pair goes to cluster 0 and the second to cluster 1, and a MUL/DIV
@@ -449,15 +501,19 @@ module mosaic_dispatch (
         q_mem[push_at].s1_tag   <= rs1_is_x0 ? {DSP_TAG_W{1'b0}} : rs1_tag_v;
         q_mem[push_at].s1_gen   <= rs1_is_x0 ? {DSP_IGEN_W{1'b0}} : rs1_gen_v;
         q_mem[push_at].s1_x0    <= rs1_is_x0;
-        q_mem[push_at].s1_const <= dec_ctl0.is_auipc;
-        q_mem[push_at].s1_cval  <= dec_pc0;
+        // The initial mapping is folded into the same ready-constant slot the
+        // AUIPC PC uses. `s1_init_fold` and `is_auipc` are mutually exclusive
+        // (AUIPC reads no rs1, so its rs1_addr is x0 and rename reports
+        // `rs1_is_x0`, which clears the fold), so the constant is unambiguous.
+        q_mem[push_at].s1_const <= dec_ctl0.is_auipc || s1_init_fold;
+        q_mem[push_at].s1_cval  <= s1_init_fold ? {DSP_XLEN{1'b0}} : dec_pc0;
         q_mem[push_at].s2_tag   <= rs2_is_x0 ? {DSP_TAG_W{1'b0}} : rs2_tag_v;
         q_mem[push_at].s2_gen   <= rs2_is_x0 ? {DSP_IGEN_W{1'b0}} : rs2_gen_v;
         q_mem[push_at].s2_x0    <= rs2_is_x0;
         // `alu_b = uses_rs2 ? rs2_val : imm`, as mosaic_bringup_core.sv states
         // it for the ISA reference.
-        q_mem[push_at].s2_const <= !dec_ctl0.uses_rs2;
-        q_mem[push_at].s2_cval  <= dec_ctl0.imm;
+        q_mem[push_at].s2_const <= !dec_ctl0.uses_rs2 || s2_init_fold;
+        q_mem[push_at].s2_cval  <= s2_init_fold ? {DSP_XLEN{1'b0}} : dec_ctl0.imm;
       end
     end
   end
