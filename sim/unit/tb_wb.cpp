@@ -312,7 +312,6 @@ class Harness {
     for (Held& h : held_) h = Held{};
     inflight_.clear();
     exp_ = Tally();
-    exp_collision_ = 0;
     prev_collision_ = 0;
   }
 
@@ -431,23 +430,19 @@ class Harness {
     return r;
   }
 
-  // Ask all four ready-table slots at once.
-  uint32_t QProbe(const uint32_t* tags, const uint32_t* gens, const bool* valids) {
-    dut_->q_valid_i = (valids[0] ? 1u : 0u) | (valids[1] ? 2u : 0u) |
-                      (valids[2] ? 4u : 0u) | (valids[3] ? 8u : 0u);
-    dut_->q_tag0_i = tags[0];
-    dut_->q_tag1_i = tags[1];
-    dut_->q_tag2_i = tags[2];
-    dut_->q_tag3_i = tags[3];
-    dut_->q_gen0_i = gens[0];
-    dut_->q_gen1_i = gens[1];
-    dut_->q_gen2_i = gens[2];
-    dut_->q_gen3_i = gens[3];
+  // Ask the ready-table querys its slots at once. `q_written[s]` is bit s.
+  uint32_t QProbe(uint32_t tag0, uint32_t gen0, bool valid0, uint32_t tag1,
+                  uint32_t gen1, bool valid1) {
+    dut_->q_valid_i = (valid0 ? 1u : 0u) | (valid1 ? 2u : 0u);
+    dut_->q_tag0_i = tag0;
+    dut_->q_tag1_i = tag1;
+    dut_->q_gen0_i = gen0;
+    dut_->q_gen1_i = gen1;
     dut_->eval();
     const uint32_t written = dut_->q_written_o;
     dut_->q_valid_i = 0;
-    dut_->q_tag0_i = dut_->q_tag1_i = dut_->q_tag2_i = dut_->q_tag3_i = 0;
-    dut_->q_gen0_i = dut_->q_gen1_i = dut_->q_gen2_i = dut_->q_gen3_i = 0;
+    dut_->q_tag0_i = dut_->q_tag1_i = 0;
+    dut_->q_gen0_i = dut_->q_gen1_i = 0;
     dut_->eval();
     return written;
   }
@@ -527,8 +522,8 @@ class Harness {
     dut_->rob_cmp_bad_uop_i = 0;
 
     dut_->q_valid_i = 0;
-    dut_->q_tag0_i = dut_->q_tag1_i = dut_->q_tag2_i = dut_->q_tag3_i = 0;
-    dut_->q_gen0_i = dut_->q_gen1_i = dut_->q_gen2_i = dut_->q_gen3_i = 0;
+    dut_->q_tag0_i = dut_->q_tag1_i = 0;
+    dut_->q_gen0_i = dut_->q_gen1_i = 0;
     dut_->stash_rd0_i = 0;
     dut_->stash_rd1_i = 0;
     ClearReadPorts();
@@ -1104,29 +1099,32 @@ void PhaseReadyTable(Harness* h) {
   h->Phase("ready-table");
   h->Fresh();
 
+  const Tally before = h->Totals();
   const uint32_t tag = 60, gen = 4;
   h->Rename().Assign(tag, gen);
   const Event e = ValueEvent(0, 0, 0, tag, gen, 0x123456789abcdef0ull, true);
   h->Offer(0, e);
   h->Drain();
 
-  Require(h->Totals().written == 1, "ready-table", "the write did not happen");
+  Require(h->Totals().written - before.written == 1, "ready-table",
+          "the write did not happen");
 
-  const uint32_t tags[4] = {tag, tag, 63, tag};
-  const uint32_t gens[4] = {gen, gen + 1, gen, gen};
-  const bool valids[4] = {true, true, true, false};
-  const uint32_t written = h->QProbe(tags, gens, valids);
-
-  Require((written & 1u) != 0, "ready-table",
+  // Slot 0 asks the written (tag, generation), slot 1 the same tag at the next
+  // generation -- which the tag has never held a value for.
+  const uint32_t written_a = h->QProbe(tag, gen, true, tag, gen + 1, true);
+  Require((written_a & 1u) != 0, "ready-table",
           "q_written is 0 for the written (tag, generation)");
-  Require((written & 2u) == 0, "ready-table",
+  Require((written_a & 2u) == 0, "ready-table",
           "q_written is 1 for the same tag at a different generation");
-  Require((written & 4u) == 0, "ready-table", "q_written is 1 for an unwritten tag");
-  Require((written & 8u) == 0, "ready-table",
+
+  // Slot 0 asks an unwritten tag, slot 1 is not offered at all.
+  const uint32_t written_b = h->QProbe(63, gen, true, tag, gen, false);
+  Require((written_b & 1u) == 0, "ready-table", "q_written is 1 for an unwritten tag");
+  Require((written_b & 2u) == 0, "ready-table",
           "q_written is 1 for a query slot that was not valid");
 
-  std::printf("  [ready-table] q_written=0b%d%d%d%d\n", (written >> 3) & 1,
-              (written >> 2) & 1, (written >> 1) & 1, written & 1);
+  std::printf("  [ready-table] q_written=%u%u / %u%u\n", (written_a >> 1) & 1,
+              written_a & 1, (written_b >> 1) & 1, written_b & 1);
 }
 
 }  // namespace

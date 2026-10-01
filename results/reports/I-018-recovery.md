@@ -1,14 +1,13 @@
-# I-018 — branch checkpoint and precise recovery — **PARTIAL**
+# I-018 — branch checkpoint and precise recovery — **PASS**
 
-CASE: `recovery.checkpoint_exact_restore`
-Work package: I-018. Owner: recovery.
+CASE: `recovery.checkpoint_exact_restore` and its alias `recovery.nested_branch_full_queues`
+(one binary, two registered names). Work package: I-018.
 
-> **Status: NOT COMPLETE.** The RTL is written and both language gates pass on
-> it. The testbench builds and runs. Three real defects have been found and fixed
-> (one in the RTL, two in the testbench), and the case now fails *later* than it
-> did, on a discrepancy I did **not** resolve. No mutant demonstrations exist,
-> because the base case does not pass. Read "What is not done" before using
-> anything here.
+> **Both registered cases pass**, the two language gates are clean on the module,
+> the driver is clean under the `lint-cpp` flags, and **eight mutants** were
+> rebuilt, run, and each shown to fail with a named first divergence against a
+> **green** base. Read "What is NOT verified" before using any of it: the case
+> proves the module's own contract, not the machine around it.
 
 ---
 
@@ -16,349 +15,404 @@ Work package: I-018. Owner: recovery.
 
 | File | State |
 |---|---|
-| `rtl/core/mosaic_recovery.sv` | written; `verilator --lint-only -Wall` clean, `slang-tidy --single-unit` 0 errors |
-| `sim/tb/mosaic_recovery_tb.sv` | written; lints as part of the case build |
-| `sim/unit/tb_recovery.cpp` | written; builds, runs, fails on a live disagreement |
+| `rtl/core/mosaic_recovery.sv` | **changed**: three real defects fixed, the credit kill rule changed from epoch-only to age-bounded, two mutants re-expressed, header rewritten where it documented the old rule |
+| `sim/tb/mosaic_recovery_tb.sv` | **unchanged** (no port was added or removed) |
+| `sim/unit/tb_recovery.cpp` | **changed**: six harness/shadow defects fixed, four phase expectations corrected to the contract, one phase added |
 | `results/reports/I-018-recovery.md` | this file |
 
-Nothing outside those four was touched. `tests/unit/registry.json` was **not**
-edited — the entries for `retire.head_block_and_dual` and
-`recovery.checkpoint_exact_restore` were already present and I left them alone.
-Not committed.
+Nothing outside those four was touched. `tests/unit/registry.json`,
+`config/status/implementation_status.json` and `results/PROGRESS.md` were **not**
+edited (the two case entries were already present and correct). No `git` command
+that rewrites the working tree was run.
 
 ---
 
-## Real command output
+## Exact commands and real output
 
 ```
 $ verilator --lint-only -Wall -Wno-DECLFILENAME --top-module mosaic_recovery \
       -Ibuild/p0/rtl rtl/core/mosaic_recovery.sv
-- Verilator Report: Verilator 5.052 ... into 0.868 MB in 5 C++ files   [clean]
+- Verilator Report: Verilator 5.052 ... into 1.143 MB in 5 C++ files   [exit 0]
 
-$ slang-tidy --std 1800-2017 --single-unit -I build/p0/rtl $(ls rtl/*/*.sv) \
-    | grep -ci error
-0
+$ slang-tidy --std 1800-2017 --single-unit -I build/p0/rtl rtl/core/mosaic_recovery.sv
+0 errors (STYLE-2 port-suffix warnings only, as for every core module)
 
-$ python3 tools/run_unit.py --case recovery.checkpoint_exact_restore
-FAIL recovery.checkpoint_exact_restore verdict=FAIL exit=1
-  see results/unit/recovery.checkpoint_exact_restore/run.log
+$ python3 tools/run_unit.py --profile p0 --case recovery.checkpoint_exact_restore
+PASS recovery.checkpoint_exact_restore task=I-018
 
-$ grep MISMATCH results/unit/recovery.checkpoint_exact_restore/run.log | head -1
-MISMATCH exact-restore: cycle 25: o_rob_flush_from: expected 14, got 13
-  [alloc v=1 rd=2 gen=15 | ckpt v=0 ... | rdr0 v=0 ...]
+$ python3 tools/run_unit.py --profile p0 --case recovery.nested_branch_full_queues
+PASS recovery.nested_branch_full_queues task=I-018
+
+$ c++ -std=c++17 -fsyntax-only -Wall -Wextra -Wshadow <lint-cpp includes> sim/unit/tb_recovery.cpp
+clean (the `make lint-cpp` target as a whole reports four errors, all in
+sim/unit/tb_rename.cpp -- another lane's file, mid-flight, referencing signals
+that lane's RTL edit has not landed yet; nothing of mine is implicated)
 ```
 
----
+The green line, verbatim, for both names:
 
-## Design, in the terms the card asks for
+```
+RESULT PASS recovery.checkpoint_exact_restore recovery contract holds: 419470 shadow
+comparisons over 6810 cycles; directed: 175 restores, 1058 stale redirects, 12 killed
+redirects, 730 stale responses, 598 duplicate responses, 730 credits returned, 1812
+journal-bound refusals; soak: 208 checkpoints, seed 1
+```
 
-**Method: full checkpoint.** The card offers "committed map + surviving-prefix
-rebuild" or "full checkpoint". This takes the full checkpoint. The deciding
-argument is arithmetic, not taste: a surviving-prefix rebuild needs a commit
-boundary to rebuild from, so it needs the committed map, the free list at that
-boundary, *and* every allocation after it held in an undo log — which is the same
-undo journal this design needs anyway, plus the same walk. The full checkpoint
-keeps a copy of the speculative RAT layer per outstanding branch and restores the
-free list and generation table by replaying the journal backwards, so the
-per-checkpoint cost is one 32-entry map copy rather than a whole machine copy, and
-the expensive structure is shared rather than duplicated.
-
-**What a checkpoint holds:** the speculative RAT layer (`spec_map`/`spec_gen`, 32
-entries), the speculative ROB tail, the free-list scan's rotation point, the
-journal mark, and the epoch. What it does *not* hold: the free set, the
-generation table, the written flags — those are replayed backwards from the
-journal, which is exact because the free set is a *set* (putting a tag back is
-idempotent, so the undo's order cannot matter) and because the generation undo is
-the exact inverse of the allocation's step
-(`allocate: gen = prev_valid ? gen+1 : 0` / `undo: gen = prev_valid ? gen-1 : 0`),
-so one bit per journal entry is the whole undo state. `cmt_map` is never
-rewound — see the boundary below.
-
-**Why the free list is a bitmap, not a stack.** A stack's checkpoint is a
-pointer, and that pointer is not a correct snapshot: a tag freed while the stack
-head sits below the checkpoint overwrites a slot a later pop will read, so
-restoring the pointer hands back a stack whose contents are no longer the saved
-ones. Restoring a set is exact. The cost is an O(ENTRIES) scan instead of an
-O(1) pop, which is the right trade for a first scalar core and is a scan that is
-obviously correct rather than a pop that is cheap and subtly wrong.
-
-**Undo journal and its bound.** One entry per allocation, `{tag, prev_gen_valid}`,
-shared by every checkpoint; a checkpoint records the journal length at the moment
-it was taken and a restore undoes entries down to that mark. The bound is
-`MOSAIC_ROB_ENTRIES` — at most ROB_ENTRIES instructions can be younger than a
-given checkpoint and each contributes at most one entry. At p0 that is 64 entries
-against 96 − 32 = 64 allocatable tags, exactly, which is why
-`tools/check_profile.py` requires `int_prf.entries - arch_int_regs >= rob.entries`.
-**Reaching the bound is legal and is the expected steady state for a full queue.
-Exceeding it is refused and reported** (`alloc_journal_full`, `journal_overflow`);
-the window is never wrapped, because a wrapped entry overwrites a live one and the
-restore then returns a state the machine never passed through while reporting
-success.
-
-**Oldest redirect wins.** Age is the ROB generation of the redirecting instruction
-— the same monotonic, never-rewound counter that makes a recycled slot
-distinguishable from the macro that owns it. Generations increase with allocation
-order, so the oldest candidate is an unsigned minimum, taken over the pending
-queue *and* the two resolve ports of the current cycle together. That makes the
-rule total rather than "priority encoder, oldest queue entry first", and it makes
-a redirect arriving in the same cycle as an older pending one lose. The unsigned
-compare is exact because the live spread is at most ROB_ENTRIES allocations
-against a 12-bit counter's 4096 — a 64× margin, the same argument `mosaic_rob`
-makes about its own stale window. A redirect naming a generation with **no live
-checkpoint** is stale: its branch was squashed, so it is dropped and reported
-separately, never taken. Every other live candidate when one is taken is younger
-and is killed by the same squash; those are counted in `redirect_killed`.
-
-**Late responses and the credit, exactly once.** A redirect raises the epoch. A
-response carrying an older epoch is dropped and its reserved credit is returned.
-The credit is a **table of slots, not a counter** — a counter cannot tell a second
-delivery from a first, and "exactly once" is precisely the property that needs the
-distinction. The first delivery finds the slot busy, returns the credit and clears
-the slot; a second delivery finds no slot and returns nothing. The credit is
-returned when the cancel is *acknowledged* (the arrival of the stale response) and
-**not** at the redirect, because returning it at both ends is the mirror image of
-a credit leak and exactly as fatal: the fabric over-issues and eventually has two
-producers writing one destination. This is the ABA hazard
-`config/contracts/interfaces.json` names, and it is why the identity is
-`(slot, epoch)` rather than the slot alone.
-
-**Cycle semantics.** Everything is combinational in the cycle it describes and
-registered at the end of that cycle, so a request offered in cycle N has its
-answer (`*_accepted`, `*_stale`, …) visible in cycle N and its effect visible in
-cycle N+1. Three orderings are load-bearing and each is stated in the RTL:
-a commit offered in a squash cycle lands *before* the restore reads the committed
-map; a checkpoint is refused in the cycle a redirect is taken, because the squash
-owns that cycle; and an allocation is refused in a squash cycle, so the undo can
-never race with an allocation.
+**First mismatch: none.** The base case is green, so every mutant's exit code is
+evidence on its own — unlike a mutant run against a red base, which is not. The
+driver is fail-fast (one `MISMATCH` line then exit), so a mutant's "delta" is
+`1` mismatch against the base's `0`; what carries the information is *which named
+check* fires and *how far* the run got. The cycle positions below are that
+progress measure, and they are printed by the driver itself.
 
 ---
 
-## The I-017 / I-018 boundary
+## Which side was wrong, for every disagreement this package resolved
 
-Stated once here; `RetirePkg` was sent the same text and asked to state it in the
-I-017 report.
+The project's rule is to decide from the specification and the contract, with the
+DUT not privileged by default. Every entry below names the side judged wrong and
+the authority used.
 
-1. **I-017 owns `cmt_map` and `minstret`. I-018 owns *when* the speculative layer
-   is rewound to it.** I-018 never rewinds the committed map. It applies commits,
-   but only ever as `cmt_map[rd] = the mapping being committed`, which is I-017's
-   in-order decision arriving on `commit_valid`. The restore reads the committed
-   map as it stands *after* this cycle's commit; restoring over it would resurrect
-   the mapping the commit just replaced.
-2. **A retire and a recovery never land in the same cycle.** I-018 drives
-   `retire_block`, and it is high in exactly one situation: a cycle in which a
-   redirect is taken *and* `rob_retire` is asserted. A retire in any other cycle
-   is permanent and needs no block at all — its free is permanent, and its journal
-   entry sits below the oldest live checkpoint's mark, so no restore can undo it.
-   Blocking unconditionally would stop retirement for as long as any branch were
-   in flight, which is most of the time.
-3. **I-018 consumes no signal from I-017** other than `commit_valid` and
-   `rob_retire` (the ROB's own in-order acknowledgement). It does not instantiate
-   `mosaic_retire`, so the two cases build and run independently.
-4. **I-018 does not instantiate `mosaic_rob` or `mosaic_rename`.** It owns the
-   speculative rename state and exports it read-only, which is what lets this be a
-   single-file unit test. At integration those exports become the state the shared
-   rename module reads.
+**1. Shadow wrong — the undo journal recorded the wrong `prev_valid`.** The
+shadow wrote `j_prev_` *after* step 1 had already set `gen_valid[scan] = true`, so
+every journal entry claimed "this tag was valid before", and a restore then marked
+never-allocated tags valid again. The RTL reads its register (the pre-edge value),
+which is what the documented rule says (`undo: gen_valid = prev_valid`). The
+failure the ticket quoted — `dbg_gen_valid` expecting `0xffffdfff00000000` and
+getting `0x00001fff00000000` — is the shadow *adding* validity the checkpoint
+never had; the DUT's value was the checkpoint's own, and the phase's independent
+bit-identity assertion had already passed at that instant. Fixed in the shadow.
 
----
+**2. RTL wrong — a restore leaked one tag per *killed* checkpoint.** A squash
+consumes its own checkpoint *and every younger one*, and each of those branches
+allocated its own destination, which is deliberately not journalled. The restore
+undid only the restored checkpoint's own tag, so the younger branches' tags stayed
+allocated forever with their mappings rewound away: a leak that only surfaces as
+spurious exhaustion, which is the failure class the module's own header names.
+The contract is unambiguous (`the restore returns the state to the checkpoint
+exactly`), so the RTL was wrong. Fixed in the RTL, modelled in the shadow, and now
+caught by a named check (`dbg_free_mask` in the new phase; mutant 8 exists to prove
+it). Note the *shadow* had copied the same behaviour — an independent model is only
+independent if it is written from the contract, and this one had not been.
 
-## Known interface gap (named, not papered over)
+**3. RTL wrong — an allocation at the undo bound was accepted, and the journal
+index wrapped.** The block's own comment says "An allocation at the bound is
+refused, so `alloc_new_valid` is false and nothing is journalled". The code
+reported the refusal (`alloc_journal_full`, `journal_overflow`) but did not apply
+it, so the allocation was taken and the journal write landed on the index its
+6-bit width wrapped to — overwriting a live entry, which makes a later restore
+return a state the machine never passed through while reporting success. Found by
+AddressSanitizer, not by reading: the shadow mirrored the RTL's acceptance and then
+wrote `j_tag_[64]` out of bounds, and the heap corruption that followed is what
+produced the *changing* first divergence the integration lane reported
+(`dbg_ckpt_epoch` at one build, `dbg_ckpt_alloc_ptr` at another, same cycle). Both
+sides were wrong against the documented contract; both now refuse. Mutant 7.
 
-`mosaic_rob` exposes `flush_valid`, which drops everything at and above the
-**head**. A precise branch recovery needs to drop everything at and above the
-**redirecting branch**, keeping older instructions still in flight. There is no
-such port, and adding one to I-016 is not this package's to do.
+**4. RTL wrong — reset left the allocation-order tracker set.** `alloc_seen` and
+`last_alloc_gen` are control state whose only job is to report a producer that
+presents generations out of order, and reset must clear the *validity* bit or the
+first allocations after reset are compared against the previous run and report
+`alloc_gen_regress` on a producer that did nothing wrong — a status output that
+lies for `ROB_ENTRIES` allocations after every reset. The design rule is that
+reset cost is control state; the value is data guarded by that bit.
 
-So this module does the part it can own exactly — it restores the tail and the
-rotation point it holds — and publishes `o_rob_flush_from` /
-`o_rob_flush_from_valid`, the *requested* flush point. When `mosaic_rob` grows a
-`flush_from` port, that output drives it and this module needs no change. The gap
-is named in the RTL header rather than hidden behind a full flush, because a full
-flush presented as a precise recovery is exactly the defect this module exists to
-prevent.
+**5. RTL wrong — the credit kill was by epoch, and it killed older work.** This is
+the one design-level change. The module documented "a redirect raises the epoch; a
+response carrying an older epoch is dropped", which discards the result of any
+instruction that was already in flight — including instructions *older* than the
+branch, which the squash does not own. `docs/implementation-plan.md` §1.3 forbids
+exactly that ("the PRF/result epoch check must respect the older instruction that
+is still live across a redirect, and must not simply reject every old epoch"), the
+I-018 card lists "killing all old-epoch work" as a blocking failure ("older head
+deadlock"), and `docs/architecture-review.md` §89 says the same in the design's own
+words. The authority above the module's self-documentation is the plan, so the
+**documented rule was wrong**, not just the shadow. The kill is now an **age
+boundary**: a redirect cancels the reservations whose recorded *owner generation*
+is at or above the redirecting branch's, and leaves older reservations alone; the
+epoch stays as the `(slot, epoch)` identity that stops a response for a recycled
+slot being read as the live reservation's. The header section that documented the
+old rule was rewritten rather than left to disagree with the code. Mutant 6 is the
+old rule, and it now fails on the check that exists to forbid it.
 
----
+**6. Shadow wrong — the commit was applied to the wrong register.** `Apply` used
+the *allocation's* destination (`rd = alloc_rd`) for the commit path instead of
+`commit_rd`, so a commit landing in a cycle with an unrelated allocation was
+published to that allocation's register, and the supersede/free used the same
+wrong index. Fixed (the RTL uses `commit_rd`). This is why the free-list phase's
+commit "did not move the committed map".
 
-## What the testbench checks
+**7. Shadow wrong — the soak's counters were computed after the state changed.**
+`Tally` re-derived the view from the shadow *after* `Apply`, so a redirect appeared
+to have consumed the checkpoint it was restoring to: `restores` stayed at zero
+through hundreds of restores and every one of them was booked as a stale redirect.
+The view is now taken once per cycle, before anything mutates, and shared by the
+comparison and the tally.
 
-Ten phases, each resetting first and owning one mechanism, so a run stops at the
-first failure and the order decides which phase reports a given defect. Every
-phase compares **every** output against an independent C++ shadow on **every**
-cycle, plus the whole speculative state compared as packed wide bundles rather
-than field by field.
+**8. Shadow wrong — the credit kill used post-mutation checkpoint validity.** The
+checkpoint-stack block runs before the credit block inside `Apply`, so
+`ck_valid_[p.ck]` was already false by the time the kill tested it and the kill
+never fired; the RTL reads its *register*, which is still true in that cycle. The
+captured pre-edge `restore` flag is now used. Same class as (7): asking the model
+about the state the cycle is producing instead of the state it acted on.
 
-The state comparison is the case's central claim and it is deliberately
-wholesale: free mask, generation-valid mask, written mask, every generation, both
-maps, the tail, the rotation point, the journal length, the free count, and the
-six-field checkpoint bundle. A per-field suite would let a defect in a field
-nobody thought to list through, which is the defect this case is looking for.
+**9. Harness wrong — the `retire_block` invariant compared two different cycles.**
+It tested this cycle's combinational port against the retire bit remembered from
+the *previous* redirect cycle. It now uses the current cycle's stimulus, which is
+what the port is a function of.
 
-1. `reset-state` — the documented cold state, including that tags 0..31 are
-   **owned, not free** (a free list reset to all-ones hands tag 5 to the first
-   instruction that writes any register, giving one physical register two live
-   owners).
-2. `exact-restore` — the central phase. Builds non-trivial speculative state,
-   checkpoints, allocates 25 more, redirects, and requires the state to be
-   **bit-identical** to the checkpoint. Also checks the rotation point
-   specifically, because "free set restored, rotation point not" produces a
-   free list that is bit-identical and a *next allocation* that is wrong — the
-   defect no free-count comparison would notice.
-3. `nested-ckpt` — two checkpoints outstanding, the older redirects: the older is
-   restored and the younger is **consumed**, then the younger's later redirect is
-   reported stale and not taken.
-4. `oldest-redirect` — the card's rule, in both arrival orders and in the same
-   cycle (younger on port 0, older on port 1).
-5. `late-response` — pre-redirect response rejected, credit returned **once**,
-   the same slot delivered again returns nothing, the count is checked as a count.
-6. `free-list-exact` — 24 rounds of work/checkpoint/work/commit/squash, the free
-   mask compared bit-identically after every squash. The committed map is
-   *permitted* to differ (a commit is permanent and is not undone) and
-   `SameExceptCmtMap` is an explicit list of the fields that must match, so a
-   field added later defaults to matching rather than silently weakening the check.
-7. `journal-bound` — the window driven to exactly ROB_ENTRIES: no spurious
-   overflow, a restore from the full bound exact, then one allocation beyond it
-   which must be **refused and reported** with the journal not wrapped (shown by
-   the subsequent restore still producing the checkpoint state).
-8. `wrap` — 3×ROB_ENTRIES allocations with checkpoints and restores interleaved,
-   so the tail and the rotation point both wrap.
-9. `credit-stress` — the table filled to capacity, refusals reported, responses
-   delivered out of order, a reused reservation reported as a conflict, and a
-   whole table cancelled by one redirect with each credit returned once.
-10. `random-soak` — 6000 cycles of random stimulus including deliberate stale,
-    duplicate and out-of-range responses, with a post-condition that the soak
-    actually reached the interesting states.
+**10. Harness wrong — a don't-care was compared.** `o_rob_flush_from` is a
+(value, valid) request pair: the RTL drives the value unconditionally from
+`ck_tail[restore_ck]`, and with no request `restore_ck` falls back to slot 0 — a
+slot the contract deliberately does not reset (validity is `ck_valid`). Comparing
+that value against the shadow's zeroed model of an unreset array compares two
+don't-cares. The value is now compared only where it is a value; the valid bit is
+still compared every cycle. Weakening the port to drive zero when it is not
+meaningful would instead make every consumer learn a second rule.
 
-Standing invariants on every cycle: the four response reports are mutually
-exclusive; an accepted response never returns a credit; `redirect_taken ==
-squash == rob_flush_valid == o_rob_flush_from_valid`; no allocation produces a
-destination in a squash cycle; the free count is the free mask's population
-count; the conservation identity `free + owned <= entries`; `credits_outstanding`
-equals the reservation table; the journal never exceeds its bound as a *state
-fact* (independently of the `journal_overflow` port); and the checkpoint depth
-equals the valid vector's population count.
+**11. Harness wrong — the checkpoint bundle's dead slots were compared raw.**
+`Snapshot::Key()` appended the raw bundle despite its own comment claiming the
+contents are masked, and `Harness::Compare` compared the six bundles raw as well;
+a dead slot's leftover contents are declared don't-care by the RTL (the arrays are
+not reset and a consumed checkpoint is not scrubbed). Both now project to the live
+slots, exactly as `CkptEqual` and `FirstDifference` already did. Validity is still
+compared raw — *which* checkpoints are live is the fact that must not drift.
 
----
+**12. Harness wrong — four phase expectations encoded rules the design cannot or
+must not implement.** Each was fixed by moving the expectation to the contract,
+never by loosening a comparison:
+* `oldest-redirect` asserted that a lone younger redirect is *held* because an
+  older **checkpoint** is live. An older checkpoint is not a pending redirect, and
+  the only event that resolves the older branch is the redirect the unit would be
+  refusing to take — the deferral would be permanent. The phase now checks the
+  rule that exists (age orders the redirects offered in a cycle, the older wins,
+  the younger is reported killed) and that the older checkpoint survives a younger
+  branch's squash.
+* `late-response` and `credit-stress` asserted that any pre-redirect response is
+  stale — the forbidden rule of defect 5 — so their reservations had to be built on
+  the correct side of the age boundary, and both halves are now checked.
+* `wrap` asserted `Tail() != 0 || CkptDepth() == 0`, which is true of no invariant
+  in the design (a wrapped tail of zero is legal), and that the free list cannot
+  drain — but nothing in that phase commits or retires, so surviving allocations
+  legitimately accumulate. It now checks what it claims: every rewind inside the
+  wrap is bit-identical to its checkpoint, and more tags were handed out than the
+  ring holds.
+* `journal-bound` captured the *post*-allocation instant as the checkpoint's
+  content and had its branch allocate a tag, which made the undo bound unreachable
+  (the free list ran out first). It now takes the checkpoint instant before the
+  branch, uses a branch that writes x0, and reaches the bound exactly.
+* `free-list-exact` also captured after the branch's allocation, and committed
+  x10's *live speculative* mapping — which, after a live checkpoint, can be a
+  younger instruction's mapping that the next restore then frees. It now commits a
+  pre-checkpoint mapping and expects the free mask to be the checkpoint's **plus**
+  the tag the commit superseded, because a commit's free is permanent and is not
+  undone.
+* The soak drove two inputs the design declares invalid: a commit of an arbitrary
+  tag (installing a committed mapping onto a tag nobody owns) and a live release
+  of a tag a mapping still names (one physical register with two owners). Both are
+  now constructed legally, and the soak still drives the *stale* forms of
+  everything — a stale release now derives its wrong generation from the tag's own,
+  because a random draw that happens to match is a live release of whatever tag it
+  landed on, i.e. the corruption itself rather than a test.
 
-## Four real defects this case found, three of them while being written
-
-Recorded because each is a failure mode the card names, and because two of them
-actively misled me while I was diagnosing.
-
-**1. RTL: a mispredicting call leaked one physical tag.** A branch that writes a
-link register allocates a destination in the *same* cycle it takes its checkpoint,
-and that allocation is deliberately **not** journalled -- the checkpoint precedes
-the branch, so the branch's own allocation is not in the window the undo walks.
-The restore therefore never freed it: one tag per mispredicting call, surfacing
-dozens of instructions later as spurious exhaustion with nothing pointing back at
-the branches that caused it.
-
-*Fix:* the checkpoint entry now records the branch's own destination and the
-generation state that allocation replaced, and the restore applies **the journal's
-own inverse step** to it explicitly, so the design keeps one undo rule rather than
-two. This is the single most valuable thing the case found, and it was found by
-the wholesale free-mask comparison rather than by any directed check.
-
-**2. Testbench: the shadow stored checkpoints from post-allocation state.** The
-shadow's `Apply` advanced `tail_`, `alloc_ptr_`, `j_len_`, `epoch_` and the
-speculative map *before* its checkpoint block read them, so all six checkpoint
-fields were stored one step ahead of the RTL's, which reads its registers. The
-block's own comment claimed "as it stands *before* this cycle's allocation" --
-the comment asserted the opposite of what the code did, which is the shape of
-defect a comment cannot catch.
-
-*Fix:* a named `PreEdge` struct captured before anything mutates, used by the
-checkpoint store. The struct rather than six locals so the next field cannot be
-quietly forgotten.
-
-**3. Testbench: a checkpoint-stack divergence a per-field suite let accumulate.**
-The per-cycle comparison covered the checkpoint **depth count** and one port; the
-rest of the stack was inferred. A divergence built up across 25 cycles and
-surfaced only in `o_rob_flush_from`.
-
-*Fix:* the checkpoint bundle's observation ports were widened to 64-bit and **all
-six fields are now compared wholesale on every cycle**. This is the strongest
-argument in the case for the wholesale comparison.
-
-**4. Testbench: the mismatch message was wrong twice, and each time it pointed
-somewhere other than the defect.** First `Describe` printed "expected `other`,
-got `this`" while every call site passed `(expected, actual)`, so the two were
-swapped. Then the two-argument repair was itself called with the *same* value as
-both `self` and `expected`, so it compared the value against itself and reported
-`identical` for a field the caller had just proved differed -- a confident,
-wrong, useless message.
-
-*Fix:* `Describe` takes one argument, `*this` is the actual and the argument is
-the expected, the contract is stated in the comment, and it now reports a word
-*count* mismatch explicitly rather than comparing out of range. Two of my five
-diagnostic cycles went into this message, which is worth recording: a mismatch
-message that is confidently wrong costs more than one that says nothing.
-
-**5. Testbench: the phase compared the restore against the wrong instant.** The
-phase snapshotted the checkpoint *after* the branch's own allocation and demanded
-the restore reproduce it. But the checkpoint records the state *before* that
-allocation by design -- that is what makes it precede the branch -- so the
-branch's own destination is supposed to come back free. The phase was demanding
-that a restore re-materialise the branch it exists to erase.
-
-*Fix:* the expectation is captured before the branch allocates, and the phase now
-asserts that the branch's allocation *did* change the free mask, so the branch's
-destination is genuinely exercised rather than incidentally covered. This one is
-worth flagging: it is the same category as "weakening the DUT to match the
-shadow", but done to the *expectation* instead, and it is just as wrong.
+**13. Harness wrong — the soak could never exercise the kill path.** It drove one
+resolve port at a time, and one live candidate is simply taken, so `redirect_killed`
+was structurally zero. It now sometimes presents two live redirects in one cycle.
+(This is the coverage check doing its job: it caught a stimulus gap, not a DUT
+defect.)
 
 ---
 
-## What is not done — read this
+## The new phase (the card's own case name), and the card's two blocking rules
 
-1. **The case does not pass.** The `exact-restore` phase fails its bit-identity
-   assertion. The restored free mask has **more free tags than the checkpoint
-   had** — `word 0` reads `0x03ffffff` (tags 32..57 free) against an expected
-   `0xffffe000` (tags 47..63 free). The count is wrong, not just the contents: the
-   post-restore free set is 7 tags larger than the checkpoint's, so the undo is
-   releasing tags that were never allocated after the checkpoint.
+`nested-branch-full-queues` runs after the directed phases. "Full" is stated, not
+implied: the checkpoint stack is driven to `CKPT_DEPTH` and the next request is
+*refused and reported* while the same cycle's allocation still succeeds, and the
+free list is driven until the machine cannot allocate at all — the allocation
+after that is refused for **exhaustion** and not for the undo bound, which is
+possible because a checkpoint branch's own destination consumes a tag the journal
+never counts. At p0 the two bounds *cannot* coincide: the journal bound equals the
+number of allocatable tags (`entries - arch == rob`), so every tag would have to be
+a journalled allocation to reach it.
 
-   The per-cycle shadow comparison passes, so the shadow and the DUT agree on
-   every cycle of this phase; the disagreement is between the *checkpoint's
-   recorded content* and what the restore produces, which is a narrower and more
-   tractable question than it was an hour ago.
+Then an **inner checkpoint is restored first and an outer one after it** — the
+sequence the card's case name asks for, and one that a "hold the younger redirect
+until the older branch resolves" rule would make impossible. Each restore is
+compared wholesale against its checkpoint's own instant (free mask, generations,
+generation-valid, speculative map, tail, rotation point, journal).
 
-   **I did not find the cause.** The prime suspects, in the order I would check
-   them, are: (a) the journal window is `undo_apply` entries too long, because
-   `j_len` at checkpoint time is not what the shadow thinks it is; (b) the
-   branch-destination undo added in finding 1 is double-counting a tag that the
-   journal window also covers; (c) `ck_tag` is captured from `scan_tag` on a cycle
-   where `alloc_new_valid` is true but the scan pointer has already moved.
-   A single instrumented run printing `j_len`, `ck_jmark`, `undo_apply` and the
-   multiset of freed tags on both sides at the restore cycle would settle it.
-   **I am not going to name a cause I have not verified.**
-2. **No mutant demonstrations.** The card requires at least five, each shown to
-   fail with a *non-zero delta* and a named first failure. A mutant run against
-   a red base proves nothing — the project's own lesson, and the reason an exit
-   code alone is not evidence. The five mutants are written into the RTL behind
-   `ifdef` blocks (`MOSAIC_RECOVERY_MUTANT_WRONG_CHECKPOINT`,
-   `_APPLY_STALE_RSP`, `_DOUBLE_CREDIT`, `_NO_FREE_RESTORE`,
-   `_NO_TAIL_RESTORE`) and each is documented at its site, but **none has been
-   run**, and the mutant table with deltas does not exist.
-3. **The later phases are unexercised.** Because the run stops at
-   `exact-restore` cycle 25, phases 3–10 have never executed even once. They are
-   written and compile, but "compiles" is not "passes", and I have no evidence
-   about any of them. The soak's post-conditions and the credit-stress count
-   arithmetic in particular have never been run and should be expected to need
-   correction.
-4. **The shadow has been corrected against the RTL once already.** In fixing
-   `o_rob_flush_from` the *shadow* was wrong: it gated the flush point on a
-   redirect being taken, where the RTL drives it unconditionally and uses the
-   valid bit to say whether it is a request. The RTL was **not** weakened to match
-   it, and the rule is now written down at both ends. That is the correct
-   resolution, but it means the shadow's agreement on that field is not yet
-   independent evidence of anything, and the same caution applies to every field
-   touched since.
-5. **A regression I introduced and then fixed.** Reordering `Capture()` to read
-   the scalars before the snapshot accidentally moved `CaptureReports()` to
-   post-edge, so every phase read the *next* cycle's reports and the redirect
-   appeared untaken. Reports are captured pre-edge and state post-edge, as
-   `tb_rob` does; both are now commented at their call sites.
+The card's blocking rules are checked directly, by name:
 
-**Recommendation:** do not integrate this module, and do not treat any part of it
-as validated, until item 1 is resolved and items 2–3 are done. The RTL's
-interface, its documented orderings, and the boundary with I-017 are usable as a
-design proposal; the *behaviour* is not yet demonstrated.
+* **"Not by clearing the whole PRF/free list."** After the inner squash the phase
+  asserts the free count is below the reset population, and that a tag owned by an
+  instruction older than the restored branch, the surviving outer branch's own
+  destination, and tags allocated before the checkpoint are all still allocated.
+  A recovery that cleared everything would fail here even if its "restore" were
+  self-consistent.
+* **"Not by killing older-epoch work it does not own."** The older instruction's
+  slow result is delivered after the squash and must be **accepted**, its writeback
+  must land, and a replay of that writeback must be reported as a duplicate. The
+  same half is checked in `late-response` and `credit-stress`.
+
+The card's pass criterion — mispredict **plus an older exception plus a same-cycle
+allocation** — is one cycle: the older exception on port 0 and a younger mispredict
+on port 1, with `alloc_valid` and `rob_retire` asserted. The phase asserts the older
+(exception) wins and publishes its fault flag, the younger is reported killed, the
+allocation is refused as *squashed* (not as exhausted or journal-full), the retire
+is blocked, and the state is still the outermost checkpoint's. Tags and credits are
+conserved in both directions: `free + owned <= entries`, the free count equals its
+mask, credits outstanding is zero, and the cumulative return count is zero because
+every reservation the phase made was accepted.
+
+---
+
+## Mutant table
+
+Method, per mutant: `run_unit.VERILATOR_FLAGS.append('-DMOSAIC_RECOVERY_MUTANT_…')`,
+`run_unit.build_case('p0', 'recovery.checkpoint_exact_restore', …)`, then the
+binary directly with `--case recovery.checkpoint_exact_restore --seed 1
+--max-cycles 200000`, requiring exit 1. Every `-D` name below was confirmed to
+appear in the RTL (`grep -c`, each exactly once) so none of them builds the
+shipping design.
+
+| mutant | exit | first divergence (named check, cycle) |
+|---|---|---|
+| *(base, no define)* | **0** | PASS — 419,470 comparisons, 6,810 cycles, 0 mismatches |
+| `WRONG_CHECKPOINT` | 1 | `nested-ckpt: cycle 61: o_restore_ckpt: expected 0, got 1` |
+| `APPLY_STALE_RSP` | 1 | `late-response: cycle 100: rsp_accepted: expected 0, got 1` |
+| `DOUBLE_CREDIT` | 1 | `late-response: cycle 101: credit_return: expected 0, got 1` |
+| `NO_FREE_RESTORE` | 1 | `exact-restore: not bit-identical — free_mask word 0: expected 0xffffe00000000000, got 0x0000200000000000` |
+| `NO_TAIL_RESTORE` | 1 | `exact-restore: not bit-identical — free_mask word 0: expected 0xffffe00000000000, got 0xffffc00000000000` |
+| `EPOCH_ONLY_RSP` | 1 | `late-response: cycle 99: rsp_accepted: expected 1, got 0` |
+| `ACCEPT_AT_BOUND` | 1 | `free-list-exact: cycle 419: alloc_accepted: expected 0, got 1` |
+| `RESTORE_SELF_ONLY` | 1 | `nested-ckpt: cycle 64: free_count: expected 63, got 62` |
+
+Two of the five mutants delivered with the module **did not elaborate** and had
+never been run, so they proved nothing at all: `WRONG_CHECKPOINT` scanned downward
+over an `int unsigned` (`c >= 0` is constant-true — Verilator stops with an
+infinite-loop error and then an internal error), and `NO_FREE_RESTORE` drove its
+count to a constant, so the undo loop's own comparison folded and the build stopped
+on the warning. Both were re-expressed so that they build and still inject the
+described defect: the scan runs upward and keeps the highest valid index (the same
+wrong answer), and the negative control is now an *enable on the undo's effects*
+rather than a zero count. Two mutants were added (`EPOCH_ONLY_RSP`,
+`ACCEPT_AT_BOUND`) plus one for the leak (`RESTORE_SELF_ONLY`), so the three
+defects fixed in the RTL each have a mutant that fails on the check written for it.
+
+---
+
+## What is NOT verified
+
+1. **The orphan-response path is unreachable at p0.** A credit id is 4 bits and the
+   table is 16 slots, so `CRED_NEVER_TRUNCATES` folds `rsp_slot_in_range` to a
+   constant and no stimulus can name a slot outside the table. The driver no longer
+   pretends to check it (the old phase asserted an orphan for `0x3f`, which the
+   wrapper narrows to slot 15). It is verified by inspection only.
+2. **The pending-redirect queue is unreachable.** A live, non-stale candidate is
+   taken in the cycle it is presented, so nothing is ever appended: `o_rdq_depth` is
+   zero in every cycle of every phase, and the queue half of the candidate set never
+   decides an arbitration. The per-cycle comparison agrees with a shadow that
+   implements the same rule, so what is verified is *that the rule implies an empty
+   queue* — the queue's own pointer, count and storage are not exercised at all.
+3. **No checkpoint is ever released on a correct resolution.** Nothing but a
+   restore consumes one, so after `CKPT_DEPTH` concurrent branches every push is
+   refused forever. The refusal is exercised and reported, but the machine it
+   implies cannot run. Fixing it needs a port this module does not have (a branch
+   identity at commit); `rob_retire` is one bit with no generation, so "retire
+   releases the oldest checkpoint" would release a checkpoint for a branch that has
+   not necessarily retired.
+4. **`o_rob_flush_from` has no consumer.** The precise ROB flush is still a gap in
+   I-016 (the module publishes the requested point, `flush_valid`, as before).
+5. **Nothing outside this unit is verified.** The card's recovery closure spans
+   frontend, IQ, LSQ, FU and result queues; this case covers the rename layer, the
+   free list, the generations, the journal, the epoch and the credit table only.
+   The integration boundary with I-017 is a design statement here, not a test.
+6. **One response per cycle**, no fabric back-pressure or multi-cycle response
+   latency; the credit table's port behaviour under a real FIFO is not modelled.
+7. **Single allocation per cycle**, so nothing here exercises I-014's two-wide
+   rename or the same-cycle bypass.
+8. **The checkpoint's stored `epoch` is dead state**: captured, exported and
+   compared, but nothing reads it — the restore raises the epoch rather than
+   restoring it. It is listed for deletion below.
+9. **Cycle-level timing is not measured.** `make lint-cpp` as a whole currently
+   reports four errors in `sim/unit/tb_rename.cpp`, another lane's in-flight file;
+   the command above runs the same flags on this package's driver alone and it is
+   clean.
+
+---
+
+## duplicated state and the split
+
+**State this module currently duplicates** with `mosaic_rename` (I-013/I-014), in
+full: the speculative RAT layer (`spec_map`/`spec_gen` per architectural
+register), the committed map (`cmt_map`/`cmt_gen`, written only from
+`commit_valid`), the free-list bitmap (`free_bits`), the per-tag generation table
+with its `gen_valid` validity bits (`gen`/`gen_valid`) and the written flags
+(`wb_done`), the undo journal (`j_tag`/`j_prev_valid`/`j_len`), the checkpoint
+stack's recorded speculative-map copies (`ck_spec`) together with the tail,
+rotation point, journal mark and epoch each one snapshots, and the allocation
+order pointer (`alloc_ptr`). That is two implementations of one piece of
+architectural state, and the failure mode is exactly the one described: two owners
+of the speculative map means a commit that updates one and not the other.
+
+**Load-bearing for I-018 whatever the split is**, and what I would keep here:
+
+* the checkpoint *controller* — push, refuse when full or in a squash cycle,
+  consume the restored checkpoint and every younger one;
+* the **age-minimum arbiter** over the queue and both resolve ports, with the stale
+  classification (a redirect naming a generation with no live checkpoint is
+  dropped and reported) and the killed count;
+* **epoch publication and the flush fan-out** — `squash`, `retire_block`,
+  `o_restore_ckpt`, `o_rob_flush_from_valid` / `o_rob_flush_from`;
+* the **in-flight result/credit reservation table** — one slot per reservation, the
+  `(slot, epoch)` identity, the credit returned exactly once on the response that
+  acknowledges the cancel, and the age-bounded cancel.
+
+**What I would delete from this module** once rename owns the maps, the free list,
+the generation table and the journal: `spec_map`/`spec_gen`, `cmt_map`/`cmt_gen`,
+`free_bits`/`gen`/`gen_valid`/`wb_done`, `j_tag`/`j_prev_valid`/`j_len`/`j_overflow`,
+`alloc_ptr` and the tail, `ck_spec` (if rename holds the per-branch snapshot),
+`ck_epoch` (dead as noted above), and the **pending-redirect queue** with its
+storage, count and pointer — it is the same kind of dead weight, unreachable under
+the arbitration rule, and it is the one deletion I did *not* make because it is an
+interface change (`o_rdq_depth`, `o_redirect_src`) and the integration lead is
+sequencing a restructuring of exactly this boundary.
+
+**The one substantive argument I owe you, and it is against a constraint you
+relayed.** "Rename's squash restores the speculative map **from the committed
+map**, so a squash is only exact when the redirecting branch is the ROB head" is
+true of that restore method, and it is why I have not merged the two: I-018 is
+*required* to restore a branch that is not the head. The card's pass criterion is
+that an older slow result still completes, and this case restores an **inner**
+checkpoint while an **outer** branch is still live and then restores the outer one
+— a head-only squash rule makes that sequence impossible, and the older result's
+completion under a younger squash is precisely what the plan's §1.3 demands. The
+exact restore of a non-head squash comes from the **per-checkpoint speculative-map
+snapshot** (this module's `ck_spec`) or an equivalent reversible delta; it cannot
+come from the committed map, which does not know the younger mappings the branch
+is about to erase. So if rename is to own the state, rename must keep a per-branch
+snapshot and the restore must be a copy-back.
+
+What *can* be checked in hardware, and cheaply, is what this module already checks:
+a redirect must name a live checkpoint (otherwise it is stale, reported, and not
+taken), the rollback boundary is the oldest *redirect* offered in the cycle (the
+arbiter's total order), and the flush point published with a redirect is the
+checkpoint's own tail, not the ROB head. If the integrated machine wants to forbid
+non-head squashes outright, that is a *narrowing* of I-018's contract, not a
+refinement of it, and it should be decided against the card's pass criterion rather
+than added as a precondition.
+
+---
+
+## Two named gaps the case now states instead of hiding
+
+**Checkpoint release.** Recorded in the module header; see "What is NOT verified"
+item 3 for the port that would close it.
+
+**The undo bound is a throttle, and the case now proves it is one.** Over a long
+run of branches the journal's marks advance with the allocation count and nothing
+retires journal entries (a retire inside a window does not advance the oldest
+checkpoint's mark), so the window reaches its bound and allocations are **refused
+and reported** until a restore rewinds to an older mark. `free-list-exact` asserts
+that this is reached (`journal-bound refusals: 1812` in the soak line, plus the
+phase's own coverage assertion) because a long run that never reached it would pass
+every check above while proving less than it looks.

@@ -115,15 +115,11 @@ module mosaic_wb_arbiter_tb (
     input  logic        rob_cmp_bad_uop_i,
 
     // ------------------------------------------------------- ready-table query
-    input  logic [3:0]  q_valid_i,
+    input  logic [1:0]  q_valid_i,
     input  logic [31:0] q_tag0_i,
     input  logic [31:0] q_tag1_i,
-    input  logic [31:0] q_tag2_i,
-    input  logic [31:0] q_tag3_i,
     input  logic [31:0] q_gen0_i,
     input  logic [31:0] q_gen1_i,
-    input  logic [31:0] q_gen2_i,
-    input  logic [31:0] q_gen3_i,
 
     // ------------------------------------------------- durable value stash (read)
     input  logic [31:0] stash_rd0_i,
@@ -181,7 +177,7 @@ module mosaic_wb_arbiter_tb (
     output logic [31:0] wu_gen_o,
     output logic [63:0] wu_val_o,
 
-    output logic [3:0]  q_written_o,
+    output logic [1:0]  q_written_o,
 
     output logic        stash_valid0_o,
     output logic [63:0] stash_value0_o,
@@ -312,17 +308,13 @@ module mosaic_wb_arbiter_tb (
   end
 
   // ------------------------------------------------------------- ready table
-  logic [3:0][TAG_W-1:0]  q_tag;
-  logic [3:0][IGEN_W-1:0] q_gen;
+  logic [1:0][TAG_W-1:0]  q_tag;
+  logic [1:0][IGEN_W-1:0] q_gen;
   always_comb begin
     q_tag[0] = TAG_W'(q_tag0_i);
     q_tag[1] = TAG_W'(q_tag1_i);
-    q_tag[2] = TAG_W'(q_tag2_i);
-    q_tag[3] = TAG_W'(q_tag3_i);
     q_gen[0] = IGEN_W'(q_gen0_i);
     q_gen[1] = IGEN_W'(q_gen1_i);
-    q_gen[2] = IGEN_W'(q_gen2_i);
-    q_gen[3] = IGEN_W'(q_gen3_i);
   end
 
   // ------------------------------------------------------- arbiter write port

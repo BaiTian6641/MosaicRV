@@ -20,31 +20,33 @@
 //
 // --------------------------------------------------------------- recovery
 //
-// Correctness of a mispredict recovery rests on two facts, and the core
-// arranges both:
+// This package ships the **conservative recovery**: a branch is a barrier. From
+// the cycle a branch is allocated until that branch has been resolved -- and, if
+// it redirected, until the redirect has been applied -- dispatch allocates
+// nothing behind it. So when a mispredicting branch redirects, there is nothing
+// younger than it anywhere in the machine:
 //
-//   * The redirect arbiter only lets a branch act in the cycle it is the ROB
-//     head and is being retired. Everything still in the ROB is therefore
-//     younger than it, so the all-or-nothing ROB flush discards exactly the
-//     wrong-path instructions, and the branch itself retires normally (its link
-//     write and its PC change both land). The flush is asserted one cycle after
-//     the retirement, because the retire module refuses to retire in a flush
-//     cycle.
-//   * The rename squash restores the speculative map from the committed map,
-//     which is correct exactly because everything unretired is younger than the
-//     branch that has just committed. Its free-list roll-back is not used: the
-//     checkpoint is taken every cycle (`ckpt_valid` tied high), so the journal
-//     is empty and the squash restores the map only. The destinations of the
-//     discarded instructions are released explicitly by walking the descriptor
-//     store, which is the only structure that knows those tags. rename's own
-//     journal cannot be used for that: it would also free an entry that has
-//     since committed, and the committed map would then point at a tag the
-//     allocator believes is free.
+//   * the redirect arbiter only lets the branch act in the cycle it is the ROB
+//     head and is being retired, so everything older has already committed;
+//   * nothing younger was ever allocated, so the ROB flush discards only stale
+//     slots, and the out-of-order machinery behind the branch is empty;
+//   * rename's speculative map already equals its committed map, so **no squash
+//     is needed and none is issued** (`ckpt_valid` and `squash` are tied low).
+//     That matters: `mosaic_rename` now refuses a squash to a checkpoint that
+//     was not taken at a committed boundary, and its undo journal is exact only
+//     when no post-checkpoint allocation has committed -- a condition a machine
+//     that retires inside the window cannot meet in general. Recovery here does
+//     not depend on either. I-018's controller replaces this with a saved
+//     speculative map, which removes the barrier and the drain entirely.
 //
-// Recovery holds dispatch and fetch until both clusters have purged their
-// queues and the walk has released every discarded destination. Retirement is
-// never held: a pending redirect waits for older work to retire, and a macro
-// waiting for issue-queue space only delays itself and everything younger.
+// The cost is frontend serialisation at every branch: a branch holds allocation
+// until it resolves. That is the deliberate price of a recovery that cannot
+// corrupt the map or the free list, and it is what the plan permits as the
+// initial method (correctness before the performance pass).
+//
+// A pending redirect never holds retirement: the arbiter waits for the branch to
+// reach the head, and older work keeps retiring until it does. Recovery holds
+// dispatch and the frontend only while the clusters purge.
 //
 // ------------------------------------------------------- what is not here
 //
@@ -70,6 +72,13 @@
 /* verilator lint_off UNUSEDSIGNAL */
 `include "mosaic_id_pkg.svh"
 /* verilator lint_on UNUSEDSIGNAL */
+
+// The data port's ready/response inputs are unread: no macro this package
+// dispatches issues a data request (loads and stores are refused by dispatch),
+// so the port is brought out complete and left quiescent for I-033..I-038. The
+// suppression is scoped to the port declaration below and is stated here rather
+// than hidden by wiring the inputs to something they do not mean.
+/* verilator lint_off UNUSEDSIGNAL */
 `include "mosaic_pkg.sv"
 `include "mosaic_uop_pkg.sv"
 
@@ -93,7 +102,6 @@ localparam int unsigned CORE_RD_W    = 5;
 localparam int unsigned CORE_CSR_W   = 12;
 localparam int unsigned CORE_SIZE_W  = 3;
 localparam int unsigned CORE_OCC_W   = $clog2(CORE_ROB_N + 1);
-localparam int unsigned CORE_JLEN_W  = $clog2(CORE_ROB_N + 1);
 
 module mosaic_core (
     input  logic                        clk,
@@ -134,6 +142,8 @@ module mosaic_core (
     output logic [CORE_RET_N*CORE_XLEN-1:0]   ev_store_data,
     output logic [CORE_RET_N*CORE_SIZE_W-1:0] ev_store_size,
 
+    /* verilator lint_on UNUSEDSIGNAL */
+
     // -------------------------------------------------------------- evidence
     output logic [31:0]                 o_commit_ctr,
     output logic [31:0]                 o_unsupported_ctr,
@@ -165,13 +175,13 @@ module mosaic_core (
     output logic [31:0]                 o_wb_collision_ctr,
     output logic [31:0]                 o_wb_drop_ctr,
     output logic [CORE_TAG_W:0]         o_free_count,
-    output logic [31:0]                 o_free_stale_ctr,
-    output logic [31:0]                 o_free_double_ctr,
+    output logic [31:0]                 o_squash_not_committed_ctr,
     output logic [31:0]                 o_squash_underflow_ctr,
     output logic [31:0]                 o_journal_overflow_ctr,
     output logic [31:0]                 o_rob_occupied,
     output logic [31:0]                 o_rob_free,
     output logic [31:0]                 o_desc_live,
+    output logic                        o_rename_boundary,
     output logic [31:0]                 o_redir_act_ctr,
     output logic [31:0]                 o_redir_wait_ctr,
     output logic [31:0]                 o_redir_dead_ctr
@@ -181,15 +191,15 @@ module mosaic_core (
   // Interconnect declarations (hoisted: a port connection must see its net)
   // ==========================================================================
   // fetch
-  logic                      fetch_req_ready;
   logic [CORE_XLEN-1:0]      fetch_pc_q;
   logic                      fetch_req_fire;
+  logic                      want_imem_req;
+  logic                      fetch_slot_free;
+  logic                      fetch_req_valid_int;
   logic                      fetch_out_valid, fetch_out_ready;
   logic [CORE_XLEN-1:0]      fetch_out_pc;
   logic [31:0]               fetch_out_bits;
-  logic [2:0]                fetch_out_len;
   logic                      fetch_out_illegal, fetch_out_fault;
-  logic [63:0]               fetch_out_cause;
   logic                      fetch_pred_next_valid;
   logic [CORE_XLEN-1:0]      fetch_pred_next_pc;
 
@@ -197,11 +207,12 @@ module mosaic_core (
   logic                      redirect_valid;
   logic [CORE_XLEN-1:0]      redirect_pc;
   logic                      rob_flush_pulse;
-  logic                      squash_pulse;
   logic                      cluster_flush_pulse;
-  logic                      desc_walk_start;
   logic                      core_stop;
   logic                      recovering;
+  logic                      br_inflight;
+  logic                      alloc_is_branch_macro;
+  logic                      redir_act_valid, redir_act_taken;
 
   // decode buffer
   mosaic_pkg::decode_ctl_t   dec_ctl_comb;
@@ -218,40 +229,30 @@ module mosaic_core (
   logic [1:0]                disp_rq_valid, disp_rq_written;
   logic [1:0][CORE_TAG_W-1:0]  disp_rq_tag;
   logic [1:0][CORE_IGEN_W-1:0] disp_rq_gen;
-  logic [1:0]                disp_rq_written_hi;
 
   // rename
   logic                      ren_alloc_req, ren_alloc_accepted, ren_alloc_exhausted;
   logic                      ren_alloc_squashed, ren_alloc_is_x0, ren_alloc_new_valid;
   logic [CORE_TAG_W-1:0]     ren_new_tag;
   logic [CORE_IGEN_W-1:0]    ren_new_gen;
-  logic                      ren_old_valid;
-  logic [CORE_TAG_W-1:0]     ren_old_tag;
-  logic [CORE_IGEN_W-1:0]    ren_old_gen;
   logic [4:0]                ren_rs1_addr, ren_rs2_addr;
   logic                      ren_rs1_is_x0, ren_rs2_is_x0;
-  logic                      ren_rs1_ready, ren_rs2_ready;
   logic [CORE_TAG_W-1:0]     ren_rs1_tag, ren_rs2_tag;
   logic [CORE_IGEN_W-1:0]    ren_rs1_gen, ren_rs2_gen;
   logic                      ren_wb_valid;
   logic [CORE_TAG_W-1:0]     ren_wb_tag;
   logic [CORE_IGEN_W-1:0]    ren_wb_gen;
   logic                      ren_wb_accepted, ren_wb_stale, ren_wb_duplicate;
-  logic                      ren_free_valid;
-  logic [CORE_TAG_W-1:0]     ren_free_tag;
-  logic [CORE_IGEN_W-1:0]    ren_free_gen;
-  logic                      ren_free_accepted, ren_free_stale, ren_free_double;
   logic                      ren_commit_valid;
   logic [4:0]                ren_commit_rd;
   logic [CORE_TAG_W-1:0]     ren_commit_tag;
   logic [CORE_IGEN_W-1:0]    ren_commit_gen;
-  logic                      ren_commit_accepted, ren_commit_x0_dropped;
   logic                      ren_commit2_valid;
   logic [4:0]                ren_commit2_rd;
   logic [CORE_TAG_W-1:0]     ren_commit2_tag;
   logic [CORE_IGEN_W-1:0]    ren_commit2_gen;
-  logic                      ren_commit2_accepted, ren_commit2_x0_dropped;
-  logic                      ren_squash_accepted, ren_squash_underflow, ren_journal_overflow;
+  logic                      ren_squash_underflow, ren_journal_overflow;
+  logic                      ren_squash_not_committed, ren_ckpt_committed;
   logic [CORE_TAG_W:0]       ren_free_count;
 
   // descriptor store
@@ -261,12 +262,7 @@ module mosaic_core (
   logic [CORE_PGEN_W-1:0]    desc_wr_gen;
   logic [4:0]                desc_wr_rd;
   logic                      desc_wr_reg_we;
-  logic                      desc_walk_busy;
-  logic                      desc_free_valid;
-  logic [CORE_TAG_W-1:0]     desc_free_tag;
-  logic [CORE_PGEN_W-1:0]    desc_free_gen;
-  logic [31:0]               desc_free_ctr, desc_live_ctr;
-  logic                      desc_rd_valid0, desc_rd_valid1;
+  logic [31:0]               desc_live_ctr;
   logic [4:0]                desc_rd0, desc_rd1;
   logic                      desc_reg_we0, desc_reg_we1;
   logic [1:0]                retire_clr_valid;
@@ -278,8 +274,7 @@ module mosaic_core (
   logic [CORE_XLEN-1:0]      rob_alloc_pc;
   logic [3:0]                rob_alloc_num_uops;
   logic                      rob_alloc_exc, rob_alloc_open;
-  logic                      rob_alloc_ok, rob_alloc_refused, rob_alloc_full;
-  logic                      rob_alloc_bad_uops;
+  logic                      rob_alloc_ok, rob_alloc_refused;
   logic [CORE_IDX_W-1:0]     rob_alloc_index;
   logic [CORE_RGEN_W-1:0]    rob_alloc_gen;
   logic                      rob_cmp_valid;
@@ -290,23 +285,19 @@ module mosaic_core (
   logic                      rob_cmp_accepted, rob_cmp_duplicate, rob_cmp_stale;
   logic                      rob_cmp_bad_uop;
   logic                      rob_retire_req_next, rob_retire_ack_next;
-  logic [CORE_RET_N-1:0]     rob_retire_ack;
-  logic                      rob_head_valid, rob_head_ready, rob_head_complete;
-  logic                      rob_head_exc, rob_head_closed, rob_head_replay;
+  logic                      rob_retire_ack;
+  logic                      rob_head_valid, rob_head_ready;
+  logic                      rob_head_exc;
   logic [CORE_IDX_W-1:0]     rob_head_index;
   logic [CORE_RGEN_W-1:0]    rob_head_gen;
   logic [CORE_TAG_W-1:0]     rob_head_tag;
   logic [CORE_XLEN-1:0]      rob_head_pc;
-  logic [3:0]                rob_head_num_uops;
-  logic [7:0]                rob_head_done_mask;
-  logic [3:0]                rob_head_done_cnt;
-  logic                      rob_head1_valid, rob_head1_ready, rob_head1_complete;
-  logic                      rob_head1_exc, rob_head1_closed, rob_head1_replay;
+  logic                      rob_head1_valid, rob_head1_ready;
+  logic                      rob_head1_exc;
   logic [CORE_IDX_W-1:0]     rob_head1_index;
   logic [CORE_RGEN_W-1:0]    rob_head1_gen;
   logic [CORE_TAG_W-1:0]     rob_head1_tag;
   logic [CORE_XLEN-1:0]      rob_head1_pc;
-  logic [31:0]               rob_alloc_total, rob_retired_total, rob_squashed_total;
   logic [CORE_OCC_W-1:0]     rob_occupied, rob_free_rob;
 
   // clusters
@@ -351,12 +342,11 @@ module mosaic_core (
   logic [CORE_BANKS*CORE_TAG_W-1:0]  prf_wr_tag;
   logic [CORE_BANKS*CORE_PGEN_W-1:0] prf_wr_gen;
   logic [CORE_BANKS*CORE_XLEN-1:0]   prf_wr_data;
-  logic [CORE_BANKS-1:0]          prf_rd_valid, prf_rd_ready;
+  logic [CORE_BANKS-1:0]          prf_rd_valid;
   logic [CORE_BANKS*CORE_TAG_W-1:0]  prf_rd_tag;
   logic [CORE_BANKS*CORE_PGEN_W-1:0] prf_rd_gen;
   logic [CORE_BANKS-1:0]          prf_rsp_valid, prf_rsp_bad, prf_rsp_never;
   logic [CORE_BANKS*CORE_XLEN-1:0] prf_rsp_data;
-  logic                      stash_valid0, stash_valid1;
   logic [CORE_XLEN-1:0]      stash_value0, stash_value1;
   logic [31:0]               wb_wr_ctr, wb_wake_ctr, wb_stale_ctr, wb_dup_ctr;
   logic [31:0]               wb_collision_ctr, wb_drop_ctr;
@@ -383,12 +373,17 @@ module mosaic_core (
 
   // retire
   logic [CORE_RET_N-1:0]     ret_req;
+  logic [CORE_RET_N-1:0]     ret_commit_valid;
+  logic [CORE_RET_N*CORE_RD_W-1:0]  ret_commit_rd;
+  logic [CORE_RET_N*CORE_TAG_W-1:0] ret_commit_tag;
+  logic [CORE_RET_N*CORE_IGEN_W-1:0] ret_commit_gen;
   logic [CORE_RET_N*CORE_XLEN-1:0] retire_pay_value;
   logic                      head_pending_taken;
 
   // evidence
   logic [31:0] commit_ctr, redirect_ctr, recovering_ctr, stop_ctr, cycle_ctr;
-  logic [31:0] free_stale_ctr, free_double_ctr, squash_under_ctr, journal_ovf_ctr;
+  logic [31:0] squash_under_ctr, journal_ovf_ctr;
+  logic [31:0] squash_nc_ctr;
   logic        core_stop_prev;
 
   // Leaf modules bring out observation and status outputs that this package
@@ -409,13 +404,21 @@ module mosaic_core (
   // disabled because this package cannot classify an instruction before it has
   // been fetched and decoded. Every taken branch therefore redirects; that is a
   // deliberate correctness-first choice, and recovery is what the case exercises.
-  assign imem_req_valid = !core_stop && !recovering;
+  // Composition of the two readinesses, and they are different things:
+  // `fetch_slot_free` is the fetch unit's credit for an outstanding request, and
+  // `imem_req_ready` is the memory endpoint accepting one. The request is
+  // offered to the memory whenever fetch has a credit, and is handed to fetch
+  // only in the cycle the memory took it, so exactly one request is issued and
+  // one slot is spent.
+  assign want_imem_req      = !core_stop && !recovering;
+  assign imem_req_valid     = want_imem_req && fetch_slot_free;
+  assign fetch_req_valid_int= imem_req_valid && imem_req_ready;
+  assign fetch_req_fire     = fetch_req_valid_int;
   assign imem_req.we    = 1'b0;
   assign imem_req.addr  = fetch_pc_q;
   assign imem_req.size  = mosaic_pkg::SZ_WORD;
   assign imem_req.wstrb = {(CORE_XLEN/8){1'b0}};
   assign imem_req.wdata = {CORE_XLEN{1'b0}};
-  assign fetch_req_fire = imem_req_valid && fetch_req_ready;
 
   always_ff @(posedge clk) begin
     if (rst) begin
@@ -431,9 +434,9 @@ module mosaic_core (
   mosaic_fetch u_fetch (
       .clk                (clk),
       .rst                (rst),
-      .req_valid          (imem_req_valid),
+      .req_valid          (fetch_req_valid_int),
       .req_pc             (fetch_pc_q),
-      .req_ready          (fetch_req_ready),
+      .req_ready          (fetch_slot_free),
       .req_id             (imem_req_id),
       .req_epoch          (imem_req_epoch),
       .rsp_valid          (imem_rsp_valid),
@@ -475,10 +478,10 @@ module mosaic_core (
       .out_ready          (fetch_out_ready),
       .out_pc             (fetch_out_pc),
       .out_bits           (fetch_out_bits),
-      .out_len            (fetch_out_len),
+      .out_len            (),
       .out_illegal        (fetch_out_illegal),
       .out_fault          (fetch_out_fault),
-      .out_cause          (fetch_out_cause),
+      .out_cause          (),
       .outstanding_count  (),
       .cancel_pending     (),
       .epoch_now          (),
@@ -526,6 +529,14 @@ module mosaic_core (
       dbuf_cnt      <= 2'd0;
       dbuf_valid[0] <= 1'b0;
       dbuf_valid[1] <= 1'b0;
+    end else if (redirect_valid || core_stop) begin
+      // A redirect discards everything fetched before it; a stop freezes the
+      // buffer where it is (the refused macro must stay refused).
+      if (redirect_valid) begin
+        dbuf_valid[0] <= 1'b0;
+        dbuf_valid[1] <= 1'b0;
+        dbuf_cnt      <= 2'd0;
+      end
     end else begin
       if (dbuf_take) begin
         dbuf_valid[0] <= dbuf_valid[1];
@@ -556,9 +567,9 @@ module mosaic_core (
       .alloc_new_valid  (ren_alloc_new_valid),
       .alloc_new_tag    (ren_new_tag),
       .alloc_new_gen    (ren_new_gen),
-      .alloc_old_valid  (ren_old_valid),
-      .alloc_old_tag    (ren_old_tag),
-      .alloc_old_gen    (ren_old_gen),
+      .alloc_old_valid  (),
+      .alloc_old_tag    (),
+      .alloc_old_gen    (),
       .alloc2_req       (1'b0),
       .alloc2_rd        (5'd0),
       .alloc2_accepted  (),
@@ -575,8 +586,8 @@ module mosaic_core (
       .rs2_addr         (ren_rs2_addr),
       .rs1_is_x0        (ren_rs1_is_x0),
       .rs2_is_x0        (ren_rs2_is_x0),
-      .rs1_ready        (ren_rs1_ready),
-      .rs2_ready        (ren_rs2_ready),
+      .rs1_ready        (),
+      .rs2_ready        (),
       .rs1_tag          (ren_rs1_tag),
       .rs2_tag          (ren_rs2_tag),
       .rs1_gen          (ren_rs1_gen),
@@ -599,31 +610,34 @@ module mosaic_core (
       .wb_accepted      (ren_wb_accepted),
       .wb_stale         (ren_wb_stale),
       .wb_duplicate     (ren_wb_duplicate),
-      .free_valid       (ren_free_valid),
-      .free_tag         (ren_free_tag),
-      .free_gen         (ren_free_gen),
-      .free_accepted    (ren_free_accepted),
-      .free_stale       (ren_free_stale),
-      .free_double      (ren_free_double),
+      .free_valid       (1'b0),
+      .free_tag         ({CORE_TAG_W{1'b0}}),
+      .free_gen         ({CORE_IGEN_W{1'b0}}),
+      .free_accepted    (),
+      .free_stale       (),
+      .free_double      (),
       .commit_valid     (ren_commit_valid),
       .commit_rd        (ren_commit_rd),
       .commit_tag       (ren_commit_tag),
       .commit_gen       (ren_commit_gen),
-      .commit_accepted  (ren_commit_accepted),
-      .commit_x0_dropped(ren_commit_x0_dropped),
+      .commit_accepted  (),
+      .commit_x0_dropped(),
       .commit2_valid    (ren_commit2_valid),
       .commit2_rd       (ren_commit2_rd),
       .commit2_tag      (ren_commit2_tag),
       .commit2_gen      (ren_commit2_gen),
-      .commit2_accepted (ren_commit2_accepted),
-      .commit2_x0_dropped(ren_commit2_x0_dropped),
-      // The checkpoint is taken every cycle: the journal is empty, and the
-      // squash is then exactly "speculative map := committed map". Recovery
-      // releases the discarded destinations explicitly (see the header).
-      .ckpt_valid       (1'b1),
-      .squash           (squash_pulse),
-      .squash_accepted  (ren_squash_accepted),
+      .commit2_accepted (),
+      .commit2_x0_dropped(),
+      // No checkpoint and no squash: the recovery is the barrier (see the
+      // header). A checkpoint would be a promise this package does not keep --
+      // it has no saved speculative map -- and rename refuses a squash to a
+      // checkpoint that was not taken at a committed boundary.
+      .ckpt_valid       (1'b0),
+      .squash           (1'b0),
+      .squash_accepted  (),
       .squash_underflow (ren_squash_underflow),
+      .squash_not_committed (ren_squash_not_committed),
+      .ckpt_committed   (ren_ckpt_committed),
       .journal_overflow (ren_journal_overflow),
       .free_count       (ren_free_count),
       .dbg_free_mask    (),
@@ -650,13 +664,13 @@ module mosaic_core (
       .wr_is_store     (2'd0),
       .rd_index0       (rob_head_index),
       .rd_index1       (rob_head1_index),
-      .rd_valid0       (desc_rd_valid0),
+      .rd_valid0       (),
       .rd_tag0         (),
       .rd_gen0         (),
       .rd_rd0          (desc_rd0),
       .rd_reg_we0      (desc_reg_we0),
       .rd_is_store0    (),
-      .rd_valid1       (desc_rd_valid1),
+      .rd_valid1       (),
       .rd_tag1         (),
       .rd_gen1         (),
       .rd_rd1          (desc_rd1),
@@ -664,13 +678,8 @@ module mosaic_core (
       .rd_is_store1    (),
       .clr_valid       (retire_clr_valid),
       .clr_index       (retire_clr_index),
-      .walk_start      (desc_walk_start),
-      .walk_busy       (desc_walk_busy),
-      .walk_free_valid (desc_free_valid),
-      .walk_free_tag   (desc_free_tag),
-      .walk_free_gen   (desc_free_gen),
       .o_write_ctr     (),
-      .o_free_ctr      (desc_free_ctr),
+      .o_clear_ctr     (),
       .o_live_ctr      (desc_live_ctr)
   );
 
@@ -688,8 +697,8 @@ module mosaic_core (
       .alloc_open      (rob_alloc_open),
       .alloc_ok        (rob_alloc_ok),
       .alloc_refused   (rob_alloc_refused),
-      .alloc_full      (rob_alloc_full),
-      .alloc_bad_uops  (rob_alloc_bad_uops),
+      .alloc_full      (),
+      .alloc_bad_uops  (),
       .alloc_index     (rob_alloc_index),
       .alloc_gen       (rob_alloc_gen),
       .close_valid     (1'b0),
@@ -707,28 +716,28 @@ module mosaic_core (
       .cmp_stale       (rob_cmp_stale),
       .cmp_bad_uop     (rob_cmp_bad_uop),
       .retire_req      (ret_req[0]),
-      .retire_ack      (rob_retire_ack[0]),
+      .retire_ack      (rob_retire_ack),
       .retire_req_next (rob_retire_req_next),
       .retire_ack_next (rob_retire_ack_next),
       .head_valid      (rob_head_valid),
       .head_ready      (rob_head_ready),
-      .head_replay     (rob_head_replay),
-      .head_complete   (rob_head_complete),
+      .head_replay     (),
+      .head_complete   (),
       .head_exc        (rob_head_exc),
-      .head_closed     (rob_head_closed),
+      .head_closed     (),
       .head_index      (rob_head_index),
       .head_gen        (rob_head_gen),
       .head_tag        (rob_head_tag),
       .head_pc         (rob_head_pc),
-      .head_num_uops   (rob_head_num_uops),
-      .head_done_mask  (rob_head_done_mask),
-      .head_done_cnt   (rob_head_done_cnt),
+      .head_num_uops   (),
+      .head_done_mask  (),
+      .head_done_cnt   (),
       .head1_valid     (rob_head1_valid),
       .head1_ready     (rob_head1_ready),
-      .head1_replay    (rob_head1_replay),
-      .head1_complete  (rob_head1_complete),
+      .head1_replay    (),
+      .head1_complete  (),
       .head1_exc       (rob_head1_exc),
-      .head1_closed    (rob_head1_closed),
+      .head1_closed    (),
       .head1_index     (rob_head1_index),
       .head1_gen       (rob_head1_gen),
       .head1_tag       (rob_head1_tag),
@@ -751,9 +760,9 @@ module mosaic_core (
       .o_alloc_ptr     (),
       .o_occupied      (rob_occupied),
       .o_free          (rob_free_rob),
-      .o_alloc_total   (rob_alloc_total),
-      .o_retired_total (rob_retired_total),
-      .o_squashed_total(rob_squashed_total),
+      .o_alloc_total   (),
+      .o_retired_total (),
+      .o_squashed_total(),
       .o_gen_counter   ()
   );
 
@@ -998,15 +1007,15 @@ module mosaic_core (
       .wu_tag              (wu_tag),
       .wu_gen              (wu_gen),
       .wu_val              (wu_val),
-      .q_valid             ({2'b00, disp_rq_valid}),
-      .q_tag               ({{(2*CORE_TAG_W){1'b0}}, disp_rq_tag}),
-      .q_gen               ({{(2*CORE_IGEN_W){1'b0}}, disp_rq_gen}),
-      .q_written           ({disp_rq_written_hi, disp_rq_written}),
+      .q_valid             (disp_rq_valid),
+      .q_tag               (disp_rq_tag),
+      .q_gen               (disp_rq_gen),
+      .q_written           (disp_rq_written),
       .stash_rd0           (rob_head_index),
       .stash_rd1           (rob_head1_index),
-      .stash_valid0        (stash_valid0),
+      .stash_valid0        (),
       .stash_value0        (stash_value0),
-      .stash_valid1        (stash_valid1),
+      .stash_valid1        (),
       .stash_value1        (stash_value1),
       .o_wr_ctr            (wb_wr_ctr),
       .o_wake_ctr          (wb_wake_ctr),
@@ -1040,7 +1049,7 @@ module mosaic_core (
       .wr_gen_i            (prf_wr_gen),
       .wr_data_i           (prf_wr_data),
       .rd_valid_i          (prf_rd_valid),
-      .rd_ready_o          (prf_rd_ready),
+      .rd_ready_o          (),
       .rd_tag_i            (prf_rd_tag),
       .rd_gen_i            (prf_rd_gen),
       .rsp_valid_o         (prf_rsp_valid),
@@ -1085,7 +1094,7 @@ module mosaic_core (
       .rs1_gen          (ren_rs1_gen),
       .rs2_tag          (ren_rs2_tag),
       .rs2_gen          (ren_rs2_gen),
-      .rob_free         (rob_free_rob),
+      .rob_free_any     (rob_free_rob != {CORE_OCC_W{1'b0}}),
       .rob_alloc_valid  (rob_alloc_valid),
       .rob_alloc_tag    (rob_alloc_tag),
       .rob_alloc_pc     (rob_alloc_pc),
@@ -1144,6 +1153,7 @@ module mosaic_core (
       .c1_ins_dst_tag   (c1_dst_tag),
       .c1_ins_dst_gen   (c1_dst_gen),
       .recovering       (recovering),
+      .barrier          (br_inflight),
       .stop             (disp_unsupported),
       .o_take           (disp_take),
       .o_alloc_ctr      (),
@@ -1163,7 +1173,6 @@ module mosaic_core (
   );
 
   assign core_stop = disp_unsupported;
-  assign disp_rq_written_hi = 2'b00;
 
   // ==========================================================================
   // 11. Redirect arbitration
@@ -1181,9 +1190,11 @@ module mosaic_core (
       .head_index      (rob_head_index),
       .head_gen        (rob_head_gen),
       .head_occupied   (rob_occupied),
-      .head_retire     (rob_retire_ack[0]),
+      .head_retire     (rob_retire_ack),
       .redirect_valid  (redirect_valid),
       .redirect_pc     (redirect_pc),
+      .o_act_valid     (redir_act_valid),
+      .o_act_taken     (redir_act_taken),
       .o_req_ctr       (),
       .o_act_ctr       (o_redir_act_ctr),
       .o_drop_ctr      (),
@@ -1196,29 +1207,55 @@ module mosaic_core (
   // 12. Flush and recovery control
   // ==========================================================================
   assign rob_flush_pulse      = redirect_valid;
-  assign squash_pulse         = redirect_valid;
   assign cluster_flush_pulse  = redirect_valid;
-  assign desc_walk_start      = redirect_valid;
 
   always_ff @(posedge clk) begin
     if (rst) begin
       recovering <= 1'b0;
     end else if (redirect_valid) begin
       recovering <= 1'b1;
-    end else if (recovering && !desc_walk_busy && !c0_flush_busy && !c1_flush_busy) begin
+    end else if (recovering && !c0_flush_busy && !c1_flush_busy) begin
       recovering <= 1'b0;
     end
   end
 
-  // rename's free port is driven by the descriptor walk and by nothing else.
-  assign ren_free_valid = desc_free_valid;
-  assign ren_free_tag   = desc_free_tag[CORE_TAG_W-1:0];
-  assign ren_free_gen   = desc_free_gen[CORE_IGEN_W-1:0];
+  // ------------------------------------------------------- the branch barrier
+  // Set when a branch is allocated, released when the arbiter has accounted for
+  // it (not taken: no flush at all) or when its redirect has been applied.
+  assign alloc_is_branch_macro = dbuf_ctl[0].is_branch || dbuf_ctl[0].is_jal ||
+                                 dbuf_ctl[0].is_jalr;
+
+  always_ff @(posedge clk) begin
+    if (rst) begin
+      br_inflight <= 1'b0;
+    end else if (redirect_valid) begin
+      br_inflight <= 1'b0;
+    end else if (redir_act_valid && !redir_act_taken) begin
+      br_inflight <= 1'b0;
+    end else if (dbuf_valid[0] && alloc_is_branch_macro && !recovering &&
+                 !core_stop && (ren_alloc_accepted != 1'b0) &&
+                 (rob_free_rob != {CORE_OCC_W{1'b0}})) begin
+      br_inflight <= 1'b1;
+    end
+  end
 
   // ==========================================================================
   // 13. Retire
   // ==========================================================================
   assign retire_pay_value = {stash_value1, stash_value0};
+
+  // The retire module carries one commit lane per retired instruction. rename
+  // has one commit port per lane, applied in program order, which is what makes
+  // two commits to one architectural register in one cycle install the younger
+  // mapping and release the older tag.
+  assign ren_commit_valid  = ret_commit_valid[0];
+  assign ren_commit_rd     = ret_commit_rd[CORE_RD_W-1:0];
+  assign ren_commit_tag    = ret_commit_tag[CORE_TAG_W-1:0];
+  assign ren_commit_gen    = ret_commit_gen[CORE_IGEN_W-1:0];
+  assign ren_commit2_valid = ret_commit_valid[1];
+  assign ren_commit2_rd    = ret_commit_rd[2*CORE_RD_W-1:CORE_RD_W];
+  assign ren_commit2_tag   = ret_commit_tag[2*CORE_TAG_W-1:CORE_TAG_W];
+  assign ren_commit2_gen   = ret_commit_gen[2*CORE_IGEN_W-1:CORE_IGEN_W];
 
   // Lane 1 must not retire when the head is a taken branch whose redirect is
   // pending: that entry is the first wrong-path instruction and the redirect is
@@ -1233,7 +1270,7 @@ module mosaic_core (
   assign rob_retire_req_next = ret_req[1] && !head_pending_taken;
 
   always_comb begin
-    retire_clr_valid[0] = rob_retire_ack[0];
+    retire_clr_valid[0] = rob_retire_ack;
     retire_clr_valid[1] = rob_retire_ack_next;
     retire_clr_index[0] = rob_head_index;
     retire_clr_index[1] = rob_head1_index;
@@ -1245,7 +1282,7 @@ module mosaic_core (
       .rob_valid      ({rob_head1_valid, rob_head_valid}),
       .rob_ready      ({rob_head1_ready, rob_head_ready}),
       .rob_exc        ({rob_head1_exc, rob_head_exc}),
-      .rob_ack        (rob_retire_ack),
+      .rob_ack        ({rob_retire_ack_next, rob_retire_ack}),
       .rob_id         ({rob_head1_gen, rob_head1_tag, rob_head_gen, rob_head_tag}),
       .rob_pc         ({rob_head1_pc, rob_head_pc}),
       .pay_valid      ({rob_head1_valid, rob_head_valid}),
@@ -1285,14 +1322,10 @@ module mosaic_core (
       .trap_pc        (),
       .trap_cause     (),
       .trap_tval      (),
-      .commit_valid   (ren_commit_valid),
-      .commit_rd      (ren_commit_rd),
-      .commit_tag     (ren_commit_tag),
-      .commit_gen     (ren_commit_gen),
-      .commit2_valid  (ren_commit2_valid),
-      .commit2_rd     (ren_commit2_rd),
-      .commit2_tag    (ren_commit2_tag),
-      .commit2_gen    (ren_commit2_gen),
+      .commit_valid   (ret_commit_valid),
+      .commit_rd      (ret_commit_rd),
+      .commit_tag     (ret_commit_tag),
+      .commit_gen     (ret_commit_gen),
       .csr_rd_valid   (1'b0),
       .csr_rd_addr    ({CORE_CSR_W{1'b0}}),
       .csr_rd_data    (),
@@ -1332,9 +1365,13 @@ module mosaic_core (
   assign o_c1_branch_ctr= c1_br_ctr;
   assign o_muldiv_ctr   = md_ctr;
   assign o_free_count   = ren_free_count;
-  assign o_free_stale_ctr = free_stale_ctr;
-  assign o_free_double_ctr= free_double_ctr;
+  // rename's own boundary report: `speculative map == committed map`. The
+  // barrier recovery claims this holds whenever the machine has no unretired
+  // register-writer, and in particular at every redirect; the case asserts it
+  // there rather than taking the claim on faith.
+  assign o_rename_boundary = ren_ckpt_committed;
   assign o_squash_underflow_ctr = squash_under_ctr;
+  assign o_squash_not_committed_ctr = squash_nc_ctr;
   assign o_journal_overflow_ctr = journal_ovf_ctr;
   assign o_rob_occupied = 32'(rob_occupied);
   assign o_rob_free     = 32'(rob_free_rob);
@@ -1354,21 +1391,19 @@ module mosaic_core (
       recovering_ctr <= 32'd0;
       stop_ctr       <= 32'd0;
       cycle_ctr      <= 32'd0;
-      free_stale_ctr <= 32'd0;
-      free_double_ctr<= 32'd0;
       squash_under_ctr <= 32'd0;
+      squash_nc_ctr    <= 32'd0;
       journal_ovf_ctr  <= 32'd0;
       core_stop_prev   <= 1'b0;
     end else begin
       cycle_ctr      <= cycle_ctr + 32'd1;
-      commit_ctr     <= commit_ctr + {31'd0, rob_retire_ack[0]} +
+      commit_ctr     <= commit_ctr + {31'd0, rob_retire_ack} +
                                    {31'd0, rob_retire_ack_next};
       redirect_ctr   <= redirect_ctr + {31'd0, redirect_valid};
       recovering_ctr <= recovering_ctr + {31'd0, recovering};
       stop_ctr       <= stop_ctr + {31'd0, core_stop && !core_stop_prev};
-      free_stale_ctr <= free_stale_ctr + {31'd0, ren_free_stale};
-      free_double_ctr<= free_double_ctr + {31'd0, ren_free_double};
       squash_under_ctr <= squash_under_ctr + {31'd0, ren_squash_underflow};
+      squash_nc_ctr    <= squash_nc_ctr + {31'd0, ren_squash_not_committed};
       journal_ovf_ctr  <= journal_ovf_ctr + {31'd0, ren_journal_overflow};
       core_stop_prev   <= core_stop;
     end

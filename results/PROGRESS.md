@@ -1326,3 +1326,68 @@ form of the report, and the reason it matters is that "the tool generated someth
 what the source says" is a claim about Verilator, not about this design — if it recurs, it
 needs a minimal reproduction before anything else is built on top of the observation. No
 defect is currently open from it: the replacement is tested and the module is green.
+
+---
+
+## 2026-10-01 — I-033 verified by an independent lane, and the two defects were in the testbench
+
+`lsu.size_fault_boundaries` PASS from a clean build: 83 805 checks over 4 118 cycles, 336
+loads, 181 stores, 332 memory transactions, 185 misaligned traps, 50 access faults, 517
+responses; all four mutants exit 1 with a named first failure and a delta against that base.
+
+The RTL was written here (the integration lead's own file) and verified by a *different* lane,
+which is the arrangement the plan wants for exactly this reason: the module was found correct
+and was not edited, and both defects it did find were in the testbench — the memory model wrote
+the presented payload's low byte instead of the byte in the lane the address selects, and a
+hand-written sign-extension expectation used `0x...0080` where `0x...ff80` is correct. Both
+were decided from the specification and the module's documented lane convention, not from what
+the DUT happened to output, and the report records them as testbench defects rather than
+quietly fixing the numbers.
+
+What the case does **not** cover is stated in its own report and matters for the next stage: no
+physical memory, one outstanding transaction, and the don't-care fields (write strobes on a
+load, read data on a store or a fault) hide any defect confined to them. Those are the seams
+I-034 (store queue and commit authorisation), I-035 (load queue and byte forwarding) and I-038
+(non-speculative MMIO) close, and each of them changes what "don't care" is allowed to mean.
+
+**Delivered so far: 19 packages** — I-001..I-006, I-010, I-012, I-014, I-015, I-016, I-017,
+I-019, I-020, I-022, I-024, I-025, I-028, I-033. Nothing is advertisable yet and that is the
+correct answer: the capability ladder requires the independent verification packages
+(V-008..V-012 for the scalar base) which are the next wave; V-008 is running now.
+
+---
+
+## 2026-10-01 — I-018 delivered, and the shifting symptom has a cause
+
+The recovery package is green: both cases PASS from clean builds, 419 470 per-cycle
+comparisons over 6 810 cycles, nine mutants each failing by name with a delta.
+
+Two things in it are worth more than the green line:
+
+**The changing first divergence was a memory bug, not a model that kept moving.** For several
+rounds the integration side saw the recovery failure appear at cycle 52, then 420, then at a
+different field, and the natural read was that the shadow model and the DUT were being fed
+different inputs. The actual cause: an allocation at the undo bound was accepted while the
+journal index wrapped, so the array write went out of bounds and corrupted the heap. It was
+found with AddressSanitizer, not by reading, and its signature — a first divergence that moves
+when unrelated code changes — is exactly what heap corruption looks like. That is now on the
+record as the diagnosis path for this class: when the first divergence moves without the
+stimulus changing, stop comparing models and run the simulator under a memory checker.
+
+**Two previously delivered mutants never elaborated.** They had been counted as evidence while
+they could not build at all — the same failure the project has met with `-D` blocks that do not
+exist, one level earlier: the mutant does not compile, so no one notices it was never run.
+They are re-expressed and now fail on the checks written for them, and three new mutants were
+added so that every RTL defect fixed in this package has a control that fails on its account.
+The rule to carry forward: a mutant's evidence is its build log *and* its exit code.
+
+Also: the credit-kill rule was changed, not just the code — killing by epoch alone discards
+older work the squash does not own, which the plan and the architecture review both forbid; the
+module's header was rewritten so the documented rule and the implemented one are the same
+statement again.
+
+**Still ahead from this package's own analysis**: `mosaic_recovery` continues to own a second
+copy of the speculative maps, free list, generation table and journal. The cutover to a single
+owner (`mosaic_rename`), with recovery driving `ckpt_valid`/`squash` and enforcing the
+"squash only at the ROB head" precondition, remains the integration task it was recorded as —
+the green case does not imply it.

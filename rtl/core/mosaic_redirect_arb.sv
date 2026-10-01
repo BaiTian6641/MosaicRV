@@ -97,6 +97,12 @@ module mosaic_redirect_arb (
     // the flush it triggers cannot also erase the instruction that caused it.
     output logic                       redirect_valid,
     output logic [RDA_XLEN-1:0]        redirect_pc,
+    // The decision, in the cycle it is made: a resolution was acted on, and
+    // whether it was taken. The core uses these to release its branch barrier --
+    // a not-taken resolution is accounted for without any flush, so the frontend
+    // may resume at once.
+    output logic                       o_act_valid,
+    output logic                       o_act_taken,
 
     // ---------------------------------------------------------------- counts
     output logic [31:0]                o_req_ctr,
@@ -192,6 +198,8 @@ module mosaic_redirect_arb (
 
   assign redirect_valid = redirect_q;
   assign redirect_pc    = redirect_pc_q;
+  assign o_act_valid    = act;
+  assign o_act_taken    = act && req_taken[win_i];
 
   always_ff @(posedge clk) begin
     if (rst) begin

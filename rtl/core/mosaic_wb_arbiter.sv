@@ -152,10 +152,10 @@ module mosaic_wb_arbiter (
     output logic [WBA_XLEN-1:0]      wu_val,
 
     // ------------------------------------------------------- ready-table query
-    input  logic [3:0]               q_valid,
-    input  logic [3:0][WBA_TAG_W-1:0] q_tag,
-    input  logic [3:0][WBA_IGEN_W-1:0] q_gen,
-    output logic [3:0]               q_written,
+    input  logic [1:0]               q_valid,
+    input  logic [1:0][WBA_TAG_W-1:0] q_tag,
+    input  logic [1:0][WBA_IGEN_W-1:0] q_gen,
+    output logic [1:0]               q_written,
 
     // ------------------------------------------- durable value stash (retire)
     input  logic [WBA_IDX_W-1:0]     stash_rd0,
@@ -312,7 +312,7 @@ module mosaic_wb_arbiter (
   logic [WBA_IGEN_W-1:0]         rt_gen [0:WBA_PRF_N-1];
 
   always_comb begin
-    for (int unsigned q = 0; q < 4; q++) begin
+    for (int unsigned q = 0; q < 2; q++) begin
       q_written[q] = 1'b0;
       if (q_valid[q] && (32'(q_tag[q]) < 32'(WBA_PRF_N))) begin
         q_written[q] = rt_valid[q_tag[q]] && (rt_gen[q_tag[q]] == q_gen[q]);

@@ -137,7 +137,10 @@ module mosaic_dispatch (
     input  logic [DSP_IGEN_W-1:0]       rs2_gen,
 
     // ---------------------------------------------------------- ROB allocate
-    input  logic [DSP_CNT_W-1:0]        rob_free,
+    // "the ROB has room for one more entry". A single bit, not the occupancy
+    // count: the request is gated on it, and the ROB's own `alloc_ok` is the
+    // answer that matters.
+    input  logic                        rob_free_any,
     output logic                        rob_alloc_valid,
     output logic [DSP_TAG_W-1:0]        rob_alloc_tag,
     output logic [DSP_XLEN-1:0]         rob_alloc_pc,
@@ -207,6 +210,12 @@ module mosaic_dispatch (
 
     // ------------------------------------------------------------ control
     input  logic                        recovering,
+    // A branch is outstanding: no macro may be allocated behind it. The core
+    // asserts this from the allocation of a branch until that branch has been
+    // resolved and, if it redirected, the redirect has been applied. It is the
+    // conservative recovery this package ships: nothing younger than an
+    // unresolved branch exists to be squashed (see mosaic_core.sv).
+    input  logic                        barrier,
     output logic                        stop,           // unsupported macro seen
     // The lane-0 macro left the input this cycle: it was allocated, or it was
     // refused as unsupported and the machine is stopping at it. The decode
@@ -285,7 +294,7 @@ module mosaic_dispatch (
   assign queue_has_room = (q_cnt < DSP_CNT_W'(DSP_DEPTH));
   assign o_take         = alloc_ok || l0_unsupported;
   assign alloc_now      = dec_valid[0] && !l0_unsupported && !recovering && !stop_q &&
-                          queue_has_room && (rob_free != {DSP_CNT_W{1'b0}});
+                          !barrier && queue_has_room && rob_free_any;
 
   assign alloc_req = alloc_now;
   assign alloc_rd  = dec_ctl0.rd;
@@ -589,13 +598,13 @@ module mosaic_dispatch (
       if (alloc_now && alloc_squashed)  squashed_ctr  <= squashed_ctr + 32'd1;
       if (alloc_now && alloc_accepted && rob_alloc_refused)
         exhausted_ctr <= exhausted_ctr + 32'd1;
-      if (dec_valid[0] && !l0_unsupported && !recovering && !stop_q &&
-          (rob_free == {DSP_CNT_W{1'b0}})) rob_full_ctr <= rob_full_ctr + 32'd1;
+      if (dec_valid[0] && !l0_unsupported && !recovering && !stop_q && !barrier &&
+          !rob_free_any) rob_full_ctr <= rob_full_ctr + 32'd1;
       if (head_valid && !recovering && !ins_ok) stall_ctr <= stall_ctr + 32'd1;
       if (s1_needs_read || s2_needs_read) src_read_ctr <= src_read_ctr + 32'd1;
       if (s1_conflict || s2_conflict) src_conflict_ctr <= src_conflict_ctr + 32'd1;
       if (s1_bad || s2_bad) src_bad_ctr <= src_bad_ctr + 32'd1;
-      if (!queue_has_room && dec_valid[0] && !l0_unsupported && !stop_q)
+      if (!queue_has_room && dec_valid[0] && !l0_unsupported && !stop_q && !barrier)
         queue_stall_ctr <= queue_stall_ctr + 32'd1;
     end
   end

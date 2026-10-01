@@ -21,51 +21,34 @@
 //
 // The array also carries the physical generation of the destination, because
 // the ROB stores only the 7-bit tag and the PRF's identity is (tag, generation):
-// without the generation the completion path could not name the destination it
-// is writing, and the value stash (mosaic_wb_arbiter) could not be read back for
-// the retire event.
+// without the generation the retire payload could not be read back from the
+// durable value stash, which is keyed by ROB index.
 //
 // --------------------------------------------------------- stale reads
 //
 // A read of an entry that no live macro owns is impossible to mistake for a
-// live one, and it is the ROB that makes it so: every read port is indexed by
+// live one, and it is the ROB that makes it so: both read ports are indexed by
 // the ROB's own `head_index` / `head1_index`, and the top only assembles a
-// payload for a lane whose `head_valid` is high. The array itself is
-// deliberately **not reset** -- it is DEPTH x WIDTH of storage and the project
-// rule (rtl/common/mosaic_ram.sv) puts validity in control bits outside it.
+// payload for a lane whose `head_valid` is high. Every allocation writes its
+// descriptor in the same cycle it allocates the ROB entry, so a live ROB head
+// always has a written descriptor. The array itself is deliberately **not
+// reset** -- it is DEPTH x WIDTH of storage and the project rule
+// (rtl/common/mosaic_ram.sv) puts validity in control bits outside it.
 //
-// The validity bit here is `live`: set by the dispatch write that allocates the
-// macro, cleared by the retire acknowledgement that removes it, and cleared in
-// bulk by the flush walk. It has exactly one meaning -- "a macro is in the ROB
-// under this index" -- and it is what the flush walk uses to decide which
-// destinations to release. It is *not* a second opinion about ROB occupancy:
-// this store never gates the retire decision (the ROB's own validity does), and
-// the only cross-check either can make is the conservation counter `o_live_ctr`.
+// `live` is that validity: set by the allocation write and cleared by the
+// retire acknowledgement. It is not a second opinion about ROB occupancy -- this
+// store never gates the retire decision (the ROB's own validity does) -- it is
+// the pairing counter `o_live_ctr`: allocations and retire-clears must be equal
+// and opposite, and a mismatch is the first sign of a retire path losing or
+// double-counting an entry.
 //
 // ------------------------------------------------------------------- ports
 //
-// Two write ports (dispatch allocates one macro per lane per cycle) and two
-// read ports (the two retire lanes). The three extra ports are the recovery
-// path and are stated rather than implied:
-//
-//   * `clr_*`   the retire acknowledgement releases the entry. Separate from
-//               the writes so a same-cycle clear and write to one index can be
-//               ordered explicitly: the write wins, because the write is the
-//               new macro and the clear is the old one.
-//   * `walk_*`  the flush walk. On a squashing redirect every *live* entry
-//               belongs to a macro that is being discarded, and each one's
-//               destination tag has to be handed back to mosaic_rename's free
-//               list -- rename's own journal restore is not used (see
-//               mosaic_core.sv, "recovery"), so the release has to come from
-//               somewhere that knows the tags. This store is that place: it
-//               already holds (tag, generation) per live macro.
-//
-// The walk steps one index per cycle and pulses `walk_free_valid` for each live
-// entry that owns a physical destination; the caller wires that pulse straight
-// onto rename's `free_*` port. The live bit is cleared as the walk passes, so a
-// completed walk leaves the store empty and the next allocation starts clean.
-// A macro that writes x0 (or writes no register at all) is live but owns no
-// destination, so it is cleared without a pulse.
+// Two write ports (the two-wide allocation the ROB will eventually allow) and
+// two read ports (the two retire lanes). The clear ports are separate from the
+// writes so that a same-cycle clear and write to one index has a single, stated
+// order: the write wins, because the write is the new macro and the clear is
+// the old one.
 // ============================================================================
 
 `default_nettype none
@@ -83,9 +66,6 @@ localparam int unsigned MD_IDX_W   = mosaic_id_pkg::MOSAIC_ID_W_ROB_INDEX;
 localparam int unsigned MD_TAG_W   = mosaic_id_pkg::MOSAIC_ID_W_PRF_TAG;
 localparam int unsigned MD_GEN_W   = mosaic_id_pkg::MOSAIC_ID_W_PRF_GEN;
 localparam int unsigned MD_RD_W    = 5;
-// The walk counter names every index and then one past the end, so it says
-// "finished" as well as naming a slot.
-localparam int unsigned MD_WALK_W  = $clog2(MD_ENTRIES + 1);
 
 module mosaic_macro_desc (
     input  logic                              clk,
@@ -120,33 +100,23 @@ module mosaic_macro_desc (
     input  logic [1:0]                        clr_valid,
     input  logic [1:0][MD_IDX_W-1:0]          clr_index,
 
-    // ------------------------------------------------------- the flush walk
-    input  logic                              walk_start,
-    output logic                              walk_busy,
-    output logic                              walk_free_valid,
-    output logic [MD_TAG_W-1:0]               walk_free_tag,
-    output logic [MD_GEN_W-1:0]               walk_free_gen,
-
     // ------------------------------------------------------------- counters
     output logic [31:0]                       o_write_ctr,
-    output logic [31:0]                       o_free_ctr,
+    output logic [31:0]                       o_clear_ctr,
     output logic [31:0]                       o_live_ctr
 );
 
   // ------------------------------------------------------------------ storage
   // Descriptor data is not reset; `live` is.
-  logic [MD_TAG_W-1:0] tag_q     [MD_ENTRIES];
-  logic [MD_GEN_W-1:0] gen_q     [MD_ENTRIES];
-  logic [MD_RD_W-1:0]  rd_q      [MD_ENTRIES];
-  logic                reg_we_q  [MD_ENTRIES];
-  logic                store_q   [MD_ENTRIES];
+  logic [MD_TAG_W-1:0]   tag_q     [0:MD_ENTRIES-1];
+  logic [MD_GEN_W-1:0]   gen_q     [0:MD_ENTRIES-1];
+  logic [MD_RD_W-1:0]    rd_q      [0:MD_ENTRIES-1];
+  logic                  reg_we_q  [0:MD_ENTRIES-1];
+  logic                  store_q   [0:MD_ENTRIES-1];
   logic [MD_ENTRIES-1:0] live_q;
 
-  logic [MD_WALK_W-1:0] walk_q;
-  logic                 walk_busy_q;
-
   logic [31:0] write_ctr;
-  logic [31:0] free_ctr;
+  logic [31:0] clear_ctr;
   logic [31:0] live_ctr;
 
   // ------------------------------------------------------------------- reads
@@ -170,30 +140,18 @@ module mosaic_macro_desc (
   end
 
   // ------------------------------------------------------------- next state
-  // One whole next-state vector per field, so a same-cycle write and clear to
-  // one index has a single, stated answer (the write wins) instead of two
-  // non-blocking assignments racing. The walk clears as it passes; because the
-  // walk is the only thing that runs while dispatch is stalled, no allocation
-  // can be racing it.
+  // One whole next-state vector, so a same-cycle write and clear to one index
+  // has a single answer (the write wins) instead of two non-blocking
+  // assignments racing.
   logic [MD_ENTRIES-1:0] live_d;
-  logic                  walk_pulse;
-  logic                  walk_last;
 
   always_comb begin
-    live_d    = live_q;
-    walk_pulse = walk_busy_q && live_q[walk_q[MD_IDX_W-1:0]];
-    walk_last  = walk_busy_q && (walk_q == MD_WALK_W'(MD_ENTRIES - 1));
-
-    if (walk_busy_q) begin
-      live_d[walk_q[MD_IDX_W-1:0]] = 1'b0;
-    end
-
+    live_d = live_q;
     for (int unsigned p = 0; p < 2; p++) begin
       if (clr_valid[p]) begin
         live_d[clr_index[p]] = 1'b0;
       end
     end
-
     // Allocation last: it is the newer statement.
     for (int unsigned p = 0; p < 2; p++) begin
       if (wr_valid[p]) begin
@@ -202,52 +160,34 @@ module mosaic_macro_desc (
     end
   end
 
-  // `walk_free_valid` is the pulse the caller wires to rename's free port. It
-  // is only for a live entry that owns a physical destination (`reg_we` and a
-  // non-x0 rd, which dispatch has already folded into the write's `wr_tag`
-  // validity by passing `reg_we_q` down). An x0 write is live and is walked but
-  // releases nothing -- there was no tag to release.
-  assign walk_free_valid = walk_pulse && reg_we_q[walk_q[MD_IDX_W-1:0]];
-  assign walk_free_tag   = tag_q[walk_q[MD_IDX_W-1:0]];
-  assign walk_free_gen   = gen_q[walk_q[MD_IDX_W-1:0]];
-  assign walk_busy       = walk_busy_q;
-
   always_ff @(posedge clk) begin
     if (rst) begin
-      live_q      <= {MD_ENTRIES{1'b0}};
-      walk_q      <= {MD_WALK_W{1'b0}};
-      walk_busy_q <= 1'b0;
-      write_ctr   <= 32'd0;
-      free_ctr    <= 32'd0;
-      live_ctr    <= 32'd0;
+      live_q    <= {MD_ENTRIES{1'b0}};
+      write_ctr <= 32'd0;
+      clear_ctr <= 32'd0;
+      live_ctr  <= 32'd0;
     end else begin
       live_q <= live_d;
 
-      // A walk requested in the cycle a previous walk finishes restarts, so two
-      // back-to-back flushes cannot drop the second walk.
-      if (walk_start) begin
-        walk_busy_q <= 1'b1;
-        walk_q      <= {MD_WALK_W{1'b0}};
-      end else if (walk_busy_q && (walk_last || (walk_q >= MD_WALK_W'(MD_ENTRIES)))) begin
-        walk_busy_q <= 1'b0;
-        walk_q      <= {MD_WALK_W{1'b0}};
-      end else if (walk_busy_q) begin
-        walk_q <= walk_q + MD_WALK_W'(1);
+      for (int unsigned p = 0; p < 2; p++) begin
+        if (wr_valid[p]) begin
+          tag_q[wr_index[p]]    <= wr_tag[p];
+          gen_q[wr_index[p]]    <= wr_gen[p];
+          rd_q[wr_index[p]]     <= wr_rd[p];
+          reg_we_q[wr_index[p]] <= wr_reg_we[p];
+          store_q[wr_index[p]]  <= wr_is_store[p];
+        end
       end
 
-      // Counters: allocation writes, releases pulsed by the walk, and the
-      // population of the live vector. The last one is the conservation check a
-      // leak would show up in first.
       write_ctr <= write_ctr + {31'd0, wr_valid[0]} + {31'd0, wr_valid[1]};
-      free_ctr  <= free_ctr  + {31'd0, walk_free_valid};
+      clear_ctr <= clear_ctr + {31'd0, clr_valid[0]} + {31'd0, clr_valid[1]};
       live_ctr  <= live_ctr + {31'd0, wr_valid[0]} + {31'd0, wr_valid[1]}
-                            - {31'd0, clr_valid[0]} - {31'd0, clr_valid[1]}
-                            - {31'd0, walk_pulse};
+                            - {31'd0, clr_valid[0]} - {31'd0, clr_valid[1]};
     end
   end
 
   assign o_write_ctr = write_ctr;
-  assign o_free_ctr  = free_ctr;
+  assign o_clear_ctr = clear_ctr;
   assign o_live_ctr  = live_ctr;
 
 endmodule : mosaic_macro_desc

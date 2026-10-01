@@ -232,15 +232,22 @@ build/p0/unit/lsu.size_fault_boundaries/lsu.size_fault_boundaries \
   --case lsu.size_fault_boundaries --out /tmp/lsu-mut --seed 1 --max-cycles 200000; echo "exit $?"
 
 # lint, scoped to the new sources
-make lint-cpp
 verilator --lint-only -Wall --top-module mosaic_lsu_endpoint_tb \
   -Ibuild/p0/sim -Irtl/core -Irtl/common -Ibuild/p0/rtl \
   rtl/core/mosaic_pkg.sv rtl/core/mosaic_uop_pkg.sv rtl/core/mosaic_lsu_endpoint.sv \
   sim/tb/mosaic_lsu_endpoint_tb.sv
+
+c++ -std=c++17 -fsyntax-only -Wall -Wextra -Wshadow \
+  -Ibuild/p0/sim -Isim/common -I$(verilator --getenv VERILATOR_ROOT)/include \
+  -Ibuild/p0/unit/lsu.size_fault_boundaries/obj_dir sim/unit/tb_lsu.cpp
 ```
 
-`make lint-cpp` reports `25 file(s) clean`. The Verilator lint above reports no
-warnings and exits 0. `slang-tidy` reports only the project-wide style warnings
-(`STYLE-2` port suffixes, `STYLE-7` `i_` instance prefix) that the RTL and the
-other wrappers already trigger, and which the project's `lint-slang` gate does
-not cover because it walks `rtl/` only.
+The Verilator lint above reports no warnings and exits 0. The `c++` line is
+`lint-cpp`'s own command scoped to this case's driver: it reports only warnings
+from Verilator's runtime headers, none from `tb_lsu.cpp`. (`make lint-cpp` over
+the whole tree reported `25 file(s) clean` when it was run for this work; it was
+failing afterwards on `sim/unit/tb_rename.cpp`, a concurrently edited sibling
+file that is not part of this case.) `slang-tidy` reports only the project-wide
+style warnings (`STYLE-2` port suffixes, `STYLE-7` `i_` instance prefix) that the
+RTL and the other wrappers already trigger, and which the project's `lint-slang`
+gate does not cover because it walks `rtl/` only.

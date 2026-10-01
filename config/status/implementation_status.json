@@ -19,7 +19,9 @@
     "I-012",
     "I-010",
     "I-028",
-    "I-024"
+    "I-024",
+    "I-033",
+    "I-018"
   ],
   "evidence": {
     "I-001": {
@@ -225,6 +227,30 @@
       "verdict": "PASS",
       "notes": "Case PASS from a clean build (build/p0/unit/<case> removed first): 4366 per-cycle shadow comparisons over 4462 cycles, soak coverage 1231 grants / 635 releases / 592 cancels / 1246 stale ids / 1559 contended cycles / 639 same-cycle terminal+grant / 26 all-pools-full cycles. Six mutants each exit 1 with a distinct named first failure and a check-count delta. A seventh mutant (the credit term dropped) passes identically and is reported as a redundancy probe rather than as evidence: occupancy is derived from the lease ledger and every live lease holds one credit, so at this geometry 'no record free' implies 'no credit free'. The falsifiable form of that defect (a dropped FU class) was written instead and is caught. The card's blockers are the ones tested: all-or-none grant, a refusal with no side effect, and a cancel returning the credit exactly once. NOT verified: p0 geometry only (the driver asserts the geometry so another profile fails loudly); the generation ABA bound is documented, not closed; no real requester exists yet (I-025/I-026/I-028 provide the plumbing); reconfiguration (FREEZE/DRAIN/REVOKED/INSTALL) belongs to I-031; fairness is observed, not proven.",
       "report": "results/reports/I-024-lease.md"
+    },
+    "I-033": {
+      "cases": [
+        "lsu.size_fault_boundaries"
+      ],
+      "commands": [
+        "python3 tools/run_unit.py --profile p0 --case lsu.size_fault_boundaries"
+      ],
+      "verdict": "PASS",
+      "notes": "Case PASS from a clean build: 83805 checks over 4118 cycles, 336 loads, 181 stores, 332 memory transactions, 185 misaligned traps, 50 access faults, 517 responses. The RTL (written by the integration lead, verified by an independent lane) was found correct and was not edited; two defects found were in the testbench and were fixed, both by deciding from the specification rather than from the DUT: the memory model wrote the payload's low byte instead of the byte in the lane the address selects (the module's documented lane convention says the byte at addr is lane addr[2:0]), and a hand-written sign-extension constant for a signed halfword was wrong while both the DUT and the model's own SpecExtract agreed. All four mutants exit 1 with a named first failure and a check-count delta against the base 83805: NO_MISALIGN_CHECK caught at cycle 295 (a misaligned access is forwarded to memory instead of trapping), NO_SIGN_EXTEND at cycle 17, NO_STORE_SHIFT at cycle 35, FAULT_AS_ZERO at cycle 259. NOT verified: no physical memory (a byte-array model: no SRAM, cache, MMIO, coherence or ECC); single outstanding transaction only (I-043 is out of scope); don't-care fields (wstrb/wdata on a load, rsp.data on a store or fault) hide any defect confined to them; only size codes 0..3 driven; one hart; seeds are 400 random transactions, not an exhaustive proof.",
+      "report": "results/reports/I-033-lsu.md"
+    },
+    "I-018": {
+      "cases": [
+        "recovery.checkpoint_exact_restore",
+        "recovery.nested_branch_full_queues"
+      ],
+      "commands": [
+        "python3 tools/run_unit.py --profile p0 --case recovery.checkpoint_exact_restore",
+        "python3 tools/run_unit.py --profile p0 --case recovery.nested_branch_full_queues"
+      ],
+      "verdict": "PASS",
+      "notes": "Both cases PASS from clean builds (build/p0/unit/<case> removed first), 419470 per-cycle comparisons over 6810 cycles in the base run. Nine mutants each exit 1 with a distinct named first failure and a delta; two of the previously delivered mutants did not elaborate at all and had never been run (they were re-expressed so they build and still inject the described defect) and three more were added so that each RTL defect fixed has a mutant failing on the check written for it. Root causes the package found: an allocation at the undo bound was accepted while the journal index wrapped (out-of-bounds write, found with AddressSanitizer -- this was the cause of the changing first divergence the integration lane kept seeing, not a shifting model); a restore undid only the restored checkpoint's own branch tag, leaking one tag per killed younger checkpoint; alloc_seen/last_alloc_gen were not reset so the first ROB_ENTRIES allocations after reset reported a regression on a compliant producer; and the credit kill was by epoch-only, which kills older work the squash does not own -- plan section 1.3 and the card forbid it, so the module's documented rule was wrong and its header was corrected rather than only its code. NOT verified: the module still owns its own copy of the speculative maps, free list, generation table and journal; the rename/recovery cutover (one owner for that state, recovery driving rename's ckpt/squash) is recorded in PROGRESS as the next integration task and is not claimed here.",
+      "report": "results/reports/I-018-recovery.md"
     }
   }
 }

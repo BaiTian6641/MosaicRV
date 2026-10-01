@@ -1,0 +1,575 @@
+{
+  "schema_version": 1,
+  "id": "mosaicrv.event.v1",
+  "reference_profile": "p0",
+  "frozen": "2026-10-01",
+  "spec": [
+    "docs/validation-plan.md#3 (Architectural Event v1 field groups, two integration routes)",
+    "docs/validation-plan.md#5 V-008 (freeze the architectural event interface)"
+  ],
+  "comment": "The frozen architectural event interface. Every field states its width, meaning, when it is valid, the phase of the clock cycle it is sampled in, and whether it is an architectural effect (something the ISA defines) or an observed fact (something the harness records to make a failure diagnosable, which no reference model is obliged to reproduce). tools/check_event_contract.py rejects this file, the RTL tap, or the C++ serialiser when any of the three disagrees with the others; it is wired into `make check` and carries negative controls that are themselves required to fail.",
+
+  "record": {
+    "granularity": "one architectural event",
+    "identity": "every architectural effect locates to exactly one hart and one instruction: the record carries hart_id and retire_seq, both architectural, and no record exists that is not attributable through them",
+    "emit_rule": "a record is emitted for each retiring lane in the cycle the reorder buffer acknowledges the pop (the event follows the acknowledgement, never the request), for each trapping instruction in the cycle it traps, and for each architectural memory visibility of exactly one previously retired instruction",
+    "lane_rule": "a wide retire produces one record per lane, oldest first; the records of one cycle share no snapshot: each lane's identity, program counter and payload come from that lane's own ports, and lane i's retire_seq is the counter plus i",
+    "trap_rule": "a trapping instruction produces a TRAP record and never a RETIRE record: it writes no register, no CSR and no store, so those fields are outside the record's validity even though the payload bus may carry them",
+    "memory_rule": "a committed store's retirement (kind RETIRE, mem_is_store 1) and that store becoming visible to the memory system (kind MEM_VISIBLE) are two records, not one; both carry the store's retire_seq so a consumer can attribute the visibility without knowing the store buffer's internal state"
+  },
+
+  "encoding": {
+    "endianness": "little",
+    "header": {
+      "name": "schema_version",
+      "bits": 32,
+      "meaning": "the schema this record was encoded against; the encoder refuses to write a record whose caller-declared version differs from the version it was compiled against, and a decoder rejects a stream whose header differs"
+    },
+    "field_bytes": "ceil(width_bits / 8), value little-endian in the low bytes, high bits zero",
+    "total_octets": 100,
+    "text_line": "fields in declaration order as name=value, each value right-justified hexadecimal with 2*ceil(width_bits/8) digits, one line per record; the text form and the binary form carry the same fields in the same order"
+  },
+
+  "sampling_instants": {
+    "settled_pre_edge": "read from the producer's settled outputs with the clock low, in the cycle the producer presents the record, before the rising edge that ends that cycle. The prompt of the interface is one cycle of presentation; how many cycles after the architectural commit that presentation lands is a property of the producer and is recorded per producer in `producers`.",
+    "producer_constant": "known to the producer without reading the DUT in that cycle: a hart index, a cycle counter, or a value the driving scenario itself supplied."
+  },
+
+  "producers": [
+    {
+      "id": "retire_unit",
+      "file": "rtl/core/mosaic_retire.sv",
+      "declaration_selector": {"kind": "sv_output_port_prefix", "prefix": "ev_"},
+      "lanes_expr": "rename_width",
+      "presentation": "combinational from the buffer's head view and the execution payload; the record for each acknowledged lane is presented in the same cycle the pop is acknowledged, gated on ev_valid",
+      "presentation_latency_cycles": 0,
+      "sampled": "settled_pre_edge",
+      "fields_unavailable": ["pc_after", "insn_bits", "trap_epc"],
+      "kinds_emitted": ["RETIRE", "TRAP"],
+      "note": "the retire unit is the only writer of committed state, so it is the authority for retire_seq, rob_id, the register/CSR/store payloads and the trap cause/tval; it carries no instruction bits, no architectural next-PC and no epc port (see reconciliation F-3)"
+    },
+    {
+      "id": "bringup_tap",
+      "file": "sim/tb/mosaic_bringup_tb.sv",
+      "declaration_selector": {"kind": "sv_output_port_prefix", "prefix": "c_evt_"},
+      "lanes_expr": "1",
+      "presentation": "registered in the bring-up core; the record is presented in the cycle after the commit, gated on c_evt_valid",
+      "presentation_latency_cycles": 1,
+      "sampled": "settled_pre_edge",
+      "fields_unavailable": ["rob_id", "csr_write_valid", "csr_addr", "csr_value"],
+      "kinds_emitted": ["RETIRE", "TRAP"],
+      "note": "single-lane in-order bring-up core; its wrapper ports are host-facing containers, so a declared width wider than the canonical field is recorded and justified rather than treated as a disagreement"
+    },
+    {
+      "id": "host_oracle_tap",
+      "file": "sim/common/event_tap.h",
+      "declaration_selector": {"kind": "cpp_struct_members", "struct": "RetireEvent"},
+      "lanes_expr": "1",
+      "presentation": "one C++ record may be recorded per retired instruction; EventTap::Line writes it as one text line",
+      "presentation_latency_cycles": null,
+      "sampled": "settled_pre_edge",
+      "fields_unavailable": ["rob_id", "cycle", "csr_write_valid", "csr_addr", "csr_value"],
+      "kinds_emitted": ["RETIRE", "TRAP"],
+      "note": "the de-facto host record used by the I-004 harness; it has no message for a memory visibility, so MEM_VISIBLE is not producible through this path today (reconciliation F-4/F-5)"
+    }
+  ],
+
+  "event_kinds": {
+    "RETIRE": {"value": 1, "meaning": "an instruction retired and its architectural effects are final"},
+    "TRAP": {"value": 2, "meaning": "a synchronous exception or interrupt was taken on this instruction; it did not retire normally"},
+    "MEM_VISIBLE": {"value": 3, "meaning": "an architectural memory location became visible with the value of exactly one previously retired store"}
+  },
+
+  "locating": {
+    "hart_field": "hart_id",
+    "order_field": "retire_seq",
+    "note": "these two fields are valid on every kind and are the only fields a consumer needs to attribute an effect to one hart and one instruction; both are architectural, and neither is a debug-only microarchitectural identity"
+  },
+
+  "rtl_constants": {
+    "mosaic_cfg_pkg::MOSAIC_XLEN": "xlen",
+    "mosaic_cfg_pkg::MOSAIC_RETIRE_WIDTH": "rename_width",
+    "mosaic_cfg_pkg::MOSAIC_ROB_ENTRIES": "rob_entries",
+    "mosaic_cfg_pkg::MOSAIC_INT_PRF_TAG_W": "clog2(int_prf_entries)",
+    "mosaic_cfg_pkg::MOSAIC_MAX_UOPS_PER_MACRO": "max_uops_per_macro"
+  },
+
+  "fields": [
+    {
+      "name": "retire_seq",
+      "width_bits": 8,
+      "width_expr": "clog2(2*rob_entries+1)",
+      "encoding_offset_bytes": 4,
+      "encoding_octets": 1,
+      "class": "architectural",
+      "identity_role": "retire_order",
+      "valid_kinds": ["RETIRE", "TRAP", "MEM_VISIBLE"],
+      "valid_when": "always present; it is the record's locating identity and the producer asserts it in the same cycle the record is presented",
+      "sampled_at": "settled_pre_edge",
+      "meaning": "the per-hart monotonic index of this retirement, i.e. the instruction's position in the hart's architectural order. The modulus exceeds twice the reorder-buffer depth so a wrapped value can never be confused with a live one (config/contracts/interfaces.json retire_event.retire_seq). It is not a cycle number: a cycle in which nothing retired does not advance it.",
+      "sources": [
+        {"kind": "rtl_lane", "file": "rtl/core/mosaic_retire.sv", "decl": "ev_seq", "relation": "exact"},
+        {"kind": "tap", "file": "sim/common/event_tap.h", "decl": "seq", "relation": "container", "declared_bits": 64, "why": "host type uint64_t is a container for the 8-bit contracted counter; see reconciliation F-1 for what the I-004 harness actually stores in it"}
+      ]
+    },
+    {
+      "name": "hart_id",
+      "width_bits": 1,
+      "width_expr": "harts",
+      "encoding_offset_bytes": 5,
+      "encoding_octets": 1,
+      "class": "architectural",
+      "identity_role": "hart",
+      "valid_kinds": ["RETIRE", "TRAP", "MEM_VISIBLE"],
+      "valid_when": "always present; bound by the producer that owns the hart being driven (p0 has one hart, so the field is one bit and always zero)",
+      "sampled_at": "producer_constant",
+      "meaning": "the single hart the effect belongs to. It is architectural, and it is the first half of the locating identity: an effect with no hart is an effect no per-hart reference model can be compared against.",
+      "sources": [
+        {"kind": "harness_binding", "decl": "driven hart index", "why": "a single-hart DUT has no hart port to read; the harness that instantiates it is the only authority, and it binds the constant it is driving"}
+      ]
+    },
+    {
+      "name": "cycle",
+      "width_bits": 64,
+      "width_expr": "xlen",
+      "encoding_offset_bytes": 6,
+      "encoding_octets": 8,
+      "class": "observed",
+      "identity_role": "occurrence",
+      "valid_kinds": ["RETIRE", "TRAP", "MEM_VISIBLE"],
+      "valid_when": "always present; supplied by the harness that owns the clock, counted in the production `settled_pre_edge` presentation cycle",
+      "sampled_at": "producer_constant",
+      "meaning": "the producer's core-clock cycle for the presentation of this record, recorded so the first difference in a differential run can be located in time. OBSERVED, not architectural: two microarchitectures' cycle numbers are not comparable values and this field must never enter an architectural-equality comparison (docs/validation-plan.md#3 rule 4). It is a different field from retire_seq with a different meaning, and the checker rejects a schema in which the two claim the same identity role.",
+      "sources": [
+        {"kind": "harness_binding", "decl": "harness cycle counter", "why": "neither the retire unit nor the bring-up tap exports a cycle number; the harness owns the clock and is the only producer that can count it"}
+      ]
+    },
+    {
+      "name": "kind",
+      "width_bits": 2,
+      "width_expr": "2",
+      "encoding_offset_bytes": 14,
+      "encoding_octets": 1,
+      "class": "architectural",
+      "identity_role": "kind",
+      "valid_kinds": ["RETIRE", "TRAP", "MEM_VISIBLE"],
+      "valid_when": "always present; it is the discriminator every other field's validity is written against",
+      "sampled_at": "settled_pre_edge",
+      "meaning": "which event this record is (see event_kinds). The interface carries the retire status explicitly, so an execution result cannot be mistaken for a retirement: a consumer that has the payload and not this field is looking at the wrong interface.",
+      "sources": [
+        {"kind": "rtl_derived", "file": "rtl/core/mosaic_retire.sv", "from": ["ev_valid", "ev_trap"], "rule": "kind = ev_trap ? TRAP : (ev_valid ? RETIRE : none); a lane with ev_valid 0 produces no record at all"},
+        {"kind": "rtl_derived", "file": "sim/tb/mosaic_bringup_tb.sv", "from": ["c_evt_valid", "c_evt_trap"], "rule": "kind = c_evt_trap ? TRAP : RETIRE, gated on c_evt_valid"},
+        {"kind": "rtl_derived", "file": "sim/common/event_tap.h", "from": ["is_trap"], "rule": "kind = is_trap ? TRAP : RETIRE; the host record has no message for a memory visibility, see reconciliation F-5"}
+      ]
+    },
+    {
+      "name": "pc_before",
+      "width_bits": 64,
+      "width_expr": "xlen",
+      "encoding_offset_bytes": 15,
+      "encoding_octets": 8,
+      "class": "architectural",
+      "identity_role": "instruction_pc",
+      "valid_kinds": ["RETIRE", "TRAP"],
+      "valid_when": "the record is about an instruction, i.e. kind is RETIRE or TRAP; it is the committed program counter of that instruction, never a fetch address and never masked",
+      "sampled_at": "settled_pre_edge",
+      "meaning": "the architectural program counter of the instruction this record is about, taken from the reorder-buffer entry that retired, so a redirected, replayed or compressed instruction cannot report the address it was fetched at instead of the address it executed at.",
+      "sources": [
+        {"kind": "rtl_lane", "file": "rtl/core/mosaic_retire.sv", "decl": "ev_pc", "relation": "exact"},
+        {"kind": "tap", "file": "sim/tb/mosaic_bringup_tb.sv", "decl": "c_evt_pc", "relation": "exact", "declared_bits": 64},
+        {"kind": "tap", "file": "sim/common/event_tap.h", "decl": "pc", "relation": "container", "declared_bits": 64, "why": "host uint64_t names the same 64-bit field one for one"}
+      ]
+    },
+    {
+      "name": "pc_after",
+      "width_bits": 64,
+      "width_expr": "xlen",
+      "encoding_offset_bytes": 23,
+      "encoding_octets": 8,
+      "class": "architectural",
+      "identity_role": "none",
+      "valid_kinds": ["RETIRE", "TRAP"],
+      "valid_when": "the record is about an instruction; for a RETIRE it is the architectural next PC (the fall-through, the taken target, or the link value's target) and for a TRAP it is the target the trap transfers to",
+      "sampled_at": "settled_pre_edge",
+      "meaning": "where the hart goes next because of this instruction. A consumer must not derive it from pc_before (that would make a branch or jump comparison vacuous), so it is a field in its own right.",
+      "sources": [
+        {"kind": "tap", "file": "sim/tb/mosaic_bringup_tb.sv", "decl": "c_evt_next_pc", "relation": "exact", "declared_bits": 64},
+        {"kind": "tap", "file": "sim/common/event_tap.h", "decl": "next_pc", "relation": "container", "declared_bits": 64, "why": "host uint64_t names the same 64-bit field one for one"},
+        {"kind": "pending_rtl", "file": "rtl/core/mosaic_retire.sv", "decl": "ev_pc_after", "why": "the out-of-order retire path has no next-PC port; the canonical event requires one, so the freeze declares the port the retire unit must grow (reconciliation F-3). Until it exists the field is supplied by the driving scenario in the unit proof and is listed as NOT verified there."}
+      ]
+    },
+    {
+      "name": "insn_bits",
+      "width_bits": 32,
+      "width_expr": "32",
+      "encoding_offset_bytes": 31,
+      "encoding_octets": 4,
+      "class": "architectural",
+      "identity_role": "none",
+      "valid_kinds": ["RETIRE", "TRAP"],
+      "valid_when": "the record is about an instruction and its bits are known; an instruction whose fetch faulted has no complete opcode and must not have one invented, so this field is zero and the TRAP record's trap_cause says why",
+      "sampled_at": "settled_pre_edge",
+      "meaning": "the instruction's own encoding, as committed, unmasked. Not a prefix, not a masked PC and not the fetch PC: the compressed low bits are part of the instruction and the reference checker decodes this word to know what the instruction was.",
+      "sources": [
+        {"kind": "tap", "file": "sim/tb/mosaic_bringup_tb.sv", "decl": "c_evt_insn", "relation": "exact", "declared_bits": 32},
+        {"kind": "tap", "file": "sim/common/event_tap.h", "decl": "insn", "relation": "container", "declared_bits": 32, "why": "host uint32_t names the same 32-bit field one for one"},
+        {"kind": "pending_rtl", "file": "rtl/core/mosaic_retire.sv", "decl": "ev_insn", "why": "the out-of-order retire path carries the PC but not the instruction bits; the freeze declares the port it must grow (reconciliation F-3)"}
+      ]
+    },
+    {
+      "name": "rob_id",
+      "width_bits": 14,
+      "width_expr": "2*clog2(int_prf_entries)",
+      "encoding_offset_bytes": 35,
+      "encoding_octets": 2,
+      "class": "observed",
+      "identity_role": "microarch_identity",
+      "valid_kinds": ["RETIRE", "TRAP"],
+      "valid_when": "the record is about an instruction, and only from the out-of-order producer; a record whose producer has no physical identity leaves it zero",
+      "sampled_at": "settled_pre_edge",
+      "meaning": "the retiring entry's {generation, destination tag} identity, for triangulating a failure to a reorder-buffer slot. OBSERVED and debug-only: no reference model has this field (docs/validation-plan.md#3 Debug-only identity), so it must never take part in an architectural comparison, and it is never a substitute for hart_id plus retire_seq.",
+      "sources": [
+        {"kind": "rtl_lane", "file": "rtl/core/mosaic_retire.sv", "decl": "ev_id", "relation": "exact"}
+      ]
+    },
+    {
+      "name": "gpr_write_valid",
+      "width_bits": 1,
+      "width_expr": "1",
+      "encoding_offset_bytes": 37,
+      "encoding_octets": 1,
+      "class": "architectural",
+      "identity_role": "none",
+      "valid_kinds": ["RETIRE"],
+      "valid_when": "the record is a retirement and the instruction writes an architectural integer register; zero on a TRAP record even if the payload bus was carrying a write, because a trapping instruction writes nothing",
+      "sampled_at": "settled_pre_edge",
+      "meaning": "whether rd/rd_value are architectural effects of this retirement. A consumer must not read rd or rd_value without it: the register payload of a non-writing instruction is not a register write.",
+      "sources": [
+        {"kind": "rtl_lane", "file": "rtl/core/mosaic_retire.sv", "decl": "ev_reg_we", "relation": "exact"},
+        {"kind": "tap", "file": "sim/tb/mosaic_bringup_tb.sv", "decl": "c_evt_has_rd", "relation": "exact", "declared_bits": 1},
+        {"kind": "tap", "file": "sim/common/event_tap.h", "decl": "has_rd", "relation": "container", "declared_bits": 1, "why": "host bool carries exactly the one validity bit"}
+      ]
+    },
+    {
+      "name": "rd",
+      "width_bits": 5,
+      "width_expr": "5",
+      "encoding_offset_bytes": 38,
+      "encoding_octets": 1,
+      "class": "architectural",
+      "identity_role": "none",
+      "valid_kinds": ["RETIRE"],
+      "valid_when": "the record is a retirement and gpr_write_valid is 1",
+      "sampled_at": "settled_pre_edge",
+      "meaning": "the architectural integer destination. rd == 0 is a legal value and a legal retirement that writes nothing: x0 is never renamed and its value is always zero, so a write to x0 retires but commits no mapping (rtl/core/mosaic_retire.sv, the committed-map commit block).",
+      "sources": [
+        {"kind": "rtl_lane", "file": "rtl/core/mosaic_retire.sv", "decl": "ev_rd", "relation": "exact"},
+        {"kind": "tap", "file": "sim/tb/mosaic_bringup_tb.sv", "decl": "c_evt_rd", "relation": "exact", "declared_bits": 5},
+        {"kind": "tap", "file": "sim/common/event_tap.h", "decl": "rd", "relation": "container", "declared_bits": 8, "why": "host uint8_t is a one-byte container for the 5-bit register number"}
+      ]
+    },
+    {
+      "name": "rd_value",
+      "width_bits": 64,
+      "width_expr": "xlen",
+      "encoding_offset_bytes": 39,
+      "encoding_octets": 8,
+      "class": "architectural",
+      "identity_role": "none",
+      "valid_kinds": ["RETIRE"],
+      "valid_when": "the record is a retirement and gpr_write_valid is 1; the value is the pre-edge register value the instruction produced, never the source operand it read",
+      "sampled_at": "settled_pre_edge",
+      "meaning": "the value written to rd by this retirement, all 64 bits. Comparing a narrower window would hide a defect in the high half, so no part of this field is optional.",
+      "sources": [
+        {"kind": "rtl_lane", "file": "rtl/core/mosaic_retire.sv", "decl": "ev_value", "relation": "exact"},
+        {"kind": "tap", "file": "sim/tb/mosaic_bringup_tb.sv", "decl": "c_evt_rd_value", "relation": "exact", "declared_bits": 64},
+        {"kind": "tap", "file": "sim/common/event_tap.h", "decl": "rd_value", "relation": "container", "declared_bits": 64, "why": "host uint64_t names the same 64-bit field one for one"}
+      ]
+    },
+    {
+      "name": "csr_write_valid",
+      "width_bits": 1,
+      "width_expr": "1",
+      "encoding_offset_bytes": 47,
+      "encoding_octets": 1,
+      "class": "architectural",
+      "identity_role": "none",
+      "valid_kinds": ["RETIRE"],
+      "valid_when": "the record is a retirement and the instruction writes a CSR; zero on a TRAP record, because a trapping instruction writes no CSR",
+      "sampled_at": "settled_pre_edge",
+      "meaning": "whether csr_addr/csr_value are architectural effects of this retirement. The CSR side effect becomes visible by the retirement and by nothing else (rtl/core/mosaic_retire.sv header, the visibility rule).",
+      "sources": [
+        {"kind": "rtl_lane", "file": "rtl/core/mosaic_retire.sv", "decl": "ev_csr_we", "relation": "exact"}
+      ]
+    },
+    {
+      "name": "csr_addr",
+      "width_bits": 12,
+      "width_expr": "12",
+      "encoding_offset_bytes": 48,
+      "encoding_octets": 2,
+      "class": "architectural",
+      "identity_role": "none",
+      "valid_kinds": ["RETIRE"],
+      "valid_when": "the record is a retirement and csr_write_valid is 1",
+      "sampled_at": "settled_pre_edge",
+      "meaning": "the CSR address written. A write to an address the unit does not implement is still reported on the stream rather than absorbed, so a software-visible register that never changes cannot hide behind a silently dropped write.",
+      "sources": [
+        {"kind": "rtl_lane", "file": "rtl/core/mosaic_retire.sv", "decl": "ev_csr_addr", "relation": "exact"}
+      ]
+    },
+    {
+      "name": "csr_value",
+      "width_bits": 64,
+      "width_expr": "xlen",
+      "encoding_offset_bytes": 50,
+      "encoding_octets": 8,
+      "class": "architectural",
+      "identity_role": "none",
+      "valid_kinds": ["RETIRE"],
+      "valid_when": "the record is a retirement and csr_write_valid is 1",
+      "sampled_at": "settled_pre_edge",
+      "meaning": "the value written to csr_addr by this retirement; the architectural CSR delta the reference model applies when it steps this instruction.",
+      "sources": [
+        {"kind": "rtl_lane", "file": "rtl/core/mosaic_retire.sv", "decl": "ev_csr_value", "relation": "exact"}
+      ]
+    },
+    {
+      "name": "mem_is_store",
+      "width_bits": 1,
+      "width_expr": "1",
+      "encoding_offset_bytes": 58,
+      "encoding_octets": 1,
+      "class": "architectural",
+      "identity_role": "none",
+      "valid_kinds": ["RETIRE", "MEM_VISIBLE"],
+      "valid_when": "the record is a retirement of a store or a visibility of a store; zero for a load retirement, for a non-memory instruction, and on a TRAP record even if the payload bus was carrying store data",
+      "sampled_at": "settled_pre_edge",
+      "meaning": "whether mem_addr/mem_data/mem_size are architectural effects of this record. The kind still distinguishes the retirement from the visibility; this field only says the payload is a store's.",
+      "sources": [
+        {"kind": "rtl_lane", "file": "rtl/core/mosaic_retire.sv", "decl": "ev_store", "relation": "exact"},
+        {"kind": "tap", "file": "sim/tb/mosaic_bringup_tb.sv", "decl": "c_evt_is_store", "relation": "exact", "declared_bits": 1},
+        {"kind": "tap", "file": "sim/common/event_tap.h", "decl": "is_store", "relation": "container", "declared_bits": 1, "why": "host bool carries exactly the one validity bit"}
+      ]
+    },
+    {
+      "name": "mem_addr",
+      "width_bits": 64,
+      "width_expr": "xlen",
+      "encoding_offset_bytes": 59,
+      "encoding_octets": 8,
+      "class": "architectural",
+      "identity_role": "none",
+      "valid_kinds": ["RETIRE", "MEM_VISIBLE"],
+      "valid_when": "the record is a retirement of a store or the visibility of a store; the address is the virtual address the instruction computed",
+      "sampled_at": "settled_pre_edge",
+      "meaning": "the byte address of the store. The same address on a RETIRE record and on the MEM_VISIBLE record is what lets a consumer prove the visibility belongs to this store and not to a neighbour's.",
+      "sources": [
+        {"kind": "rtl_lane", "file": "rtl/core/mosaic_retire.sv", "decl": "ev_store_addr", "relation": "exact"},
+        {"kind": "tap", "file": "sim/tb/mosaic_bringup_tb.sv", "decl": "c_evt_store_addr", "relation": "exact", "declared_bits": 64},
+        {"kind": "tap", "file": "sim/common/event_tap.h", "decl": "store_address", "relation": "container", "declared_bits": 64, "why": "host uint64_t names the same 64-bit field one for one"}
+      ]
+    },
+    {
+      "name": "mem_data",
+      "width_bits": 64,
+      "width_expr": "xlen",
+      "encoding_offset_bytes": 67,
+      "encoding_octets": 8,
+      "class": "architectural",
+      "identity_role": "none",
+      "valid_kinds": ["RETIRE", "MEM_VISIBLE"],
+      "valid_when": "the record is a retirement of a store or the visibility of a store; the low mem_size bytes are the value, the bytes above mem_size are not part of the effect",
+      "sampled_at": "settled_pre_edge",
+      "meaning": "the store data as it left the hart, before any memory-system transformation. It is compared byte-exactly against the reference's store, so a wrong byte cannot be excused by a plausible whole word.",
+      "sources": [
+        {"kind": "rtl_lane", "file": "rtl/core/mosaic_retire.sv", "decl": "ev_store_data", "relation": "exact"},
+        {"kind": "tap", "file": "sim/tb/mosaic_bringup_tb.sv", "decl": "c_evt_store_data", "relation": "exact", "declared_bits": 64},
+        {"kind": "tap", "file": "sim/common/event_tap.h", "decl": "store_data", "relation": "container", "declared_bits": 64, "why": "host uint64_t names the same 64-bit field one for one"}
+      ]
+    },
+    {
+      "name": "mem_size",
+      "width_bits": 3,
+      "width_expr": "3",
+      "encoding_offset_bytes": 75,
+      "encoding_octets": 1,
+      "class": "architectural",
+      "identity_role": "none",
+      "valid_kinds": ["RETIRE", "MEM_VISIBLE"],
+      "valid_when": "the record is a retirement of a store or the visibility of a store; the encoding is mosaic_pkg's SZ_BYTE/SZ_HALF/SZ_WORD/... (3 bits in the package), so a half word and a word cannot be confused",
+      "sampled_at": "settled_pre_edge",
+      "meaning": "the access size of the store, in the project's package encoding. It is the field that says how many bytes of mem_data are the effect; the tap's wider container carries the same value in more bits.",
+      "sources": [
+        {"kind": "rtl_lane", "file": "rtl/core/mosaic_retire.sv", "decl": "ev_store_size", "relation": "exact"},
+        {"kind": "tap", "file": "sim/tb/mosaic_bringup_tb.sv", "decl": "c_evt_store_size", "relation": "container", "declared_bits": 4, "why": "wrapper port one bit wider than the package encoding so the harness reads it as a byte; the low three bits are the field (reconciliation F-2)"},
+        {"kind": "tap", "file": "sim/common/event_tap.h", "decl": "store_size", "relation": "container", "declared_bits": 32, "why": "host `unsigned` is a 32-bit container for the 3-bit encoding"}
+      ]
+    },
+    {
+      "name": "trap_cause",
+      "width_bits": 64,
+      "width_expr": "xlen",
+      "encoding_offset_bytes": 76,
+      "encoding_octets": 8,
+      "class": "architectural",
+      "identity_role": "none",
+      "valid_kinds": ["TRAP"],
+      "valid_when": "kind is TRAP; it is the mcause value the trap will write, with the interrupt bit in bit 63 for an asynchronous event. It is never present on a retirement, because a trap emitted as an ordinary retire is a phantom instruction to a reference checker (config/contracts/interfaces.json retire_event, ABA counterexample 1).",
+      "sampled_at": "settled_pre_edge",
+      "meaning": "why the hart trapped. The trap log the corpus firmware writes (tests/programs/src/platform.h, MOSAIC_TRAPLOG_REC_WORDS 2 = {mcause, mtval}) and the host oracle's trap expectations are both written against this field and trap_tval.",
+      "sources": [
+        {"kind": "rtl_lane", "file": "rtl/core/mosaic_retire.sv", "decl": "ev_trap_cause", "relation": "exact"},
+        {"kind": "tap", "file": "sim/tb/mosaic_bringup_tb.sv", "decl": "c_evt_cause", "relation": "exact", "declared_bits": 64},
+        {"kind": "tap", "file": "sim/common/event_tap.h", "decl": "cause", "relation": "container", "declared_bits": 64, "why": "host uint64_t names the same 64-bit field one for one"}
+      ]
+    },
+    {
+      "name": "trap_tval",
+      "width_bits": 64,
+      "width_expr": "xlen",
+      "encoding_offset_bytes": 84,
+      "encoding_octets": 8,
+      "class": "architectural",
+      "identity_role": "none",
+      "valid_kinds": ["TRAP"],
+      "valid_when": "kind is TRAP; it is the mtval value the trap will write, whose meaning is defined by the cause (the faulting address for a memory fault, the encoding for an illegal instruction)",
+      "sampled_at": "settled_pre_edge",
+      "meaning": "the faulting value. For an illegal instruction it is the instruction's own encoding, which is why it must be reported and not re-derived by the consumer from insn_bits.",
+      "sources": [
+        {"kind": "rtl_lane", "file": "rtl/core/mosaic_retire.sv", "decl": "ev_trap_tval", "relation": "exact"},
+        {"kind": "tap", "file": "sim/tb/mosaic_bringup_tb.sv", "decl": "c_evt_tval", "relation": "exact", "declared_bits": 64},
+        {"kind": "tap", "file": "sim/common/event_tap.h", "decl": "tval", "relation": "container", "declared_bits": 64, "why": "host uint64_t names the same 64-bit field one for one"}
+      ]
+    },
+    {
+      "name": "trap_epc",
+      "width_bits": 64,
+      "width_expr": "xlen",
+      "encoding_offset_bytes": 92,
+      "encoding_octets": 8,
+      "class": "architectural",
+      "identity_role": "none",
+      "valid_kinds": ["TRAP"],
+      "valid_when": "kind is TRAP; it is the mepc value the trap will write",
+      "sampled_at": "settled_pre_edge",
+      "meaning": "the architectural program counter the trap returns to. For a synchronous trap it equals pc_before; for an asynchronous interrupt it need not, and neither field may be derived from the other (rule epc_is_not_pc).",
+      "sources": [
+        {"kind": "tap", "file": "sim/tb/mosaic_bringup_tb.sv", "decl": "c_evt_epc", "relation": "exact", "declared_bits": 64},
+        {"kind": "tap", "file": "sim/common/event_tap.h", "decl": "epc", "relation": "container", "declared_bits": 64, "why": "host uint64_t names the same 64-bit field one for one"},
+        {"kind": "pending_rtl", "file": "rtl/core/mosaic_retire.sv", "decl": "ev_trap_epc", "why": "the retire unit exports the trap PC on its single-lane handoff port (trap_pc) but not as a per-lane event field; the freeze declares the event port it must grow (reconciliation F-3)"}
+      ]
+    }
+  ],
+
+  "rules": [
+    {
+      "id": "retire_status_is_explicit",
+      "text": "An interface that exposes execution results but not retire status is forbidden: every record carries `kind`, every payload field names the kinds it is valid in, and a TRAP record never carries a register, CSR or store payload even when the payload bus was driving one.",
+      "enforced_by": "INV-KINDS"
+    },
+    {
+      "id": "no_shared_snapshot",
+      "text": "Two retirements in one cycle must not share one snapshot: the record is per instruction, each lane's identity, PC and payload come from that lane's own ports, and lane i's retire_seq is the cycle's counter plus i.",
+      "enforced_by": "INV-IDENTITY"
+    },
+    {
+      "id": "no_fixed_vector_window",
+      "text": "A vector body must never be truncated to a fixed window (the low 128 bits being the recorded instance of this failure). No field of the record may carry a variable-length architectural value in a literal-width window: such a field's width must be an expression over the profile's VLEN, and in a profile with no VLEN such a field cannot be listed at all.",
+      "enforced_by": "INV-VECTOR"
+    },
+    {
+      "id": "one_hart_one_instruction",
+      "text": "Every architectural effect locates to exactly one hart and one instruction: hart_id and retire_seq are valid on every kind, both are architectural, and they are the only fields the locating section names.",
+      "enforced_by": "INV-LOCATE"
+    },
+    {
+      "id": "observed_is_not_architectural",
+      "text": "A field marked observed (cycle, rob_id) records a fact to make a failure diagnosable; it is never part of an architectural comparison and can never be a locating field, because a reference model does not have it.",
+      "enforced_by": "INV-LOCATE"
+    },
+    {
+      "id": "cycle_is_not_order",
+      "text": "The cycle counter and the retirement order are different fields with different meanings: cycle may repeat and may skip, retire_seq advances once per retired instruction and wraps at its contracted modulus. Two fields may not claim the retirement-order identity.",
+      "enforced_by": "INV-IDENTITY"
+    },
+    {
+      "id": "epc_is_not_pc",
+      "text": "trap_epc is the architectural mepc value; it equals pc_before for a synchronous trap and need not for an asynchronous interrupt, so neither may be derived from the other.",
+      "enforced_by": "INV-KINDS"
+    },
+    {
+      "id": "store_drain_is_separate",
+      "text": "A committed store's retirement and its visibility are two records of different kinds, both carrying the store's retire_seq, so a consumer can attribute the visibility to exactly one instruction without knowing the store buffer's internal state.",
+      "enforced_by": "INV-KINDS"
+    },
+    {
+      "id": "version_is_checked",
+      "text": "The schema version is not decoration: the encoder refuses to write a record whose declared version differs from the version it was compiled against, and the checker proves the compiled constant equals this file's schema_version.",
+      "enforced_by": "INV-VERSION"
+    },
+    {
+      "id": "containers_are_declared",
+      "text": "A producer declaration wider than the canonical field is a host container and must be recorded with its exact declared width and a reason; a declaration narrower than the field, or one that is not recorded at all, is a truncation or a drift and is rejected.",
+      "enforced_by": "INV-TAPDECL"
+    },
+    {
+      "id": "no_unenforced_rule",
+      "text": "Every rule in this file names the checker invariant that enforces it, and every invariant the checker implements is named by at least one rule, so no rule is prose and no check is unexplained.",
+      "enforced_by": "INV-RULES"
+    }
+  ],
+
+  "deferred": [
+    {
+      "id": "vector_body",
+      "why": "p0 implements RV64IM_Zicsr_Zifencei only; there is no vector architectural state to report, so no vector field is listed in v1 and none is invented here.",
+      "when_added": "the first profile that implements V must add the vector group of docs/validation-plan.md#3 (vl, vtype, vlenb, vstart, element completion, mask) as a new schema version, with each element field's width an expression over vlen.",
+      "must_not": "a vector field with a literal window width (128, or any other constant) in place of vlen; a single element completion treated as a completed instruction.",
+      "enforced_by": "INV-VECTOR"
+    }
+  ],
+
+  "reconciliation": [
+    {
+      "id": "F-1",
+      "field": "retire_seq",
+      "source": "sim/common/event_tap.h RetireEvent.seq, bound by sim/harness/tb_harness.cpp Run()",
+      "finding": "event_tap.h documents `seq` as a per-hart monotonic counter that wraps at the contracted modulus, but the I-004 harness binds it to its loop's cycle counter (`event.seq = cycle`) and the same struct has no cycle field at all. The two meanings are indistinguishable in the record the harness writes, and the value never wraps at a modulus because nothing is counting retirements.",
+      "decided_by": "docs/validation-plan.md#3 Header: '每 hart event_id 单调，retire_order 只对退休递增' -- the order counter advances on retirements only, and a cycle counter is not that value; the plan's rule 4 forbids comparing cycle numbers across microarchitectures, which is why cycle must be a separate observed field.",
+      "verdict": "the schema is right and the harness binding is wrong: retire_seq is the retire counter (source: rtl/core/mosaic_retire.sv ev_seq), cycle is a second observed field, and the I-004 harness must bind seq from a retirement count and put its cycle in cycle."
+    },
+    {
+      "id": "F-2",
+      "field": "mem_size",
+      "source": "sim/tb/mosaic_bringup_tb.sv c_evt_store_size (4 bits) versus rtl/core/mosaic_retire.sv ev_store_size (3 bits per lane)",
+      "finding": "the two producers declare different widths for the same field: the bring-up wrapper port is [3:0] while the retire unit's per-lane field is 3 bits, matching mosaic_pkg's 3-bit SZ_* encoding (sim/tb/mosaic_bringup_tb.sv's own size_bytes() takes logic [2:0]).",
+      "decided_by": "mosaic_pkg's SZ_BYTE/SZ_HALF/SZ_WORD encoding is 3 bits (rtl/core/mosaic_pkg.sv, consumed as logic [2:0] by the harness's size_bytes()); a size is never a 4-bit quantity in this project.",
+      "verdict": "the 3-bit retire-unit field is the contract and the schema freezes 3; the wrapper's 4-bit port is a host-facing container and is recorded as one, not silently widened into the schema."
+    },
+    {
+      "id": "F-3",
+      "field": "pc_after, insn_bits, trap_epc",
+      "source": "rtl/core/mosaic_retire.sv ev_* ports",
+      "finding": "the out-of-order retire stream is complete for the architectural effects it owns (register, CSR, store, trap cause/tval, identity) but carries no architectural next PC, no instruction bits and no per-lane epc. Only the bring-up tap exports those, and it is a single-lane in-order core with no identity.",
+      "decided_by": "docs/validation-plan.md#3 Instruction: 'pc_before, pc_after, insn_bits, ... 禁止 blanket PC mask、压缩指令低位丢失或把 fetch PC 当 commit PC' -- the canonical event requires the committed instruction's bits and next PC, and deriving them from pc_before is the forbidden shortcut.",
+      "verdict": "the schema is right and the out-of-order retire path is incomplete: the freeze declares the three ports it must grow (ev_insn, ev_pc_after, ev_trap_epc). Until they exist, the unit proof drives those fields from the scenario and they are listed as NOT verified against the retire unit."
+    },
+    {
+      "id": "F-4",
+      "field": "kind == MEM_VISIBLE",
+      "source": "rtl/core/mosaic_lsu_endpoint.sv",
+      "finding": "the memory endpoint exports counters and last-fault values but no event tap, so nothing in the implemented p0 path can emit the visibility of a committed store. The plan keeps the commit-store and the drain apart, so without this record a store's side effect can only be checked against final memory, not attributed to an instruction.",
+      "decided_by": "docs/validation-plan.md#3 Memory operation: 'commit-store 与 store-buffer drain/MEM_VISIBLE 是不同事件'.",
+      "verdict": "the schema is right and the memory path has no producer: the freeze defines the MEM_VISIBLE record and the unit proof emits it from the harness memory side effect; a DUT-side producer is a declared gap (NOT verified)."
+    },
+    {
+      "id": "F-5",
+      "field": "rob_id, cycle, csr_*",
+      "source": "sim/common/event_tap.h RetireEvent",
+      "finding": "the de-facto host record has no microarchitectural identity, no cycle and no CSR effect, and no message for a memory visibility, so a differential runner built on it alone cannot attribute an effect to a reorder-buffer slot, cannot locate a failure in time, and cannot compare Zicsr.",
+      "decided_by": "docs/validation-plan.md#3 CSR group (the CSR list is part of the canonical event) and the V-008 card's requirement that every architectural effect locate to one hart and one instruction.",
+      "verdict": "the schema is right: the host record must be replaced by, or migrated to, the canonical record and the codec in sim/common/event_codec.*. The migration of sim/harness/tb_harness.cpp and sim/common/event_tap.* is a declared follow-up, not part of this freeze."
+    }
+  ]
+}
