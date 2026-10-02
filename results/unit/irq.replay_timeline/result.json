@@ -1,15 +1,15 @@
 {
   "schema_version": 1,
-  "case": "core.trap_csr_program",
+  "case": "irq.replay_timeline",
   "verdict": "PASS",
-  "detail": "checks=208 comparisons=17144009 cycles=2696515 retires=428642 traps=26 seed=1",
+  "detail": "checks=70 cycles=549 retires=308 traps=3 trace=0x5e5cbc99d04548e0 seed=1",
   "seed": 1,
   "max_cycles": 4000000,
-  "checks": 209,
+  "checks": 71,
   "failures": 0,
   "image": "",
   "expect": "",
   "tool": "Verilator 5.052 2026-09-05",
-  "timestamp": "2026-10-02T02:24:07Z",
+  "timestamp": "2026-10-02T02:26:46Z",
   "first_mismatch": ""
 }

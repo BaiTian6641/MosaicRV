@@ -41,7 +41,8 @@
     "V-013",
     "I-027",
     "I-038",
-    "V-014"
+    "V-014",
+    "I-029"
   ],
   "evidence": {
     "I-001": {
@@ -505,6 +506,17 @@
       "verdict": "PASS",
       "notes": "Synchronous trap comparison and precise state. Case PASS from a clean build: checks=167810, 65917 comparisons, 12081 cycles, 4740 retires, 35 traps across seven kinds (illegal instruction, ecall, ebreak, load misalignment, store misalignment, load access fault, store access fault) and five placements (at the ROB head, away from the head, before a long-latency instruction whose younger divide is squashed and replayed, after a long-latency instruction whose older divide is complete in the frame, and a same-cycle-completion situation), with the machine's whole RAM and all 35 trap frames compared bit for bit against an independent ISA-derived model rather than against the DUT. Six controls, two of them RTL mutants and four driver-level (each stated as such): TRAP_AS_NORMAL (a faulting instruction retiring as a success), MTVAL_MASKED (a wrong mtval being masked wholesale), REF_EXTRA_INSN (the reference taking one instruction too many), MRET_PC_WRONG, RD_POLLUTED (an exception writeback polluting the destination register first) and REPLAY_POLLUTED_REPLAY_LOST. This was the last gate on advertising Zifencei. No RTL was edited. ONE MACHINE OBSERVATION reported rather than fixed, reproduced here on my own run (journal_ovf_seen=1): mosaic_rename's undo window is emptied only by a branch checkpoint or by the trap path's flush_restore, never by retirement, so a branchless stretch longer than MOSAIC_ROB_ENTRIES (64) allocations overflows it and o_journal_ovf_ctr is sticky -- it is not cleared even by flush_restore. There is no architectural effect in this case (the trap path restores from the committed map, not the journal, and all 35 frames plus the RAM match the model), but a sticky flag would mask a genuinely clamped journal squash later in a run, so it is recorded as a maintainability defect to triage rather than as a pass. NOT covered, stated by the lane: asynchronous interrupts (no irq is asserted here; that is V-015), delegation (M-only, medeleg/mideleg canonicalise to zero), S/U mode and any privilege transition other than M, mtval for an instruction-fetch fault (the harness drives no fetch error), a same-cycle-completion situation for a system trap (structurally impossible: the macro owns the head and sys_commit is zero for every system trap), a branch-mispredict squash interleaved with a trap (the program is branchless apart from the trap path and the park loop), and compressed/F/D/V/multi-hart/MMIO/WFI/FENCE.I paths.",
       "report": "results/reports/V-014-trapstate.md"
+    },
+    "I-029": {
+      "cases": [
+        "steering.capacity_locality"
+      ],
+      "commands": [
+        "python3 tools/run_unit.py --profile p0 --case steering.capacity_locality"
+      ],
+      "verdict": "PASS",
+      "notes": "Dynamic steering baseline policy: deterministic locality-first, then least-loaded, then age -- no predictor, no learned state. Case PASS from a clean build: 3030 per-cycle comparisons over 3118 cycles, the fixed and dynamic modes agreeing on the architectural result while differing in time (572 cycles fixed against 379 dynamic in the comparison program), which is the shape the card asks for: identical architecture, measured schedule. Three mutants each exit 1 with a named first failure: IGNORE_CAPABILITY (a uop routed to an incompatible unit -- the card's first fail mode), SATURATION_ADMIT (saturation resolved by admitting work rather than stalling or retrying -- the card's second fail mode), and NONDET_AGE (a tie-break that the program's state does not explain, caught at the first unexplained decision, which is the premise of the fixed/dynamic comparison rather than an architectural difference -- the report says so explicitly instead of claiming a stronger catch). Eleven other cases re-run green, including the six core cases, the corpus sweep, MMIO, FENCE and the bypass. SCOPE, stated by the lane and recorded here: the policy is a new module (rtl/core/mosaic_steering.sv) and the lane changed ZERO lines in mosaic_core.sv, mosaic_dispatch.sv and mosaic_cluster.sv -- the shipping core still uses its alternating toggle. The policy is therefore verified in isolation; the report documents the integration point and the four things an integration needs (strategy select, producer-cluster locality, per-unit occupancy, and the capability matrix as configuration) and notes that making the shipping core use the fixed baseline would contradict fabric.fixed_two_cluster's claim. Also not covered: the occupancy the policy reads is the driver's model rather than measured cluster state; no timing/area characterisation; the 4096-macro age bound that makes the unsigned comparison exact is a driver bound, not a proof about an unbounded stream; saturation is exercised (the shared MUL/DIV queue fills to 2 of 2 with 20 stall cycles in the directed burst, and both cluster queues reach capacity in the dynamic run) but a stall caused by both clusters being full while the class has no shared fallback is not separately forced; two clusters contending for one unit in the same cycle is not exercised because this core dispatches one macro per cycle; and the SYSTEM class is only untested in the negative sense, its capability bit being clear in the matrix the driver hands over.",
+      "report": "results/reports/I-029-steering.md"
     }
   }
 }
