@@ -296,12 +296,68 @@ package mosaic_pkg;
     // integration needs, states it here, and leaves the decoder's illegal set
     // exactly as its case asserts it. See mosaic_core.sv section 2a.
     logic        is_wfi;
+    // SFENCE.VMA (I-046), recognised by the core's front end exactly as WFI and
+    // SRET are, and for the same ownership reason: the decoder's case owns the
+    // reserved-encoding enumeration, so the integration recognises the encoding
+    // it needs from the raw word. `has_va`/`has_asid` are "rs1 != x0"/"rs2 !=
+    // x0": the operands distinguish the four forms of the instruction, and a
+    // clear bit means "all", not "page or ASID zero".
+    logic        is_sfence_vma;
+    logic        sfence_has_va;
+    logic        sfence_has_asid;
     csr_op_e     csr_op;
     logic [11:0] csr_addr;
     logic        csr_writes;
     logic        csr_reads;
     logic        csr_imm_form;
   } decode_ctl_t;
+
+  // ------------------------------------------------------ the leaf permission
+  // The decision the ISA makes once a *leaf* PTE has been reached: the access
+  // class's own permission bit, the U-bit rule (U-mode needs U=1; S-mode on a
+  // U page needs SUM for a load or store and can never fetch from one), and
+  // MXR's one-directional substitution of X for R on a load. It lives here,
+  // once, so that the walker (I-045) and the translation cache (I-046) cannot
+  // disagree: the cache re-evaluates this rule on every hit against the leaf's
+  // cached permission bits, and a second copy of the rule would be a second
+  // answer to the same question.
+  //
+  //   perms  {x, w, r, u} of the leaf, in that bit order
+  //   kind   0 load, 1 store (and AMO/SC), 2 fetch
+  //   priv   0 U, 1 S, 3 M (M does not reach here: it is a passthrough)
+  //
+  // It is a pure function of its arguments; it holds no state and reads no
+  // signal, so both callers get the same answer from the same inputs.
+  function automatic logic leaf_perm_ok(input logic [3:0] perms,
+                                        input logic [1:0] kind,
+                                        input logic [1:0] priv,
+                                        input logic       sum,
+                                        input logic       mxr);
+    logic u_ok;
+    logic perm_ok;
+    begin
+      u_ok = 1'b1;
+      if (priv == 2'b00) begin
+        u_ok = perms[0];
+      end else if (priv == 2'b01) begin
+        if (perms[0]) begin
+          if (kind == 2'd2) u_ok = 1'b0;   // S-mode can never fetch a U page
+          else              u_ok = sum;
+        end
+      end
+      case (kind)
+        2'd1:    perm_ok = perms[2];
+        2'd2:    perm_ok = perms[3];
+        default: perm_ok = perms[1] | (mxr & perms[3]);
+      endcase
+`ifdef MOSAIC_PTW_MUTANT_SUM_IGNORED
+      // NEGATIVE CONTROL (I-045): the SUM rule is dropped, so S-mode reads a U
+      // page with SUM=0. CASE=sv39.walk_and_faults names it.
+      if (priv == 2'b01) u_ok = 1'b1;
+`endif
+      leaf_perm_ok = u_ok & perm_ok;
+    end
+  endfunction
 
   // ----------------------------------------------------------- write events
   // What actually happened to an architectural register, so the retire event

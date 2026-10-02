@@ -10,7 +10,7 @@
   "image": "",
   "expect": "",
   "tool": "Verilator 5.052 2026-09-05",
-  "timestamp": "2026-10-02T06:54:52Z",
+  "timestamp": "2026-10-02T07:11:12Z",
   "first_mismatch": "directed/misaligned-super-L1: expected fault=1, got fault=0 cause=0",
   "failed_checks": ["no contract violation"]
 }

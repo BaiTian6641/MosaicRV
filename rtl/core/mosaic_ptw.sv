@@ -161,6 +161,11 @@ module mosaic_ptw (
     output logic [3:0]  xl_cause_o,     // 1/5/7 access fault, 12/13/15 page fault
     output logic [63:0] xl_tval_o,      // the original virtual address
     output logic [3:0]  xl_perms_o,     // {x, w, r, u} of the leaf (0 when faulting)
+    // The leaf's remaining attribute bits, {g, a, d}, after any A/D update this
+    // walk performed. I-046's translation cache keys on G and must not treat a
+    // store as a hit on an entry whose cached D is still clear, so it needs
+    // these three bits and not just the permission nibble. Zero when faulting.
+    output logic [2:0]  xl_attr_o,
     output logic        xl_bare_o,      // the translation was a Bare passthrough
 
     // ------------------------------------------------------------ the PTE port
@@ -194,8 +199,6 @@ module mosaic_ptw (
   localparam logic [1:0] KIND_FETCH = 2'd2;
 
   // Privilege.
-  localparam logic [1:0] PRIV_U = 2'b00;
-  localparam logic [1:0] PRIV_S = 2'b01;
   localparam logic [1:0] PRIV_M = 2'b11;
 
   localparam logic [3:0] SATP_MODE_BARE = 4'd0;
@@ -251,6 +254,7 @@ module mosaic_ptw (
   logic [3:0]  cause_q;
   logic [63:0] tval_q;
   logic [3:0]  perms_q;
+  logic [2:0]  attr_q;
   logic        bare_q;
 
   // ---------------------------------------------------------------- counters
@@ -319,36 +323,12 @@ module mosaic_ptw (
   // Step 5, with the U-bit rule in front: U-mode needs U=1; S-mode needs SUM=1
   // for a load/store on a U page and can never fetch from one; the class's own
   // permission bit must be set, with MXR substituting X for R on a load and R
-  // for X on a fetch.
+  // for X on a fetch. The rule itself is `mosaic_pkg::leaf_perm_ok`, shared with
+  // the I-046 translation cache so a cached permission result cannot drift from
+  // a walked one.
   always_comb begin
-    logic u_ok;
-    logic perm_ok;
-    begin
-      u_ok = 1'b1;
-      if (priv_q == PRIV_U) begin
-        u_ok = pte_q[4];
-      end else if (priv_q == PRIV_S) begin
-        if (pte_q[4]) begin
-          if (kind_q == KIND_FETCH) u_ok = 1'b0;
-          else                      u_ok = sum_q;
-        end
-      end
-      case (kind_q)
-        KIND_STORE: perm_ok = pte_q[2];
-        // MXR is the specification's "Make eXecutable Readable": it lets a
-        // *load* use a page whose X bit is set. It does not let a fetch use an
-        // R-only page -- an instruction access needs X, whatever MXR says.
-        KIND_FETCH: perm_ok = pte_q[3];
-        default:    perm_ok = pte_q[1] | (mxr_q & pte_q[3]);
-      endcase
-`ifdef MOSAIC_PTW_MUTANT_SUM_IGNORED
-      // NEGATIVE CONTROL: the SUM rule is dropped, so S-mode reads a U page
-      // with SUM=0. The case's "S-mode load of a U page with SUM=0 faults"
-      // check names it.
-      if (priv_q == PRIV_S) u_ok = 1'b1;
-`endif
-      perm_fail_c = !(u_ok & perm_ok);
-    end
+    perm_fail_c = !mosaic_pkg::leaf_perm_ok({pte_q[3], pte_q[2], pte_q[1], pte_q[4]},
+                                            kind_q, priv_q, sum_q, mxr_q);
   end
 
   // The A/D need. The mutant inverts it: a leaf that needs no update is the one
@@ -392,6 +372,7 @@ module mosaic_ptw (
   assign xl_cause_o     = cause_q;
   assign xl_tval_o      = tval_q;
   assign xl_perms_o     = perms_q;
+  assign xl_attr_o      = attr_q;
   assign xl_bare_o      = bare_q;
 
   // A read is offered while the read states still need their beat; a write while
@@ -434,12 +415,13 @@ module mosaic_ptw (
       tval_q           <= 64'd0;
       pa_q             <= 64'd0;
       perms_q          <= 4'd0;
+      attr_q           <= 3'd0;
       bare_q           <= 1'b0;
       level_q          <= 2'd2;
       table_ppn_q      <= 44'd0;
       va_q             <= 64'd0;
       kind_q           <= KIND_LOAD;
-      priv_q           <= PRIV_S;
+      priv_q           <= 2'b01;
       sum_q            <= 1'b0;
       mxr_q            <= 1'b0;
       pte_q            <= 64'd0;
@@ -473,6 +455,7 @@ module mosaic_ptw (
             mxr_q      <= xl_mxr_i;
             tval_q     <= xl_va_i;
             perms_q    <= 4'd0;
+            attr_q     <= 3'd0;
             walk_ctr_q <= walk_ctr_q + 32'd1;
             retry_q    <= 3'd0;
 
@@ -726,6 +709,7 @@ module mosaic_ptw (
           fault_q     <= 1'b0;
           cause_q     <= 4'd0;
           perms_q     <= {pte_q[3], pte_q[2], pte_q[1], pte_q[4]};
+          attr_q      <= {pte_q[5], pte_q[6], pte_q[7]};
           bare_q      <= 1'b0;
           rsp_valid_q <= 1'b1;
           state_q     <= ST_DONE;

@@ -10,7 +10,7 @@
   "image": "",
   "expect": "",
   "tool": "Verilator 5.052 2026-09-05",
-  "timestamp": "2026-10-02T06:54:33Z",
+  "timestamp": "2026-10-02T07:10:53Z",
   "first_mismatch": "directed/noncanonical: expected a result without a PTE read, got no result",
   "failed_checks": ["no contract violation"]
 }

@@ -10,7 +10,7 @@
   "image": "",
   "expect": "",
   "tool": "Verilator 5.052 2026-09-05",
-  "timestamp": "2026-10-02T06:55:11Z",
+  "timestamp": "2026-10-02T07:11:31Z",
   "first_mismatch": "directed/leaf-L0: expected no A/D write, got a write happened",
   "failed_checks": ["no contract violation"]
 }

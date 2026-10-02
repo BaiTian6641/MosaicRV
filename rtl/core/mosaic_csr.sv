@@ -946,9 +946,13 @@ module mosaic_csr (
           // required by software to zero the remaining fields, and the hardware
           // keeps whatever was written, which is one of the behaviours the
           // specification permits.
+          // ASID: I-046 implements ASIDLEN = 16 (the spec's ASIDMAX for Sv39),
+          // so the field is storage and takes the written value; the TLB
+          // compares it exactly. PPN is storage too. The write ignores nothing
+          // but an unsupported MODE.
           mosaic_csr_pkg::MOSAIC_CSR_ADDR_SATP: begin
             if ((csr_op_result[63:60] == 4'd0) || (csr_op_result[63:60] == 4'd8)) begin
-              satp_d = {csr_op_result[63:60], 16'd0, csr_op_result[43:0]};
+              satp_d = csr_op_result;
             end else begin
               satp_d = satp_q;
             end

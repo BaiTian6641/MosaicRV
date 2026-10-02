@@ -329,7 +329,14 @@ module mosaic_dispatch (
     // the whole payload beyond the identity.
     output logic                        sys_ins_is_fence,
     output logic                        sys_ins_is_fence_i,
+    // SFENCE.VMA (I-046): a system macro with two source operands -- rs1 is the
+    // address, rs2 the ASID -- and the two `has` bits say which operand names a
+    // dimension rather than "all". The system unit resolves it at the ROB head.
+    output logic                        sys_ins_is_sfence_vma,
+    output logic                        sys_ins_sfence_has_va,
+    output logic                        sys_ins_sfence_has_asid,
     output logic [DSP_XLEN-1:0]         sys_ins_src1_val,
+    output logic [DSP_XLEN-1:0]         sys_ins_src2_val,
     output logic [DSP_TAG_W-1:0]        sys_ins_dst_tag,
     output logic [DSP_IGEN_W-1:0]       sys_ins_dst_gen,
     output logic                        sys_ins_dst_x0,
@@ -453,6 +460,9 @@ module mosaic_dispatch (
     // fm/pred/succ fields conservatively and ignores them.
     logic                    sys_fence;
     logic                    sys_fence_i;
+    logic                    sys_sfence_vma;
+    logic                    sys_sfence_has_va;
+    logic                    sys_sfence_has_asid;
   } disp_ent_t;
 
   disp_ent_t            q_mem [0:DSP_DEPTH-1];
@@ -481,6 +491,7 @@ module mosaic_dispatch (
   logic                 head_is_sys;
   logic                 sys_ins_offer;
   logic [DSP_XLEN-1:0]  sys_src1_val;
+  logic [DSP_XLEN-1:0]  sys_src2_val;
   // The initial-mapping fold stored in a queue entry: the shipping build passes
   // rename's flag through, and the two negative controls replace it with one
   // half of the wrong rule each. See the operands section of the header.
@@ -792,6 +803,9 @@ module mosaic_dispatch (
         q_mem[push_at].sys_fetch_fault <= dec_ctl0.is_fetch_fault;
         q_mem[push_at].sys_fence    <= dec_ctl0.is_miscmem && !dec_ctl0.is_fence_i;
         q_mem[push_at].sys_fence_i  <= dec_ctl0.is_fence_i;
+        q_mem[push_at].sys_sfence_vma     <= dec_ctl0.is_sfence_vma;
+        q_mem[push_at].sys_sfence_has_va  <= dec_ctl0.sfence_has_va;
+        q_mem[push_at].sys_sfence_has_asid<= dec_ctl0.sfence_has_asid;
       end
     end
   end
@@ -980,8 +994,12 @@ module mosaic_dispatch (
   // every `csrrwi`/`csrrsi`/`csrrci` operand.
   assign sys_src1_val   = head.s1_const ? head.s1_cval
                           : (head.s1_x0 ? {DSP_XLEN{1'b0}} : s1_val_sel);
+  // SFENCE.VMA's second operand (the ASID). Read through the same path the
+  // first is, so both operands are the architectural values at the head.
+  assign sys_src2_val   = head.s2_const ? head.s2_cval
+                          : (head.s2_x0 ? {DSP_XLEN{1'b0}} : s2_val_sel);
   assign sys_ins_offer  = head_valid && !recovering && head_is_sys &&
-                          s1_val_ready;
+                          s1_val_ready && (s2_val_ready || !head.sys_sfence_vma);
   assign sys_ins_valid  = sys_ins_offer;
   assign head_fire      = ins_ok_cluster || (mem_ins_offer && mem_ins_ready) ||
                           (sys_ins_offer && sys_ins_ready);
@@ -1098,7 +1116,11 @@ module mosaic_dispatch (
     sys_ins_is_fetch_fault = head.sys_fetch_fault;
     sys_ins_is_fence   = head.sys_fence;
     sys_ins_is_fence_i = head.sys_fence_i;
+    sys_ins_is_sfence_vma    = head.sys_sfence_vma;
+    sys_ins_sfence_has_va    = head.sys_sfence_has_va;
+    sys_ins_sfence_has_asid  = head.sys_sfence_has_asid;
     sys_ins_src1_val   = sys_src1_val;
+    sys_ins_src2_val   = sys_src2_val;
     sys_ins_dst_x0     = head.dst_x0;
     sys_ins_dst_tag    = head.dst_x0 ? {DSP_TAG_W{1'b0}} : head.dst_tag;
     sys_ins_dst_gen    = head.dst_x0 ? {DSP_IGEN_W{1'b0}} : head.dst_gen;

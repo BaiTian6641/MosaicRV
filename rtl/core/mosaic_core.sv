@@ -426,6 +426,17 @@ module mosaic_core (
     output logic [31:0]                 o_exc_gen_mismatch_ctr,
     output logic [31:0]                 o_trap_irq_ctr,
     output logic [31:0]                 o_sys_redirect_ctr,
+    // The I-046 translation cache's own view: how many requests it served from
+    // an entry, how many walked, and how many walk results a fence or a satp
+    // write discarded before they could install.
+    output logic [31:0]                 o_tlb_hit_ctr,
+    output logic [31:0]                 o_tlb_miss_ctr,
+    output logic [31:0]                 o_tlb_install_ctr,
+    output logic [31:0]                 o_tlb_walk_ctr,
+    output logic [31:0]                 o_tlb_stale_ctr,
+    output logic [31:0]                 o_tlb_sfence_ctr,
+    output logic [31:0]                 o_tlb_satp_flush_ctr,
+    output logic [15:0]                 o_tlb_gen,
 
     // ------------------------------------------------------- debug observability
     // The instructions and the ROB head, so a failing case can say what the
@@ -1026,6 +1037,11 @@ module mosaic_core (
   // treats fence's fm/pred/succ fields conservatively and does not distinguish
   // fence.tso (see results/reports/I-037-fence.md).
   logic                       sys_fence_q, sys_fence_i_q;
+  // SFENCE.VMA's staged payload (I-046): the class bit, which operand names a
+  // dimension, and both operand values.
+  logic                       sys_sfence_vma_q;
+  logic                       sys_sfence_has_va_q, sys_sfence_has_asid_q;
+  logic [15:0]                sys_src2_q;       // SFENCE.VMA's rs2 (ASID)
   logic                       fence_like_q;      // a fence or fence.i is staged
   logic                       fence_pending;     // ... and its rule still binds
   logic                       fence_mem_ok;      // "the memory path has drained"
@@ -1087,7 +1103,16 @@ module mosaic_core (
   logic                       disp_sys_is_mret, disp_sys_is_sret, disp_sys_is_wfi;
   logic                       disp_sys_is_fetch_fault;
   logic                       disp_sys_is_fence, disp_sys_is_fence_i;
+  logic                       disp_sys_is_sfence_vma;
+  logic                       disp_sys_sfence_has_va, disp_sys_sfence_has_asid;
   logic [CORE_XLEN-1:0]       disp_sys_src1_val;
+  // SFENCE.VMA's rs2 is an XLEN-wide register, but the ASID it names is
+  // ASIDLEN=16 bits (the spec's ASIDMAX for Sv39); bits above ASIDMAX are
+  // reserved and ignored. The operands are carried at XLEN because that is what
+  // the pipeline renames, so the high bits are genuinely unused here.
+  /* verilator lint_off UNUSEDSIGNAL */
+  logic [CORE_XLEN-1:0]       disp_sys_src2_val;
+  /* verilator lint_on UNUSEDSIGNAL */
   logic [CORE_TAG_W-1:0]      disp_sys_dst_tag;
   logic [CORE_IGEN_W-1:0]     disp_sys_dst_gen;
   logic                       disp_sys_dst_x0;
@@ -1336,6 +1361,23 @@ module mosaic_core (
   // word rather than a second decode of fields that are all zero.
   localparam logic [31:0] SRET_WORD = 32'h1020_0073;
 
+  // SFENCE.VMA (I-046) is recognised here for the same reason WFI and SRET are:
+  // its funct7 (0001001) is outside the decoder's legal set, and the enumeration
+  // of that set belongs to the decoder's case. The encoding is matched field by
+  // field rather than as one word, because its two operands vary: rs1 is the
+  // address, rs2 is the ASID, and either being x0 is the "all" form of that
+  // dimension.
+  logic        sfence_vma_c;
+  logic        sfence_has_va_c;
+  logic        sfence_has_asid_c;
+
+  assign sfence_vma_c = (fetch_out_bits[31:25] == 7'b0001001) &&
+                        (fetch_out_bits[14:12] == 3'b000) &&
+                        (fetch_out_bits[11:7] == 5'd0) &&
+                        (fetch_out_bits[6:0] == mosaic_pkg::OP_SYSTEM);
+  assign sfence_has_va_c   = (fetch_out_bits[19:15] != 5'd0);
+  assign sfence_has_asid_c = (fetch_out_bits[24:20] != 5'd0);
+
   // A-extension decode (I-039), also done here rather than in mosaic_decoder and
   // for the same ownership reason as WFI: the decoder's case asserts every
   // opcode outside RV64IM is illegal, and opcode 0101111 is outside RV64IM. The
@@ -1409,6 +1451,22 @@ module mosaic_core (
       dbuf_ctl_new.illegal   = 1'b0;
       dbuf_ctl_new.is_system = 1'b1;
       dbuf_ctl_new.is_sret   = 1'b1;
+    end else if (sfence_vma_c) begin
+      // SFENCE.VMA (I-046). A system instruction with two source registers and
+      // no destination; the operands are captured through the ordinary rename
+      // path, so a value still in flight cannot be sampled stale.
+      dbuf_ctl_new.valid           = 1'b1;
+      dbuf_ctl_new.illegal         = 1'b0;
+      dbuf_ctl_new.is_system       = 1'b1;
+      dbuf_ctl_new.is_sfence_vma   = 1'b1;
+      dbuf_ctl_new.sfence_has_va   = sfence_has_va_c;
+      dbuf_ctl_new.sfence_has_asid = sfence_has_asid_c;
+      dbuf_ctl_new.uses_rs1        = sfence_has_va_c;
+      dbuf_ctl_new.uses_rs2        = sfence_has_asid_c;
+      dbuf_ctl_new.rs1             = fetch_out_bits[19:15];
+      dbuf_ctl_new.rs2             = fetch_out_bits[24:20];
+      dbuf_ctl_new.rd              = 5'd0;
+      dbuf_ctl_new.reg_write       = 1'b0;
     end else if ((fetch_out_bits[6:0] == mosaic_pkg::OP_AMO) &&
                  (amo_op_ok_c || lr_c || sc_c)) begin
       // A legal AMO/lr/sc always overwrites the illegal constant's fields; the
@@ -2201,7 +2259,11 @@ module mosaic_core (
       .sys_ins_is_fetch_fault (disp_sys_is_fetch_fault),
       .sys_ins_is_fence (disp_sys_is_fence),
       .sys_ins_is_fence_i(disp_sys_is_fence_i),
+      .sys_ins_is_sfence_vma   (disp_sys_is_sfence_vma),
+      .sys_ins_sfence_has_va   (disp_sys_sfence_has_va),
+      .sys_ins_sfence_has_asid (disp_sys_sfence_has_asid),
       .sys_ins_src1_val (disp_sys_src1_val),
+      .sys_ins_src2_val (disp_sys_src2_val),
       .sys_ins_dst_tag  (disp_sys_dst_tag),
       .sys_ins_dst_gen  (disp_sys_dst_gen),
       .sys_ins_dst_x0   (disp_sys_dst_x0),
@@ -2483,7 +2545,8 @@ module mosaic_core (
   // `fence_like_q` is the staged class; `fence_pending` is the same thing named
   // for the block, and both clear when the macro retires or a redirect discards
   // it (the staging entry's own lifetime).
-  assign fence_like_q = sys_valid_q && (sys_fence_q || sys_fence_i_q);
+  assign fence_like_q = sys_valid_q && (sys_fence_q || sys_fence_i_q ||
+                                        sys_sfence_vma_q);
   assign fence_pending = fence_like_q;
 
   // The device serializer is part of the memory path for this rule (I-038): a
@@ -2541,6 +2604,37 @@ module mosaic_core (
   assign csr_access_illegal = (sys_csr_op_q != mosaic_pkg::CSR_NONE) &&
                               (csr_illegal || (sys_csr_writes_q && csr_wr_illegal));
 
+  // SFENCE.VMA's own legality (I-046). The spec makes it an illegal instruction
+  // in U-mode, and in S-mode when mstatus.TVM is set ("attempts to ... execute
+  // SFENCE.VMA ... while executing in S-mode will raise an illegal instruction
+  // exception"). It is available in M-mode. The TVM bit is mstatus[20], the same
+  // bit the CSR file reads for the satp-access rule.
+  logic csr_sfence_illegal;
+  assign csr_sfence_illegal = (csr_priv == mosaic_csr_pkg::MOSAIC_PRIV_U) ||
+                              ((csr_priv == mosaic_csr_pkg::MOSAIC_PRIV_S) &&
+                               (o_csr_mstatus[20] == 1'b1));
+
+  // The satp-write pulse is derived from the committed register itself rather
+  // than from the write's address, because `satp` and its address constant
+  // exist only in a profile with S-mode: a change of the committed value is
+  // exactly "an instruction wrote satp and the write was not canonicalised
+  // away", and it needs no profile-specific name here.
+  logic [63:0] csr_satp_prev_q;
+  always_ff @(posedge clk) begin
+    if (rst) csr_satp_prev_q <= 64'd0;
+    else     csr_satp_prev_q <= csr_satp;
+  end
+
+  logic tlb_sfence_valid;
+  logic tlb_satp_write;
+  logic [63:0] tlb_sfence_va;
+  logic [15:0] tlb_sfence_asid;
+
+  assign tlb_sfence_valid = sys_wb_valid && sys_sfence_vma_q && !sys_exc;
+  assign tlb_satp_write   = (csr_satp != csr_satp_prev_q);
+  assign tlb_sfence_va    = sys_src1_q;
+  assign tlb_sfence_asid  = sys_src2_q;
+
   always_comb begin
     sys_exc       = 1'b0;
     sys_exc_cause = {CORE_XLEN{1'b0}};
@@ -2579,6 +2673,11 @@ module mosaic_core (
         sys_exc_cause = mosaic_pkg::EXC_ILLEGAL_INSN;
       end else if (sys_wfi_q && csr_wfi_illegal) begin
         // WFI in U-mode, or in S-mode with mstatus.TW set.
+        sys_exc       = 1'b1;
+        sys_exc_cause = mosaic_pkg::EXC_ILLEGAL_INSN;
+      end else if (sys_sfence_vma_q && csr_sfence_illegal) begin
+        // SFENCE.VMA in U-mode, or in S-mode with mstatus.TVM set: the
+        // specification makes both an illegal instruction.
         sys_exc       = 1'b1;
         sys_exc_cause = mosaic_pkg::EXC_ILLEGAL_INSN;
       end
@@ -2790,20 +2889,23 @@ module mosaic_core (
   // retirement stream, not a hang.
   assign sys_redir_pc = trap_decision ? csr_trap_target
                                       : (sys_fence_i_q ? (rob_head_pc + CORE_XLEN'(8))
+                                                       : (sys_sfence_vma_q ? (rob_head_pc + CORE_XLEN'(4))
                                                        : (sys_sret_q ? csr_sret_target
-                                                                     : csr_mret_target));
+                                                                     : csr_mret_target)));
 `elsif MOSAIC_CORE_MUTANT_MRET_PC_WRONG
   // NEGATIVE CONTROL: MRET returns to the instruction after mepc. The failing
   // program's interrupt round trip then resumes one instruction late.
   assign sys_redir_pc = trap_decision ? csr_trap_target
                                       : (sys_fence_i_q ? (rob_head_pc + CORE_XLEN'(4))
+                                                       : (sys_sfence_vma_q ? (rob_head_pc + CORE_XLEN'(4))
                                                        : (sys_sret_q ? (csr_sret_target + CORE_XLEN'(4))
-                                                                     : (csr_mret_target + CORE_XLEN'(4))));
+                                                                     : (csr_mret_target + CORE_XLEN'(4)))));
 `else
   assign sys_redir_pc = trap_decision ? csr_trap_target
                                       : (sys_fence_i_q ? (rob_head_pc + CORE_XLEN'(4))
+                                                       : (sys_sfence_vma_q ? (rob_head_pc + CORE_XLEN'(4))
                                                        : (sys_sret_q ? csr_sret_target
-                                                                     : csr_mret_target));
+                                                                     : csr_mret_target)));
 `endif
 `ifdef MOSAIC_CORE_MUTANT_FENCEI_NO_INVALIDATE
   // NEGATIVE CONTROL: FENCE.I completes like a plain fence and does *not*
@@ -2815,7 +2917,8 @@ module mosaic_core (
 `else
   assign sys_redir_req_valid = trap_decision || (sys_head && sys_mret_q) ||
                                (sys_head && sys_sret_q) ||
-                               (sys_head && sys_fence_i_q);
+                               (sys_head && sys_fence_i_q) ||
+                               (sys_head && sys_sfence_vma_q);
 `endif
   assign sys_redir_act_now   = trap_decision;
 
@@ -2861,7 +2964,11 @@ module mosaic_core (
       sys_wfi_q          <= 1'b0;
       sys_fence_q        <= 1'b0;
       sys_fence_i_q      <= 1'b0;
+      sys_sfence_vma_q      <= 1'b0;
+      sys_sfence_has_va_q   <= 1'b0;
+      sys_sfence_has_asid_q <= 1'b0;
       sys_src1_q         <= {CORE_XLEN{1'b0}};
+      sys_src2_q         <= 16'd0;
       sys_dst_tag_q      <= {CORE_TAG_W{1'b0}};
       sys_dst_gen_q      <= {CORE_IGEN_W{1'b0}};
       sys_dst_x0_q       <= 1'b1;
@@ -2913,7 +3020,11 @@ module mosaic_core (
         sys_fetch_fault_q <= disp_sys_is_fetch_fault;
         sys_fence_q      <= disp_sys_is_fence;
         sys_fence_i_q    <= disp_sys_is_fence_i;
+        sys_sfence_vma_q      <= disp_sys_is_sfence_vma;
+        sys_sfence_has_va_q   <= disp_sys_sfence_has_va;
+        sys_sfence_has_asid_q <= disp_sys_sfence_has_asid;
         sys_src1_q       <= disp_sys_src1_val;
+        sys_src2_q       <= disp_sys_src2_val[15:0];
         sys_dst_tag_q    <= disp_sys_dst_tag;
         sys_dst_gen_q    <= disp_sys_dst_gen;
         sys_dst_x0_q     <= disp_sys_dst_x0;
@@ -3565,8 +3676,13 @@ module mosaic_core (
   assign xlate_active_c = (eff_priv_c != mosaic_csr_pkg::MOSAIC_PRIV_M) &&
                           (csr_satp[63:60] != 4'd0);
 
-  // ------------------------------------------------------------------ the walker
-  mosaic_ptw u_ptw (
+  // -------------------------------------------------- the translation cache
+  // I-046 replaces the bare walker with the TLB that wraps it. The request and
+  // response interface is the walker's own, plus the ASID for the tag; the PTE
+  // port is the walker's unchanged. The fence inputs come from the staged
+  // SFENCE.VMA macro, the satp pulse from the committed CSR write, and the
+  // counters let a case see a hit without inferring it from a cycle count.
+  mosaic_tlb u_tlb (
       .clk             (clk),
       .rst             (rst),
       .xl_req_valid_i  (ptw_xl_req_valid),
@@ -3576,6 +3692,7 @@ module mosaic_core (
       .xl_priv_i       (ptw_xl_priv),
       .xl_satp_mode_i  (ptw_xl_mode),
       .xl_satp_ppn_i   (ptw_xl_ppn),
+      .xl_satp_asid_i  (csr_satp[59:44]),
       .xl_sum_i        (ptw_xl_sum),
       .xl_mxr_i        (ptw_xl_mxr),
       .xl_cancel_i     (ptw_xl_cancel),
@@ -3586,7 +3703,14 @@ module mosaic_core (
       .xl_cause_o      (ptw_xl_cause),
       .xl_tval_o       (),
       .xl_perms_o      (),
+      .xl_attr_o       (),
       .xl_bare_o       (),
+      .sfence_valid_i  (tlb_sfence_valid),
+      .sfence_va_i     (tlb_sfence_va),
+      .sfence_has_va_i (sys_sfence_has_va_q),
+      .sfence_asid_i   (tlb_sfence_asid),
+      .sfence_has_asid_i(sys_sfence_has_asid_q),
+      .satp_write_i    (tlb_satp_write),
       .pte_req_valid_o (ptw_mem_req_valid),
       .pte_req_ready_i (ptw_mem_req_ready),
       .pte_req_we_o    (ptw_mem_we),
@@ -3598,15 +3722,22 @@ module mosaic_core (
       .pte_rsp_rdata_i (ptw_mem_rdata),
       .pte_rsp_fault_i (ptw_mem_fault),
       .o_busy          (),
-      .o_walk_ctr      (),
-      .o_bare_ctr      (),
+      .o_hit           (),
+      .o_hit_ctr       (o_tlb_hit_ctr),
+      .o_miss_ctr      (o_tlb_miss_ctr),
+      .o_perm_fault_ctr(),
+      .o_install_ctr   (o_tlb_install_ctr),
+      .o_evict_ctr     (),
+      .o_stale_ctr     (o_tlb_stale_ctr),
+      .o_sfence_ctr    (o_tlb_sfence_ctr),
+      .o_satp_flush_ctr(o_tlb_satp_flush_ctr),
+      .o_cancel_ctr    (),
+      .o_gen           (o_tlb_gen),
+      .o_walk_ctr      (o_tlb_walk_ctr),
       .o_leaf_ctr      (),
       .o_fault_ctr     (),
-      .o_ad_upd_ctr    (),
-      .o_retry_ctr     (),
-      .o_cancel_ctr    (),
-      .o_last_fault_cause (),
-      .o_last_fault_tval  ()
+      .o_ad_ctr        (),
+      .o_walk_cancel_ctr()
   );
 
   // --------------------------------------------------------- the PTE/dmem merge
