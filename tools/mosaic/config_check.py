@@ -239,6 +239,7 @@ def load(name: str, config_root: Optional[str] = None) -> Bundle:
 
     _check_capabilities(bundle)
     _check_memory(bundle, name)
+    _check_reservation(bundle, name)
     _check_geometry(bundle, name)
     _check_csr(bundle, name)
     _check_csr_rules(bundle, name)
@@ -835,6 +836,119 @@ def _check_csr_rules(bundle: Bundle, profile_name: str) -> None:
 # ---------------------------------------------------------------------------
 # geometry
 # ---------------------------------------------------------------------------
+
+
+def _strip_json_comments(text: str) -> str:
+    """Remove // and /* */ comments from a JSON document, honoring strings.
+
+    The ACT reference platform declaration (tests/act4/mosaic-*/sail.json) is
+    JSON with comments, the form Sail's own config uses. Stripping comments --
+    and only comments -- makes it readable by the same strict parser everything
+    else uses; a document that needs more than that is a generation failure, not
+    something to guess at.
+    """
+    out: List[str] = []
+    i, n = 0, len(text)
+    in_string = False
+    while i < n:
+        ch = text[i]
+        if in_string:
+            out.append(ch)
+            if ch == "\\" and i + 1 < n:
+                out.append(text[i + 1])
+                i += 2
+                continue
+            if ch == '"':
+                in_string = False
+            i += 1
+            continue
+        if ch == '"':
+            in_string = True
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "/" and i + 1 < n and text[i + 1] == "/":
+            while i < n and text[i] != "\n":
+                i += 1
+            continue
+        if ch == "/" and i + 1 < n and text[i + 1] == "*":
+            i += 2
+            while i + 1 < n and not (text[i] == "*" and text[i + 1] == "/"):
+                i += 1
+            i += 2
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _check_reservation(bundle: Bundle, profile_name: str) -> None:
+    """The platform's LR/SC reservation-set declaration.
+
+    The reservation set size is a *platform* property, so it is declared in
+    config/profiles/<profile>.json and reaches the RTL and the cases as the
+    generated constant MOSAIC_RESERVATION_SET_SIZE_EXP -- never from the RTL's
+    own granule constant, which is the value being checked. For a profile that
+    also ships an ACT reference platform declaration
+    (tests/act4/mosaic-<profile>/sail.json), the two copies of this one fact are
+    cross-checked here, so the case's expectation and the reference model's
+    cannot drift while the RTL matches neither.
+    """
+    profile = bundle.profile
+    if profile is None:
+        return
+    declared = profile.get("reservation")
+    if declared is None:
+        bundle.fail(
+            "profile %s reservation" % profile_name,
+            "no reservation declaration; the LR/SC reservation set size is a platform "
+            "property and must be stated rather than read back from the RTL",
+        )
+        return
+
+    exp = declared.get("set_size_exp")
+    if not isinstance(exp, int) or isinstance(exp, bool) or not 3 <= exp <= 12:
+        bundle.fail(
+            "profile %s reservation" % profile_name,
+            "set_size_exp %r is not an integer in 3..12 (RV64 requires at least 8 "
+            "bytes and the ISA caps the set at 4096)" % (exp,),
+        )
+        return
+
+    act_path = os.path.join(REPO_ROOT, "tests", "act4", "mosaic-%s" % profile_name,
+                            "sail.json")
+    if not os.path.exists(act_path):
+        # No reference declaration ships for this profile; the profile's own
+        # declaration is the only source and is checked above.
+        return
+    try:
+        with open(act_path, "r", encoding="utf-8") as handle:
+            act = json.loads(_strip_json_comments(handle.read()))
+        reservation = act["platform"]["reservation"]
+        act_exp = reservation["reservation_set_size_exp"]
+        act_exact = reservation["require_exact_reservation_addr"]
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        bundle.fail(
+            "profile %s reservation" % profile_name,
+            "cannot read the ACT platform declaration %s: %s"
+            % (os.path.relpath(act_path, REPO_ROOT), exc),
+        )
+        return
+
+    if act_exp != exp:
+        bundle.fail(
+            "profile %s reservation" % profile_name,
+            "declares set_size_exp %r but the ACT platform declaration %s declares %r; the "
+            "case and the reference model would disagree about the reservation set"
+            % (exp, os.path.relpath(act_path, REPO_ROOT), act_exp),
+        )
+    if bool(act_exact) != bool(declared.get("require_exact_addr")):
+        bundle.fail(
+            "profile %s reservation" % profile_name,
+            "declares require_exact_addr %r but the ACT platform declaration %s declares %r"
+            % (declared.get("require_exact_addr"), os.path.relpath(act_path, REPO_ROOT),
+               act_exact),
+        )
 
 
 def _check_geometry(bundle: Bundle, profile_name: str) -> None:

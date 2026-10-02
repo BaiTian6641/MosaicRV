@@ -182,3 +182,226 @@ mutant must make the suite fail on the same ELF); none of these was added to
   `lint_rtl.py --profile p0/p1`, `slang-tidy`, `check_records.py`,
   `check_exclusions.py`, and the exclusion-ledger entry the brief asks for when
   a test's stated direction is wrong.
+
+---
+
+# Lane `HpmAndRecords`: the three fixes completed, with controls
+
+Status: **complete.** The section above is the previous lane's; where its
+diagnosis differs from what was measured here, the measurement below is what
+governs and the difference is named explicitly.
+
+## 1. Zihpm (ACT4 127/127)
+
+**Diagnosis (measured, not hypothesised).** The previous lane's "surviving
+divergence is the counter-enable gate" is right, and the root cause is a
+configuration disagreement, not a read-modify-write defect. `tools/run_act_dut.py`
+on `Zihpm/Zihpm-csrrs-00.elf` reproduced the first failure exactly as recorded:
+trap cause 2 at `XEPC = 0x80000040`, the test's *first* instruction
+(`csrrs x12, hpmcounter3, x0`), handled in S-mode. The Zihpm test bodies run in
+S-mode (`rvtest_setup.h`'s `RVTEST_BOOT_TO_SMODE`), and the S-mode read of a
+counter shadow is gated by `mcounteren.HPMn`. The shipped table
+(`config/csr/mode_m.json`) declared `mcounteren` bits 31:3 read-only zero, so
+`csr_counter_ok` was false and the read trapped, while the platform the reference
+is generated from declares `mcounteren_writable_bits = 0xFFFFFFFF`
+(`tests/act4/mosaic-p1/sail.json`). The RTL matched its own table; the table did
+not match the platform. Note the brief's read-modify-write hypothesis is *not*
+what the observable shows: the test's `csrrs` uses `rs1 = x0`, so no write is
+attempted and no read-modify-write occurs; the counter is read-only zero, and the
+only thing that was wrong was whether the read was permitted.
+
+**Fix.**
+* `config/csr/mode_m.json`: `mcounteren` — `unmodifiable_bits` 31:3 to `[]`,
+  `writable_fields` to `31:0`, clause rewritten to state the platform
+  declaration it now matches.
+* `config/csr/mode_su.json`: `scounteren` — same widening, `behavior`
+  `warl_wpri` to `warl` (with no WPRI field left, `warl_wpri` was rejected by the
+  configuration check: "behavior warl_wpri requires both writable_fields and
+  wpri_fields to be non-empty").
+* `tools/gen_manifest.py`: `LESS_PRIVILEGE_ONLY_FIELDS["mcounteren"]` widened
+  from `("2","1","0")` to `("31:0",)`. The old list narrowed only CY/TM/IR for a
+  profile with no less-privileged mode, which after the table change left p0 with
+  bits 31:3 writable and 2:0 read-only zero — an arbitrary split. The HPM bits
+  gate counter access from a less-privileged mode exactly as CY/TM/IR do, so a
+  profile with no S or U mode narrows all of them and p0's `mcounteren` stays the
+  read-only-zero register `csr.precise_trap_mret` and the rule ledger already
+  describe.
+* The RTL was already right (`csr_counter_bit = csr_addr_i[5:0]` is `HPMn`);
+  nothing in `mosaic_csr.sv` changed for this beyond a declaration hoist (below).
+
+**Result.** `Zihpm-csrrs-00` and `Zihpm-csrrc-00` both PASS. Full applicable set:
+**applicable=127 run=127 passed=127**, exit 0, on the shipping binary
+`sha256 415482da9c7eb707b176597c7ee711e89bbd0b0fa68f918eb9c3ff237ba7baf9`.
+
+**Is Zihpm advertisable?** Yes, at p0 and p1, and it now is. The architectural
+suite passes it, and the p0 unit evidence for the read-only-zero behaviour is
+real (section 2). No un-advertising is needed.
+
+## 2. `csr.precise_trap_mret` — the expectation was wrong, and the config was too
+
+The case is p0-scoped and its `PhaseIllegalAddress` listed `0xc03`/`0xc04` among
+addresses that *must* be unimplemented — while the capability ladder advertises
+Zihpm from p0 with the clause "read-only zero when no counters are implemented"
+(`config/capability_ladder.json`). The case and `config/csr/mode_m.json` agreed
+with each other and both disagreed with the ladder.
+
+**Decision.** Of the brief's two options, the one that matches the ladder is to
+declare the shadows implemented, so p0's table now carries them:
+`config/csr/mode_m.json` gains `hpmcounter3..31` (0xc03..0xc1f) in the M block as
+`ro`/`fixed`, `role: counter-shadow`, reset 0 — the same rows
+`config/csr/mode_su.json` already declared for p1..p3 in the U block, and
+`collect_csrs` merges the two declarations and refuses them if they disagree.
+The RTL needed no change: `MOSAIC_CSR_HAS_HPM` now defines for p0, the range
+decodes, and M-mode reads were never gated.
+
+**The case now reads the table.**
+* `sim/unit/tb_csr.cpp`: `TableIndex` keeps a second index over *every* generated
+  row (`row_of_addr`/`RowOf`/`Impl`) next to the modelled-role index, so the
+  shadow no longer calls an implemented hpmcounter illegal.
+* `PhaseIllegalAddress` derives from the generated table: a candidate the table
+  implements is required to read its table reset value without a trap, and only a
+  candidate the table does *not* implement is required to raise illegal, read 0
+  and refuse a write. `0xb03` (mhpmevent3) stays in the illegal list on purpose —
+  no HPM counter is implemented, so no event selector exists.
+* Phase 1's hand-derived table widened from 21 to 50 rows (the 29 shadows are
+  rows the table must carry for the advertisement to be honest).
+* `PhaseResetState` gained the check the ledger claimed but nothing performed:
+  every `hpmcounter` row must be implemented, read 0, be unwritable, and have
+  write mask 0, and there must be exactly 29 of them.
+
+**Result.** `csr.precise_trap_mret` PASS, `csr.rule_ledger` PASS (p0).
+
+## 3. EX-009 repaired
+
+The entry claimed "Zihpm is advertised at p0 and its read-only-zero behaviour is
+verified by the named CSR cases", which no case performed, and its reason ("the
+runner defers them") described the Zihpm suite as deferred when
+`tools/run_act_dut.py` generates and runs both Zihpm ELFs at p1. Both statements
+are corrected: the reason now says Zihpm is run and passes at p1 and only Zicntr
+(unadvertised) and the p0 core's lack of a trap frame are what remain uncovered,
+and the note names the checks that now exist (the reset-state phase in
+`csr.precise_trap_mret`, the 29 `hpmcounterN.value` rules in `csr.rule_ledger`),
+both of which pass. `csr.precise_trap_mret` is added to `affected_cases`.
+`check_exclusions.py` and `--negative` (13/13 rejected) are green.
+
+## 4. Controls
+
+`tools/run_act_dut.py --controls` now builds one `-D` mutant per defect from a
+**deleted** build directory with the define on the Verilator command line, checks
+the mutant binary's hash differs from the shipping one, and requires the named
+ELF to exit 1. Run result (all six controls FAIL as required), recorded in
+`results/v043/dut_results.json`:
+
+| control | defect | ELF | verdict |
+|---|---|---|---|
+| `MOSAIC_ALU_MUTANT_4` | `slt` answers the unsigned comparison | `I-slt-00` | FAIL exit 1 |
+| `MOSAIC_DECODER_MUTANT_C_LUI_IMM` | `c.lui` immediate 12 bits high | `Zca-c.lui-00` | FAIL exit 1 |
+| `MOSAIC_LRSC_MUTANT_GRANULE_64B` | reservation set 64 B, not the declared 8 | `Zalrsc-sc.w-00` | FAIL exit 1 |
+| `MOSAIC_CSR_MUTANT_NO_HPM` | Zihpm shadow decode removed | `Zihpm-csrrs-00` | FAIL exit 1 |
+| `MOSAIC_CSR_MUTANT_MCOUNTEREN_RO` | `mcounteren` stays read-only zero | `Zihpm-csrrs-00` | FAIL exit 1 |
+| `corrupt_expected_signature` (data) | one expected signature word flipped | `I-add-00` | FAIL exit 1 |
+
+Every mutant binary hash differs from the shipping binary's
+`415482da9c7eb707b176597c7ee711e89bbd0b0fa68f918eb9c3ff237ba7baf9`:
+
+| control | mutant binary sha256 | differs |
+|---|---|---|
+| `MOSAIC_ALU_MUTANT_4` | `d7647f0c3ca54d85c0cab2be285ff6351c4dd0c78f8aa046632b88270903ef35` | yes |
+| `MOSAIC_DECODER_MUTANT_C_LUI_IMM` | `2c0ceac51410f17574e83f5d7086ffe3361aa86ae4a54ed221c9ba8a78813b18` | yes |
+| `MOSAIC_LRSC_MUTANT_GRANULE_64B` | `7663caad6390ba8e11c97d86f2e023d67c3f17ea0c295e6ae594cf5fd1351406` | yes |
+| `MOSAIC_CSR_MUTANT_NO_HPM` | `13da4ebb7c802ba41ff76137727267f8c5a7cb68c887336fe74aba0200ef13cc` | yes |
+| `MOSAIC_CSR_MUTANT_MCOUNTEREN_RO` | `e4f663d2bfaab2026c29700eab3a4a2b335b1536c58f748760743b352481c3c3` | yes |
+| `corrupt_expected_signature` (data) | `79f36dd3570283b8eacf21f7e279ebcc8a2fa997a14fc839c5196005f14e8c23` | yes (ELF) |
+
+The two Zihpm controls are the control for fix 1 in both directions: removing the
+shadow decode and reverting the counter-enable mask each make the same ELF fail.
+`MOSAIC_CSR_MUTANT_MCOUNTEREN_RO` is new in `rtl/core/mosaic_csr.sv`; it drops the
+`mcounteren` write mask so the write in `rvtest_setup.h` cannot enable the
+shadows.
+
+Also: `make lint-slang PROFILE=p1` was failing before this lane on
+`rtl/core/mosaic_csr.sv:489: identifier 'csr_is_hpm' used before its declaration`
+(the previous lane's HPM decode block was placed after its first use); the
+declaration is hoisted and both `lint-slang` and `lint_rtl.py --profile p0/p1`
+are clean.
+
+## 5. `lrsc.reservation_progress` — the declaration, and the observable it lacked
+
+**The set size now comes from the platform declaration.** The previous lane had
+removed the literal `GRANULE_BITS` dependency but left the numbers as literals
+with a comment. The declaration is now real data:
+* `config/profiles/p0..p3.json` gain a `reservation` block
+  (`set_size_exp: 3`, `require_exact_addr: false`); the profile schema gains the
+  property.
+* `tools/mosaic/config_check.py` gains `_check_reservation`, which validates the
+  block and, for a profile that ships an ACT reference declaration
+  (`tests/act4/mosaic-<profile>/sail.json`, JSON-with-comments, parsed with a
+  comment stripper), requires `set_size_exp` to equal
+  `platform.reservation.reservation_set_size_exp` and `require_exact_addr` to
+  equal `require_exact_reservation_addr`. The two copies cannot drift.
+* `tools/gen_manifest.py` emits `MOSAIC_RESERVATION_SET_SIZE_EXP`,
+  `MOSAIC_RESERVATION_SET_BYTES` and `MOSAIC_RESERVATION_REQUIRE_EXACT_ADDR`
+  into `build/<profile>/sim/mosaic_platform.h`; the case derives its granule mask
+  and its in/out-of-set offsets from those constants, with `static_assert`s that
+  the probe addresses are legal.
+
+**The missing observable.** Blocks 8 and 9 of Run A now take an LR at B, then
+issue the SC at a *different* address: B+4, inside the declared set (a word SC,
+the only non-zero offset a legal access can have inside an eight-byte set), and
+B+8, the first address of the next set. The declarations decide the expected
+status: with `require_exact_addr = false` the in-set SC succeeds and the
+out-of-set SC fails; the out-of-set case also checks the sentinel parked there is
+untouched, so "a refused SC writes nothing" is checked directly. The harness's
+granule check now tracks the address of the outstanding LR (from the LR
+transaction) instead of assuming A, so reserving B is checked as state rather
+than flagged.
+
+**The RTL granule was wrong and is fixed** (previous lane): `GRANULE_BITS = 3`,
+the naturally aligned XLEN-sized set the declaration names.
+
+**Control for this fix.** `MOSAIC_LRSC_MUTANT_GRANULE_64B` (restores
+`GRANULE_BITS = 6`) built from a deleted directory makes
+`lrsc.reservation_progress` exit 1, first failure at `0x80000058` — block 5's SC,
+where the 64-byte set makes the out-of-set store at A+8 break a reservation the
+declared 8-byte set leaves standing. The same mutant makes the ACT4
+`Zalrsc-sc.w-00` ELF fail, so the case and the suite now agree about the granule.
+
+One correction inside the case, flagged: the previous lane's move of the in-set
+conflicting store to A+4 left block 5's `lr.d` expectation at `kVal2`, but the LR
+now reads that word back in the upper half of the doubleword; the expectation is
+`(kInVal << 32) | kVal2`, and the A+4 watch now checks that block 5's successful
+*doubleword* SC rewrote the whole declared set (if the SC wrote only four bytes
+the word would still hold `kInVal`). Both were unobserved because the file was
+not compiled after the previous lane's edit — it also referenced an undefined
+`F3_W`, which is now defined.
+
+## 6. Re-runs and gates (all observed)
+
+| case | profile | result |
+|---|---|---|
+| `core.act_dut` (127 ELFs) | p1 | PASS 127/127, exit 0 |
+| `csr.precise_trap_mret` | p0 | PASS |
+| `csr.rule_ledger` | p0 | PASS |
+| `compressed.cross_boundary` | p0, p1 | PASS |
+| `lrsc.reservation_progress` | p0, p1 | PASS (85 checks) |
+| `amo.linearization` | p1 | PASS |
+| `core.corpus_sweep` | p0 | PASS |
+| `core.mem_program` | p0 | PASS |
+| `trap.precise_state` | p0 | PASS |
+| `privilege.permission_matrix` | p1 | PASS |
+| `sv39.walk_and_faults` | p1 | PASS |
+| `tlb.sfence_vma` | p1 | PASS |
+
+Gates: `gen_manifest.py --profile p0/p1` OK; `check_profile.py --all` OK;
+`check_contracts.py --all` OK (4/4 profiles); `check_records.py` OK (59 packages,
+65 registered cases); `check_exclusions.py` OK and `--negative` 13/13 rejected;
+`lint_rtl.py --profile p0/p1` 45/45 sources clean; `make lint-slang PROFILE=p1`
+clean.
+
+**Not verified by this lane, named so nobody assumes it:** `make check` was not
+run as a single target (its constituent gates were run individually, above);
+`gen_manifest.py --profile p2/p3` fails on a **pre-existing** configuration error
+unrelated to this lane — `csr vtype (0xc21): the table declares it writable but
+the address encodes a read-only register`, in `config/csr/vector.json`, which
+this lane did not touch.
+

@@ -148,16 +148,12 @@
           "access": "rwr",
           "behavior": "warl",
           "reset": 0,
-          "unmodifiable_bits": [
-            "31:3"
-          ],
+          "unmodifiable_bits": [],
           "writable_fields": [
-            "2",
-            "1",
-            "0"
+            "31:0"
           ],
           "wpri_fields": [],
-          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033, src/machine.tex: section 'Machine Counter-Enable Register (mcounteren)' L1741, 'The counter-enable register mcounteren is a 32-bit register' L1744-L1746; Fig. mcounteren L1748-L1781 (CY 0, TM 1, IR 2, HPM3..HPM31 bits 3..31); 'The settings in this register only control accessibility' L1784-L1786; 'In systems with U-mode, the mcounteren must be implemented, but all fields are WARL and may be read-only zero' L1820-L1823 and 'In systems without U-mode, the mcounteren register should not exist' L1824. Address and privilege: src/priv-csrs.tex L309 '0x306 & MRW & mcounteren'. p0 is M-only (no U-mode), so no counter is ever exposed to a less privileged mode and every field is WARL read-only zero, giving reset 0. Recorded deviation: the spec says the register 'should not exist' in a system without U-mode; MosaicRV keeps it at 0x306 as an all-zero WARL register so firmware reads a defined value instead of taking an illegal-instruction trap, and 0 is a legal WARL value (L2857). CY/TM/IR (bits 2:0) are writable: they gate U-mode reads of cycle/time/instret ('When the CY, TM, IR ... bit in mcounteren is clear, attempts to read ... while executing in U-mode will cause an illegal instruction exception'). Bits 31:3 (HPM3-HPM31) are read-only zero because this profile implements no hpmcounter_n. tools/gen_manifest.py narrows CY/TM/IR back to read-only zero for a profile with no U-mode, where there is no access to gate."
+          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033, src/machine.tex: section 'Machine Counter-Enable Register (mcounteren)' L1741, 'The counter-enable register mcounteren is a 32-bit register' L1744-L1746; Fig. mcounteren L1748-L1781 (CY 0, TM 1, IR 2, HPM3..HPM31 bits 3..31); 'The settings in this register only control accessibility' L1784-L1786; 'In systems with U-mode, the mcounteren must be implemented, but all fields are WARL and may be read-only zero' L1820-L1823 and 'In systems without U-mode, the mcounteren register should not exist' L1824. Address and privilege: src/priv-csrs.tex L309 '0x306 & MRW & mcounteren'. p0 is M-only (no U-mode), so every counter is always accessible from the only implemented mode and mcounteren gates nothing there; the register is still modelled with a defined reset of 0 (L2857 makes 0 a legal WARL value) rather than trapping on a read. Recorded deviation: the spec says the register 'should not exist' in a system without U-mode; MosaicRV keeps it at 0x306 as an all-zero WARL register so firmware reads a defined value instead of taking an illegal-instruction trap, and 0 is a legal WARL value (L2857). CY/TM/IR (bits 2:0) gate U-mode reads of cycle/time/instret ('When the CY, TM, IR ... bit in mcounteren is clear, attempts to read ... while executing in U-mode will cause an illegal instruction exception'), and HPM3-HPM31 (bits 3:31) gate the hpmcounter3..31 shadows. All 32 bits are writable, which is the platform declaration this project is verified against: the ACT4 sail.json for the profile sets mcounteren_writable_bits = 0xFFFF_FFFF, so firmware that enables counters (rvtest_setup.h 'csrw mcounteren, t0' with t0 = -1) must observe the bits set or an S-mode read of a counter shadow traps where the reference reads zero. Bits 31:3 were previously read-only zero, which made the RTL's mcounteren disagree with the platform declaration. tools/gen_manifest.py narrows CY/TM/IR back to read-only zero for a profile with no U-mode, where there is no access to gate."
         },
         {
           "name": "mscratch",
@@ -367,6 +363,383 @@
             "63:0"
           ],
           "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033, src/machine.tex: section 'Machine Counter-Enable Register (mcounteren)' L1805-L1810, 'The cycle, instret, and hpmcounter_n CSRs are read-only shadows of mcycle, minstret, and mhpmcounter_n, respectively' (instreth is the RV32-only alias and is excluded); section 'Hardware Performance Monitor' L1653-L1655 gives minstret 64-bit precision on RV64. Address and privilege: src/priv-csrs.tex L168 '0xC02 & URO & instret'. Reset 0 because minstret resets to 0."
+        },
+        {
+          "name": "hpmcounter3",
+          "role": "counter-shadow",
+"address": 3075,
+          "width": 64,
+          "access": "ro",
+          "behavior": "fixed",
+          "reset": 0,
+          "unmodifiable_bits": [
+            "63:0"
+          ],
+          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L170-L199 assign '0xC03 & URO & hpmcounter3' through '0xC1F & URO & hpmcounter31'. src/machine.tex section 'Hardware Performance Monitor' L1653-L1655: hpmcounter3 is the read-only shadow of mhpmcounter3, and a counter that is not implemented reads as zero, so an implementation with no HPM counter must answer a read at 0xc03 with 0 rather than trap. The capability ladder advertises Zihpm from p0 with that clause, so a profile with no U-mode (p0) must still implement the shadow: this row is in the M block, and a profile with U-mode (p1..p3) declares the same register in csr/mode_su.json; tools/gen_manifest.py merges the two declarations and refuses them if they disagree. No mhpmcounter3, mhpmevent3 or mcountinhibit is implemented (config/csr/mode_m.json declares none), so the shadow is read-only zero; reset 0 is the only value it can hold."
+        },
+        {
+          "name": "hpmcounter4",
+          "role": "counter-shadow",
+"address": 3076,
+          "width": 64,
+          "access": "ro",
+          "behavior": "fixed",
+          "reset": 0,
+          "unmodifiable_bits": [
+            "63:0"
+          ],
+          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L170-L199 assign '0xC03 & URO & hpmcounter3' through '0xC1F & URO & hpmcounter31'. src/machine.tex section 'Hardware Performance Monitor' L1653-L1655: hpmcounter4 is the read-only shadow of mhpmcounter4, and a counter that is not implemented reads as zero, so an implementation with no HPM counter must answer a read at 0xc04 with 0 rather than trap. The capability ladder advertises Zihpm from p0 with that clause, so a profile with no U-mode (p0) must still implement the shadow: this row is in the M block, and a profile with U-mode (p1..p3) declares the same register in csr/mode_su.json; tools/gen_manifest.py merges the two declarations and refuses them if they disagree. No mhpmcounter4, mhpmevent4 or mcountinhibit is implemented (config/csr/mode_m.json declares none), so the shadow is read-only zero; reset 0 is the only value it can hold."
+        },
+        {
+          "name": "hpmcounter5",
+          "role": "counter-shadow",
+"address": 3077,
+          "width": 64,
+          "access": "ro",
+          "behavior": "fixed",
+          "reset": 0,
+          "unmodifiable_bits": [
+            "63:0"
+          ],
+          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L170-L199 assign '0xC03 & URO & hpmcounter3' through '0xC1F & URO & hpmcounter31'. src/machine.tex section 'Hardware Performance Monitor' L1653-L1655: hpmcounter5 is the read-only shadow of mhpmcounter5, and a counter that is not implemented reads as zero, so an implementation with no HPM counter must answer a read at 0xc05 with 0 rather than trap. The capability ladder advertises Zihpm from p0 with that clause, so a profile with no U-mode (p0) must still implement the shadow: this row is in the M block, and a profile with U-mode (p1..p3) declares the same register in csr/mode_su.json; tools/gen_manifest.py merges the two declarations and refuses them if they disagree. No mhpmcounter5, mhpmevent5 or mcountinhibit is implemented (config/csr/mode_m.json declares none), so the shadow is read-only zero; reset 0 is the only value it can hold."
+        },
+        {
+          "name": "hpmcounter6",
+          "role": "counter-shadow",
+"address": 3078,
+          "width": 64,
+          "access": "ro",
+          "behavior": "fixed",
+          "reset": 0,
+          "unmodifiable_bits": [
+            "63:0"
+          ],
+          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L170-L199 assign '0xC03 & URO & hpmcounter3' through '0xC1F & URO & hpmcounter31'. src/machine.tex section 'Hardware Performance Monitor' L1653-L1655: hpmcounter6 is the read-only shadow of mhpmcounter6, and a counter that is not implemented reads as zero, so an implementation with no HPM counter must answer a read at 0xc06 with 0 rather than trap. The capability ladder advertises Zihpm from p0 with that clause, so a profile with no U-mode (p0) must still implement the shadow: this row is in the M block, and a profile with U-mode (p1..p3) declares the same register in csr/mode_su.json; tools/gen_manifest.py merges the two declarations and refuses them if they disagree. No mhpmcounter6, mhpmevent6 or mcountinhibit is implemented (config/csr/mode_m.json declares none), so the shadow is read-only zero; reset 0 is the only value it can hold."
+        },
+        {
+          "name": "hpmcounter7",
+          "role": "counter-shadow",
+"address": 3079,
+          "width": 64,
+          "access": "ro",
+          "behavior": "fixed",
+          "reset": 0,
+          "unmodifiable_bits": [
+            "63:0"
+          ],
+          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L170-L199 assign '0xC03 & URO & hpmcounter3' through '0xC1F & URO & hpmcounter31'. src/machine.tex section 'Hardware Performance Monitor' L1653-L1655: hpmcounter7 is the read-only shadow of mhpmcounter7, and a counter that is not implemented reads as zero, so an implementation with no HPM counter must answer a read at 0xc07 with 0 rather than trap. The capability ladder advertises Zihpm from p0 with that clause, so a profile with no U-mode (p0) must still implement the shadow: this row is in the M block, and a profile with U-mode (p1..p3) declares the same register in csr/mode_su.json; tools/gen_manifest.py merges the two declarations and refuses them if they disagree. No mhpmcounter7, mhpmevent7 or mcountinhibit is implemented (config/csr/mode_m.json declares none), so the shadow is read-only zero; reset 0 is the only value it can hold."
+        },
+        {
+          "name": "hpmcounter8",
+          "role": "counter-shadow",
+"address": 3080,
+          "width": 64,
+          "access": "ro",
+          "behavior": "fixed",
+          "reset": 0,
+          "unmodifiable_bits": [
+            "63:0"
+          ],
+          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L170-L199 assign '0xC03 & URO & hpmcounter3' through '0xC1F & URO & hpmcounter31'. src/machine.tex section 'Hardware Performance Monitor' L1653-L1655: hpmcounter8 is the read-only shadow of mhpmcounter8, and a counter that is not implemented reads as zero, so an implementation with no HPM counter must answer a read at 0xc08 with 0 rather than trap. The capability ladder advertises Zihpm from p0 with that clause, so a profile with no U-mode (p0) must still implement the shadow: this row is in the M block, and a profile with U-mode (p1..p3) declares the same register in csr/mode_su.json; tools/gen_manifest.py merges the two declarations and refuses them if they disagree. No mhpmcounter8, mhpmevent8 or mcountinhibit is implemented (config/csr/mode_m.json declares none), so the shadow is read-only zero; reset 0 is the only value it can hold."
+        },
+        {
+          "name": "hpmcounter9",
+          "role": "counter-shadow",
+"address": 3081,
+          "width": 64,
+          "access": "ro",
+          "behavior": "fixed",
+          "reset": 0,
+          "unmodifiable_bits": [
+            "63:0"
+          ],
+          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L170-L199 assign '0xC03 & URO & hpmcounter3' through '0xC1F & URO & hpmcounter31'. src/machine.tex section 'Hardware Performance Monitor' L1653-L1655: hpmcounter9 is the read-only shadow of mhpmcounter9, and a counter that is not implemented reads as zero, so an implementation with no HPM counter must answer a read at 0xc09 with 0 rather than trap. The capability ladder advertises Zihpm from p0 with that clause, so a profile with no U-mode (p0) must still implement the shadow: this row is in the M block, and a profile with U-mode (p1..p3) declares the same register in csr/mode_su.json; tools/gen_manifest.py merges the two declarations and refuses them if they disagree. No mhpmcounter9, mhpmevent9 or mcountinhibit is implemented (config/csr/mode_m.json declares none), so the shadow is read-only zero; reset 0 is the only value it can hold."
+        },
+        {
+          "name": "hpmcounter10",
+          "role": "counter-shadow",
+"address": 3082,
+          "width": 64,
+          "access": "ro",
+          "behavior": "fixed",
+          "reset": 0,
+          "unmodifiable_bits": [
+            "63:0"
+          ],
+          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L170-L199 assign '0xC03 & URO & hpmcounter3' through '0xC1F & URO & hpmcounter31'. src/machine.tex section 'Hardware Performance Monitor' L1653-L1655: hpmcounter10 is the read-only shadow of mhpmcounter10, and a counter that is not implemented reads as zero, so an implementation with no HPM counter must answer a read at 0xc0a with 0 rather than trap. The capability ladder advertises Zihpm from p0 with that clause, so a profile with no U-mode (p0) must still implement the shadow: this row is in the M block, and a profile with U-mode (p1..p3) declares the same register in csr/mode_su.json; tools/gen_manifest.py merges the two declarations and refuses them if they disagree. No mhpmcounter10, mhpmevent10 or mcountinhibit is implemented (config/csr/mode_m.json declares none), so the shadow is read-only zero; reset 0 is the only value it can hold."
+        },
+        {
+          "name": "hpmcounter11",
+          "role": "counter-shadow",
+"address": 3083,
+          "width": 64,
+          "access": "ro",
+          "behavior": "fixed",
+          "reset": 0,
+          "unmodifiable_bits": [
+            "63:0"
+          ],
+          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L170-L199 assign '0xC03 & URO & hpmcounter3' through '0xC1F & URO & hpmcounter31'. src/machine.tex section 'Hardware Performance Monitor' L1653-L1655: hpmcounter11 is the read-only shadow of mhpmcounter11, and a counter that is not implemented reads as zero, so an implementation with no HPM counter must answer a read at 0xc0b with 0 rather than trap. The capability ladder advertises Zihpm from p0 with that clause, so a profile with no U-mode (p0) must still implement the shadow: this row is in the M block, and a profile with U-mode (p1..p3) declares the same register in csr/mode_su.json; tools/gen_manifest.py merges the two declarations and refuses them if they disagree. No mhpmcounter11, mhpmevent11 or mcountinhibit is implemented (config/csr/mode_m.json declares none), so the shadow is read-only zero; reset 0 is the only value it can hold."
+        },
+        {
+          "name": "hpmcounter12",
+          "role": "counter-shadow",
+"address": 3084,
+          "width": 64,
+          "access": "ro",
+          "behavior": "fixed",
+          "reset": 0,
+          "unmodifiable_bits": [
+            "63:0"
+          ],
+          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L170-L199 assign '0xC03 & URO & hpmcounter3' through '0xC1F & URO & hpmcounter31'. src/machine.tex section 'Hardware Performance Monitor' L1653-L1655: hpmcounter12 is the read-only shadow of mhpmcounter12, and a counter that is not implemented reads as zero, so an implementation with no HPM counter must answer a read at 0xc0c with 0 rather than trap. The capability ladder advertises Zihpm from p0 with that clause, so a profile with no U-mode (p0) must still implement the shadow: this row is in the M block, and a profile with U-mode (p1..p3) declares the same register in csr/mode_su.json; tools/gen_manifest.py merges the two declarations and refuses them if they disagree. No mhpmcounter12, mhpmevent12 or mcountinhibit is implemented (config/csr/mode_m.json declares none), so the shadow is read-only zero; reset 0 is the only value it can hold."
+        },
+        {
+          "name": "hpmcounter13",
+          "role": "counter-shadow",
+"address": 3085,
+          "width": 64,
+          "access": "ro",
+          "behavior": "fixed",
+          "reset": 0,
+          "unmodifiable_bits": [
+            "63:0"
+          ],
+          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L170-L199 assign '0xC03 & URO & hpmcounter3' through '0xC1F & URO & hpmcounter31'. src/machine.tex section 'Hardware Performance Monitor' L1653-L1655: hpmcounter13 is the read-only shadow of mhpmcounter13, and a counter that is not implemented reads as zero, so an implementation with no HPM counter must answer a read at 0xc0d with 0 rather than trap. The capability ladder advertises Zihpm from p0 with that clause, so a profile with no U-mode (p0) must still implement the shadow: this row is in the M block, and a profile with U-mode (p1..p3) declares the same register in csr/mode_su.json; tools/gen_manifest.py merges the two declarations and refuses them if they disagree. No mhpmcounter13, mhpmevent13 or mcountinhibit is implemented (config/csr/mode_m.json declares none), so the shadow is read-only zero; reset 0 is the only value it can hold."
+        },
+        {
+          "name": "hpmcounter14",
+          "role": "counter-shadow",
+"address": 3086,
+          "width": 64,
+          "access": "ro",
+          "behavior": "fixed",
+          "reset": 0,
+          "unmodifiable_bits": [
+            "63:0"
+          ],
+          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L170-L199 assign '0xC03 & URO & hpmcounter3' through '0xC1F & URO & hpmcounter31'. src/machine.tex section 'Hardware Performance Monitor' L1653-L1655: hpmcounter14 is the read-only shadow of mhpmcounter14, and a counter that is not implemented reads as zero, so an implementation with no HPM counter must answer a read at 0xc0e with 0 rather than trap. The capability ladder advertises Zihpm from p0 with that clause, so a profile with no U-mode (p0) must still implement the shadow: this row is in the M block, and a profile with U-mode (p1..p3) declares the same register in csr/mode_su.json; tools/gen_manifest.py merges the two declarations and refuses them if they disagree. No mhpmcounter14, mhpmevent14 or mcountinhibit is implemented (config/csr/mode_m.json declares none), so the shadow is read-only zero; reset 0 is the only value it can hold."
+        },
+        {
+          "name": "hpmcounter15",
+          "role": "counter-shadow",
+"address": 3087,
+          "width": 64,
+          "access": "ro",
+          "behavior": "fixed",
+          "reset": 0,
+          "unmodifiable_bits": [
+            "63:0"
+          ],
+          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L170-L199 assign '0xC03 & URO & hpmcounter3' through '0xC1F & URO & hpmcounter31'. src/machine.tex section 'Hardware Performance Monitor' L1653-L1655: hpmcounter15 is the read-only shadow of mhpmcounter15, and a counter that is not implemented reads as zero, so an implementation with no HPM counter must answer a read at 0xc0f with 0 rather than trap. The capability ladder advertises Zihpm from p0 with that clause, so a profile with no U-mode (p0) must still implement the shadow: this row is in the M block, and a profile with U-mode (p1..p3) declares the same register in csr/mode_su.json; tools/gen_manifest.py merges the two declarations and refuses them if they disagree. No mhpmcounter15, mhpmevent15 or mcountinhibit is implemented (config/csr/mode_m.json declares none), so the shadow is read-only zero; reset 0 is the only value it can hold."
+        },
+        {
+          "name": "hpmcounter16",
+          "role": "counter-shadow",
+"address": 3088,
+          "width": 64,
+          "access": "ro",
+          "behavior": "fixed",
+          "reset": 0,
+          "unmodifiable_bits": [
+            "63:0"
+          ],
+          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L170-L199 assign '0xC03 & URO & hpmcounter3' through '0xC1F & URO & hpmcounter31'. src/machine.tex section 'Hardware Performance Monitor' L1653-L1655: hpmcounter16 is the read-only shadow of mhpmcounter16, and a counter that is not implemented reads as zero, so an implementation with no HPM counter must answer a read at 0xc10 with 0 rather than trap. The capability ladder advertises Zihpm from p0 with that clause, so a profile with no U-mode (p0) must still implement the shadow: this row is in the M block, and a profile with U-mode (p1..p3) declares the same register in csr/mode_su.json; tools/gen_manifest.py merges the two declarations and refuses them if they disagree. No mhpmcounter16, mhpmevent16 or mcountinhibit is implemented (config/csr/mode_m.json declares none), so the shadow is read-only zero; reset 0 is the only value it can hold."
+        },
+        {
+          "name": "hpmcounter17",
+          "role": "counter-shadow",
+"address": 3089,
+          "width": 64,
+          "access": "ro",
+          "behavior": "fixed",
+          "reset": 0,
+          "unmodifiable_bits": [
+            "63:0"
+          ],
+          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L170-L199 assign '0xC03 & URO & hpmcounter3' through '0xC1F & URO & hpmcounter31'. src/machine.tex section 'Hardware Performance Monitor' L1653-L1655: hpmcounter17 is the read-only shadow of mhpmcounter17, and a counter that is not implemented reads as zero, so an implementation with no HPM counter must answer a read at 0xc11 with 0 rather than trap. The capability ladder advertises Zihpm from p0 with that clause, so a profile with no U-mode (p0) must still implement the shadow: this row is in the M block, and a profile with U-mode (p1..p3) declares the same register in csr/mode_su.json; tools/gen_manifest.py merges the two declarations and refuses them if they disagree. No mhpmcounter17, mhpmevent17 or mcountinhibit is implemented (config/csr/mode_m.json declares none), so the shadow is read-only zero; reset 0 is the only value it can hold."
+        },
+        {
+          "name": "hpmcounter18",
+          "role": "counter-shadow",
+"address": 3090,
+          "width": 64,
+          "access": "ro",
+          "behavior": "fixed",
+          "reset": 0,
+          "unmodifiable_bits": [
+            "63:0"
+          ],
+          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L170-L199 assign '0xC03 & URO & hpmcounter3' through '0xC1F & URO & hpmcounter31'. src/machine.tex section 'Hardware Performance Monitor' L1653-L1655: hpmcounter18 is the read-only shadow of mhpmcounter18, and a counter that is not implemented reads as zero, so an implementation with no HPM counter must answer a read at 0xc12 with 0 rather than trap. The capability ladder advertises Zihpm from p0 with that clause, so a profile with no U-mode (p0) must still implement the shadow: this row is in the M block, and a profile with U-mode (p1..p3) declares the same register in csr/mode_su.json; tools/gen_manifest.py merges the two declarations and refuses them if they disagree. No mhpmcounter18, mhpmevent18 or mcountinhibit is implemented (config/csr/mode_m.json declares none), so the shadow is read-only zero; reset 0 is the only value it can hold."
+        },
+        {
+          "name": "hpmcounter19",
+          "role": "counter-shadow",
+"address": 3091,
+          "width": 64,
+          "access": "ro",
+          "behavior": "fixed",
+          "reset": 0,
+          "unmodifiable_bits": [
+            "63:0"
+          ],
+          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L170-L199 assign '0xC03 & URO & hpmcounter3' through '0xC1F & URO & hpmcounter31'. src/machine.tex section 'Hardware Performance Monitor' L1653-L1655: hpmcounter19 is the read-only shadow of mhpmcounter19, and a counter that is not implemented reads as zero, so an implementation with no HPM counter must answer a read at 0xc13 with 0 rather than trap. The capability ladder advertises Zihpm from p0 with that clause, so a profile with no U-mode (p0) must still implement the shadow: this row is in the M block, and a profile with U-mode (p1..p3) declares the same register in csr/mode_su.json; tools/gen_manifest.py merges the two declarations and refuses them if they disagree. No mhpmcounter19, mhpmevent19 or mcountinhibit is implemented (config/csr/mode_m.json declares none), so the shadow is read-only zero; reset 0 is the only value it can hold."
+        },
+        {
+          "name": "hpmcounter20",
+          "role": "counter-shadow",
+"address": 3092,
+          "width": 64,
+          "access": "ro",
+          "behavior": "fixed",
+          "reset": 0,
+          "unmodifiable_bits": [
+            "63:0"
+          ],
+          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L170-L199 assign '0xC03 & URO & hpmcounter3' through '0xC1F & URO & hpmcounter31'. src/machine.tex section 'Hardware Performance Monitor' L1653-L1655: hpmcounter20 is the read-only shadow of mhpmcounter20, and a counter that is not implemented reads as zero, so an implementation with no HPM counter must answer a read at 0xc14 with 0 rather than trap. The capability ladder advertises Zihpm from p0 with that clause, so a profile with no U-mode (p0) must still implement the shadow: this row is in the M block, and a profile with U-mode (p1..p3) declares the same register in csr/mode_su.json; tools/gen_manifest.py merges the two declarations and refuses them if they disagree. No mhpmcounter20, mhpmevent20 or mcountinhibit is implemented (config/csr/mode_m.json declares none), so the shadow is read-only zero; reset 0 is the only value it can hold."
+        },
+        {
+          "name": "hpmcounter21",
+          "role": "counter-shadow",
+"address": 3093,
+          "width": 64,
+          "access": "ro",
+          "behavior": "fixed",
+          "reset": 0,
+          "unmodifiable_bits": [
+            "63:0"
+          ],
+          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L170-L199 assign '0xC03 & URO & hpmcounter3' through '0xC1F & URO & hpmcounter31'. src/machine.tex section 'Hardware Performance Monitor' L1653-L1655: hpmcounter21 is the read-only shadow of mhpmcounter21, and a counter that is not implemented reads as zero, so an implementation with no HPM counter must answer a read at 0xc15 with 0 rather than trap. The capability ladder advertises Zihpm from p0 with that clause, so a profile with no U-mode (p0) must still implement the shadow: this row is in the M block, and a profile with U-mode (p1..p3) declares the same register in csr/mode_su.json; tools/gen_manifest.py merges the two declarations and refuses them if they disagree. No mhpmcounter21, mhpmevent21 or mcountinhibit is implemented (config/csr/mode_m.json declares none), so the shadow is read-only zero; reset 0 is the only value it can hold."
+        },
+        {
+          "name": "hpmcounter22",
+          "role": "counter-shadow",
+"address": 3094,
+          "width": 64,
+          "access": "ro",
+          "behavior": "fixed",
+          "reset": 0,
+          "unmodifiable_bits": [
+            "63:0"
+          ],
+          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L170-L199 assign '0xC03 & URO & hpmcounter3' through '0xC1F & URO & hpmcounter31'. src/machine.tex section 'Hardware Performance Monitor' L1653-L1655: hpmcounter22 is the read-only shadow of mhpmcounter22, and a counter that is not implemented reads as zero, so an implementation with no HPM counter must answer a read at 0xc16 with 0 rather than trap. The capability ladder advertises Zihpm from p0 with that clause, so a profile with no U-mode (p0) must still implement the shadow: this row is in the M block, and a profile with U-mode (p1..p3) declares the same register in csr/mode_su.json; tools/gen_manifest.py merges the two declarations and refuses them if they disagree. No mhpmcounter22, mhpmevent22 or mcountinhibit is implemented (config/csr/mode_m.json declares none), so the shadow is read-only zero; reset 0 is the only value it can hold."
+        },
+        {
+          "name": "hpmcounter23",
+          "role": "counter-shadow",
+"address": 3095,
+          "width": 64,
+          "access": "ro",
+          "behavior": "fixed",
+          "reset": 0,
+          "unmodifiable_bits": [
+            "63:0"
+          ],
+          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L170-L199 assign '0xC03 & URO & hpmcounter3' through '0xC1F & URO & hpmcounter31'. src/machine.tex section 'Hardware Performance Monitor' L1653-L1655: hpmcounter23 is the read-only shadow of mhpmcounter23, and a counter that is not implemented reads as zero, so an implementation with no HPM counter must answer a read at 0xc17 with 0 rather than trap. The capability ladder advertises Zihpm from p0 with that clause, so a profile with no U-mode (p0) must still implement the shadow: this row is in the M block, and a profile with U-mode (p1..p3) declares the same register in csr/mode_su.json; tools/gen_manifest.py merges the two declarations and refuses them if they disagree. No mhpmcounter23, mhpmevent23 or mcountinhibit is implemented (config/csr/mode_m.json declares none), so the shadow is read-only zero; reset 0 is the only value it can hold."
+        },
+        {
+          "name": "hpmcounter24",
+          "role": "counter-shadow",
+"address": 3096,
+          "width": 64,
+          "access": "ro",
+          "behavior": "fixed",
+          "reset": 0,
+          "unmodifiable_bits": [
+            "63:0"
+          ],
+          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L170-L199 assign '0xC03 & URO & hpmcounter3' through '0xC1F & URO & hpmcounter31'. src/machine.tex section 'Hardware Performance Monitor' L1653-L1655: hpmcounter24 is the read-only shadow of mhpmcounter24, and a counter that is not implemented reads as zero, so an implementation with no HPM counter must answer a read at 0xc18 with 0 rather than trap. The capability ladder advertises Zihpm from p0 with that clause, so a profile with no U-mode (p0) must still implement the shadow: this row is in the M block, and a profile with U-mode (p1..p3) declares the same register in csr/mode_su.json; tools/gen_manifest.py merges the two declarations and refuses them if they disagree. No mhpmcounter24, mhpmevent24 or mcountinhibit is implemented (config/csr/mode_m.json declares none), so the shadow is read-only zero; reset 0 is the only value it can hold."
+        },
+        {
+          "name": "hpmcounter25",
+          "role": "counter-shadow",
+"address": 3097,
+          "width": 64,
+          "access": "ro",
+          "behavior": "fixed",
+          "reset": 0,
+          "unmodifiable_bits": [
+            "63:0"
+          ],
+          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L170-L199 assign '0xC03 & URO & hpmcounter3' through '0xC1F & URO & hpmcounter31'. src/machine.tex section 'Hardware Performance Monitor' L1653-L1655: hpmcounter25 is the read-only shadow of mhpmcounter25, and a counter that is not implemented reads as zero, so an implementation with no HPM counter must answer a read at 0xc19 with 0 rather than trap. The capability ladder advertises Zihpm from p0 with that clause, so a profile with no U-mode (p0) must still implement the shadow: this row is in the M block, and a profile with U-mode (p1..p3) declares the same register in csr/mode_su.json; tools/gen_manifest.py merges the two declarations and refuses them if they disagree. No mhpmcounter25, mhpmevent25 or mcountinhibit is implemented (config/csr/mode_m.json declares none), so the shadow is read-only zero; reset 0 is the only value it can hold."
+        },
+        {
+          "name": "hpmcounter26",
+          "role": "counter-shadow",
+"address": 3098,
+          "width": 64,
+          "access": "ro",
+          "behavior": "fixed",
+          "reset": 0,
+          "unmodifiable_bits": [
+            "63:0"
+          ],
+          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L170-L199 assign '0xC03 & URO & hpmcounter3' through '0xC1F & URO & hpmcounter31'. src/machine.tex section 'Hardware Performance Monitor' L1653-L1655: hpmcounter26 is the read-only shadow of mhpmcounter26, and a counter that is not implemented reads as zero, so an implementation with no HPM counter must answer a read at 0xc1a with 0 rather than trap. The capability ladder advertises Zihpm from p0 with that clause, so a profile with no U-mode (p0) must still implement the shadow: this row is in the M block, and a profile with U-mode (p1..p3) declares the same register in csr/mode_su.json; tools/gen_manifest.py merges the two declarations and refuses them if they disagree. No mhpmcounter26, mhpmevent26 or mcountinhibit is implemented (config/csr/mode_m.json declares none), so the shadow is read-only zero; reset 0 is the only value it can hold."
+        },
+        {
+          "name": "hpmcounter27",
+          "role": "counter-shadow",
+"address": 3099,
+          "width": 64,
+          "access": "ro",
+          "behavior": "fixed",
+          "reset": 0,
+          "unmodifiable_bits": [
+            "63:0"
+          ],
+          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L170-L199 assign '0xC03 & URO & hpmcounter3' through '0xC1F & URO & hpmcounter31'. src/machine.tex section 'Hardware Performance Monitor' L1653-L1655: hpmcounter27 is the read-only shadow of mhpmcounter27, and a counter that is not implemented reads as zero, so an implementation with no HPM counter must answer a read at 0xc1b with 0 rather than trap. The capability ladder advertises Zihpm from p0 with that clause, so a profile with no U-mode (p0) must still implement the shadow: this row is in the M block, and a profile with U-mode (p1..p3) declares the same register in csr/mode_su.json; tools/gen_manifest.py merges the two declarations and refuses them if they disagree. No mhpmcounter27, mhpmevent27 or mcountinhibit is implemented (config/csr/mode_m.json declares none), so the shadow is read-only zero; reset 0 is the only value it can hold."
+        },
+        {
+          "name": "hpmcounter28",
+          "role": "counter-shadow",
+"address": 3100,
+          "width": 64,
+          "access": "ro",
+          "behavior": "fixed",
+          "reset": 0,
+          "unmodifiable_bits": [
+            "63:0"
+          ],
+          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L170-L199 assign '0xC03 & URO & hpmcounter3' through '0xC1F & URO & hpmcounter31'. src/machine.tex section 'Hardware Performance Monitor' L1653-L1655: hpmcounter28 is the read-only shadow of mhpmcounter28, and a counter that is not implemented reads as zero, so an implementation with no HPM counter must answer a read at 0xc1c with 0 rather than trap. The capability ladder advertises Zihpm from p0 with that clause, so a profile with no U-mode (p0) must still implement the shadow: this row is in the M block, and a profile with U-mode (p1..p3) declares the same register in csr/mode_su.json; tools/gen_manifest.py merges the two declarations and refuses them if they disagree. No mhpmcounter28, mhpmevent28 or mcountinhibit is implemented (config/csr/mode_m.json declares none), so the shadow is read-only zero; reset 0 is the only value it can hold."
+        },
+        {
+          "name": "hpmcounter29",
+          "role": "counter-shadow",
+"address": 3101,
+          "width": 64,
+          "access": "ro",
+          "behavior": "fixed",
+          "reset": 0,
+          "unmodifiable_bits": [
+            "63:0"
+          ],
+          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L170-L199 assign '0xC03 & URO & hpmcounter3' through '0xC1F & URO & hpmcounter31'. src/machine.tex section 'Hardware Performance Monitor' L1653-L1655: hpmcounter29 is the read-only shadow of mhpmcounter29, and a counter that is not implemented reads as zero, so an implementation with no HPM counter must answer a read at 0xc1d with 0 rather than trap. The capability ladder advertises Zihpm from p0 with that clause, so a profile with no U-mode (p0) must still implement the shadow: this row is in the M block, and a profile with U-mode (p1..p3) declares the same register in csr/mode_su.json; tools/gen_manifest.py merges the two declarations and refuses them if they disagree. No mhpmcounter29, mhpmevent29 or mcountinhibit is implemented (config/csr/mode_m.json declares none), so the shadow is read-only zero; reset 0 is the only value it can hold."
+        },
+        {
+          "name": "hpmcounter30",
+          "role": "counter-shadow",
+"address": 3102,
+          "width": 64,
+          "access": "ro",
+          "behavior": "fixed",
+          "reset": 0,
+          "unmodifiable_bits": [
+            "63:0"
+          ],
+          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L170-L199 assign '0xC03 & URO & hpmcounter3' through '0xC1F & URO & hpmcounter31'. src/machine.tex section 'Hardware Performance Monitor' L1653-L1655: hpmcounter30 is the read-only shadow of mhpmcounter30, and a counter that is not implemented reads as zero, so an implementation with no HPM counter must answer a read at 0xc1e with 0 rather than trap. The capability ladder advertises Zihpm from p0 with that clause, so a profile with no U-mode (p0) must still implement the shadow: this row is in the M block, and a profile with U-mode (p1..p3) declares the same register in csr/mode_su.json; tools/gen_manifest.py merges the two declarations and refuses them if they disagree. No mhpmcounter30, mhpmevent30 or mcountinhibit is implemented (config/csr/mode_m.json declares none), so the shadow is read-only zero; reset 0 is the only value it can hold."
+        },
+        {
+          "name": "hpmcounter31",
+          "role": "counter-shadow",
+"address": 3103,
+          "width": 64,
+          "access": "ro",
+          "behavior": "fixed",
+          "reset": 0,
+          "unmodifiable_bits": [
+            "63:0"
+          ],
+          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L170-L199 assign '0xC03 & URO & hpmcounter3' through '0xC1F & URO & hpmcounter31'. src/machine.tex section 'Hardware Performance Monitor' L1653-L1655: hpmcounter31 is the read-only shadow of mhpmcounter31, and a counter that is not implemented reads as zero, so an implementation with no HPM counter must answer a read at 0xc1f with 0 rather than trap. The capability ladder advertises Zihpm from p0 with that clause, so a profile with no U-mode (p0) must still implement the shadow: this row is in the M block, and a profile with U-mode (p1..p3) declares the same register in csr/mode_su.json; tools/gen_manifest.py merges the two declarations and refuses them if they disagree. No mhpmcounter31, mhpmevent31 or mcountinhibit is implemented (config/csr/mode_m.json declares none), so the shadow is read-only zero; reset 0 is the only value it can hold."
         }
       ]
     }

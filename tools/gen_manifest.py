@@ -407,16 +407,18 @@ NO_TARGET_WITHOUT_LESS_PRIVILEGE = ("medeleg", "mideleg")
 #   mie/mip bits 9, 5, 1 (SEIE/STIE/SSIE and SEIP/STIP/SSIP) are the supervisor
 #                        interrupt enables and pending bits; with no S-mode the
 #                        only legal value of each is 0.
-#   mcounteren [2:0]     gates counter access *from U-mode* (Priv v1.12: "When
-#                        the CY, TM, IR ... bit in mcounteren is clear, attempts
-#                        to read ... while executing in U-mode will cause an
-#                        illegal instruction exception"). With no U-mode there is
-#                        no access to gate and the register is read-only zero.
+#   mcounteren [31:0]    gates counter access *from a less-privileged mode*
+#                        (Priv v1.12: "When the CY, TM, IR ... bit in mcounteren
+#                        is clear, attempts to read ... while executing in
+#                        U-mode will cause an illegal instruction exception";
+#                        the HPMn bits 31:3 gate the hpmcounter3..31 shadows the
+#                        Zihpm rows implement). With no S or U mode there is no
+#                        access to gate and every bit's only legal value is 0.
 LESS_PRIVILEGE_ONLY_FIELDS = {
     "mstatus": ("12:11", "8", "17", "18", "19", "20", "21", "22"),
     "mie": ("9", "5", "1"),
     "mip": ("9", "5", "1"),
-    "mcounteren": ("2", "1", "0"),
+    "mcounteren": ("31:0",),
 }
 
 
@@ -933,6 +935,19 @@ def render_platform_header(bundle: config_check.Bundle) -> str:
     add("// Derived from whether the profile claims C; the CSR write masks of the")
     add("// PC-valued registers follow it (config_check.ialign).")
     add("#define MOSAIC_IALIGN %d" % config_check.ialign(bundle))
+    add("")
+    # The LR/SC reservation set is a *platform* declaration (config/profiles/
+    # <profile>.json), cross-checked against the ACT reference declaration where
+    # one ships. It travels here so CASE=lrsc.reservation_progress checks the
+    # RTL against the declaration rather than against the RTL's own constant.
+    reservation = bundle.profile["reservation"]
+    add("// ---- LR/SC reservation set (platform declaration) ----")
+    add("// The size below is the profile's declaration, not the RTL's granule")
+    add("// constant: the case takes its expected set from here and checks the RTL.")
+    add("#define MOSAIC_RESERVATION_SET_SIZE_EXP %d" % reservation["set_size_exp"])
+    add("#define MOSAIC_RESERVATION_SET_BYTES %d" % (1 << reservation["set_size_exp"]))
+    add("#define MOSAIC_RESERVATION_REQUIRE_EXACT_ADDR %d"
+        % (1 if reservation["require_exact_addr"] else 0))
     add("")
     add("// ---- physical memory map ----")
     for region in sorted(bundle.memory["regions"], key=lambda r: r["base"]):

@@ -38,17 +38,21 @@ reporting a vacuous pass.
 
 Controls (--controls)
 ---------------------
-Two defect injections must make the case FAIL, so the case is known to detect a
-real error rather than passing on anything:
+Each defect injection must make the case FAIL, so the case is known to detect a
+real error rather than passing on anything. Every RTL mutant is built from a
+deleted build directory with its `-D` on the Verilator command line (so its
+binary hash differs from the shipping one) and must make the named ELF -- the one
+the fixed defect was about -- stop passing with exit 1:
 
-  * `MOSAIC_ALU_MUTANT_4` (slt answers the unsigned comparison) is built into the
-    DUT and the I-suite `slt` ELF must stop passing inside the ELF;
-  * one expected-signature word is corrupted in a copy of an ELF, so the ELF's own
-    comparison must fail and the DUT must write 3 to `tohost`.
+  * `MOSAIC_ALU_MUTANT_4`             slt answers the unsigned comparison (I);
+  * `MOSAIC_DECODER_MUTANT_C_LUI_IMM` c.lui places its immediate 12 bits high;
+  * `MOSAIC_LRSC_MUTANT_GRANULE_64B`  the reservation set is 64 bytes, not the
+                                      declared 8;
+  * `MOSAIC_CSR_MUTANT_NO_HPM`        the Zihpm counter shadows are not decoded;
+  * `MOSAIC_CSR_MUTANT_MCOUNTEREN_RO` mcounteren stays read-only zero.
 
-Both are built from a deleted build directory with their `-D` on the Verilator
-command line, so the mutant binary's hash differs from the shipping one, and both
-must exit 1 with a named first failure.
+Plus a data control: one expected-signature word is corrupted in a copy of an
+ELF, so the ELF's own comparison must fail and the DUT must write 3 to `tohost`.
 
 Exit status: 0 only when every applicable ELF ran and passed with N closed; 1 FAIL
 (a DUT mismatch or a control that did not fail); 2 BLOCKED (a prerequisite is
@@ -150,10 +154,30 @@ DEFERRED_REASONS = {
     "Zicond": "conditional ops: the p1 profile claims Zicond but this checkout has no Zicond suite, so no ELF exists to run (see the exclusion ledger).",
 }
 
-# A control that must fail: the ALU mutant the I-suite slt cases detect.
-CONTROL_MUTANT_DEFINE = "MOSAIC_ALU_MUTANT_4"
-CONTROL_MUTANT_SUITE = "I"
-CONTROL_MUTANT_CANDIDATES = ("I-slt-00", "I-sltiu-00")
+# Controls that must fail: one -D per defect the ACT4 suite found. Each is built
+# from a *deleted* build directory with its -D on the Verilator command line, so
+# the mutant binary's hash differs from the shipping one, and the named ELF (the
+# one the suite's fix was about) must stop passing with exit 1.
+#
+#   * MOSAIC_ALU_MUTANT_4            slt answers the unsigned comparison (I-suite);
+#   * MOSAIC_DECODER_MUTANT_C_LUI_IMM  c.lui places its immediate 12 bits high;
+#   * MOSAIC_LRSC_MUTANT_GRANULE_64B   the reservation set is 64 bytes, not the
+#                                      declared 8 (Zalrsc);
+#   * MOSAIC_CSR_MUTANT_NO_HPM         the Zihpm counter shadows are not decoded;
+#   * MOSAIC_CSR_MUTANT_MCOUNTEREN_RO  mcounteren stays read-only zero, so an
+#                                      S-mode read of a counter shadow traps.
+CONTROL_MUTANTS = [
+    ("MOSAIC_ALU_MUTANT_4", ("I-slt-00", "I-sltiu-00"),
+     "the ALU mutant the I-suite slt cases detect"),
+    ("MOSAIC_DECODER_MUTANT_C_LUI_IMM", ("Zca-c.lui-00",),
+     "the shifted c.lui immediate the Zca case detects"),
+    ("MOSAIC_LRSC_MUTANT_GRANULE_64B", ("Zalrsc-sc.w-00", "Zalrsc-sc.d-00"),
+     "the oversized reservation granule the Zalrsc cases detect"),
+    ("MOSAIC_CSR_MUTANT_NO_HPM", ("Zihpm-csrrs-00", "Zihpm-csrrc-00"),
+     "the removed Zihpm shadow decode the Zihpm cases detect"),
+    ("MOSAIC_CSR_MUTANT_MCOUNTEREN_RO", ("Zihpm-csrrs-00", "Zihpm-csrrc-00"),
+     "the read-only-zero mcounteren the Zihpm cases detect"),
+]
 # A data control: corrupt one expected-signature word in a copy of this ELF.
 CONTROL_DATA_SUITE = "I"
 CONTROL_DATA_ELF = "I-add-00"
@@ -544,35 +568,43 @@ def main():
         controls_ok = True
         if args.controls:
             control_log = []
-            # (1) RTL mutant: the I-suite slt ELF must stop passing.
-            mutant_dir = build_dir + ".MUTANT_ALU4"
-            mutant_bin = build(mutant_dir, define=CONTROL_MUTANT_DEFINE,
-                               entry=entry, log=control_log)
-            mutant_sha = sha256(mutant_bin)
-            target = None
-            for cand in CONTROL_MUTANT_CANDIDATES:
-                for suite, path in elfs:
-                    if os.path.basename(path) == cand + ".elf":
-                        target = (suite, path)
+            # (1) RTL mutants: one per defect the suite found. Each is built from
+            # a deleted build directory with its -D on the Verilator command line
+            # and its ELF must stop passing.
+            for define, candidates, why in CONTROL_MUTANTS:
+                mutant_dir = build_dir + ".MUTANT_" + define.replace("MOSAIC_", "")
+                mutant_bin = build(mutant_dir, define=define, entry=entry,
+                                   log=control_log)
+                mutant_sha = sha256(mutant_bin)
+                if mutant_sha == record["dut_sha256"]:
+                    controls_ok = False
+                    control_log.append("control %s: binary hash equals the shipping "
+                                       "binary; the -D did not change the build" % define)
+                target = None
+                for cand in candidates:
+                    for suite, path in elfs:
+                        if os.path.basename(path) == cand + ".elf":
+                            target = (suite, path)
+                            break
+                    if target:
                         break
-                if target:
-                    break
-            if target is None:
-                controls_ok = False
-                control_log.append("control: no slt ELF found for the mutant")
-            else:
-                cdir = os.path.join(args.out, "controls", "alu_mutant_4")
+                if target is None:
+                    controls_ok = False
+                    control_log.append("control %s: none of %s found in the suite"
+                                       % (define, ", ".join(candidates)))
+                    continue
+                cdir = os.path.join(args.out, "controls", define)
                 kind, code, out = run_elf(mutant_bin, target[1], cdir, args.max_cycles)
                 failed = (kind == "FAIL" and code == 1)
                 record["controls"].append({
-                    "name": CONTROL_MUTANT_DEFINE, "define": CONTROL_MUTANT_DEFINE,
+                    "name": define, "define": define, "why": why,
                     "elf": os.path.basename(target[1]), "sha256": mutant_sha,
                     "shipping_sha256": record["dut_sha256"], "exit": code,
                     "verdict": kind, "must": "FAIL", "ok": failed})
-                control_log.append("control %s: %s exit=%d (must FAIL)"
-                                   % (CONTROL_MUTANT_DEFINE, kind, code))
-                log("control %-28s %s exit=%d (must FAIL)" %
-                    (CONTROL_MUTANT_DEFINE, kind, code))
+                control_log.append("control %s on %s: %s exit=%d (must FAIL); %s"
+                                   % (define, os.path.basename(target[1]), kind, code, why))
+                log("control %-34s %s exit=%d on %s (must FAIL)"
+                    % (define, kind, code, os.path.basename(target[1])))
                 controls_ok = controls_ok and failed
             # (2) data control: corrupt one expected signature word.
             target = None

@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "case": "core.act_dut",
+  "verdict": "PASS",
+  "detail": "applicable=127 generated=127 run=127 passed=127 failed=0 act_commit=96493a91448ca50780013fd892daec2c204487ba config=tests/act4/mosaic-p1/test_config.yaml",
+  "seed": 1,
+  "max_cycles": 4000000,
+  "checks": 130,
+  "failures": 0,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-02T08:52:07Z",
+  "first_mismatch": ""
+}

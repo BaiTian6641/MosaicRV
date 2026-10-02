@@ -27,6 +27,10 @@
     "store": "trap",
     "atomic": "trap"
   },
+  "reservation": {
+    "set_size_exp": 3,
+    "require_exact_addr": false
+  },
   "csr_files": [
     "csr/mode_m.json"
   ],

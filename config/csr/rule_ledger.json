@@ -1747,6 +1747,934 @@
         },
         "forbid": "0x0000000000000000"
       }
+    },
+    {
+      "id": "hpmcounter3.value",
+      "csr": "hpmcounter3",
+      "address": 3075,
+      "field": "value",
+      "bits": "63:0",
+      "kind": "read_only",
+      "clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L170-L199 assign '0xC03 & URO & hpmcounter3' through '0xC1F & URO & hpmcounter31'. src/machine.tex section 'Hardware Performance Monitor' L1653-L1655: hpmcounter3 is the read-only shadow of mhpmcounter3, and a counter that is not implemented reads as zero, so an implementation with no HPM counter must answer a read at 0xc03 with 0 rather than trap; capability_ladder.json advertises Zihpm from p0 with exactly that clause. MosaicRV implements no mhpmcounter3, mhpmevent3 or mcountinhibit, so the shadow is read-only zero and no software write can change it.",
+      "preconditions": [
+        "profile p0 implements hpmcounter3 at 0xc03",
+        "the hart runs in M-mode (p0 privilege_modes == [M]); every implemented CSR is M-accessible",
+        "no HPM counter is implemented, so the shadow is read-only zero (capability ladder: Zihpm, 'read-only zero when no counters are implemented')"
+      ],
+      "positive": {
+        "op": "csrr",
+        "write": "0x0000000000000000",
+        "traps": 0,
+        "expect": {
+          "read": "0x0000000000000000"
+        },
+        "forbid": "0x0000000000000001"
+      },
+      "negative": {
+        "op": "csrr",
+        "write": "0x0000000000000000",
+        "traps": 0,
+        "expect": {
+          "read": "0x0000000000000000"
+        },
+        "forbid": "0x0000000000000001"
+      }
+    },
+    {
+      "id": "hpmcounter4.value",
+      "csr": "hpmcounter4",
+      "address": 3076,
+      "field": "value",
+      "bits": "63:0",
+      "kind": "read_only",
+      "clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L170-L199 assign '0xC03 & URO & hpmcounter3' through '0xC1F & URO & hpmcounter31'. src/machine.tex section 'Hardware Performance Monitor' L1653-L1655: hpmcounter4 is the read-only shadow of mhpmcounter4, and a counter that is not implemented reads as zero, so an implementation with no HPM counter must answer a read at 0xc04 with 0 rather than trap; capability_ladder.json advertises Zihpm from p0 with exactly that clause. MosaicRV implements no mhpmcounter4, mhpmevent4 or mcountinhibit, so the shadow is read-only zero and no software write can change it.",
+      "preconditions": [
+        "profile p0 implements hpmcounter4 at 0xc04",
+        "the hart runs in M-mode (p0 privilege_modes == [M]); every implemented CSR is M-accessible",
+        "no HPM counter is implemented, so the shadow is read-only zero (capability ladder: Zihpm, 'read-only zero when no counters are implemented')"
+      ],
+      "positive": {
+        "op": "csrr",
+        "write": "0x0000000000000000",
+        "traps": 0,
+        "expect": {
+          "read": "0x0000000000000000"
+        },
+        "forbid": "0x0000000000000001"
+      },
+      "negative": {
+        "op": "csrr",
+        "write": "0x0000000000000000",
+        "traps": 0,
+        "expect": {
+          "read": "0x0000000000000000"
+        },
+        "forbid": "0x0000000000000001"
+      }
+    },
+    {
+      "id": "hpmcounter5.value",
+      "csr": "hpmcounter5",
+      "address": 3077,
+      "field": "value",
+      "bits": "63:0",
+      "kind": "read_only",
+      "clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L170-L199 assign '0xC03 & URO & hpmcounter3' through '0xC1F & URO & hpmcounter31'. src/machine.tex section 'Hardware Performance Monitor' L1653-L1655: hpmcounter5 is the read-only shadow of mhpmcounter5, and a counter that is not implemented reads as zero, so an implementation with no HPM counter must answer a read at 0xc05 with 0 rather than trap; capability_ladder.json advertises Zihpm from p0 with exactly that clause. MosaicRV implements no mhpmcounter5, mhpmevent5 or mcountinhibit, so the shadow is read-only zero and no software write can change it.",
+      "preconditions": [
+        "profile p0 implements hpmcounter5 at 0xc05",
+        "the hart runs in M-mode (p0 privilege_modes == [M]); every implemented CSR is M-accessible",
+        "no HPM counter is implemented, so the shadow is read-only zero (capability ladder: Zihpm, 'read-only zero when no counters are implemented')"
+      ],
+      "positive": {
+        "op": "csrr",
+        "write": "0x0000000000000000",
+        "traps": 0,
+        "expect": {
+          "read": "0x0000000000000000"
+        },
+        "forbid": "0x0000000000000001"
+      },
+      "negative": {
+        "op": "csrr",
+        "write": "0x0000000000000000",
+        "traps": 0,
+        "expect": {
+          "read": "0x0000000000000000"
+        },
+        "forbid": "0x0000000000000001"
+      }
+    },
+    {
+      "id": "hpmcounter6.value",
+      "csr": "hpmcounter6",
+      "address": 3078,
+      "field": "value",
+      "bits": "63:0",
+      "kind": "read_only",
+      "clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L170-L199 assign '0xC03 & URO & hpmcounter3' through '0xC1F & URO & hpmcounter31'. src/machine.tex section 'Hardware Performance Monitor' L1653-L1655: hpmcounter6 is the read-only shadow of mhpmcounter6, and a counter that is not implemented reads as zero, so an implementation with no HPM counter must answer a read at 0xc06 with 0 rather than trap; capability_ladder.json advertises Zihpm from p0 with exactly that clause. MosaicRV implements no mhpmcounter6, mhpmevent6 or mcountinhibit, so the shadow is read-only zero and no software write can change it.",
+      "preconditions": [
+        "profile p0 implements hpmcounter6 at 0xc06",
+        "the hart runs in M-mode (p0 privilege_modes == [M]); every implemented CSR is M-accessible",
+        "no HPM counter is implemented, so the shadow is read-only zero (capability ladder: Zihpm, 'read-only zero when no counters are implemented')"
+      ],
+      "positive": {
+        "op": "csrr",
+        "write": "0x0000000000000000",
+        "traps": 0,
+        "expect": {
+          "read": "0x0000000000000000"
+        },
+        "forbid": "0x0000000000000001"
+      },
+      "negative": {
+        "op": "csrr",
+        "write": "0x0000000000000000",
+        "traps": 0,
+        "expect": {
+          "read": "0x0000000000000000"
+        },
+        "forbid": "0x0000000000000001"
+      }
+    },
+    {
+      "id": "hpmcounter7.value",
+      "csr": "hpmcounter7",
+      "address": 3079,
+      "field": "value",
+      "bits": "63:0",
+      "kind": "read_only",
+      "clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L170-L199 assign '0xC03 & URO & hpmcounter3' through '0xC1F & URO & hpmcounter31'. src/machine.tex section 'Hardware Performance Monitor' L1653-L1655: hpmcounter7 is the read-only shadow of mhpmcounter7, and a counter that is not implemented reads as zero, so an implementation with no HPM counter must answer a read at 0xc07 with 0 rather than trap; capability_ladder.json advertises Zihpm from p0 with exactly that clause. MosaicRV implements no mhpmcounter7, mhpmevent7 or mcountinhibit, so the shadow is read-only zero and no software write can change it.",
+      "preconditions": [
+        "profile p0 implements hpmcounter7 at 0xc07",
+        "the hart runs in M-mode (p0 privilege_modes == [M]); every implemented CSR is M-accessible",
+        "no HPM counter is implemented, so the shadow is read-only zero (capability ladder: Zihpm, 'read-only zero when no counters are implemented')"
+      ],
+      "positive": {
+        "op": "csrr",
+        "write": "0x0000000000000000",
+        "traps": 0,
+        "expect": {
+          "read": "0x0000000000000000"
+        },
+        "forbid": "0x0000000000000001"
+      },
+      "negative": {
+        "op": "csrr",
+        "write": "0x0000000000000000",
+        "traps": 0,
+        "expect": {
+          "read": "0x0000000000000000"
+        },
+        "forbid": "0x0000000000000001"
+      }
+    },
+    {
+      "id": "hpmcounter8.value",
+      "csr": "hpmcounter8",
+      "address": 3080,
+      "field": "value",
+      "bits": "63:0",
+      "kind": "read_only",
+      "clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L170-L199 assign '0xC03 & URO & hpmcounter3' through '0xC1F & URO & hpmcounter31'. src/machine.tex section 'Hardware Performance Monitor' L1653-L1655: hpmcounter8 is the read-only shadow of mhpmcounter8, and a counter that is not implemented reads as zero, so an implementation with no HPM counter must answer a read at 0xc08 with 0 rather than trap; capability_ladder.json advertises Zihpm from p0 with exactly that clause. MosaicRV implements no mhpmcounter8, mhpmevent8 or mcountinhibit, so the shadow is read-only zero and no software write can change it.",
+      "preconditions": [
+        "profile p0 implements hpmcounter8 at 0xc08",
+        "the hart runs in M-mode (p0 privilege_modes == [M]); every implemented CSR is M-accessible",
+        "no HPM counter is implemented, so the shadow is read-only zero (capability ladder: Zihpm, 'read-only zero when no counters are implemented')"
+      ],
+      "positive": {
+        "op": "csrr",
+        "write": "0x0000000000000000",
+        "traps": 0,
+        "expect": {
+          "read": "0x0000000000000000"
+        },
+        "forbid": "0x0000000000000001"
+      },
+      "negative": {
+        "op": "csrr",
+        "write": "0x0000000000000000",
+        "traps": 0,
+        "expect": {
+          "read": "0x0000000000000000"
+        },
+        "forbid": "0x0000000000000001"
+      }
+    },
+    {
+      "id": "hpmcounter9.value",
+      "csr": "hpmcounter9",
+      "address": 3081,
+      "field": "value",
+      "bits": "63:0",
+      "kind": "read_only",
+      "clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L170-L199 assign '0xC03 & URO & hpmcounter3' through '0xC1F & URO & hpmcounter31'. src/machine.tex section 'Hardware Performance Monitor' L1653-L1655: hpmcounter9 is the read-only shadow of mhpmcounter9, and a counter that is not implemented reads as zero, so an implementation with no HPM counter must answer a read at 0xc09 with 0 rather than trap; capability_ladder.json advertises Zihpm from p0 with exactly that clause. MosaicRV implements no mhpmcounter9, mhpmevent9 or mcountinhibit, so the shadow is read-only zero and no software write can change it.",
+      "preconditions": [
+        "profile p0 implements hpmcounter9 at 0xc09",
+        "the hart runs in M-mode (p0 privilege_modes == [M]); every implemented CSR is M-accessible",
+        "no HPM counter is implemented, so the shadow is read-only zero (capability ladder: Zihpm, 'read-only zero when no counters are implemented')"
+      ],
+      "positive": {
+        "op": "csrr",
+        "write": "0x0000000000000000",
+        "traps": 0,
+        "expect": {
+          "read": "0x0000000000000000"
+        },
+        "forbid": "0x0000000000000001"
+      },
+      "negative": {
+        "op": "csrr",
+        "write": "0x0000000000000000",
+        "traps": 0,
+        "expect": {
+          "read": "0x0000000000000000"
+        },
+        "forbid": "0x0000000000000001"
+      }
+    },
+    {
+      "id": "hpmcounter10.value",
+      "csr": "hpmcounter10",
+      "address": 3082,
+      "field": "value",
+      "bits": "63:0",
+      "kind": "read_only",
+      "clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L170-L199 assign '0xC03 & URO & hpmcounter3' through '0xC1F & URO & hpmcounter31'. src/machine.tex section 'Hardware Performance Monitor' L1653-L1655: hpmcounter10 is the read-only shadow of mhpmcounter10, and a counter that is not implemented reads as zero, so an implementation with no HPM counter must answer a read at 0xc0a with 0 rather than trap; capability_ladder.json advertises Zihpm from p0 with exactly that clause. MosaicRV implements no mhpmcounter10, mhpmevent10 or mcountinhibit, so the shadow is read-only zero and no software write can change it.",
+      "preconditions": [
+        "profile p0 implements hpmcounter10 at 0xc0a",
+        "the hart runs in M-mode (p0 privilege_modes == [M]); every implemented CSR is M-accessible",
+        "no HPM counter is implemented, so the shadow is read-only zero (capability ladder: Zihpm, 'read-only zero when no counters are implemented')"
+      ],
+      "positive": {
+        "op": "csrr",
+        "write": "0x0000000000000000",
+        "traps": 0,
+        "expect": {
+          "read": "0x0000000000000000"
+        },
+        "forbid": "0x0000000000000001"
+      },
+      "negative": {
+        "op": "csrr",
+        "write": "0x0000000000000000",
+        "traps": 0,
+        "expect": {
+          "read": "0x0000000000000000"
+        },
+        "forbid": "0x0000000000000001"
+      }
+    },
+    {
+      "id": "hpmcounter11.value",
+      "csr": "hpmcounter11",
+      "address": 3083,
+      "field": "value",
+      "bits": "63:0",
+      "kind": "read_only",
+      "clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L170-L199 assign '0xC03 & URO & hpmcounter3' through '0xC1F & URO & hpmcounter31'. src/machine.tex section 'Hardware Performance Monitor' L1653-L1655: hpmcounter11 is the read-only shadow of mhpmcounter11, and a counter that is not implemented reads as zero, so an implementation with no HPM counter must answer a read at 0xc0b with 0 rather than trap; capability_ladder.json advertises Zihpm from p0 with exactly that clause. MosaicRV implements no mhpmcounter11, mhpmevent11 or mcountinhibit, so the shadow is read-only zero and no software write can change it.",
+      "preconditions": [
+        "profile p0 implements hpmcounter11 at 0xc0b",
+        "the hart runs in M-mode (p0 privilege_modes == [M]); every implemented CSR is M-accessible",
+        "no HPM counter is implemented, so the shadow is read-only zero (capability ladder: Zihpm, 'read-only zero when no counters are implemented')"
+      ],
+      "positive": {
+        "op": "csrr",
+        "write": "0x0000000000000000",
+        "traps": 0,
+        "expect": {
+          "read": "0x0000000000000000"
+        },
+        "forbid": "0x0000000000000001"
+      },
+      "negative": {
+        "op": "csrr",
+        "write": "0x0000000000000000",
+        "traps": 0,
+        "expect": {
+          "read": "0x0000000000000000"
+        },
+        "forbid": "0x0000000000000001"
+      }
+    },
+    {
+      "id": "hpmcounter12.value",
+      "csr": "hpmcounter12",
+      "address": 3084,
+      "field": "value",
+      "bits": "63:0",
+      "kind": "read_only",
+      "clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L170-L199 assign '0xC03 & URO & hpmcounter3' through '0xC1F & URO & hpmcounter31'. src/machine.tex section 'Hardware Performance Monitor' L1653-L1655: hpmcounter12 is the read-only shadow of mhpmcounter12, and a counter that is not implemented reads as zero, so an implementation with no HPM counter must answer a read at 0xc0c with 0 rather than trap; capability_ladder.json advertises Zihpm from p0 with exactly that clause. MosaicRV implements no mhpmcounter12, mhpmevent12 or mcountinhibit, so the shadow is read-only zero and no software write can change it.",
+      "preconditions": [
+        "profile p0 implements hpmcounter12 at 0xc0c",
+        "the hart runs in M-mode (p0 privilege_modes == [M]); every implemented CSR is M-accessible",
+        "no HPM counter is implemented, so the shadow is read-only zero (capability ladder: Zihpm, 'read-only zero when no counters are implemented')"
+      ],
+      "positive": {
+        "op": "csrr",
+        "write": "0x0000000000000000",
+        "traps": 0,
+        "expect": {
+          "read": "0x0000000000000000"
+        },
+        "forbid": "0x0000000000000001"
+      },
+      "negative": {
+        "op": "csrr",
+        "write": "0x0000000000000000",
+        "traps": 0,
+        "expect": {
+          "read": "0x0000000000000000"
+        },
+        "forbid": "0x0000000000000001"
+      }
+    },
+    {
+      "id": "hpmcounter13.value",
+      "csr": "hpmcounter13",
+      "address": 3085,
+      "field": "value",
+      "bits": "63:0",
+      "kind": "read_only",
+      "clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L170-L199 assign '0xC03 & URO & hpmcounter3' through '0xC1F & URO & hpmcounter31'. src/machine.tex section 'Hardware Performance Monitor' L1653-L1655: hpmcounter13 is the read-only shadow of mhpmcounter13, and a counter that is not implemented reads as zero, so an implementation with no HPM counter must answer a read at 0xc0d with 0 rather than trap; capability_ladder.json advertises Zihpm from p0 with exactly that clause. MosaicRV implements no mhpmcounter13, mhpmevent13 or mcountinhibit, so the shadow is read-only zero and no software write can change it.",
+      "preconditions": [
+        "profile p0 implements hpmcounter13 at 0xc0d",
+        "the hart runs in M-mode (p0 privilege_modes == [M]); every implemented CSR is M-accessible",
+        "no HPM counter is implemented, so the shadow is read-only zero (capability ladder: Zihpm, 'read-only zero when no counters are implemented')"
+      ],
+      "positive": {
+        "op": "csrr",
+        "write": "0x0000000000000000",
+        "traps": 0,
+        "expect": {
+          "read": "0x0000000000000000"
+        },
+        "forbid": "0x0000000000000001"
+      },
+      "negative": {
+        "op": "csrr",
+        "write": "0x0000000000000000",
+        "traps": 0,
+        "expect": {
+          "read": "0x0000000000000000"
+        },
+        "forbid": "0x0000000000000001"
+      }
+    },
+    {
+      "id": "hpmcounter14.value",
+      "csr": "hpmcounter14",
+      "address": 3086,
+      "field": "value",
+      "bits": "63:0",
+      "kind": "read_only",
+      "clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L170-L199 assign '0xC03 & URO & hpmcounter3' through '0xC1F & URO & hpmcounter31'. src/machine.tex section 'Hardware Performance Monitor' L1653-L1655: hpmcounter14 is the read-only shadow of mhpmcounter14, and a counter that is not implemented reads as zero, so an implementation with no HPM counter must answer a read at 0xc0e with 0 rather than trap; capability_ladder.json advertises Zihpm from p0 with exactly that clause. MosaicRV implements no mhpmcounter14, mhpmevent14 or mcountinhibit, so the shadow is read-only zero and no software write can change it.",
+      "preconditions": [
+        "profile p0 implements hpmcounter14 at 0xc0e",
+        "the hart runs in M-mode (p0 privilege_modes == [M]); every implemented CSR is M-accessible",
+        "no HPM counter is implemented, so the shadow is read-only zero (capability ladder: Zihpm, 'read-only zero when no counters are implemented')"
+      ],
+      "positive": {
+        "op": "csrr",
+        "write": "0x0000000000000000",
+        "traps": 0,
+        "expect": {
+          "read": "0x0000000000000000"
+        },
+        "forbid": "0x0000000000000001"
+      },
+      "negative": {
+        "op": "csrr",
+        "write": "0x0000000000000000",
+        "traps": 0,
+        "expect": {
+          "read": "0x0000000000000000"
+        },
+        "forbid": "0x0000000000000001"
+      }
+    },
+    {
+      "id": "hpmcounter15.value",
+      "csr": "hpmcounter15",
+      "address": 3087,
+      "field": "value",
+      "bits": "63:0",
+      "kind": "read_only",
+      "clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L170-L199 assign '0xC03 & URO & hpmcounter3' through '0xC1F & URO & hpmcounter31'. src/machine.tex section 'Hardware Performance Monitor' L1653-L1655: hpmcounter15 is the read-only shadow of mhpmcounter15, and a counter that is not implemented reads as zero, so an implementation with no HPM counter must answer a read at 0xc0f with 0 rather than trap; capability_ladder.json advertises Zihpm from p0 with exactly that clause. MosaicRV implements no mhpmcounter15, mhpmevent15 or mcountinhibit, so the shadow is read-only zero and no software write can change it.",
+      "preconditions": [
+        "profile p0 implements hpmcounter15 at 0xc0f",
+        "the hart runs in M-mode (p0 privilege_modes == [M]); every implemented CSR is M-accessible",
+        "no HPM counter is implemented, so the shadow is read-only zero (capability ladder: Zihpm, 'read-only zero when no counters are implemented')"
+      ],
+      "positive": {
+        "op": "csrr",
+        "write": "0x0000000000000000",
+        "traps": 0,
+        "expect": {
+          "read": "0x0000000000000000"
+        },
+        "forbid": "0x0000000000000001"
+      },
+      "negative": {
+        "op": "csrr",
+        "write": "0x0000000000000000",
+        "traps": 0,
+        "expect": {
+          "read": "0x0000000000000000"
+        },
+        "forbid": "0x0000000000000001"
+      }
+    },
+    {
+      "id": "hpmcounter16.value",
+      "csr": "hpmcounter16",
+      "address": 3088,
+      "field": "value",
+      "bits": "63:0",
+      "kind": "read_only",
+      "clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L170-L199 assign '0xC03 & URO & hpmcounter3' through '0xC1F & URO & hpmcounter31'. src/machine.tex section 'Hardware Performance Monitor' L1653-L1655: hpmcounter16 is the read-only shadow of mhpmcounter16, and a counter that is not implemented reads as zero, so an implementation with no HPM counter must answer a read at 0xc10 with 0 rather than trap; capability_ladder.json advertises Zihpm from p0 with exactly that clause. MosaicRV implements no mhpmcounter16, mhpmevent16 or mcountinhibit, so the shadow is read-only zero and no software write can change it.",
+      "preconditions": [
+        "profile p0 implements hpmcounter16 at 0xc10",
+        "the hart runs in M-mode (p0 privilege_modes == [M]); every implemented CSR is M-accessible",
+        "no HPM counter is implemented, so the shadow is read-only zero (capability ladder: Zihpm, 'read-only zero when no counters are implemented')"
+      ],
+      "positive": {
+        "op": "csrr",
+        "write": "0x0000000000000000",
+        "traps": 0,
+        "expect": {
+          "read": "0x0000000000000000"
+        },
+        "forbid": "0x0000000000000001"
+      },
+      "negative": {
+        "op": "csrr",
+        "write": "0x0000000000000000",
+        "traps": 0,
+        "expect": {
+          "read": "0x0000000000000000"
+        },
+        "forbid": "0x0000000000000001"
+      }
+    },
+    {
+      "id": "hpmcounter17.value",
+      "csr": "hpmcounter17",
+      "address": 3089,
+      "field": "value",
+      "bits": "63:0",
+      "kind": "read_only",
+      "clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L170-L199 assign '0xC03 & URO & hpmcounter3' through '0xC1F & URO & hpmcounter31'. src/machine.tex section 'Hardware Performance Monitor' L1653-L1655: hpmcounter17 is the read-only shadow of mhpmcounter17, and a counter that is not implemented reads as zero, so an implementation with no HPM counter must answer a read at 0xc11 with 0 rather than trap; capability_ladder.json advertises Zihpm from p0 with exactly that clause. MosaicRV implements no mhpmcounter17, mhpmevent17 or mcountinhibit, so the shadow is read-only zero and no software write can change it.",
+      "preconditions": [
+        "profile p0 implements hpmcounter17 at 0xc11",
+        "the hart runs in M-mode (p0 privilege_modes == [M]); every implemented CSR is M-accessible",
+        "no HPM counter is implemented, so the shadow is read-only zero (capability ladder: Zihpm, 'read-only zero when no counters are implemented')"
+      ],
+      "positive": {
+        "op": "csrr",
+        "write": "0x0000000000000000",
+        "traps": 0,
+        "expect": {
+          "read": "0x0000000000000000"
+        },
+        "forbid": "0x0000000000000001"
+      },
+      "negative": {
+        "op": "csrr",
+        "write": "0x0000000000000000",
+        "traps": 0,
+        "expect": {
+          "read": "0x0000000000000000"
+        },
+        "forbid": "0x0000000000000001"
+      }
+    },
+    {
+      "id": "hpmcounter18.value",
+      "csr": "hpmcounter18",
+      "address": 3090,
+      "field": "value",
+      "bits": "63:0",
+      "kind": "read_only",
+      "clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L170-L199 assign '0xC03 & URO & hpmcounter3' through '0xC1F & URO & hpmcounter31'. src/machine.tex section 'Hardware Performance Monitor' L1653-L1655: hpmcounter18 is the read-only shadow of mhpmcounter18, and a counter that is not implemented reads as zero, so an implementation with no HPM counter must answer a read at 0xc12 with 0 rather than trap; capability_ladder.json advertises Zihpm from p0 with exactly that clause. MosaicRV implements no mhpmcounter18, mhpmevent18 or mcountinhibit, so the shadow is read-only zero and no software write can change it.",
+      "preconditions": [
+        "profile p0 implements hpmcounter18 at 0xc12",
+        "the hart runs in M-mode (p0 privilege_modes == [M]); every implemented CSR is M-accessible",
+        "no HPM counter is implemented, so the shadow is read-only zero (capability ladder: Zihpm, 'read-only zero when no counters are implemented')"
+      ],
+      "positive": {
+        "op": "csrr",
+        "write": "0x0000000000000000",
+        "traps": 0,
+        "expect": {
+          "read": "0x0000000000000000"
+        },
+        "forbid": "0x0000000000000001"
+      },
+      "negative": {
+        "op": "csrr",
+        "write": "0x0000000000000000",
+        "traps": 0,
+        "expect": {
+          "read": "0x0000000000000000"
+        },
+        "forbid": "0x0000000000000001"
+      }
+    },
+    {
+      "id": "hpmcounter19.value",
+      "csr": "hpmcounter19",
+      "address": 3091,
+      "field": "value",
+      "bits": "63:0",
+      "kind": "read_only",
+      "clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L170-L199 assign '0xC03 & URO & hpmcounter3' through '0xC1F & URO & hpmcounter31'. src/machine.tex section 'Hardware Performance Monitor' L1653-L1655: hpmcounter19 is the read-only shadow of mhpmcounter19, and a counter that is not implemented reads as zero, so an implementation with no HPM counter must answer a read at 0xc13 with 0 rather than trap; capability_ladder.json advertises Zihpm from p0 with exactly that clause. MosaicRV implements no mhpmcounter19, mhpmevent19 or mcountinhibit, so the shadow is read-only zero and no software write can change it.",
+      "preconditions": [
+        "profile p0 implements hpmcounter19 at 0xc13",
+        "the hart runs in M-mode (p0 privilege_modes == [M]); every implemented CSR is M-accessible",
+        "no HPM counter is implemented, so the shadow is read-only zero (capability ladder: Zihpm, 'read-only zero when no counters are implemented')"
+      ],
+      "positive": {
+        "op": "csrr",
+        "write": "0x0000000000000000",
+        "traps": 0,
+        "expect": {
+          "read": "0x0000000000000000"
+        },
+        "forbid": "0x0000000000000001"
+      },
+      "negative": {
+        "op": "csrr",
+        "write": "0x0000000000000000",
+        "traps": 0,
+        "expect": {
+          "read": "0x0000000000000000"
+        },
+        "forbid": "0x0000000000000001"
+      }
+    },
+    {
+      "id": "hpmcounter20.value",
+      "csr": "hpmcounter20",
+      "address": 3092,
+      "field": "value",
+      "bits": "63:0",
+      "kind": "read_only",
+      "clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L170-L199 assign '0xC03 & URO & hpmcounter3' through '0xC1F & URO & hpmcounter31'. src/machine.tex section 'Hardware Performance Monitor' L1653-L1655: hpmcounter20 is the read-only shadow of mhpmcounter20, and a counter that is not implemented reads as zero, so an implementation with no HPM counter must answer a read at 0xc14 with 0 rather than trap; capability_ladder.json advertises Zihpm from p0 with exactly that clause. MosaicRV implements no mhpmcounter20, mhpmevent20 or mcountinhibit, so the shadow is read-only zero and no software write can change it.",
+      "preconditions": [
+        "profile p0 implements hpmcounter20 at 0xc14",
+        "the hart runs in M-mode (p0 privilege_modes == [M]); every implemented CSR is M-accessible",
+        "no HPM counter is implemented, so the shadow is read-only zero (capability ladder: Zihpm, 'read-only zero when no counters are implemented')"
+      ],
+      "positive": {
+        "op": "csrr",
+        "write": "0x0000000000000000",
+        "traps": 0,
+        "expect": {
+          "read": "0x0000000000000000"
+        },
+        "forbid": "0x0000000000000001"
+      },
+      "negative": {
+        "op": "csrr",
+        "write": "0x0000000000000000",
+        "traps": 0,
+        "expect": {
+          "read": "0x0000000000000000"
+        },
+        "forbid": "0x0000000000000001"
+      }
+    },
+    {
+      "id": "hpmcounter21.value",
+      "csr": "hpmcounter21",
+      "address": 3093,
+      "field": "value",
+      "bits": "63:0",
+      "kind": "read_only",
+      "clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L170-L199 assign '0xC03 & URO & hpmcounter3' through '0xC1F & URO & hpmcounter31'. src/machine.tex section 'Hardware Performance Monitor' L1653-L1655: hpmcounter21 is the read-only shadow of mhpmcounter21, and a counter that is not implemented reads as zero, so an implementation with no HPM counter must answer a read at 0xc15 with 0 rather than trap; capability_ladder.json advertises Zihpm from p0 with exactly that clause. MosaicRV implements no mhpmcounter21, mhpmevent21 or mcountinhibit, so the shadow is read-only zero and no software write can change it.",
+      "preconditions": [
+        "profile p0 implements hpmcounter21 at 0xc15",
+        "the hart runs in M-mode (p0 privilege_modes == [M]); every implemented CSR is M-accessible",
+        "no HPM counter is implemented, so the shadow is read-only zero (capability ladder: Zihpm, 'read-only zero when no counters are implemented')"
+      ],
+      "positive": {
+        "op": "csrr",
+        "write": "0x0000000000000000",
+        "traps": 0,
+        "expect": {
+          "read": "0x0000000000000000"
+        },
+        "forbid": "0x0000000000000001"
+      },
+      "negative": {
+        "op": "csrr",
+        "write": "0x0000000000000000",
+        "traps": 0,
+        "expect": {
+          "read": "0x0000000000000000"
+        },
+        "forbid": "0x0000000000000001"
+      }
+    },
+    {
+      "id": "hpmcounter22.value",
+      "csr": "hpmcounter22",
+      "address": 3094,
+      "field": "value",
+      "bits": "63:0",
+      "kind": "read_only",
+      "clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L170-L199 assign '0xC03 & URO & hpmcounter3' through '0xC1F & URO & hpmcounter31'. src/machine.tex section 'Hardware Performance Monitor' L1653-L1655: hpmcounter22 is the read-only shadow of mhpmcounter22, and a counter that is not implemented reads as zero, so an implementation with no HPM counter must answer a read at 0xc16 with 0 rather than trap; capability_ladder.json advertises Zihpm from p0 with exactly that clause. MosaicRV implements no mhpmcounter22, mhpmevent22 or mcountinhibit, so the shadow is read-only zero and no software write can change it.",
+      "preconditions": [
+        "profile p0 implements hpmcounter22 at 0xc16",
+        "the hart runs in M-mode (p0 privilege_modes == [M]); every implemented CSR is M-accessible",
+        "no HPM counter is implemented, so the shadow is read-only zero (capability ladder: Zihpm, 'read-only zero when no counters are implemented')"
+      ],
+      "positive": {
+        "op": "csrr",
+        "write": "0x0000000000000000",
+        "traps": 0,
+        "expect": {
+          "read": "0x0000000000000000"
+        },
+        "forbid": "0x0000000000000001"
+      },
+      "negative": {
+        "op": "csrr",
+        "write": "0x0000000000000000",
+        "traps": 0,
+        "expect": {
+          "read": "0x0000000000000000"
+        },
+        "forbid": "0x0000000000000001"
+      }
+    },
+    {
+      "id": "hpmcounter23.value",
+      "csr": "hpmcounter23",
+      "address": 3095,
+      "field": "value",
+      "bits": "63:0",
+      "kind": "read_only",
+      "clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L170-L199 assign '0xC03 & URO & hpmcounter3' through '0xC1F & URO & hpmcounter31'. src/machine.tex section 'Hardware Performance Monitor' L1653-L1655: hpmcounter23 is the read-only shadow of mhpmcounter23, and a counter that is not implemented reads as zero, so an implementation with no HPM counter must answer a read at 0xc17 with 0 rather than trap; capability_ladder.json advertises Zihpm from p0 with exactly that clause. MosaicRV implements no mhpmcounter23, mhpmevent23 or mcountinhibit, so the shadow is read-only zero and no software write can change it.",
+      "preconditions": [
+        "profile p0 implements hpmcounter23 at 0xc17",
+        "the hart runs in M-mode (p0 privilege_modes == [M]); every implemented CSR is M-accessible",
+        "no HPM counter is implemented, so the shadow is read-only zero (capability ladder: Zihpm, 'read-only zero when no counters are implemented')"
+      ],
+      "positive": {
+        "op": "csrr",
+        "write": "0x0000000000000000",
+        "traps": 0,
+        "expect": {
+          "read": "0x0000000000000000"
+        },
+        "forbid": "0x0000000000000001"
+      },
+      "negative": {
+        "op": "csrr",
+        "write": "0x0000000000000000",
+        "traps": 0,
+        "expect": {
+          "read": "0x0000000000000000"
+        },
+        "forbid": "0x0000000000000001"
+      }
+    },
+    {
+      "id": "hpmcounter24.value",
+      "csr": "hpmcounter24",
+      "address": 3096,
+      "field": "value",
+      "bits": "63:0",
+      "kind": "read_only",
+      "clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L170-L199 assign '0xC03 & URO & hpmcounter3' through '0xC1F & URO & hpmcounter31'. src/machine.tex section 'Hardware Performance Monitor' L1653-L1655: hpmcounter24 is the read-only shadow of mhpmcounter24, and a counter that is not implemented reads as zero, so an implementation with no HPM counter must answer a read at 0xc18 with 0 rather than trap; capability_ladder.json advertises Zihpm from p0 with exactly that clause. MosaicRV implements no mhpmcounter24, mhpmevent24 or mcountinhibit, so the shadow is read-only zero and no software write can change it.",
+      "preconditions": [
+        "profile p0 implements hpmcounter24 at 0xc18",
+        "the hart runs in M-mode (p0 privilege_modes == [M]); every implemented CSR is M-accessible",
+        "no HPM counter is implemented, so the shadow is read-only zero (capability ladder: Zihpm, 'read-only zero when no counters are implemented')"
+      ],
+      "positive": {
+        "op": "csrr",
+        "write": "0x0000000000000000",
+        "traps": 0,
+        "expect": {
+          "read": "0x0000000000000000"
+        },
+        "forbid": "0x0000000000000001"
+      },
+      "negative": {
+        "op": "csrr",
+        "write": "0x0000000000000000",
+        "traps": 0,
+        "expect": {
+          "read": "0x0000000000000000"
+        },
+        "forbid": "0x0000000000000001"
+      }
+    },
+    {
+      "id": "hpmcounter25.value",
+      "csr": "hpmcounter25",
+      "address": 3097,
+      "field": "value",
+      "bits": "63:0",
+      "kind": "read_only",
+      "clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L170-L199 assign '0xC03 & URO & hpmcounter3' through '0xC1F & URO & hpmcounter31'. src/machine.tex section 'Hardware Performance Monitor' L1653-L1655: hpmcounter25 is the read-only shadow of mhpmcounter25, and a counter that is not implemented reads as zero, so an implementation with no HPM counter must answer a read at 0xc19 with 0 rather than trap; capability_ladder.json advertises Zihpm from p0 with exactly that clause. MosaicRV implements no mhpmcounter25, mhpmevent25 or mcountinhibit, so the shadow is read-only zero and no software write can change it.",
+      "preconditions": [
+        "profile p0 implements hpmcounter25 at 0xc19",
+        "the hart runs in M-mode (p0 privilege_modes == [M]); every implemented CSR is M-accessible",
+        "no HPM counter is implemented, so the shadow is read-only zero (capability ladder: Zihpm, 'read-only zero when no counters are implemented')"
+      ],
+      "positive": {
+        "op": "csrr",
+        "write": "0x0000000000000000",
+        "traps": 0,
+        "expect": {
+          "read": "0x0000000000000000"
+        },
+        "forbid": "0x0000000000000001"
+      },
+      "negative": {
+        "op": "csrr",
+        "write": "0x0000000000000000",
+        "traps": 0,
+        "expect": {
+          "read": "0x0000000000000000"
+        },
+        "forbid": "0x0000000000000001"
+      }
+    },
+    {
+      "id": "hpmcounter26.value",
+      "csr": "hpmcounter26",
+      "address": 3098,
+      "field": "value",
+      "bits": "63:0",
+      "kind": "read_only",
+      "clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L170-L199 assign '0xC03 & URO & hpmcounter3' through '0xC1F & URO & hpmcounter31'. src/machine.tex section 'Hardware Performance Monitor' L1653-L1655: hpmcounter26 is the read-only shadow of mhpmcounter26, and a counter that is not implemented reads as zero, so an implementation with no HPM counter must answer a read at 0xc1a with 0 rather than trap; capability_ladder.json advertises Zihpm from p0 with exactly that clause. MosaicRV implements no mhpmcounter26, mhpmevent26 or mcountinhibit, so the shadow is read-only zero and no software write can change it.",
+      "preconditions": [
+        "profile p0 implements hpmcounter26 at 0xc1a",
+        "the hart runs in M-mode (p0 privilege_modes == [M]); every implemented CSR is M-accessible",
+        "no HPM counter is implemented, so the shadow is read-only zero (capability ladder: Zihpm, 'read-only zero when no counters are implemented')"
+      ],
+      "positive": {
+        "op": "csrr",
+        "write": "0x0000000000000000",
+        "traps": 0,
+        "expect": {
+          "read": "0x0000000000000000"
+        },
+        "forbid": "0x0000000000000001"
+      },
+      "negative": {
+        "op": "csrr",
+        "write": "0x0000000000000000",
+        "traps": 0,
+        "expect": {
+          "read": "0x0000000000000000"
+        },
+        "forbid": "0x0000000000000001"
+      }
+    },
+    {
+      "id": "hpmcounter27.value",
+      "csr": "hpmcounter27",
+      "address": 3099,
+      "field": "value",
+      "bits": "63:0",
+      "kind": "read_only",
+      "clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L170-L199 assign '0xC03 & URO & hpmcounter3' through '0xC1F & URO & hpmcounter31'. src/machine.tex section 'Hardware Performance Monitor' L1653-L1655: hpmcounter27 is the read-only shadow of mhpmcounter27, and a counter that is not implemented reads as zero, so an implementation with no HPM counter must answer a read at 0xc1b with 0 rather than trap; capability_ladder.json advertises Zihpm from p0 with exactly that clause. MosaicRV implements no mhpmcounter27, mhpmevent27 or mcountinhibit, so the shadow is read-only zero and no software write can change it.",
+      "preconditions": [
+        "profile p0 implements hpmcounter27 at 0xc1b",
+        "the hart runs in M-mode (p0 privilege_modes == [M]); every implemented CSR is M-accessible",
+        "no HPM counter is implemented, so the shadow is read-only zero (capability ladder: Zihpm, 'read-only zero when no counters are implemented')"
+      ],
+      "positive": {
+        "op": "csrr",
+        "write": "0x0000000000000000",
+        "traps": 0,
+        "expect": {
+          "read": "0x0000000000000000"
+        },
+        "forbid": "0x0000000000000001"
+      },
+      "negative": {
+        "op": "csrr",
+        "write": "0x0000000000000000",
+        "traps": 0,
+        "expect": {
+          "read": "0x0000000000000000"
+        },
+        "forbid": "0x0000000000000001"
+      }
+    },
+    {
+      "id": "hpmcounter28.value",
+      "csr": "hpmcounter28",
+      "address": 3100,
+      "field": "value",
+      "bits": "63:0",
+      "kind": "read_only",
+      "clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L170-L199 assign '0xC03 & URO & hpmcounter3' through '0xC1F & URO & hpmcounter31'. src/machine.tex section 'Hardware Performance Monitor' L1653-L1655: hpmcounter28 is the read-only shadow of mhpmcounter28, and a counter that is not implemented reads as zero, so an implementation with no HPM counter must answer a read at 0xc1c with 0 rather than trap; capability_ladder.json advertises Zihpm from p0 with exactly that clause. MosaicRV implements no mhpmcounter28, mhpmevent28 or mcountinhibit, so the shadow is read-only zero and no software write can change it.",
+      "preconditions": [
+        "profile p0 implements hpmcounter28 at 0xc1c",
+        "the hart runs in M-mode (p0 privilege_modes == [M]); every implemented CSR is M-accessible",
+        "no HPM counter is implemented, so the shadow is read-only zero (capability ladder: Zihpm, 'read-only zero when no counters are implemented')"
+      ],
+      "positive": {
+        "op": "csrr",
+        "write": "0x0000000000000000",
+        "traps": 0,
+        "expect": {
+          "read": "0x0000000000000000"
+        },
+        "forbid": "0x0000000000000001"
+      },
+      "negative": {
+        "op": "csrr",
+        "write": "0x0000000000000000",
+        "traps": 0,
+        "expect": {
+          "read": "0x0000000000000000"
+        },
+        "forbid": "0x0000000000000001"
+      }
+    },
+    {
+      "id": "hpmcounter29.value",
+      "csr": "hpmcounter29",
+      "address": 3101,
+      "field": "value",
+      "bits": "63:0",
+      "kind": "read_only",
+      "clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L170-L199 assign '0xC03 & URO & hpmcounter3' through '0xC1F & URO & hpmcounter31'. src/machine.tex section 'Hardware Performance Monitor' L1653-L1655: hpmcounter29 is the read-only shadow of mhpmcounter29, and a counter that is not implemented reads as zero, so an implementation with no HPM counter must answer a read at 0xc1d with 0 rather than trap; capability_ladder.json advertises Zihpm from p0 with exactly that clause. MosaicRV implements no mhpmcounter29, mhpmevent29 or mcountinhibit, so the shadow is read-only zero and no software write can change it.",
+      "preconditions": [
+        "profile p0 implements hpmcounter29 at 0xc1d",
+        "the hart runs in M-mode (p0 privilege_modes == [M]); every implemented CSR is M-accessible",
+        "no HPM counter is implemented, so the shadow is read-only zero (capability ladder: Zihpm, 'read-only zero when no counters are implemented')"
+      ],
+      "positive": {
+        "op": "csrr",
+        "write": "0x0000000000000000",
+        "traps": 0,
+        "expect": {
+          "read": "0x0000000000000000"
+        },
+        "forbid": "0x0000000000000001"
+      },
+      "negative": {
+        "op": "csrr",
+        "write": "0x0000000000000000",
+        "traps": 0,
+        "expect": {
+          "read": "0x0000000000000000"
+        },
+        "forbid": "0x0000000000000001"
+      }
+    },
+    {
+      "id": "hpmcounter30.value",
+      "csr": "hpmcounter30",
+      "address": 3102,
+      "field": "value",
+      "bits": "63:0",
+      "kind": "read_only",
+      "clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L170-L199 assign '0xC03 & URO & hpmcounter3' through '0xC1F & URO & hpmcounter31'. src/machine.tex section 'Hardware Performance Monitor' L1653-L1655: hpmcounter30 is the read-only shadow of mhpmcounter30, and a counter that is not implemented reads as zero, so an implementation with no HPM counter must answer a read at 0xc1e with 0 rather than trap; capability_ladder.json advertises Zihpm from p0 with exactly that clause. MosaicRV implements no mhpmcounter30, mhpmevent30 or mcountinhibit, so the shadow is read-only zero and no software write can change it.",
+      "preconditions": [
+        "profile p0 implements hpmcounter30 at 0xc1e",
+        "the hart runs in M-mode (p0 privilege_modes == [M]); every implemented CSR is M-accessible",
+        "no HPM counter is implemented, so the shadow is read-only zero (capability ladder: Zihpm, 'read-only zero when no counters are implemented')"
+      ],
+      "positive": {
+        "op": "csrr",
+        "write": "0x0000000000000000",
+        "traps": 0,
+        "expect": {
+          "read": "0x0000000000000000"
+        },
+        "forbid": "0x0000000000000001"
+      },
+      "negative": {
+        "op": "csrr",
+        "write": "0x0000000000000000",
+        "traps": 0,
+        "expect": {
+          "read": "0x0000000000000000"
+        },
+        "forbid": "0x0000000000000001"
+      }
+    },
+    {
+      "id": "hpmcounter31.value",
+      "csr": "hpmcounter31",
+      "address": 3103,
+      "field": "value",
+      "bits": "63:0",
+      "kind": "read_only",
+      "clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L170-L199 assign '0xC03 & URO & hpmcounter3' through '0xC1F & URO & hpmcounter31'. src/machine.tex section 'Hardware Performance Monitor' L1653-L1655: hpmcounter31 is the read-only shadow of mhpmcounter31, and a counter that is not implemented reads as zero, so an implementation with no HPM counter must answer a read at 0xc1f with 0 rather than trap; capability_ladder.json advertises Zihpm from p0 with exactly that clause. MosaicRV implements no mhpmcounter31, mhpmevent31 or mcountinhibit, so the shadow is read-only zero and no software write can change it.",
+      "preconditions": [
+        "profile p0 implements hpmcounter31 at 0xc1f",
+        "the hart runs in M-mode (p0 privilege_modes == [M]); every implemented CSR is M-accessible",
+        "no HPM counter is implemented, so the shadow is read-only zero (capability ladder: Zihpm, 'read-only zero when no counters are implemented')"
+      ],
+      "positive": {
+        "op": "csrr",
+        "write": "0x0000000000000000",
+        "traps": 0,
+        "expect": {
+          "read": "0x0000000000000000"
+        },
+        "forbid": "0x0000000000000001"
+      },
+      "negative": {
+        "op": "csrr",
+        "write": "0x0000000000000000",
+        "traps": 0,
+        "expect": {
+          "read": "0x0000000000000000"
+        },
+        "forbid": "0x0000000000000001"
+      }
     }
   ]
 }

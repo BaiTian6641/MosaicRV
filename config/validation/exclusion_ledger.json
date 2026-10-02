@@ -249,28 +249,32 @@
         "ACT4 Zicntr",
         "ACT4 Zihpm"
       ],
-      "reason": "The counter CSR suites need an S/U trap frame the p0 bring-up core does not have; the runner defers them.",
-      "spec_clause": "RISC-V Privileged Spec, Zicntr/Zihpm counter CSRs (cycle, time, instret and the HPM counters).",
-      "alternative_verification": {
-        "status": "covered",
-        "cases": [
-          "csr.precise_trap_mret",
-          "csr.rule_ledger"
-        ],
-        "checks": [],
-        "note": "Zihpm is advertised at p0 and its read-only-zero behaviour is verified by the named CSR cases, which pass; Zicntr is not advertised (see EX-025)."
-      },
-      "affected_cases": [
-        {
-          "case": "csr.rule_ledger",
-          "fields": [
-            "mcycle",
-            "minstret"
-          ]
-        }
-      ],
-      "affected_scope": "tools/run_act_dut.py; config/csr/mode_m.json",
-      "end_condition": "A DUT with an S/U trap frame runs the ACT4 counter suites, and the suite manifest lists none deferred."
+   "reason": "The counter CSR suites are generated per profile. Zihpm IS run against the p1 core by tools/run_act_dut.py -- both Zihpm-csrrs-00 and Zihpm-csrrc-00 execute and pass, and the runner's applicable set counts them -- so the only counter work a suite does not cover is the p0 core, which is M-only and has no less-privileged mode for the mcounteren/scounteren gate to exercise; and Zicntr, which no profile advertises (see EX-025) so its suite produces no ELF.",
+   "spec_clause": "RISC-V Privileged Spec, Zicntr/Zihpm counter CSRs (cycle, time, instret and the HPM counters).",
+   "alternative_verification": {
+    "status": "covered",
+    "cases": [
+     "csr.precise_trap_mret",
+     "csr.rule_ledger"
+    ],
+    "checks": [],
+    "note": "The Zihpm shadow behaviour that used to be asserted in prose is now checked: csr.precise_trap_mret's reset-state phase reads hpmcounter3..31 through the DUT and requires each to be implemented, to read the read-only-zero shadow value, and to be unwritable, and its illegal-address phase derives from the generated table which addresses exist; csr.rule_ledger carries one hpmcounter3..31.value rule per shadow, so the coverage assertion visits all 29. Both cases pass. The p1 ACT4 Zihpm ELFs pass on the same core."
+   },
+   "affected_cases": [
+    {
+     "case": "csr.rule_ledger",
+     "fields": [
+      "mcycle",
+      "minstret"
+     ]
+    },
+    {
+     "case": "csr.precise_trap_mret",
+     "fields": []
+    }
+   ],
+   "affected_scope": "tools/run_act_dut.py; config/csr/mode_m.json; config/csr/mode_su.json",
+   "end_condition": "A DUT with an S/U trap frame runs the ACT4 Zicntr suite, and the suite manifest lists none deferred."
     },
     {
       "id": "EX-010",

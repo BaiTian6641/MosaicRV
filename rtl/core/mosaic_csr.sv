@@ -401,6 +401,11 @@ module mosaic_csr (
   // the table marks read-only cannot become writable by editing this file.
   logic addr_impl;
   logic wr_legal;
+  // Declared here because the address-decode block below reads it before the
+  // counter-gate block that drives it; slang rejects a use before the
+  // declaration, and moving the driving assign up would separate it from the
+  // gate rule it belongs to.
+  logic csr_is_hpm;
 
   // PMP CSR selection: base + span from the generated config package, so a
   // profile with no PMP entries (MOSAIC_PMP_ENTRIES == 0) selects nothing and
@@ -526,7 +531,6 @@ module mosaic_csr (
   logic       csr_counter_ok;
   logic [5:0] csr_counter_bit;
   logic       csr_is_counter;
-  logic       csr_is_hpm;
   logic [63:0] scounteren_view;
 
   assign csr_min_priv_r = csr_addr_i[9:8];
@@ -949,8 +953,17 @@ module mosaic_csr (
           mideleg_d = (mideleg_q & ~mosaic_csr_pkg::MOSAIC_CSR_WMASK_MIDELEG)
                     | (csr_op_result & mosaic_csr_pkg::MOSAIC_CSR_WMASK_MIDELEG);
         mosaic_csr_pkg::MOSAIC_CSR_ADDR_MCOUNTEREN:
+`ifdef MOSAIC_CSR_MUTANT_MCOUNTEREN_RO
+          // NEGATIVE CONTROL: the counter-enable write mask is dropped, so every
+          // mcounteren bit stays read-only zero. An S-mode read of an HPM counter
+          // shadow is then gated off and traps, which is the defect the Zihpm ACT4
+          // ELF names once the HPM counters exist. Reverts the configuration fix
+          // (mcounteren_writable_bits = 0xFFFF_FFFF) at the RTL instead.
+          mcounteren_d = mcounteren_q;
+`else
           mcounteren_d = (mcounteren_q & ~mosaic_csr_pkg::MOSAIC_CSR_WMASK_MCOUNTEREN)
                        | (csr_op_result & mosaic_csr_pkg::MOSAIC_CSR_WMASK_MCOUNTEREN);
+`endif
         `ifdef MOSAIC_CSR_HAS_S
           // sstatus and sie are views of mstatus and mie: the write lands in the
           // register that owns the bit, masked by the view's own writable set.

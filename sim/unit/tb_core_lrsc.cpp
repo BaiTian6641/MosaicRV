@@ -99,20 +99,50 @@ constexpr uint64_t kProgressBound = 16;
 // 0x80000000.
 constexpr uint64_t kRamBase    = 0x80000000ull;  // = MOSAIC_RAM_BASE
 constexpr uint64_t kAOff       = 0x400;          // the reserved / SC address
-// The reservation set is the naturally aligned XLEN-sized (8-byte) block the
-// platform declares (tests/act4/mosaic-p1/mosaic-p1.yaml's
-// LRSC_RESERVATION_STRATEGY, and the reference model's
-// platform.reservation.reservation_set_size_exp = 3). A's granule is therefore
-// 0x400..0x407: 0x404 is the only *other* address in it, so the in-granule
-// conflicting store is a word store at A+4 -- an 8-byte store there would be
-// misaligned and trap -- and the first address of the next granule is A+8.
-constexpr uint64_t kA8Off      = 0x404;          // inside A's 8-byte granule
-constexpr uint64_t kA64Off     = 0x408;          // the next granule
+
+// The reservation set is the *platform's* declaration, not the RTL's choice.
+// MOSAIC_RESERVATION_SET_SIZE_EXP comes from config/profiles/<profile>.json
+// (emitted in mosaic_platform.h), where config_check cross-checks it against the
+// ACT reference declaration tests/act4/mosaic-<profile>/sail.json's
+// platform.reservation.reservation_set_size_exp and require_exact_reservation_addr.
+// Deriving the mask and the in/out-of-set offsets from it is what makes this case
+// able to disagree with the RTL: the RTL's own GRANULE_BITS never reaches here.
+constexpr unsigned kRsvSetExp   = MOSAIC_RESERVATION_SET_SIZE_EXP;
+constexpr uint64_t kRsvSetBytes = UINT64_C(1) << kRsvSetExp;
+constexpr uint64_t kRsvMask     = ~(kRsvSetBytes - UINT64_C(1));
+constexpr bool     kRsvExact    = MOSAIC_RESERVATION_REQUIRE_EXACT_ADDR != 0;
+
+// A *different* address inside the declared set. The set is at least eight bytes
+// (the schema floors the exponent at 3), so a four-byte access at A+4 is legal,
+// inside the set, and not the LR's address -- which is exactly the observable a
+// declared set size controls and the case previously never produced.
+constexpr uint64_t kInSetOff   = 4;
+// The first address of the next set: outside the declaration, and 8-byte
+// aligned, so a doubleword SC there is a legal access the reservation must
+// refuse.
+constexpr uint64_t kOutSetOff  = kRsvSetBytes;
+static_assert(kRsvSetExp >= 3, "the platform may not declare a set smaller than the XLEN");
+static_assert(kInSetOff < kRsvSetBytes, "the in-set probe is outside the declared set");
+static_assert(kInSetOff % 4 == 0, "the in-set probe must be word-aligned");
+static_assert(kOutSetOff % 8 == 0, "the out-of-set probe must be doubleword-aligned");
+static_assert(kAOff % kRsvSetBytes == 0, "the reserved address must start a set");
+
+constexpr uint64_t kA8Off      = kAOff + kInSetOff;   // inside A's declared set
+constexpr uint64_t kA64Off     = kAOff + kOutSetOff;  // the next set
 constexpr uint64_t kAttOff     = 0x4C0;          // the attempt counter (run B)
 constexpr uint64_t kHandlerOff = 0x600;          // the trap handler
+// The different-address SC probes use their own doubleword-aligned base, in a
+// part of RAM no other block touches, so adding them cannot move an expectation
+// the earlier blocks pin.
+constexpr uint64_t kBOff       = 0x480;
+constexpr uint64_t kBInOff     = kBOff + kInSetOff;   // B + 4: inside B's set
+constexpr uint64_t kBOutOff    = kBOff + kOutSetOff;  // B + set: the next set
 constexpr uint64_t kA     = kRamBase + kAOff;
 constexpr uint64_t kA8    = kRamBase + kA8Off;
 constexpr uint64_t kA64   = kRamBase + kA64Off;
+constexpr uint64_t kB     = kRamBase + kBOff;
+constexpr uint64_t kBIn   = kRamBase + kBOff + kInSetOff;
+constexpr uint64_t kBOut  = kRamBase + kBOff + kOutSetOff;
 constexpr uint64_t kAtt   = kRamBase + kAttOff;
 constexpr uint64_t kTohost = 0x80001000;         // the frozen exit protocol
 
@@ -124,6 +154,10 @@ constexpr uint64_t kOutVal   = 0x44;
 constexpr uint64_t kVal5     = 0x55;
 constexpr uint64_t kAmoDelta = 0x1;
 constexpr uint64_t kLoopVal  = 0x77;
+// The different-address probes: the value an SC inside the declared set writes,
+// and a sentinel parked just outside the set that a refused SC must leave alone.
+constexpr uint64_t kInScVal   = 0x88;
+constexpr uint64_t kSentinel  = 0x99;
 
 // Both programs write architectural register x2 *only* from an SC, so counting
 // the retirements of x2 counts the store-conditionals and their statuses.
@@ -182,7 +216,7 @@ constexpr uint32_t OP_BRANCH = 0x63u;
 constexpr uint32_t OP_JAL    = 0x6Fu;
 constexpr uint32_t OP_ALU    = 0x33u;
 
-constexpr uint32_t F3_D = 3;
+constexpr uint32_t F3_B = 0, F3_H = 1, F3_W = 2, F3_D = 3;
 constexpr uint32_t F5_LR = 0x02, F5_SC = 0x03, F5_AMOADD = 0x00;
 constexpr uint32_t CSR_MTVEC = 0x305, CSR_MEPC = 0x341;
 
@@ -240,6 +274,15 @@ class Asm {
   // `rd` = the status, `rs2` = the data, `rs1` = the address.
   void EmitScD(uint32_t rd, uint32_t rs2, uint32_t rs1, uint64_t expect_status) {
     emit_expect(EncAmo(F5_SC, 0, 0, F3_D, rd, rs1, rs2), rd, expect_status);
+  }
+  // The word-width pair, for the different-address probes: inside an
+  // eight-byte-or-larger set the only *other* legal width at a non-zero offset is
+  // four bytes (a doubleword at A+4 is misaligned).
+  void EmitLrW(uint32_t rd, uint32_t rs1, uint64_t expect_value) {
+    emit_expect(EncAmo(F5_LR, 0, 0, F3_W, rd, rs1, 0), rd, expect_value);
+  }
+  void EmitScW(uint32_t rd, uint32_t rs2, uint32_t rs1, uint64_t expect_status) {
+    emit_expect(EncAmo(F5_SC, 0, 0, F3_W, rd, rs1, rs2), rd, expect_status);
   }
   void EmitExit(uint32_t code) {
     EmitI(0, 28, 0, 0x100);                 // addi x28, x0, 0x100
@@ -333,7 +376,12 @@ Program BuildSemantics() {
 
   // ---- 5. a store outside the granule leaves it standing ------------------
   a.EmitI(0, 3, 0, static_cast<int32_t>(kVal5));
-  a.EmitLrD(1, 10, kVal2);           // lr.d x1, (x10) -> x1 = 0x22
+  // The LR reads the whole doubleword at A, and block 4's in-set store wrote
+  // kInVal into the upper word, so the ISA's value is the two words joined --
+  // not kVal2 alone. (With a 64-byte reservation the conflicting store sat at
+  // A+8, outside the word the LR reads; with the declared 8-byte set it is at
+  // A+4, inside it, and the LR sees it.)
+  a.EmitLrD(1, 10, (kInVal << 32) | kVal2);  // lr.d x1, (x10) -> x1 = 0x33_00000022
   a.EmitI(0, 13, 5, static_cast<int32_t>(kA64Off));
   a.EmitI(0, 14, 0, static_cast<int32_t>(kOutVal));
   a.EmitStoreD(13, 14, 0);           // sd x14, 0(x13): A+8 = 0x44, next granule
@@ -350,18 +398,48 @@ Program BuildSemantics() {
   a.emit(0x00000073u);               // ecall -> trap -> handler -> mret
   a.EmitScD(2, 3, 10, 1);            // sc.d x2, x3, (x10) -> x2 = 1, no write
 
+  // ---- 8/9. the SC's *address*, which is what a declared set size controls --
+  // Every block above pairs the SC with the LR's own address, so none of them
+  // can tell a reservation that covers one address from one that covers the
+  // declared set. These two do: at B the LR reserves the declared naturally
+  // aligned set, then the SC names a *different* address in that set (B+4, a
+  // legal four-byte access) and the first address of the next set (B+8).
+  //
+  // The platform declares whether an SC must name the exact LR address
+  // (require_exact_addr). When it does not -- which is what this profile's
+  // declaration, cross-checked against the ACT sail.json, says -- an SC inside
+  // the set succeeds and an SC outside it fails; the case takes both
+  // expectations from the declaration.
+  a.EmitI(0, 17, 5, static_cast<int32_t>(kBOff));   // x17 = B
+  a.EmitI(0, 3, 0, static_cast<int32_t>(kSeedVal));
+  a.EmitStoreD(17, 3, 0);            // sd x3, 0(x17): B = 0x11
+  a.EmitI(0, 3, 0, static_cast<int32_t>(kSentinel));
+  a.EmitI(0, 20, 5, static_cast<int32_t>(kBOutOff));
+  a.EmitStoreD(20, 3, 0);            // sd x3, 0(x20): B+set = 0x99, outside
+
+  // 8. a different address inside the declared set
+  a.EmitI(0, 18, 5, static_cast<int32_t>(kBInOff));  // x18 = B+4
+  a.EmitI(0, 3, 0, static_cast<int32_t>(kInScVal));
+  a.EmitLrW(1, 17, kSeedVal);        // lr.w x1, (x17) -> x1 = 0x11
+  a.EmitScW(2, 3, 18, kRsvExact ? 1 : 0);  // sc.w x2, x3, (x18)
+
+  // 9. an address outside the declared set
+  a.EmitLrW(1, 17, kSeedVal);        // lr.w x1, (x17) -> x1 = 0x11
+  a.EmitScW(2, 3, 20, 1);            // sc.w x2, x3, (x20) -> x2 = 1, no write
+
   a.EmitExit(1);
 
   // Derived from the program above, by hand, from the ISA: the LRs are blocks
-  // 2, 4, 5, 6 and 7; the SCs are blocks 1, 2, 3, 4, 5, 6 and 7, of which 2 and 5
-  // must succeed (their reservations were never broken) and 1, 3, 4, 6 and 7
-  // must fail.
-  p.lr_count = 5;
-  p.sc_count = 7;
-  p.sc_success = 2;
-  p.sc_fail = 5;
+  // 2, 4, 5, 6, 7, 8 and 9; the SCs are blocks 1..9, of which 2 and 5 must
+  // succeed (their reservations were never broken), 8 also succeeds when the
+  // platform does not require the exact address (its different address is inside
+  // the declared set), and 1, 3, 4, 6, 7, 9 must fail.
+  p.lr_count = 7;
+  p.sc_count = 9;
+  p.sc_success = 2 + (kRsvExact ? 0 : 1);
+  p.sc_fail = 5 + (kRsvExact ? 2 : 1);
   p.ext_inval_expected = 0;
-  p.watch = {{kA, 8}, {kA8, 4}, {kA64, 8}};
+  p.watch = {{kA, 8}, {kA8, 4}, {kA64, 8}, {kB, 8}, {kBIn, 4}, {kBOut, 8}};
 
   EmitHandler(&p.img);
   return p;
@@ -639,6 +717,11 @@ class Harness {
       t.wdata = r.wdata;
       txns_.push_back(t);
       pending_idx_ = static_cast<long>(txns_.size()) - 1;
+      // The address the outstanding reservation was taken on. The granule the
+      // endpoint reports while it stands must be the declared set *of that
+      // address*: the case now reserves more than one address (A and B), so
+      // comparing against a hard-coded A granule would flag every B reservation.
+      if (t.kind == KIND_LR) lr_addr_ = r.addr;
     }
     if (!rst && (dut_->dmem_rsp_valid_i != 0) && (dut_->dmem_rsp_ready_o != 0)) {
       if (pending_idx_ >= 0) {
@@ -749,11 +832,13 @@ class Harness {
       retires_.push_back(r);
     }
     // The declared granule is checked as state: whenever a reservation stands,
-    // the granule the DUT reports must be the 8-byte block containing the
-    // address the LR reserved.
+    // the granule the DUT reports must be the naturally aligned declared set
+    // containing the address the LR reserved. The mask comes from the platform
+    // declaration (kRsvMask), not from the RTL's constant, so the two can
+    // disagree and this check is what notices.
     if (dut_->o_mem_res_valid_o != 0) {
       granule_samples_++;
-      if (dut_->o_mem_res_granule_o != (kA & ~UINT64_C(7))) granule_violations_++;
+      if (dut_->o_mem_res_granule_o != (lr_addr_ & kRsvMask)) granule_violations_++;
     }
   }
 
@@ -769,6 +854,7 @@ class Harness {
   std::vector<TxnRec> txns_;
   uint64_t granule_samples_ = 0;
   uint64_t granule_violations_ = 0;
+  uint64_t lr_addr_ = 0;
   bool agent_ = false;
   uint64_t agent_addr_ = 0;
   uint64_t agent_budget_ = 0;
@@ -986,9 +1072,9 @@ RunResult RunOnce(Vmosaic_core_tb* dut, mosaic::Reporter* reporter,
   reporter->Check(harness.granule_samples() > 0,
                   label + ": the reservation was observed standing at least once");
   reporter->Check(harness.granule_violations() == 0,
-                  label + ": every observed reservation covered the declared 8-byte "
-                  "granule (" + Dec(harness.granule_violations()) + " violations in " +
-                      Dec(harness.granule_samples()) + " samples)");
+                  label + ": every observed reservation covered the declared " +
+                      Dec(kRsvSetBytes) + "-byte granule (" + Dec(harness.granule_violations()) +
+                      " violations in " + Dec(harness.granule_samples()) + " samples)");
 
   // ------------------------------------------------------- 4. the memory image
   // The exit protocol is read through the memory model's own state, not by
@@ -1029,18 +1115,41 @@ void RunSemantics(Vmosaic_core_tb* dut, mosaic::Reporter* reporter,
   //   A    -- block 2's SC wrote 0x22, block 5's SC wrote 0x55, then the AMO
   //           between block 6's LR and SC added 1, and block 6's and 7's SCs
   //           failed, so the location ends at 0x56;
-  //   A+4  -- block 4's in-granule store wrote 0x33 and no SC ever touched it;
-  //   A+8  -- block 5's out-of-granule store wrote 0x44.
+  //   A+4  -- block 4's in-set store wrote kInVal into the upper word, and
+  //           block 5's successful *doubleword* SC rewrote the whole declared
+  //           set, so the word is zero again: if the SC had written only four
+  //           bytes this would still hold kInVal, which is why it is watched;
+  //   A+8  -- block 5's out-of-set store wrote 0x44.
   const uint64_t expect_a = kVal5 + kAmoDelta;
   reporter->Check(r.watched[0] == expect_a,
                   "semantics: the reserved location holds " + U64(expect_a) + " (saw " +
                       U64(r.watched[0]) + ")");
-  reporter->Check(r.watched[1] == kInVal,
-                  "semantics: the in-granule conflicting location holds " + U64(kInVal) +
-                      " (saw " + U64(r.watched[1]) + ")");
+  reporter->Check(r.watched[1] == 0,
+                  "semantics: the in-set conflict word is zero after the successful "
+                  "doubleword SC rewrote the whole set (saw " + U64(r.watched[1]) + ")");
   reporter->Check(r.watched[2] == kOutVal,
-                  "semantics: the out-of-granule location holds " + U64(kOutVal) + " (saw " +
+                  "semantics: the out-of-set location holds " + U64(kOutVal) + " (saw " +
                       U64(r.watched[2]) + ")");
+
+  // Block 8/9: the SC's *address* against the declared set. B still holds the
+  // value the store parked there (both LRs only read it); B+4 holds the SC's
+  // value exactly when the declaration lets a different in-set address succeed;
+  // B+set still holds the sentinel, because the SC there named an address the
+  // reservation does not cover and a refused SC writes nothing.
+  const uint64_t expect_in_sc = kRsvExact ? UINT64_C(0) : kInScVal;
+  const uint64_t expect_b = kRsvExact ? kSeedVal
+                                      : ((kInScVal << 32) | kSeedVal);
+  reporter->Check(r.watched[3] == expect_b,
+                  "semantics: the second reserved doubleword holds " + U64(expect_b) +
+                      " (saw " + U64(r.watched[3]) + ")");
+  reporter->Check(r.watched[4] == expect_in_sc,
+                  "semantics: the different in-set address holds " + U64(expect_in_sc) +
+                      " (saw " + U64(r.watched[4]) + "; the platform declares "
+                      "require_exact_addr=" + Dec(kRsvExact ? 1 : 0) + ")");
+  reporter->Check(r.watched[5] == kSentinel,
+                  "semantics: the out-of-set address still holds the sentinel " +
+                      U64(kSentinel) + " after the SC that named it was refused (saw " +
+                      U64(r.watched[5]) + ")");
 
   reporter->Check(dut->o_mem_res_valid_o == 0,
                   "semantics: the last SC consumed the reservation");

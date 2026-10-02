@@ -17,8 +17,9 @@
 // could drift while both staying self-consistent. What is shared is the *data*;
 // what is independent is the *behaviour*, and the behaviour is what the phases
 // below check. Because shared data can hide a decode bug, phase 1 ("table")
-// cross-checks all 21 rows against hand-derived expectations read from the
-// spec clauses in config/csr/mode_m.json, so a wrong decode fails loudly here
+// cross-checks all 50 rows against hand-derived expectations read from the
+// spec clauses in config/csr/mode_m.json (21 machine-mode rows plus the 29
+// Zihpm hpmcounter shadows p0 advertises), so a wrong decode fails loudly here
 // instead of passing in both models at once.
 //
 // Every row of the generated table also declares its *role* -- what the register
@@ -31,25 +32,28 @@
 // configuration gate, not a unit case.
 //
 // Profile scope: the shadow models the *machine-mode* CSR file, mode_m.json's
-// 21 rows. A profile that also implements supervisor and PMP registers (p1
-// loads mode_su.json and mode_pmp.json) generates a larger table; those rows
-// still declare roles, but this model has no shadow for them, so the case is a
-// p0 gate and a p1 run stops at the table phase, which names the row count it
-// was written for. The supervisor and PMP registers are verified by
-// privilege.permission_matrix.
+// 21 rows plus the Zihpm shadows the profile advertises. A profile that also
+// implements supervisor and PMP registers (p1 loads mode_su.json and
+// mode_pmp.json) generates a larger table; those rows still declare roles, but
+// this model has no shadow for them, so the case is a p0 gate and a p1 run
+// stops at the table phase, which names the row count it was written for. The
+// supervisor and PMP registers are verified by privilege.permission_matrix.
 //
 // Phases, each of which resets first and can fail on its own:
 //
 //   1. table          the generated table equals the hand-derived one
-//   2. reset-state    every one of the 21 CSRs reads its declared reset value
+//   2. reset-state    every modelled CSR reads its declared reset value, and the
+//                     29 Zihpm hpmcounter shadows are implemented and read zero
 //   3. read-only      writes to the seven read-only CSRs raise csr_wr_illegal_o,
 //                     change nothing, and reads still work; writes to misa and
 //                     mcounteren are *legal* (WARL registers with no writable
 //                     bits) and also change nothing
 //   4. warl-allones   write all-ones to every writable CSR and require exactly
 //                     the mask-implied value back, per CSR, with RW, RS and RC
-//   5. illegal-addr   legitimate-looking unimplemented addresses raise
-//                     csr_illegal_o, read 0, and change nothing on a write
+//   5. illegal-addr   legitimate-looking addresses the generated table does not
+//                     implement raise csr_illegal_o, read 0, and change nothing
+//                     on a write; a candidate the table *does* implement reads
+//                     its reset value without a trap (the Zihpm shadows)
 //   6. trap-mret      trap entry and MRET field transitions, nesting, MPIE
 //                     already zero, trap/mret mutual exclusion, trap priority
 //                     over a retiring CSR write
@@ -164,16 +168,24 @@ const char* const kRoleClass[kRoleCount] = {
     "counter-shadow", "counter-shadow"};
 
 // Addresses the shadow uses to reach a role. The numbers themselves are only in
-// the generated table; this is a lookup, not a copy.
+// the generated table; this is a lookup, not a copy. Two indexes are kept: the
+// *modelled* roles this shadow drives, and the *implemented* rows the table
+// declares. They differ for a row the profile implements but this M-mode model
+// has no behaviour for -- the Zihpm hpmcounter shadows are exactly that -- and
+// conflating them made a read of an implemented hpmcounter look illegal.
 struct TableIndex {
-  int    role_of_addr[4096];   // -1 when unimplemented
+  int    row_of_addr[4096];    // MOSAIC_CSR_TABLE index, -1 when unimplemented
+  int    role_of_addr[4096];   // modelled role, -1 when this model has no shadow
   int    row_of_role[kRoleCount];
   bool   ok = true;
   std::string problem;
 
   TableIndex() {
-    for (int i = 0; i < 4096; i++) role_of_addr[i] = -1;
+    for (int i = 0; i < 4096; i++) { row_of_addr[i] = -1; role_of_addr[i] = -1; }
     for (int r = 0; r < kRoleCount; r++) row_of_role[r] = -1;
+    for (int t = 0; t < MOSAIC_CSR_COUNT; t++) {
+      row_of_addr[MOSAIC_CSR_TABLE[t].addr] = t;
+    }
     for (int r = 0; r < kRoleCount; r++) {
       for (int t = 0; t < MOSAIC_CSR_COUNT; t++) {
         if (std::string(MOSAIC_CSR_TABLE[t].name) == kRoleName[r]) {
@@ -218,7 +230,11 @@ struct TableIndex {
   uint64_t Wmask(int role) const { return Desc(role).wmask; }
   bool WriteLegal(int role) const { return Desc(role).write_legal != 0; }
   int RoleOf(uint16_t addr) const { return (addr < 4096) ? role_of_addr[addr] : -1; }
-  bool Impl(uint16_t addr) const { return RoleOf(addr) >= 0; }
+  int RowOf(uint16_t addr) const { return (addr < 4096) ? row_of_addr[addr] : -1; }
+  bool Impl(uint16_t addr) const { return RowOf(addr) >= 0; }
+  const mosaic_csr_desc_t& RowDesc(int row) const { return MOSAIC_CSR_TABLE[row]; }
+  uint64_t ResetRow(int row) const { return MOSAIC_CSR_TABLE[row].reset; }
+  bool WriteLegalRow(int row) const { return MOSAIC_CSR_TABLE[row].write_legal != 0; }
 };
 
 const TableIndex kTable;
@@ -393,11 +409,16 @@ class ShadowCsr {
   // -------------------------------------------------------------- evaluation
   Comb Eval(const Stim& s) const {
     Comb c;
+    const int row = kTable.RowOf(s.addr);
     const int role = kTable.RoleOf(s.addr);
 
-    c.illegal = role < 0;
-    c.wr_illegal = s.we && ((role < 0) || !kTable.WriteLegal(role));
-    c.rdata = (role < 0) ? 0 : ReadValue(role, s.mip, s.mtime);
+    c.illegal = row < 0;
+    c.wr_illegal = s.we && ((row < 0) || !kTable.WriteLegalRow(row));
+    // A row this model has no behaviour for (the Zihpm hpmcounter shadows) is
+    // still an implemented address: it reads its table reset value -- zero --
+    // rather than trapping, which is the whole point of the row existing.
+    c.rdata = (row < 0) ? 0
+                        : ((role < 0) ? kTable.ResetRow(row) : ReadValue(role, s.mip, s.mtime));
 
     c.trap_commit = s.trap_valid;
     // A trap and an MRET cannot both be at one boundary; the hardware resolves it
@@ -748,7 +769,7 @@ struct TableExpectation {
   bool        write_legal;
 };
 
-const TableExpectation kExpected[21] = {
+const TableExpectation kExpected[50] = {
     // name          addr    reset                       write mask                  legal
     {"mstatus",     0x300,  UINT64_C(0x0000000000001800), UINT64_C(0x00000000000066aa), true},
     // misa is WARL with no writable bits in p0 (the clause: "writable bits are
@@ -772,6 +793,41 @@ const TableExpectation kExpected[21] = {
     {"cycle",       0xc00,  UINT64_C(0x0000000000000000), UINT64_C(0x0000000000000000), false},
     {"time",        0xc01,  UINT64_C(0x0000000000000000), UINT64_C(0x0000000000000000), false},
     {"instret",     0xc02,  UINT64_C(0x0000000000000000), UINT64_C(0x0000000000000000), false},
+    // The Zihpm counter shadows. p0 advertises Zihpm (capability ladder,
+    // "read-only zero when no counters are implemented"), so
+    // hpmcounter3..31 exist and read zero; the row is hand-derived here
+    // because this phase is the one place a configured number is written
+    // twice on purpose, and a profile that advertises the extension must
+    // not be able to have its shadows checked against nothing.
+    {"hpmcounter3",    0xc03,  UINT64_C(0x0000000000000000), UINT64_C(0x0000000000000000), false},
+    {"hpmcounter4",    0xc04,  UINT64_C(0x0000000000000000), UINT64_C(0x0000000000000000), false},
+    {"hpmcounter5",    0xc05,  UINT64_C(0x0000000000000000), UINT64_C(0x0000000000000000), false},
+    {"hpmcounter6",    0xc06,  UINT64_C(0x0000000000000000), UINT64_C(0x0000000000000000), false},
+    {"hpmcounter7",    0xc07,  UINT64_C(0x0000000000000000), UINT64_C(0x0000000000000000), false},
+    {"hpmcounter8",    0xc08,  UINT64_C(0x0000000000000000), UINT64_C(0x0000000000000000), false},
+    {"hpmcounter9",    0xc09,  UINT64_C(0x0000000000000000), UINT64_C(0x0000000000000000), false},
+    {"hpmcounter10",    0xc0a,  UINT64_C(0x0000000000000000), UINT64_C(0x0000000000000000), false},
+    {"hpmcounter11",    0xc0b,  UINT64_C(0x0000000000000000), UINT64_C(0x0000000000000000), false},
+    {"hpmcounter12",    0xc0c,  UINT64_C(0x0000000000000000), UINT64_C(0x0000000000000000), false},
+    {"hpmcounter13",    0xc0d,  UINT64_C(0x0000000000000000), UINT64_C(0x0000000000000000), false},
+    {"hpmcounter14",    0xc0e,  UINT64_C(0x0000000000000000), UINT64_C(0x0000000000000000), false},
+    {"hpmcounter15",    0xc0f,  UINT64_C(0x0000000000000000), UINT64_C(0x0000000000000000), false},
+    {"hpmcounter16",    0xc10,  UINT64_C(0x0000000000000000), UINT64_C(0x0000000000000000), false},
+    {"hpmcounter17",    0xc11,  UINT64_C(0x0000000000000000), UINT64_C(0x0000000000000000), false},
+    {"hpmcounter18",    0xc12,  UINT64_C(0x0000000000000000), UINT64_C(0x0000000000000000), false},
+    {"hpmcounter19",    0xc13,  UINT64_C(0x0000000000000000), UINT64_C(0x0000000000000000), false},
+    {"hpmcounter20",    0xc14,  UINT64_C(0x0000000000000000), UINT64_C(0x0000000000000000), false},
+    {"hpmcounter21",    0xc15,  UINT64_C(0x0000000000000000), UINT64_C(0x0000000000000000), false},
+    {"hpmcounter22",    0xc16,  UINT64_C(0x0000000000000000), UINT64_C(0x0000000000000000), false},
+    {"hpmcounter23",    0xc17,  UINT64_C(0x0000000000000000), UINT64_C(0x0000000000000000), false},
+    {"hpmcounter24",    0xc18,  UINT64_C(0x0000000000000000), UINT64_C(0x0000000000000000), false},
+    {"hpmcounter25",    0xc19,  UINT64_C(0x0000000000000000), UINT64_C(0x0000000000000000), false},
+    {"hpmcounter26",    0xc1a,  UINT64_C(0x0000000000000000), UINT64_C(0x0000000000000000), false},
+    {"hpmcounter27",    0xc1b,  UINT64_C(0x0000000000000000), UINT64_C(0x0000000000000000), false},
+    {"hpmcounter28",    0xc1c,  UINT64_C(0x0000000000000000), UINT64_C(0x0000000000000000), false},
+    {"hpmcounter29",    0xc1d,  UINT64_C(0x0000000000000000), UINT64_C(0x0000000000000000), false},
+    {"hpmcounter30",    0xc1e,  UINT64_C(0x0000000000000000), UINT64_C(0x0000000000000000), false},
+    {"hpmcounter31",    0xc1f,  UINT64_C(0x0000000000000000), UINT64_C(0x0000000000000000), false},
     // The four machine ID registers are read-only zero in p0.
     {"mvendorid",   0xf11,  UINT64_C(0x0000000000000000), UINT64_C(0x0000000000000000), false},
     {"marchid",     0xf12,  UINT64_C(0x0000000000000000), UINT64_C(0x0000000000000000), false},
@@ -782,10 +838,11 @@ const TableExpectation kExpected[21] = {
 void PhaseTable(mosaic::Reporter* reporter) {
   const std::string where = "table";
   Require(kTable.ok, where, kTable.problem);
-  Require(MOSAIC_CSR_COUNT == 21, where,
+  Require(MOSAIC_CSR_COUNT == 50, where,
           "the generated table has " + Dec(MOSAIC_CSR_COUNT) + " rows, the implementation "
-          "table declares 21");
-  for (int i = 0; i < 21; i++) {
+          "table declares 50 (mode_m.json's 21 machine-mode rows plus the 29 Zihpm "
+          "hpmcounter3..31 shadows the profile advertises)");
+  for (int i = 0; i < 50; i++) {
     const TableExpectation& e = kExpected[i];
     Require(std::string(MOSAIC_CSR_TABLE[i].name) == e.name, where,
             "row " + Dec(i) + " is " + MOSAIC_CSR_TABLE[i].name + ", expected " + e.name);
@@ -802,7 +859,7 @@ void PhaseTable(mosaic::Reporter* reporter) {
             std::string(e.name) + ": generated write-legality " +
                 Bool(MOSAIC_CSR_TABLE[i].write_legal != 0) + ", expected " + Bool(e.write_legal));
   }
-  reporter->Check(true, "table: all 21 generated rows equal the hand-derived expectations");
+  reporter->Check(true, "table: all 50 generated rows equal the hand-derived expectations");
 }
 
 void PhaseResetState(Harness* h, mosaic::Reporter* reporter) {
@@ -821,7 +878,40 @@ void PhaseResetState(Harness* h, mosaic::Reporter* reporter) {
   }
   // The observability counters are zero out of reset.
   Require(h->Read(kTable.Addr(kMcycle)) == 0, "reset-state", "mcycle is not zero at reset");
-  reporter->Check(true, "reset-state: all 21 CSRs read their declared reset value");
+
+  // The Zihpm counter shadows. The profile advertises Zihpm ("read-only zero
+  // when no counters are implemented"), so hpmcounter3..31 must be implemented
+  // addresses that read zero and that no write can change -- a read that raises
+  // illegal instruction is exactly the defect EX-009 recorded as unverified.
+  // The rows and addresses come from the generated table; the hand-derived
+  // count (29) is the one number from config/csr/mode_m.json this phase asserts.
+  int hpm_rows = 0;
+  for (int t = 0; t < MOSAIC_CSR_COUNT; t++) {
+    const std::string name = MOSAIC_CSR_TABLE[t].name;
+    if (name.compare(0, 10, "hpmcounter") != 0) continue;
+    hpm_rows++;
+    const uint16_t addr = MOSAIC_CSR_TABLE[t].addr;
+    Stim s;
+    s.addr = addr;
+    const Comb c = h->Cycle(s);
+    Require(!c.illegal, "reset-state",
+            name + " at 0x" + mosaic::Hex(addr, 3) + " is not implemented; the profile "
+            "advertises Zihpm, whose shadows must exist and read zero");
+    Require(c.rdata == 0, "reset-state",
+            name + " reads 0x" + mosaic::Hex(c.rdata) + " at reset, expected the "
+            "read-only-zero shadow value 0");
+    Require(MOSAIC_CSR_TABLE[t].write_legal == 0, "reset-state",
+            name + " is declared writable; an hpmcounter shadow of an unimplemented "
+            "counter is read-only");
+    Require(MOSAIC_CSR_TABLE[t].wmask == 0, "reset-state",
+            name + " has write mask 0x" + mosaic::Hex(MOSAIC_CSR_TABLE[t].wmask) +
+                ", expected 0 for a read-only shadow");
+  }
+  Require(hpm_rows == 29, "reset-state",
+          "the generated table declares " + Dec(hpm_rows) + " hpmcounter rows, expected "
+          "the contiguous Zihpm block hpmcounter3..31 (29)");
+  reporter->Check(true, "reset-state: every modelled CSR reads its declared reset value, "
+                        "and the 29 Zihpm hpmcounter shadows are implemented and read zero");
 }
 
 // One CSR write, then a read in the following cycle: the port contract says a
@@ -1005,16 +1095,40 @@ bool RegsEqual(const Regs& a, const Regs& b);
 void PhaseIllegalAddress(Harness* h, mosaic::Reporter* reporter) {
   // Addresses that look legitimate -- a CSR number adjacent to an implemented
   // one, an RV32 half-counter, a hypervisor or custom range -- must not silently
-  // succeed. Every one of them is unimplemented in this table.
-  const uint16_t addresses[] = {
+  // succeed. Which of them are *unimplemented* is read from the generated table
+  // rather than hand-listed: a candidate the table declares (the Zihpm
+  // hpmcounter shadows 0xc03/0xc04, which the profile carries because it
+  // advertises Zihpm) is required to be implemented and to read its reset value,
+  // so this phase cannot assert the absence of a CSR the configuration declares.
+  // 0xb03 (mhpmevent3) is the deliberate opposite: it stays unimplemented,
+  // because no HPM counter is implemented and so no event selector exists.
+  const uint16_t candidates[] = {
       0x000, 0x001, 0x100, 0x307, 0x30a, 0x310, 0x345, 0x346, 0x347, 0x348,
       0x3ff, 0x400, 0x600, 0x7ff, 0x800, 0x900, 0xa00, 0xb01, 0xb03, 0xc03,
       0xc04, 0xd00, 0xe12, 0xf00, 0xf15, 0xfff};
   const Regs before = ReadAllRegs(h);
+  int illegal_checked = 0;
+  int implemented_checked = 0;
 
-  for (uint16_t addr : addresses) {
-    Require(!kTable.Impl(addr), "illegal-addr",
-            "0x" + mosaic::Hex(addr, 3) + " is implemented in the table but listed as illegal");
+  for (uint16_t addr : candidates) {
+    const int row = kTable.RowOf(addr);
+    if (row >= 0) {
+      Stim r;
+      r.addr = addr;
+      const Comb c = h->Cycle(r);
+      Require(!c.illegal, "illegal-addr",
+              "0x" + mosaic::Hex(addr, 3) + " is implemented in the generated table (" +
+                  kTable.RowDesc(row).name + ") but the DUT raised csr_illegal_o");
+      Require(c.rdata == kTable.ResetRow(row), "illegal-addr",
+              "0x" + mosaic::Hex(addr, 3) + " (" + kTable.RowDesc(row).name + ") read 0x" +
+                  mosaic::Hex(c.rdata) + ", expected the table's reset value 0x" +
+                  mosaic::Hex(kTable.ResetRow(row)));
+      implemented_checked++;
+      continue;
+    }
+    Require(kTable.RoleOf(addr) < 0, "illegal-addr",
+            "0x" + mosaic::Hex(addr, 3) + " is modelled by this case but the generated "
+            "table does not implement it");
     Stim r;
     r.addr = addr;
     const Comb c = h->Cycle(r);
@@ -1031,14 +1145,20 @@ void PhaseIllegalAddress(Harness* h, mosaic::Reporter* reporter) {
     const Comb cw = h->Cycle(w);
     Require(cw.wr_illegal, "illegal-addr",
             "a write to 0x" + mosaic::Hex(addr, 3) + " did not raise csr_wr_illegal_o");
+    illegal_checked++;
   }
+
+  Require(implemented_checked > 0, "illegal-addr",
+          "no candidate address is implemented in the generated table; the Zihpm shadows "
+          "0xc03/0xc04 should be, so this phase would prove nothing by skipping them");
 
   // A whole sweep of illegal accesses changed nothing at all.
   Require(RegsEqual(before, ReadAllRegs(h)), "illegal-addr",
           "an illegal CSR access changed architectural state");
-  reporter->Check(true, "illegal-addr: " + Dec(sizeof(addresses) / sizeof(addresses[0])) +
-                            " unimplemented addresses read 0, raised csr_illegal_o, and "
-                            "changed no state on a write");
+  reporter->Check(true, "illegal-addr: " + Dec(illegal_checked) + " unimplemented addresses "
+                            "read 0, raised csr_illegal_o, and changed no state on a write; " +
+                            Dec(implemented_checked) + " candidate address(es) the generated "
+                            "table implements read the table's reset value without a trap");
 }
 
 Regs ReadAllRegs(Harness* h) {

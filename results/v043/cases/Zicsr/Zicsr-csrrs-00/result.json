@@ -10,6 +10,6 @@
   "image": "/Users/flare/mosaic-ref/act4-mosaic-p1-work/mosaic-p1/elfs/rv64i/Zicsr/Zicsr-csrrs-00.elf",
   "expect": "",
   "tool": "Verilator 5.052 2026-09-05",
-  "timestamp": "2026-10-02T08:03:57Z",
+  "timestamp": "2026-10-02T08:50:28Z",
   "first_mismatch": ""
 }
