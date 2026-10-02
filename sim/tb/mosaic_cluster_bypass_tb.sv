@@ -132,6 +132,8 @@ module mosaic_cluster_bypass_tb (
   logic [IDX_W-1:0]    slot_rob_index_n;
   logic [RGEN_W-1:0]   slot_rob_gen_n;
   logic [UOP_W-1:0]    slot_uop_index_n;
+  logic [TAG_W-1:0]    bp_src_tag_n;
+  logic [PGEN_W-1:0]   bp_src_gen_n;
 
   // The module's widths are `localparam`s taken from the generated packages, so
   // they are not overridable here on purpose: a second place to write the
@@ -184,8 +186,8 @@ module mosaic_cluster_bypass_tb (
       .slot_uop_index (slot_uop_index_n),
 
       .bp_src_valid   (bp_src_valid_o),
-      .bp_src_tag     (bp_src_tag_o),
-      .bp_src_gen     (bp_src_gen_o),
+      .bp_src_tag     (bp_src_tag_n),
+      .bp_src_gen     (bp_src_gen_n),
       .bp_src_value   (bp_src_value_o),
 
       .o_slot_captured(o_slot_captured_o),
@@ -205,6 +207,8 @@ module mosaic_cluster_bypass_tb (
   assign slot_rob_index_o = 32'(slot_rob_index_n);
   assign slot_rob_gen_o   = 32'(slot_rob_gen_n);
   assign slot_uop_index_o = 32'(slot_uop_index_n);
+  assign bp_src_tag_o     = 32'(bp_src_tag_n);
+  assign bp_src_gen_o     = 32'(bp_src_gen_n);
 
   assign o_xlen_o   = 32'(XLEN);
   assign o_tag_w_o  = 32'(TAG_W);

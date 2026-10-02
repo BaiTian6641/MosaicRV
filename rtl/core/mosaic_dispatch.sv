@@ -621,8 +621,10 @@ module mosaic_dispatch (
   logic             head_steerable;
   logic [15:0]      head_age;
   logic             fab_cluster_eff;   // the cluster the head goes to this cycle
-  logic             fab_cluster_ok;    // the dynamic grant covers a cluster
-  logic             fab_mem_ok;        // the dynamic grant covers the LSU
+  logic             fab_route_lsu;     // the router granted the LSU this cycle
+  logic             fab_route_clu;     // the router granted a cluster this cycle
+  logic             head_goes_lsu;     // the head takes the memory insert path
+  logic             head_goes_clu;     // the head takes a cluster insert path
   logic [5:0][31:0] fab_reason_hist;
 
 
@@ -986,17 +988,25 @@ module mosaic_dispatch (
   assign o_fab_occ_w       = fab_occ_w;
   assign o_fab_unit_w      = fab_unit_w;
 
-  // The insert decision. `fab_cluster_ok` is the dynamic grant's "this macro
-  // may go to a cluster this cycle", `fab_mem_ok` its "it may go to the LSU";
-  // both are high unconditionally in the fixed baseline, where the steering is
-  // not consulted at all.
+  // The insert decision. The router's answer, when it is consulted, *is* the
+  // path decision: a grant to a cluster unit is a cluster insert, and a grant to
+  // the LSU is the memory insert. With the capability matrix correct these agree
+  // with the macro's class by construction -- dispatch never offers a memory
+  // macro to the router, and the matrix never lets a cluster class reach the
+  // LSU -- so the shipping machine is unchanged. With the matrix broken (the
+  // `MOSAIC_STEER_MUTANT_IGNORE_CAPABILITY` control) an ALU macro is granted the
+  // LSU and goes there, which is exactly "an incompatible unit receives work".
+  // The alternative -- re-checking the class in dispatch -- would mask the
+  // router's matrix, and a masked policy is not the one being measured.
   always_comb begin
     fab_cluster_eff = fab_dyn ? (fab_steer_unit == 2'd1) : head.cluster;
-    fab_cluster_ok  = !fab_dyn || (fab_steer_grant && (fab_steer_unit != 2'd3));
-    // The memory path is never routed by the fabric; it keeps the fixed single
-    // path it has always had.
-    fab_mem_ok      = 1'b1;
+    fab_route_lsu   = fab_dyn && fab_steer_grant && (fab_steer_unit == 2'd3);
+    fab_route_clu   = fab_dyn && fab_steer_grant && (fab_steer_unit != 2'd3);
   end
+
+  assign head_goes_lsu = head_is_mem || fab_route_lsu;
+  assign head_goes_clu = !head_is_mem && !head_is_sys &&
+                         (!fab_dyn || fab_route_clu);
 
   // The reason histogram, so the case reports which key decided rather than
   // only where the macro went. Observational only.
@@ -1272,10 +1282,10 @@ module mosaic_dispatch (
   assign s1_val_ready = head.s1_x0 || head.s1_const || (rq_written[0] && s1_value_ok);
   assign s2_val_ready = head.s2_x0 || head.s2_const || (rq_written[1] && s2_value_ok);
 
-  assign ins_ok_cluster = head_valid && !recovering && !head_is_mem && !head_is_sys &&
-                          s1_value_ok && s2_value_ok && fab_cluster_ok && ins_ready_sel;
-  assign mem_ins_offer  = head_valid && !recovering && head_is_mem &&
-                          s1_val_ready && s2_val_ready && fab_mem_ok;
+  assign ins_ok_cluster = head_valid && !recovering && head_goes_clu &&
+                          s1_value_ok && s2_value_ok && ins_ready_sel;
+  assign mem_ins_offer  = head_valid && !recovering && head_goes_lsu &&
+                          s1_val_ready && s2_val_ready;
   assign mem_ins_valid  = mem_ins_offer;
   // F/D (I-050): an FP load is a memory macro whose destination is an
   // f-register; `head.meta.fp_dst_fp` is set only for those (an FP arithmetic
@@ -1312,6 +1322,21 @@ module mosaic_dispatch (
     s2_val_sel = prf_rsp_data[bank_of_src[1]*DSP_XLEN +: DSP_XLEN];
   end
 
+  // The operand values the *cluster* insert presents (I-090). They are the
+  // source reads above, except under `MOSAIC_FAB_MUTANT_DYN_SWAP_SRC`, which
+  // crosses the two lanes while the fabric is on: the negative control for "a
+  // dynamic route must never change what the program computes", since a two
+  // register-operand ALU op then computes a different result in the dynamic
+  // configuration only.
+  logic [DSP_XLEN-1:0]  ins_s1_sel, ins_s2_sel;
+`ifdef MOSAIC_FAB_MUTANT_DYN_SWAP_SRC
+  assign ins_s1_sel = fab_dyn ? s2_val_sel : s1_val_sel;
+  assign ins_s2_sel = fab_dyn ? s1_val_sel : s2_val_sel;
+`else
+  assign ins_s1_sel = s1_val_sel;
+  assign ins_s2_sel = s2_val_sel;
+`endif
+
   always_comb begin
     ins_uop_v     = head.id;
     ins_meta_v    = head.meta;
@@ -1332,12 +1357,12 @@ module mosaic_dispatch (
     c0_ins_src1_gen  = head.s1_gen;
     c0_ins_src1_ready = head.s1_x0 || head.s1_const || rq_written[0];
     c0_ins_src1_val  = head.s1_const ? head.s1_cval
-                                     : (head.s1_x0 ? {DSP_XLEN{1'b0}} : s1_val_sel);
+                                     : (head.s1_x0 ? {DSP_XLEN{1'b0}} : ins_s1_sel);
     c0_ins_src2_tag  = head.s2_tag;
     c0_ins_src2_gen  = head.s2_gen;
     c0_ins_src2_ready = head.s2_x0 || head.s2_const || rq_written[1];
     c0_ins_src2_val  = head.s2_const ? head.s2_cval
-                                     : (head.s2_x0 ? {DSP_XLEN{1'b0}} : s2_val_sel);
+                                     : (head.s2_x0 ? {DSP_XLEN{1'b0}} : ins_s2_sel);
     c0_ins_dst_tag   = ins_dst_tag_v;
     c0_ins_dst_gen   = ins_dst_gen_v;
 
@@ -1349,12 +1374,12 @@ module mosaic_dispatch (
     c1_ins_src1_gen  = head.s1_gen;
     c1_ins_src1_ready = head.s1_x0 || head.s1_const || rq_written[0];
     c1_ins_src1_val  = head.s1_const ? head.s1_cval
-                                     : (head.s1_x0 ? {DSP_XLEN{1'b0}} : s1_val_sel);
+                                     : (head.s1_x0 ? {DSP_XLEN{1'b0}} : ins_s1_sel);
     c1_ins_src2_tag  = head.s2_tag;
     c1_ins_src2_gen  = head.s2_gen;
     c1_ins_src2_ready = head.s2_x0 || head.s2_const || rq_written[1];
     c1_ins_src2_val  = head.s2_const ? head.s2_cval
-                                     : (head.s2_x0 ? {DSP_XLEN{1'b0}} : s2_val_sel);
+                                     : (head.s2_x0 ? {DSP_XLEN{1'b0}} : ins_s2_sel);
     c1_ins_dst_tag   = ins_dst_tag_v;
     c1_ins_dst_gen   = ins_dst_gen_v;
   end

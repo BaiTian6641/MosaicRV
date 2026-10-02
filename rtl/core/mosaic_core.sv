@@ -732,6 +732,28 @@ module mosaic_core (
 `else
   assign fab_dyn_use = fab_dyn_i;
 `endif
+
+  // I-090 measurement instrumentation: the step table in
+  // results/reports/I-090-fabric.md is measured by building the case with
+  // exactly one of these defined, which disables one integration step while
+  // leaving the others on. They are *not* controls -- a control must fail, a
+  // step build is a partial fabric -- and no registered run defines one.
+  logic fab_dyn_steer, fab_dyn_bank, fab_dyn_bp;
+`ifdef MOSAIC_FAB_STEP_NO_STEERING
+  assign fab_dyn_steer = 1'b0;
+`else
+  assign fab_dyn_steer = fab_dyn_use;
+`endif
+`ifdef MOSAIC_FAB_STEP_NO_BANK
+  assign fab_dyn_bank = 1'b0;
+`else
+  assign fab_dyn_bank = fab_dyn_use;
+`endif
+`ifdef MOSAIC_FAB_STEP_NO_BYPASS
+  assign fab_dyn_bp = 1'b0;
+`else
+  assign fab_dyn_bp = fab_dyn_use;
+`endif
   // I-090: the cluster dispatch's allocation-time affinity pinned the oldest
   // buffered macro to; the I-032 bank preference is driven from it while the
   // fabric is on.
@@ -2112,7 +2134,7 @@ module mosaic_core (
       // to change only which legal free tag is chosen and never whether an
       // allocation succeeds. With the fabric off it is the pre-I-032 allocator,
       // bit for bit.
-      .alloc_bias_en    (fab_dyn_use),
+      .alloc_bias_en    (fab_dyn_bank),
       .alloc_bias_bank  ({1'b0, fab_alloc_cluster}),
       .rs1_addr         (ren_rs1_addr),
       .rs2_addr         (ren_rs2_addr),
@@ -2410,7 +2432,7 @@ module mosaic_core (
       .o_refuse_ctr    (),
       .o_purge_ctr     (),
       .o_wu_miss_ctr   (),
-      .fab_dyn         (fab_dyn_use),
+      .fab_dyn         (fab_dyn_bp),
       .o_wu2_matched   (c0_wu2_matched),
       .o_bp_captured_ctr(c0_bp_captured),
       .o_bp_unauth_ctr (c0_bp_unauth),
@@ -2496,7 +2518,7 @@ module mosaic_core (
       .o_refuse_ctr    (),
       .o_purge_ctr     (),
       .o_wu_miss_ctr   (),
-      .fab_dyn         (fab_dyn_i),
+      .fab_dyn         (fab_dyn_bp),
       .o_wu2_matched   (c1_wu2_matched),
       .o_bp_captured_ctr(c1_bp_captured),
       .o_bp_unauth_ctr (c1_bp_unauth),
@@ -2793,7 +2815,7 @@ module mosaic_core (
   mosaic_dispatch u_disp (
       .clk              (clk),
       .rst              (rst),
-      .fab_dyn          (fab_dyn_use),
+      .fab_dyn          (fab_dyn_steer),
       .dec_valid        ({1'b0, dbuf_valid[0]}),
       .dec_ctl0         (dbuf_ctl[0]),
       .dec_ctl1         (dbuf_ctl[1]),
