@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "case": "llb.stale_copy_invalidation",
+  "verdict": "FAIL",
+  "detail": "first failure: in-flight-race/store: expected no hit in the invalidating cycle (or the post-store value), got a hit with the pre-store value",
+  "seed": 1,
+  "max_cycles": 200000,
+  "checks": 1,
+  "failures": 1,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-02T17:02:41Z",
+  "first_mismatch": "in-flight-race/store: expected no hit in the invalidating cycle (or the post-store value), got a hit with the pre-store value",
+  "failed_checks": ["no rule of the invalidation protocol was violated"]
+}

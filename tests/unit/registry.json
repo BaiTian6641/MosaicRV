@@ -2185,6 +2185,9 @@
   },
   "llb.stale_copy_invalidation": {
    "task": "I-060",
+   "profiles": [
+    "p1"
+   ],
    "top": "mosaic_llb_tb",
    "rtl": [
     "rtl/core/mosaic_pkg.sv",
@@ -2198,8 +2201,7 @@
     "sim/unit/tb_llb.cpp"
    ],
    "max_cycles": 200000,
-   "seed": 1,
-   "pending": true
+   "seed": 1
   }
  }
 }

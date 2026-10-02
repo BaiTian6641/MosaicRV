@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "case": "llb.stale_copy_invalidation",
+  "verdict": "FAIL",
+  "detail": "first failure: alias: expected a hit on 0x0000000080001020, got a miss on 0x0000000080001020",
+  "seed": 1,
+  "max_cycles": 200000,
+  "checks": 1,
+  "failures": 1,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-02T17:02:46Z",
+  "first_mismatch": "alias: expected a hit on 0x0000000080001020, got a miss on 0x0000000080001020",
+  "failed_checks": ["no rule of the invalidation protocol was violated"]
+}

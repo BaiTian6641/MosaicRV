@@ -3,7 +3,7 @@
   "case": "core.act_dut",
   "controls": [],
   "detail": "",
-  "dut_sha256": "b886aeba579f9a0dea993a889720ed3f3ee998f460572574714e4b28748da406",
+  "dut_sha256": "de3fff29800b4d835fd3e6beb54cd43b4b667958ca6014fa600a68d9068512ea",
   "expected": 127,
   "passed": 127,
   "planes": {

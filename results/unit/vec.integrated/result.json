@@ -1,16 +1,15 @@
 {
   "schema_version": 1,
   "case": "vec.integrated",
-  "verdict": "FAIL",
-  "detail": "checks=44 phases=4 seed=1",
+  "verdict": "PASS",
+  "detail": "checks=49 phases=4 seed=1 vec_cycles=203 scalar_cycles=103",
   "seed": 1,
   "max_cycles": 4000000,
-  "checks": 45,
-  "failures": 1,
+  "checks": 50,
+  "failures": 0,
   "image": "",
   "expect": "",
   "tool": "Verilator 5.052 2026-09-05",
-  "timestamp": "2026-10-02T16:36:40Z",
-  "first_mismatch": "",
-  "failed_checks": ["restart: mtval is the faulting element's address, got 0"]
+  "timestamp": "2026-10-02T17:01:33Z",
+  "first_mismatch": ""
 }

@@ -3412,7 +3412,16 @@ module mosaic_core (
   // it. A live, committed value is correct here precisely because the macro is
   // resolved at the head: no younger vset can be in flight (dispatch holds
   // allocation), so this *is* the configuration the macro was issued under.
+`ifdef MOSAIC_CORE_MUTANT_VEC_IGNORE_VS_OFF
+  // NEGATIVE CONTROL: `mstatus.VS` == Off stops forbidding vector state, so a
+  // vector instruction executes from a configuration the ISA says must trap
+  // illegal. CASE=vec.integrated's vs-off phase requires the first `vsetvli` to
+  // trap with mcause=2 and the engine to count one trap; with this define it
+  // commits instead and both checks fail.
+  assign vec_vset_vs_off = 1'b0;
+`else
   assign vec_vset_vs_off = (o_csr_mstatus[10:9] == 2'b00);
+`endif
 
   mosaic_vec_cfg u_vec_cfg (
       .clk_i            (clk),
@@ -3923,10 +3932,35 @@ module mosaic_core (
   assign vec_chain_p_gen         = vec_gen_q;
   assign vec_chain_p_vd          = vec_pay_q.vd;
   assign vec_chain_p_vl          = vec_vl[7:0];
+`ifdef MOSAIC_CORE_MUTANT_VEC_STALE_PACKET
+  // NEGATIVE CONTROL: the one-macro barrier makes a packet from a *genuinely*
+  // cancelled macro unreachable here -- the restart controller's walker is
+  // drained before the trap redirects, so no element completion is still in
+  // flight when the successor allocates (this is the integration's "not
+  // covered" item, controlled structurally by CASE=rvv.chaining_hazards). To
+  // prove the integration's own progress accounting is sensitive to the defect
+  // anyway, the injection synthesises the offer: one cycle after a *restarted*
+  // memory macro (vstart != 0) allocates its descriptor, the element the
+  // cancelled attempt had already committed is offered to the chain again and
+  // accepted, so the successor's progress counts a packet that belongs to the
+  // macro the redirect discarded.
+  logic vec_stale_pkt_q;
+  always_ff @(posedge clk) begin
+    if (rst) vec_stale_pkt_q <= 1'b0;
+    else vec_stale_pkt_q <= vec_launch_unit && vec_is_mem && (vec_vstart != 64'd0);
+  end
+  assign vec_chain_p_wr_valid    = (vec_pay_q.kind == 3'd1) ? vec_alu_trace_valid
+                                                           : (vec_rst_elem_done_valid ||
+                                                              vec_stale_pkt_q);
+  assign vec_chain_p_wr_index    = vec_stale_pkt_q ? 7'd0
+                                 : ((vec_pay_q.kind == 3'd1) ? vec_alu_trace_elem[6:0]
+                                                            : vec_rst_elem_done_index);
+`else
   assign vec_chain_p_wr_valid    = (vec_pay_q.kind == 3'd1) ? vec_alu_trace_valid
                                                            : vec_rst_elem_done_valid;
   assign vec_chain_p_wr_index    = (vec_pay_q.kind == 3'd1) ? vec_alu_trace_elem[6:0]
                                                            : vec_rst_elem_done_index;
+`endif
   assign vec_chain_p_wr_data     = 64'd0;
   assign vec_chain_p_wr_gen      = vec_gen_q;
   assign vec_chain_p_fault_valid = vec_rst_fault_valid;
@@ -4118,16 +4152,31 @@ module mosaic_core (
       default: vec_trap_cause_mem = vec_lsu_we ? mosaic_pkg::EXC_STORE_ACCESS
                                                : mosaic_pkg::EXC_LOAD_ACCESS;
     endcase
+    // `eew_sew` is log2(EEW in *bits*) (3..6, the packetizer's own encoding, see
+    // mosaic_vec_lsu's `be64 = 1 << (eew_log2_q - 3)`), so the element's byte
+    // offset is `vstart << (eew_sew - 3)`. Shifting by `eew_sew` itself made the
+    // address eight times the real one for e32/lmul=1: the case drove a fault at
+    // element 2 of a 32-bit unit-stride load at 0x801FFFF8 and the DUT named
+    // 0x80200038 where the faulting element is at 0x80200000.
     vec_trap_tval_mem = vec_lsu_base +
-        (64'(vec_rst_vstart) << vec_pay_q.eew_sew);
+        (64'(vec_rst_vstart) << (vec_pay_q.eew_sew - 3'd3));
   end
 
   // ---------------------------------------------------------- the FSM outputs
-  assign vec_unit_done = (vec_pay_q.kind == 3'd1) ? vec_alu_done
-                                                  : vec_lsu_finished;
   logic vec_lsu_seen_busy_q;
   logic vec_lsu_finished;
   assign vec_lsu_finished = vec_lsu_seen_busy_q && !vec_rst_busy;
+`ifdef MOSAIC_CORE_MUTANT_VEC_RETIRE_INCOMPLETE
+  // NEGATIVE CONTROL: the engine calls every macro complete the cycle after it
+  // is launched, so a vector instruction retires with its element progress
+  // unfinished -- the units are still writing the VRF and the chain has accepted
+  // no packets. CASE=vec.integrated's arith phase requires sixteen accepted
+  // element completions and the architectural result; both fail.
+  assign vec_unit_done = 1'b1;
+`else
+  assign vec_unit_done = (vec_pay_q.kind == 3'd1) ? vec_alu_done
+                                                  : vec_lsu_finished;
+`endif
 
   assign vec_macro_leave = (vec_valid_q && rob_retire_ack && vec_at_head) ||
                            redirect_valid;

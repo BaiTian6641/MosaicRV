@@ -705,14 +705,14 @@ void PhaseVsOff(Vmosaic_core_tb* dut, mosaic::Reporter* reporter,
   Check(reporter, run.vec_elem == 0,
         name + ": no element was executed by a vset, got " + Dec(run.vec_elem));
   Check(reporter, run.Slot(3) == 4,
-        name + ": vl after vsetvli e32,m1 is VLMAX=4, got " + Dec(run.Slot(24)));
+        name + ": vl after vsetvli e32,m1 is VLMAX=4, got " + Dec(run.Slot(3)));
   Check(reporter, (run.Slot(4) & 0xFFull) == 0x28,
-        name + ": vtype low byte is the committed argument, got " + Dec(run.Slot(32)));
+        name + ": vtype low byte is the committed argument, got " + Dec(run.Slot(4)));
   Check(reporter, run.Slot(5) == 16,
-        name + ": vlenb is 16, got " + Dec(run.Slot(40)));
+        name + ": vlenb is 16, got " + Dec(run.Slot(5)));
   Check(reporter, ((run.Slot(6) >> 9) & 3ull) == 3ull,
         name + ": mstatus.VS is Dirty after the vector instruction, got " +
-            Dec((run.Slot(48) >> 9) & 3ull));
+            Dec((run.Slot(6) >> 9) & 3ull));
   Check(reporter, run.vec_vlenb == 16,
         name + ": the core's vlenb read-back is 16, got " + Dec(run.vec_vlenb));
 }
@@ -721,8 +721,8 @@ void PhaseVsOff(Vmosaic_core_tb* dut, mosaic::Reporter* reporter,
 // Phase 2: load, load, vadd.vv, store -- the architectural result against the
 // host model, and positive evidence the vector path executed.
 // ============================================================================
-void PhaseArith(Vmosaic_core_tb* dut, mosaic::Reporter* reporter,
-                const Geometry& g, const std::string& name) {
+RunResult PhaseArith(Vmosaic_core_tb* dut, mosaic::Reporter* reporter,
+                     const Geometry& g, const std::string& name) {
   Asm asm_(g.reset_vector);
   Scenario sc;
   const uint64_t a_addr = kDataBase + 0;
@@ -768,7 +768,7 @@ void PhaseArith(Vmosaic_core_tb* dut, mosaic::Reporter* reporter,
   Check(reporter, run.Slot(0) == 4,
         name + ": vsetvli returned VLMAX=4, got " + Dec(run.Slot(0)));
   Check(reporter, run.Slot(1) == 4,
-        name + ": the vl CSR reads 4, got " + Dec(run.Slot(8)));
+        name + ": the vl CSR reads 4, got " + Dec(run.Slot(1)));
   Check(reporter, ((run.Slot(2) >> 9) & 3ull) == 3ull,
         name + ": mstatus.VS is Dirty, got " + Dec((run.Slot(16) >> 9) & 3ull));
   // The vector path was actually taken.
@@ -790,6 +790,7 @@ void PhaseArith(Vmosaic_core_tb* dut, mosaic::Reporter* reporter,
         name + ": the VRF refused no read, got " + Dec(run.vec_vrf_bad));
   Check(reporter, run.vec_alu_elems == 4,
         name + ": the ALU wrote four elements, got " + Dec(run.vec_alu_elems));
+  return run;
 }
 
 // ============================================================================
@@ -863,14 +864,18 @@ void PhaseRestart(Vmosaic_core_tb* dut, mosaic::Reporter* reporter,
             Dec(run.mcause));
   Check(reporter, run.Slot(3) == 2,
         name + ": vstart at the trap is the faulting element 2, got " +
-            Dec(run.Slot(24)));
+            Dec(run.Slot(3)));
   Check(reporter, run.Slot(1) == g.reset_vector + 4ull * load_at,
-        name + ": mepc names the faulting load, got " + Dec(run.Slot(8)));
+        name + ": mepc names the faulting load, got " + Dec(run.Slot(1)));
   Check(reporter, run.Slot(2) == 0x80200000ull,
         name + ": mtval is the faulting element's address, got " +
-            Dec(run.Slot(16)));
+            Dec(run.Slot(2)));
   Check(reporter, run.vec_fault == 1,
         name + ": the engine counted one vector fault, got " + Dec(run.vec_fault));
+  Check(reporter, run.vec_elem == 8,
+        name + ": the phase accepted eight element packets (two from the "
+               "cancelled attempt's committed prefix, two from the restart, four "
+               "from the store), got " + Dec(run.vec_elem));
   // The committed prefix survived and the restart completed from vstart.
   for (int i = 0; i < 4; i++) {
     const uint32_t got = run.Data32(96 + static_cast<uint64_t>(i) * 4);
@@ -881,9 +886,9 @@ void PhaseRestart(Vmosaic_core_tb* dut, mosaic::Reporter* reporter,
   }
   Check(reporter, run.Slot(4) == 0,
         name + ": vstart is reset to 0 by the completed restart, got " +
-            Dec(run.Slot(32)));
+            Dec(run.Slot(4)));
   Check(reporter, run.Slot(5) == 4,
-        name + ": vl is still 4 after the restart, got " + Dec(run.Slot(40)));
+        name + ": vl is still 4 after the restart, got " + Dec(run.Slot(5)));
   Check(reporter, run.vec_retire == 3,
         name + ": the vset, the restarted load and the store retired, got " + Dec(run.vec_retire));
 }
@@ -959,13 +964,24 @@ int main(int argc, char** argv) {
     if (geometry.xlen != 64) Fail("geometry", "the profile is not 64-bit");
 
     PhaseVsOff(&dut, &reporter, geometry, "vs-off");
-    PhaseArith(&dut, &reporter, geometry, "arith");
+    RunResult vec = PhaseArith(&dut, &reporter, geometry, "arith");
     PhaseRestart(&dut, &reporter, geometry, "restart");
-    const RunResult scalar = PhaseScalar(&dut, &reporter, geometry, "scalar");
-    (void)scalar;
+    RunResult scalar = PhaseScalar(&dut, &reporter, geometry, "scalar");
+    // The on/off comparison: the same computation run both ways must produce
+    // identical bytes, and the cycle counts are reported honestly -- including
+    // when the vector path is slower, which the barrier and the per-macro
+    // overhead make it for four elements.
+    for (int i = 0; i < 4; i++) {
+      const uint64_t off = static_cast<uint64_t>(i) * 4;
+      Check(&reporter, vec.Data32(32 + off) == scalar.Data32(128 + off),
+            std::string("on/off: C[") + std::to_string(i) +
+                "] is identical vector vs scalar");
+    }
 
     detail = "checks=" + Dec(static_cast<uint64_t>(reporter.checks())) +
-             " phases=4 seed=" + Dec(options.seed);
+             " phases=4 seed=" + Dec(options.seed) +
+             " vec_cycles=" + Dec(vec.cycles) +
+             " scalar_cycles=" + Dec(scalar.cycles);
   } catch (const Failure& f) {
     reporter.Mismatch(f.what, "every vector-integration claim holds on this machine",
                       "contract violated");
