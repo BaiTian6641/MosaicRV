@@ -1908,3 +1908,40 @@ TLB, the MMIO side-effect model, the FPU (self-implemented, `fdiv` correctly rou
 then Stage 4+: vector, multi-hart, cohort, the measured dynamic/fixed comparison and the RVA23S64
 matrix. Those last items are the larger half of the plan and the half that justifies the project's
 name; nothing in this file should be read as claiming them.
+
+---
+
+## 2026-10-01 — an external suite runs against the real core, and finds five real bugs
+
+The architectural test suite (ACT4, at a pinned revision, with a MosaicRV p1 configuration
+checked in under `tests/act4/mosaic-p1/`) now runs **against the integrated out-of-order core**
+rather than the bring-up model. N is closed against its own generation manifest — 127 applicable,
+127 generated, 127 run — and 47 excluded suites are each named with a reason rather than dropped.
+The PASS macro is calibrated: a corrupted expected-signature byte in `I-add-00` makes the case exit
+1, and an ALU mutant fails `I-slt-00`, so the suite can fail and its passes therefore mean
+something. Three *harness* defects were found and fixed on the way — a fetch image that was
+4-byte-aligned-only (which had been hiding every Zca test), a static fetch image invisible to
+`fence.i`, and fetch reads shadowing `MOSAIC_TOHOST` inside the ELF text.
+
+**122 of 127 pass. The five that fail are real divergences in advertised extensions**, located by
+diffing the signature-mode ELF against Sail's `.results` — the expectation is Sail's, not ours:
+
+* **`c.lui` places its 6-bit immediate 16 bits too high** (Zca, 51 signature words).
+* **SC returns failure where the reference expects success**, at both widths (Zalrsc, 23 words).
+* **HPM `csrrc`/`csrrs` read-modify-write diverges** (Zihpm, 357 words).
+
+This is the most important event in this file's recent history, and it is worth saying why plainly.
+Every previous green line in this project rested on a model written **here**: the host oracle, the
+reference interpreters, the expected-event tables. V-020's ledger said so in as many words ("no
+independent reference has ever been compared against this core"), and the first external suite to
+run found three defects in three different advertised extensions within minutes of being pointed at
+the machine. The conclusion is not that the project's own cases were worthless — they found dozens
+of real defects, including several that would have made the machine deadlock — but that
+self-consistency is a weaker property than correctness, and the difference is measurable.
+
+Two consequences are already recorded rather than promised: `core.act_dut` is a **registered case
+that reports FAIL** until the five divergences are fixed (that is the honest state, and the suite is
+not to be narrowed or skipped to make it green), and each fix owes a paragraph on *what this
+project's own cases were missing* that let the bug through — for `SC` in particular, `lrsc.
+reservation_progress` passes today, so the ACT4 failure is telling us that case's coverage has a
+hole rather than that the machine is broken in a way we already knew about.
