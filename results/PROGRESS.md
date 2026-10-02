@@ -1777,3 +1777,54 @@ p1/Linux contract (I-044..I-048).
    first two instructions, rename's committed map fed the wrong generation counter. None of those
    were caught by a program passing; all of them were caught by a case that compared a *rule*
    against a model written from the specification.
+
+---
+
+## 2026-10-01 — the I-041 regression: how the tree went red, how it was contained, and what to do differently
+
+**What happened.** Two lanes worked the same tree (I-039 adding the A extension's atomic path, I-041
+adding RV64C decompression and length plumbing). I-039 delivered; I-041's first attempt did not —
+it landed RTL that made `core.mem_program`, `core.corpus_branch`, `core.corpus_sweep` (all 39 runs)
+and `core.trap_csr_program` stop with `illegal=1 unsup=1`. To protect the baseline I stashed I-041's
+edits — and the stash caught `mosaic_pkg.sv`, `mosaic_uop_pkg.sv` and `mosaic_decoder.sv`, which
+**both** lanes had edited, so the AMO path stopped building too. Two hand-restores (`OP_AMO`,
+`MEM_AMO`, `amo_op_e`, the `lsu_req_t` AMO fields, plus the AMO lane's two-line `amo_op:` arm in
+`CTL_ILLEGAL`) brought the tree back to a state where everything except I-041 passed, and the second
+attempt restored the stashed work, fixed the defect, and delivered.
+
+**What the defect actually was**, because it is a good one: a *speculatively fetched reserved
+encoding* — the zero padding behind the corpus text's final `jal` — reached dispatch and stopped the
+machine before the still-in-flight jump could redirect and squash it, and the redirect itself was
+gated on `!stopped`, so the deadlock was complete. The fix is the right shape rather than a patch:
+dispatch now *holds* an undecodable macro while a transfer is in flight, so the redirect can purge
+it, and a transfer that turns out not to be taken still stops the machine. No check was weakened:
+the reserved-encoding cases still stop at their encodings, and `core.ready_*` still stops at its
+architectural ECALL.
+
+**Two further defects fell out of finishing the package** — the decoder's CI-format immediate read
+the destination register as the immediate (`c.addi x6,1` added 6), and a stale device attribute in
+the serializer broke `mmio.exactly_once`, inherited from the AMO lane. Both were found because the
+package had to make real programs work, not because a directed test looked for them.
+
+**Three process lessons, now rules.**
+
+1. **A stash is not a lane-private thing.** `git stash push -- <paths>` takes the *current* content
+   of those paths, whoever wrote it. When two lanes share a file — and `mosaic_pkg.sv`,
+   `mosaic_uop_pkg.sv` and `mosaic_decoder.sv` are shared by construction, since they are the type
+   and encoding dictionaries — there is no pathspec that separates them. The correct containment is
+   to commit the *good* lane's work first, then stash or revert the failing lane's hunks; that is
+   the opposite order from the one I used.
+2. **A failed lane owes the tree a green baseline, not a diagnosis.** I-041's first attempt left the
+   tree non-elaborating and four cases red while it wrote an honest report. The report was worth
+   having, but the ordering was wrong: revert first, report second, and only then re-attempt.
+3. **The two-strike lesson from CompressedRetry.** The second attempt succeeded *because* the first
+   attempt's work was preserved intact and its hypotheses were written down (the dbuf push, the
+   PC-advance/response-model interaction). Both hypotheses were wrong, and the instrumentation the
+   first lane recommended is what found the real cause. An honest, detailed failure is a reusable
+   asset; a tidy failure with no hypotheses would have cost that attempt's 34 minutes twice.
+
+**State after this stretch**: 45 packages delivered, advertised `I, M, Zicsr, Zifencei, Zihpm, C`,
+38 RTL sources clean under both tools, `make check` and `check_records.py` green, and the whole p0
+corpus passing on the out-of-order core. In flight: I-040 (LR/SC, which completes the A extension's
+implementation) and I-031 (the ownership-change FSM). The A extension then waits only on its
+verification packages V-016 and V-020.
