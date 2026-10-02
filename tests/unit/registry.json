@@ -1557,6 +1557,45 @@
    ],
    "max_cycles": 4000000,
    "seed": 1
+  },
+  "core.act_dut": {
+   "task": "V-043",
+   "top": "mosaic_core_tb",
+   "rtl": [
+    "rtl/core/mosaic_pkg.sv",
+    "rtl/core/mosaic_uop_pkg.sv",
+    "rtl/core/mosaic_alu.sv",
+    "rtl/core/mosaic_branch_cmp.sv",
+    "rtl/core/mosaic_branch_target.sv",
+    "rtl/core/mosaic_predictor.sv",
+    "rtl/core/mosaic_fetch.sv",
+    "rtl/core/mosaic_decoder.sv",
+    "rtl/core/mosaic_rename.sv",
+    "rtl/core/mosaic_rob.sv",
+    "rtl/core/mosaic_iq.sv",
+    "rtl/core/mosaic_prf.sv",
+    "rtl/core/mosaic_wb_arbiter.sv",
+    "rtl/core/mosaic_macro_desc.sv",
+    "rtl/core/mosaic_dispatch.sv",
+    "rtl/core/mosaic_cluster.sv",
+    "rtl/core/mosaic_redirect_arb.sv",
+    "rtl/core/mosaic_muldiv.sv",
+    "rtl/core/mosaic_retire.sv",
+    "rtl/core/mosaic_core.sv",
+    "rtl/core/mosaic_csr.sv",
+    "rtl/core/mosaic_interrupt.sv"
+   ],
+   "sv": [
+    "sim/tb/mosaic_core_tb.sv"
+   ],
+   "cpp": [
+    "sim/unit/tb_core_act.cpp",
+    "sim/common/elf_loader.cpp",
+    "sim/common/memory_model.cpp"
+   ],
+   "max_cycles": 4000000,
+   "seed": 1,
+   "pending": true
   }
  }
 }
