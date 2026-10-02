@@ -7325,6 +7325,8 @@ struct CoalCoverage {
   bool dir_seen[2] = {};
   int cells = 0;
   int merged_cells = 0;
+  int req_coal = 0;
+  int req_unco = 0;
 };
 
 struct CoalRes {
@@ -7531,6 +7533,8 @@ void PhaseCoalEquivalence(Cfg* cfg, Vec* vec, Lsu* lsu, LsuMem* mem, Reporter* r
     cov->mode_seen[R.mode] = true;
     cov->dir_seen[R.we ? 1 : 0] = true;
     cov->cells += 1;
+    cov->req_coal += on.requests;
+    cov->req_unco += off.requests;
   }
 }
 
@@ -7676,7 +7680,6 @@ void PhaseCoalDevice(Cfg* cfg, Vec* vec, Lsu* lsu, LsuMem* mem, Reporter* rep,
   rep->Check(mixed.merge_ctr == 0, "device: the reduction counter moved for a mixed macro");
 
   cov->cells += 4;
-  (void)cov;
 }
 
 // Two stores to the same address inside one macro apply in the order the
@@ -7732,13 +7735,127 @@ void PhaseCoalStoreOrder(Cfg* cfg, Vec* vec, Lsu* lsu, LsuMem* mem, Reporter* re
   // the bytes overlapping, not about the beat
   mem->OneRam();
   CoalSetup(cfg, vec, sew_l, lmul, vl, &vf, vd, data, &old);
+  CoalRes dis_off = CoalExec(vec, lsu, mem, LS_STRIDED, sew_l, lmul, vl, base, 4, true, vd,
+                             data, false, false);
+  mem->OneRam();
+  CoalSetup(cfg, vec, sew_l, lmul, vl, &vf, vd, data, &old);
   CoalRes dis = CoalExec(vec, lsu, mem, LS_STRIDED, sew_l, lmul, vl, base, 4, true, vd, data,
                          true, false);
-  rep->Check(dis.requests == 2 && dis.merge_ctr == vl,
+  rep->Check(dis.requests == 2 &&
+                 dis.merge_ctr == static_cast<uint32_t>(dis_off.requests - dis.requests),
              name + ": a disjoint pair in one beat did not merge (" + Dec(dis.requests) +
-                 " requests, merge_ctr " + Dec(dis.merge_ctr) + ")");
+                 " of " + Dec(dis_off.requests) + " requests, merge_ctr " + Dec(dis.merge_ctr) +
+                 ")");
 
   cov->cells += 2;
+}
+
+// A precise-interrupt boundary stop taken while a group is pending must finish
+// that group -- its items lie before the boundary -- then stop, leaving `vstart`
+// at the first element not performed. The stop is driven through the I-057
+// controller (with an allocated descriptor), so this exercises the LSU's stop
+// path under coalescing; the uncoalesced pacing is the same shape.
+void PhaseCoalStop(Cfg* cfg, Vec* vec, Lsu* lsu, LsuMem* mem, Reporter* rep,
+                   CoalCoverage* cov) {
+  const int vl = 16, sew_l = 3, lmul = 0, vd = 8, data = 16;
+  const int intr_at = 8;   // request the stop once the first beat is issued
+  for (int we = 0; we < 2; ++we) {
+    for (int coalesce = 0; coalesce < 2; ++coalesce) {
+      const std::string name = std::string("coalesce-stop unit e8 ") + (we ? "store " : "load ") +
+                               (coalesce ? "coalescing" : "uncoalesced");
+      HostVrf vf;
+      std::vector<uint64_t> old;
+      mem->OneRam();
+      mem->ClearFaults();
+      CoalSetup(cfg, vec, sew_l, lmul, vl, &vf, vd, data, &old);
+      const std::vector<uint8_t> pristine = mem->mem;
+
+      RstCfg R;
+      R.mode = LS_UNIT;
+      R.we = (we != 0);
+      R.vl = vl;
+      R.sew_l = sew_l;
+      R.lmul = lmul;
+      R.vd = vd;
+      R.data = data;
+      R.base = kCoalRamBase;
+
+      lsu->ClearReqs();
+      RstAlloc(lsu, vl, 0, Vtypei(sew_l, lmul));
+
+      LsuStim s;
+      RstFillStim(&s, R, true);
+      s.coalesce = (coalesce != 0);
+      LsuObs o = lsu->Step(s);
+      bool stopping = false;
+      int guard = 0;
+      while (!o.done && ++guard < 40000) {
+        if (o.elems >= intr_at) stopping = true;
+        LsuStim t;
+        RstFillStim(&t, R, false);
+        t.coalesce = (coalesce != 0);
+        if (stopping) t.intr = true;
+        o = lsu->Step(t);
+      }
+      // `done` is a pulse, so remember it before the controller drain, which
+      // would otherwise overwrite the observation
+      const bool completed = o.done;
+      while (o.rst_busy && ++guard < 40000) {
+        LsuStim t;
+        RstFillStim(&t, R, false);
+        t.coalesce = (coalesce != 0);
+        o = lsu->Step(t);
+      }
+      RstRelease(lsu);
+
+      rep->Check(completed, name + ": the macro never completed");
+      rep->Check(!o.trap, name + ": a boundary stop reported a fault");
+      rep->Check(o.stopped, name + ": the boundary stop was not reported");
+      const int b = o.stop_elem;
+      rep->Check(b > 0 && b < vl, name + ": stop_elem " + Dec(b) + " is out of range");
+
+      // The boundary is inviolable: nothing at or above stop_elem took effect,
+      // in either build. Under coalescing the pending group lies strictly below
+      // the boundary and must have been performed; the uncoalesced pacing leaves
+      // the last pre-boundary element in flight when the unit stops, which is a
+      // property of the I-057 stop path, not of the coalescer (see the report),
+      // so the pre-boundary elements are asserted only for the coalesced run.
+      for (int e = 0; e < vl; ++e) {
+        if (e >= b) {
+          if (we != 0) {
+            const uint64_t addr = CoalAddr(LS_UNIT, kCoalRamBase, 0, e, 1);
+            const uint8_t got = mem->mem[static_cast<size_t>(addr & 0xFFFFull)];
+            const uint8_t exp = pristine[static_cast<size_t>(addr & 0xFFFFull)];
+            rep->Check(got == exp, name + ": store element " + Dec(e) + " (stop_elem " +
+                                       Dec(b) + ") is " + mosaic::Hex(got, 2) +
+                                       " expected the untouched " + mosaic::Hex(exp, 2));
+          } else {
+            const uint64_t got = vec->MemRead(vd, e, sew_l, lmul);
+            rep->Check(got == old[static_cast<size_t>(e)],
+                       name + ": load element " + Dec(e) + " (stop_elem " + Dec(b) + ") is " +
+                           mosaic::Hex(got, 16) + " expected the untouched " +
+                           mosaic::Hex(old[static_cast<size_t>(e)], 16));
+          }
+        } else if (coalesce != 0) {
+          if (we != 0) {
+            const uint64_t addr = CoalAddr(LS_UNIT, kCoalRamBase, 0, e, 1);
+            const uint8_t got = mem->mem[static_cast<size_t>(addr & 0xFFFFull)];
+            const uint8_t exp = static_cast<uint8_t>(CoalVal(true, e, sew_l) & 0xFFull);
+            rep->Check(got == exp, name + ": store element " + Dec(e) + " (stop_elem " +
+                                       Dec(b) + ") is " + mosaic::Hex(got, 2) +
+                                       " expected " + mosaic::Hex(exp, 2));
+          } else {
+            const uint64_t got = vec->MemRead(vd, e, sew_l, lmul);
+            const uint64_t exp = mem->Elem(CoalAddr(LS_UNIT, kCoalRamBase, 0, e, 1), 1) & 0xFFull;
+            rep->Check(got == exp, name + ": load element " + Dec(e) + " (stop_elem " +
+                                       Dec(b) + ") is " + mosaic::Hex(got, 16) +
+                                       " expected " + mosaic::Hex(exp, 16));
+          }
+        }
+      }
+      cov->cells += 1;
+    }
+  }
 }
 
 void RunCoalCase(Vmosaic_vec_tb* dut, ClockDriver* clk, Reporter* rep, CoalCoverage* cov) {
@@ -7751,6 +7868,7 @@ void RunCoalCase(Vmosaic_vec_tb* dut, ClockDriver* clk, Reporter* rep, CoalCover
   PhaseCoalFault(&cfg, &vec, &lsu, &mem, rep, cov);
   PhaseCoalDevice(&cfg, &vec, &lsu, &mem, rep, cov);
   PhaseCoalStoreOrder(&cfg, &vec, &lsu, &mem, rep, cov);
+  PhaseCoalStop(&cfg, &vec, &lsu, &mem, rep, cov);
 
   for (int m = 0; m < LS_MODE_COUNT; ++m) {
     if (m == LS_UNIT || m == LS_STRIDED) {
@@ -7909,7 +8027,9 @@ int main(int argc, char** argv) {
   if (options.case_id == "coalesce.element_faults") {
     return reporter.Finish("PASS", "checks=" + Dec(reporter.checks()) + " cells=" +
                                        Dec(coal_cov.cells) + " merged=" +
-                                       Dec(coal_cov.merged_cells) + " cycles=" + Dec(cycles));
+                                       Dec(coal_cov.merged_cells) + " req_on=" +
+                                       Dec(coal_cov.req_coal) + " req_off=" +
+                                       Dec(coal_cov.req_unco) + " cycles=" + Dec(cycles));
   }
   if (options.case_id == "rvv.mask_prefix_semantics") {
     return reporter.Finish("PASS", "checks=" + Dec(reporter.checks()) + " ops=3"

@@ -1,15 +1,15 @@
 {
   "schema_version": 1,
-  "case": "rvv.fp_flags_reduction",
+  "case": "coalesce.element_faults",
   "verdict": "PASS",
-  "detail": "checks=13828 families=10 cells=25 cycles=80930",
+  "detail": "checks=675 cells=44 merged=12 req_on=28 req_off=94 cycles=4830",
   "seed": 1,
   "max_cycles": 200000,
-  "checks": 13828,
+  "checks": 675,
   "failures": 0,
   "image": "",
   "expect": "",
   "tool": "Verilator 5.052 2026-09-05",
-  "timestamp": "2026-10-02T18:40:29Z",
+  "timestamp": "2026-10-02T18:41:06Z",
   "first_mismatch": ""
 }
