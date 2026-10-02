@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "case": "mmio.exactly_once",
+  "verdict": "PASS",
+  "detail": "checks=69 runA_retires=34 runA_dev_txn=5 runA_ram_txn=6 runB_retires=39 runB_dev_txn=1 runB_ram_txn=4 runA_dev_hold=8 runB_dev_hold=1 runB_dev_wait=60 runA_cycles=137 runB_cycles=157 seed=1",
+  "seed": 1,
+  "max_cycles": 4000000,
+  "checks": 70,
+  "failures": 0,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-02T20:40:41Z",
+  "first_mismatch": ""
+}

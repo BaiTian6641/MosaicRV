@@ -115,6 +115,17 @@
 //   MASKPFX_SAME_EXPR    vmsbf and vmsif share set-including-first again
 //   MASKPFX_ALLZERO      an all-zero active source is cleared, not all-ones
 //   MASKPFX_POS0         vmsbf sets a bit before a first set bit at position 0
+//
+// Three more inject a defect in the *masked* forms of the mask-prefix
+// operations (CASE=rvv.mask_prefix_masked); each is proven to fail it in
+// results/reports/rvv-mask-prefix-masked.md:
+//
+//   MASKPFX_SEARCH_ALL   the search is over all elements, so a masked-off
+//                        source bit is treated as a first set bit
+//   MASKPFX_MASKED_SRC   a masked-off source element contributes a 1 to the
+//                        search instead of being ignored
+//   MASKPFX_VMA          a masked-off destination under vma=1 is written with
+//                        0 instead of the mask-agnostic all-ones
 // ============================================================================
 
 `default_nettype none
@@ -910,11 +921,39 @@ module mosaic_vec_alu #(
       sel_result = zz;
       sel_mres   = 1'b1;
     end
+`ifdef MOSAIC_VEC_ALU_MUTANT_MASKPFX_VMA
+    // NEGATIVE CONTROL: a masked-off destination element of a mask-prefix
+    // instruction under vma=1 is written with 0 instead of the mask-agnostic
+    // all-ones.
+    if ((ef_family == F_MASKPFX) && !mm && wr && (idx < int'(cfg_vl_i))) begin
+      sel_result = 64'd0;
+      sel_mres   = 1'b0;
+    end
+`endif
 
     // Which source element (vs2) this element needs.
     sel_active = acc;
     sel_access = acc;
     sel_rd2    = 8'(rd2[7:0]);
+
+`ifdef MOSAIC_VEC_ALU_MUTANT_MASKPFX_SEARCH_ALL
+    // NEGATIVE CONTROL: the search is over all elements, not the active ones
+    // -- a masked-off element reads its source bit and updates the running
+    // prefix, so a masked-off set bit becomes "the first".
+    if ((ef_family == F_MASKPFX) && (idx < int'(cfg_vl_i))) begin
+      sel_active = 1'b1;
+      sel_access = 1'b1;
+    end
+`endif
+`ifdef MOSAIC_VEC_ALU_MUTANT_MASKPFX_MASKED_SRC
+    // NEGATIVE CONTROL: a masked-off source element contributes a 1 to the
+    // search instead of being ignored, so the first set bit can be a masked-off
+    // element whose source bit is zero.
+    if ((ef_family == F_MASKPFX) && !mm && (idx < int'(cfg_vl_i))) begin
+      sel_active = 1'b1;
+      sel_pfx    = 1'b1;
+    end
+`endif
 
     // An inactive element must not access. A permute whose index leaves the
     // group reads nothing (the specification makes it a zero, not an access).
@@ -1394,6 +1433,13 @@ module mosaic_vec_alu #(
 `else
               end else if (mbit_q) begin
                 step_q <= E_VS1;
+`ifdef MOSAIC_VEC_ALU_MUTANT_MASKPFX_SEARCH_ALL
+              end else if (op_f_q == F_MASKPFX) begin
+                // NEGATIVE CONTROL: the search is over all elements, so a
+                // masked-off element of a mask-prefix instruction takes the
+                // access path and its own source bit enters the running prefix.
+                step_q <= E_VS1;
+`endif
               end else begin
                 // masked off: policy write only, no source access
                 step_q <= E_EXEC;

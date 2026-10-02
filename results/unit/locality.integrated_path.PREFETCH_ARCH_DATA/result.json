@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "case": "locality.integrated_path",
+  "verdict": "FAIL",
+  "detail": "locality integration: on/off identical, structures used, class rule checked, no prefetch reaches a device",
+  "seed": 1,
+  "max_cycles": 4000000,
+  "checks": 37,
+  "failures": 2,
+  "image": "",
+  "expect": "",
+  "tool": "verilator",
+  "timestamp": "2026-10-02T20:35:49Z",
+  "first_mismatch": "locality-both retirement stream: expected identical to the baseline, got retirement 225: baseline pc=0x80000060 rd=5 we=1 val=0xc, both pc=0x80000060 rd=5 we=1 val=0xd",
+  "failed_checks": ["the both run retires the same instructions through the park as the baseline", "the both run leaves the same signature words"]
+}

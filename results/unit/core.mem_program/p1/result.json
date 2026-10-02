@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "case": "core.mem_program",
+  "verdict": "PASS",
+  "detail": "checks=125 comparisons=9543 cycles=1017 retires=306 loads=63 stores=84 data_txns=147 fwd_bytes=96 mem_bytes=306 programs=2 inputs=3 seed=1",
+  "seed": 1,
+  "max_cycles": 4000000,
+  "checks": 126,
+  "failures": 0,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-02T20:38:29Z",
+  "first_mismatch": ""
+}

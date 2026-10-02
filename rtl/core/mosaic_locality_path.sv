@@ -175,8 +175,13 @@ module mosaic_locality_path #(
   // be dirtied -- a copy the store's invalidation has already passed -- and a
   // later load that misses the L1 reads the pre-store value.
   localparam logic LOAD_ONLY = 1'b0;
+  // ...and the permission-context component of the key is collapsed too, so
+  // every access class shares one context: the defect is that an ineligible
+  // access is *served*, not that the buffer stops matching.
+  localparam logic PERM_OPEN = 1'b1;
 `else
   localparam logic LOAD_ONLY = 1'b1;
+  localparam logic PERM_OPEN = 1'b0;
 `endif
 
   // ==========================================================================
@@ -271,12 +276,7 @@ module mosaic_locality_path #(
   // ==========================================================================
   assign llb_req_pa_c = {{(64-ADDR_WIDTH){1'b0}}, cache_line_req_addr};
 
-`ifdef MOSAIC_LOC_MUTANT_PERM_BYPASS
-  // The lookup does not ask which access class it is answering.
-  assign llb_req_perms_c = 4'b0000;
-`else
-  assign llb_req_perms_c = ctx_perms_i;
-`endif
+  assign llb_req_perms_c = PERM_OPEN ? 4'b0000 : ctx_perms_i;
 
   // A line read is offered to the LLB when the buffer is enabled, the read is
   // a *load*'s (a store's read-for-ownership is not a reuse and must not install
@@ -492,7 +492,8 @@ module mosaic_locality_path #(
   assign llb_fill_pa_c    = demand_fill_c ? fill_ctx_pa_q    : pf_fill_pa;
   assign llb_fill_vpn_c   = demand_fill_c ? fill_ctx_vpn_q   : pf_fill_vpn;
   assign llb_fill_asid_c  = demand_fill_c ? fill_ctx_asid_q  : pf_fill_asid;
-  assign llb_fill_perms_c = demand_fill_c ? fill_ctx_perms_q : pf_fill_perms;
+  assign llb_fill_perms_c = PERM_OPEN ? 4'b0000
+                          : (demand_fill_c ? fill_ctx_perms_q : pf_fill_perms);
   assign llb_fill_data_c  = demand_fill_c ? bridge_line_rsp_rdata : pf_fill_data;
 
   // A prefetch's fill is refused (and reported as such) when the response
@@ -526,7 +527,6 @@ module mosaic_locality_path #(
       llb_hold_valid_q   <= 1'b0;
       llb_hold_data_q    <= {LINE_BITS{1'b0}};
       bridge_owner_q     <= OWN_CACHE;
-      pf_resp_id_q       <= 8'd0;
       mem_line_ctr_q     <= 32'd0;
       pf_mem_ctr_q       <= 32'd0;
       fill_ctx_is_load_q <= 1'b0;

@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "case": "locality.integrated_path",
+  "verdict": "FAIL",
+  "detail": "locality integration: on/off identical, structures used, class rule checked, no prefetch reaches a device",
+  "seed": 1,
+  "max_cycles": 4000000,
+  "checks": 37,
+  "failures": 4,
+  "image": "",
+  "expect": "",
+  "tool": "verilator",
+  "timestamp": "2026-10-02T20:35:06Z",
+  "first_mismatch": "locality-llb retirement stream: expected identical to the baseline, got retirement 206: baseline pc=0x80000050 rd=7 we=1 val=0x69, llb pc=0x80000050 rd=7 we=1 val=0x64",
+  "failed_checks": ["the llb run retires the same instructions through the park as the baseline", "the llb run leaves the same signature words", "the both run retires the same instructions through the park as the baseline", "the both run leaves the same signature words"]
+}

@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Negative controls for the mask-prefix cases.
 
-Two cases share this tool: ``CASE=rvv.mask_prefix_vstart`` (work package I-057,
-the illegal-instruction rule at a non-zero ``vstart``) and the semantics proper,
-``CASE=rvv.mask_prefix_semantics`` (the three rules at the first set bit, plus
-the all-zero and position-0 boundaries).  ``--case`` selects which; the default
-is the vstart case.
+Three cases share this tool: ``CASE=rvv.mask_prefix_vstart`` (work package
+I-057, the illegal-instruction rule at a non-zero ``vstart``), the semantics
+proper, ``CASE=rvv.mask_prefix_semantics`` (the three rules at the first set
+bit, plus the all-zero and position-0 boundaries), and the masked forms,
+``CASE=rvv.mask_prefix_masked`` (the search over active elements only, the
+masked-off and tail policies).  ``--case`` selects which; the default is the
+vstart case.
 
 The vstart case claims that the mask-prefix operations (`vmsbf.m`, `vmsif.m`,
 `vmsof.m`) raise an illegal-instruction exception when `vstart` is non-zero --
@@ -100,9 +102,36 @@ MUTANTS_SEMANTICS = [
     ),
 ]
 
+# CASE=rvv.mask_prefix_masked: the masked forms, where the search is over the
+# active elements only and a masked-off source element must be ignored.
+MUTANTS_MASKED = [
+    (
+        "MOSAIC_VEC_ALU_MUTANT_MASKPFX_SEARCH_ALL",
+        "rtl/core/mosaic_vec_alu.sv",
+        "the search for the first set bit is over all elements instead of the "
+        "active ones, so a masked-off source bit is treated as the first",
+        "masked-off-before-active k=2 vmsbf bit1: 0 expected 1",
+    ),
+    (
+        "MOSAIC_VEC_ALU_MUTANT_MASKPFX_MASKED_SRC",
+        "rtl/core/mosaic_vec_alu.sv",
+        "a masked-off source element contributes a 1 to the search instead of "
+        "being ignored, so it can be the first set bit with a zero source bit",
+        "masked-position k=1 vmsif bit1: 0 expected 1",
+    ),
+    (
+        "MOSAIC_VEC_ALU_MUTANT_MASKPFX_VMA",
+        "rtl/core/mosaic_vec_alu.sv",
+        "a masked-off destination element of a mask-prefix instruction under "
+        "vma=1 is written with 0 instead of the mask-agnostic all-ones",
+        "vma=1 pattern=0 vmsbf bit4: 0 expected 1",
+    ),
+]
+
 CASES = {
     "rvv.mask_prefix_vstart": MUTANTS,
     "rvv.mask_prefix_semantics": MUTANTS_SEMANTICS,
+    "rvv.mask_prefix_masked": MUTANTS_MASKED,
 }
 
 

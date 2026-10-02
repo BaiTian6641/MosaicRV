@@ -7801,6 +7801,249 @@ void RunMaskPrefixSemanticsCase(Vmosaic_vec_tb* dut, ClockDriver* clk, Reporter*
              "coverage: " + Dec(anchor_cells) + " spec-anchor cells ran, expected 9");
 }
 
+// ---------------------------------------------------------------------------
+// CASE=rvv.mask_prefix_masked.
+//
+// The masked forms of the three mask-prefix instructions, `vmsbf.m`/`vmsif.m`/
+// `vmsof.m vd, vs2, v0.t`. The specification's own worked example for the
+// masked form is the rule's source (v-spec.adoc, "vmsbf.m set-before-first mask
+// bit", the fourth example):
+//
+//     1 1 0 0 0 0 1 1   v0 (mask)
+//     1 0 0 1 0 1 0 0   v3 (source)
+//                       vmsbf.m v2, v3, v0.t
+//     0 1 x x x x 1 1   v2
+//
+// The instruction "writes a 1 to all active mask elements before the first
+// active source element that is a 1" (vmsbf), "also includes the element with a
+// set bit" (vmsif) and "only sets the first element with a bit set, if any"
+// (vmsof). The search is therefore over the ACTIVE elements only: element 4 of
+// the example has a set source bit but is masked off, and it does not make
+// element 4 -- or anything before it -- "the first". A masked-off source
+// element contributes *nothing* to the search; it is ignored, not read as a
+// zero (the two agree on k, and the rule that matters is that the element is
+// not in the search at all).
+//
+// The destination of a masked-off element is a mask destination, so the
+// masked-off (vma) and tail (vta) policies apply: vma/vta = 0 leaves the
+// element undisturbed, vma/vta = 1 writes the mask-agnostic all-ones. The
+// specification's printed examples show `x` for the masked-off elements, i.e.
+// vma = 0.
+//
+// The host oracle is `MaskedPrefixExpectedBits`, which states the rules
+// directly and is computed on the host from the source and mask patterns; it is
+// never read back from the RTL. The specification's own printed masked examples
+// are checked separately, as spec-anchor cells, so the oracle itself is under
+// test.
+uint64_t MaskedPrefixExpectedBits(int op, uint64_t src, uint64_t mask, uint64_t old,
+                                  int vl, int vma, int vta) {
+  // k = the first ACTIVE element whose source bit is set. A masked-off source
+  // element is not part of the search at all.
+  int k = -1;
+  for (int i = 0; i < vl; ++i) {
+    if (((mask >> i) & 1u) != 0 && ((src >> i) & 1u) != 0) { k = i; break; }
+  }
+  uint64_t out = old;
+  for (int i = 0; i < 16; ++i) {
+    bool bit;
+    if (i >= vl) {
+      if (!vta) continue;                       // tail, undisturbed
+      bit = true;                               // tail, mask-agnostic all-ones
+    } else if (((mask >> i) & 1u) == 0) {
+      if (!vma) continue;                       // masked off, undisturbed
+      bit = true;                               // masked off, all-ones
+    } else if (op == 0) {
+      bit = (k < 0) || (i < k);                 // vmsbf: before the first
+    } else if (op == 1) {
+      bit = (k < 0) || (i <= k);                // vmsif: through the first
+    } else {
+      bit = (k >= 0) && (i == k);               // vmsof: only the first
+    }
+    out = (out & ~(1ull << i)) | (bit ? (1ull << i) : 0ull);
+  }
+  return out;
+}
+
+void RunMaskPrefixMaskedCase(Vmosaic_vec_tb* dut, ClockDriver* clk, Reporter* rep) {
+  Cfg cfg(dut, clk);
+  Vec vec(dut, clk);
+
+  const char* kName[3] = {"vmsbf", "vmsif", "vmsof"};
+  const int kSewL = 3;      // a mask register is SEW=8, LMUL=1
+  const int kVlmax = 16;    // VLEN=128 / SEW=8, LMUL=1 -> 16 addressable bits
+  Layout L;
+  L.vd = 8; L.vs1 = 24; L.vs2 = 16; L.mask = false;
+
+  auto prime = [&](HostVrf* vf, int base, uint64_t bits) {
+    for (int b = 0; b < kVlmax / 8; ++b) {
+      vec.Prime(*vf, base, b, 3, 0, (bits >> (8 * b)) & 0xFFull);
+    }
+  };
+  auto dst_bit = [&](int i) {
+    return ((vec.MemRead(L.vd, i / 8, 3, 0) >> (i % 8)) & 1u) != 0;
+  };
+
+  int anchor_cells = 0, position_cells = 0, masked_before_cells = 0;
+  int masked_only_cells = 0, vma_cells = 0, vta_cells = 0;
+
+  // Run one masked cell and compare every destination bit against the host
+  // oracle. `mask_bits` is the v0 operand. When `want_override` is non-null the
+  // expected destination is that value (the specification's own printed result)
+  // rather than the oracle's.
+  auto run_cell = [&](const std::string& what, int op, uint64_t src, uint64_t mask_bits,
+                      uint64_t dst_seed, int vl, int vma, int vta,
+                      const uint64_t* want_override) {
+    ConfigureVec(&cfg, kSewL, 0, vta, vma, static_cast<uint64_t>(vl));
+    HostVrf vf;
+    prime(&vf, L.vs2, src);
+    prime(&vf, 0, mask_bits);
+    prime(&vf, L.vd, dst_seed);
+    const uint64_t want =
+        (want_override != nullptr)
+            ? *want_override
+            : MaskedPrefixExpectedBits(op, src, mask_bits, dst_seed, vl, vma, vta);
+    VecObs o = vec.RunPacket(VF_MASKPFX, op, kFormVv, L.vd, L.vs1, L.vs2, 0, true, kAllCaps);
+    const std::string tag = what + " " + kName[op];
+    rep->Check(!o.alu_illegal && !o.alu_trap,
+               tag + ": refused (illegal=" + Dec(o.alu_illegal) + " trap=" +
+                   Dec(o.alu_trap) + ")");
+    for (int i = 0; i < kVlmax; ++i) {
+      const bool got = dst_bit(i);
+      const bool exp = ((want >> i) & 1u) != 0;
+      rep->Check(got == exp,
+                 tag + " bit" + Dec(i) + ": " + Dec(got) + " expected " + Dec(exp));
+    }
+  };
+
+  // ------------------------------------------------------------------------
+  // The first active set bit at every addressable position. The mask turns off
+  // exactly the elements below k, so the first ACTIVE set bit is k for every k.
+  // No masked-off element here carries a set bit, which is the cell the
+  // masked-off-as-a-set-bit defect must fail and the search-over-all defect
+  // must pass.
+  for (int op = 0; op < 3; ++op) {
+    for (int k = 0; k < kVlmax; ++k) {
+      const uint64_t m = (k == 0) ? 0xFFFFull : ((0xFFFFull << k) & 0xFFFFull);
+      run_cell("masked-position k=" + Dec(k), op, m, m, 0x5555ull, kVlmax, 0, 0, nullptr);
+      ++position_cells;
+    }
+  }
+
+  // ------------------------------------------------------------------------
+  // A set bit masked off *before* a set bit that is active: the two searches
+  // disagree about k. A masked-off element here does carry a set bit, which is
+  // the cell the search-over-all defect must fail.
+  for (int op = 0; op < 3; ++op) {
+    for (int k = 1; k < kVlmax; ++k) {
+      const uint64_t m = 0xFFFEull;             // element 0 is masked off
+      const uint64_t s = 1ull | (1ull << k);    // set at 0 (masked off) and at k
+      run_cell("masked-off-before-active k=" + Dec(k), op, s, m, 0x0000ull, kVlmax, 0, 0,
+               nullptr);
+      ++masked_before_cells;
+    }
+  }
+
+  // ------------------------------------------------------------------------
+  // The only set bit is masked off: the active search finds none. The active
+  // slice is all-zero, where the three are not symmetric -- vmsbf/vmsif write
+  // all-ones, vmsof all-zeros -- and an implementation that searched over all
+  // elements would find k instead.
+  for (int op = 0; op < 3; ++op) {
+    for (int k = 0; k < kVlmax; ++k) {
+      const uint64_t s = 1ull << k;
+      const uint64_t m = (~(1ull << k)) & 0xFFFFull;
+      run_cell("masked-off-only k=" + Dec(k), op, s, m, 0x5555ull, kVlmax, 0, 0, nullptr);
+      ++masked_only_cells;
+    }
+  }
+
+  // ------------------------------------------------------------------------
+  // vma = 0 and vma = 1 on a masked destination. Masked-off elements sit both
+  // before and after the first active set bit; under vma = 0 they are
+  // undisturbed (the seed survives), under vma = 1 they are written with the
+  // mask-agnostic all-ones.
+  {
+    struct VmaCase { uint64_t mask, src; };
+    const VmaCase kCases[2] = {
+        {0x0F0Full, 0x0022ull},   // k = 1; a set bit at 5 is masked off
+        {0xFFF0ull, 0x0011ull},   // k = 4; masked-off elements precede k
+    };
+    for (int ci = 0; ci < 2; ++ci) {
+      for (int vma = 0; vma < 2; ++vma) {
+        for (int op = 0; op < 3; ++op) {
+          run_cell("vma=" + Dec(vma) + " pattern=" + Dec(ci), op, kCases[ci].src,
+                   kCases[ci].mask, 0x0000ull, kVlmax, vma, 0, nullptr);
+          ++vma_cells;
+        }
+      }
+    }
+  }
+
+  // ------------------------------------------------------------------------
+  // vta past vl: with vl = 8 the tail [8, 16) is undisturbed under vta = 0 and
+  // all-ones under vta = 1, and a source bit above vl is not a first set bit.
+  {
+    struct VtaCase { uint64_t mask, src; const char* name; };
+    const VtaCase kCases[2] = {
+        {0x00FFull, 0x0010ull, "tail-below-set"},   // k = 4 within [0, 8)
+        {0x00FFull, 0x1000ull, "tail-above-set"},   // the only set bit is above vl
+    };
+    for (int ci = 0; ci < 2; ++ci) {
+      for (int vta = 0; vta < 2; ++vta) {
+        for (int op = 0; op < 3; ++op) {
+          run_cell(std::string("vta=") + Dec(vta) + " " + kCases[ci].name, op,
+                   kCases[ci].src, kCases[ci].mask, 0x0000ull, 8, 0, vta, nullptr);
+          ++vta_cells;
+        }
+      }
+    }
+  }
+
+  // ------------------------------------------------------------------------
+  // The specification's own printed masked examples, checked directly rather
+  // than through the oracle, so a shared misreading cannot make both sides
+  // agree. The `x` elements of the printed result are the masked-off elements
+  // under vma = 0: they keep the destination seed.
+  {
+    struct MaskAnchor { uint64_t v0; uint64_t vs2[3]; uint64_t want[3]; };
+    const MaskAnchor kAnchors[1] = {
+        // v0 = 11000011. v3 = 10010100 for vmsbf/vmsif (first active set bit at
+        // element 7; elements 4 and 2 are set but masked off). The printed
+        // results are 00000011 / 11000011, i.e. the active bits are 0x43 /
+        // 0xC3. For vmsof v3 = 11010100, whose first active set bit is element
+        // 6, and the printed result 01000000 is 0x40.
+        {0xC3ull, {0x94ull, 0x94ull, 0xD4ull}, {0x43ull, 0xC3ull, 0x40ull}},
+    };
+    const uint64_t kSeed = 0x5Aull;
+    for (int ai = 0; ai < 1; ++ai) {
+      for (int op = 0; op < 3; ++op) {
+        const uint64_t active = kAnchors[ai].v0;
+        const uint64_t want = (kSeed & ~active) | (kAnchors[ai].want[op] & active);
+        run_cell("spec-anchor", op, kAnchors[ai].vs2[op], kAnchors[ai].v0, kSeed,
+                 kVlmax, 0, 0, &want);
+        ++anchor_cells;
+      }
+    }
+  }
+
+  // ------------------------------------------------------------------ coverage
+  rep->Check(position_cells == 3 * kVlmax,
+             "coverage: " + Dec(position_cells) + " first-active-set-bit cells ran, expected " +
+                 Dec(3 * kVlmax));
+  rep->Check(masked_before_cells == 3 * (kVlmax - 1),
+             "coverage: " + Dec(masked_before_cells) +
+                 " masked-off-before-active cells ran, expected " + Dec(3 * (kVlmax - 1)));
+  rep->Check(masked_only_cells == 3 * kVlmax,
+             "coverage: " + Dec(masked_only_cells) + " masked-off-only cells ran, expected " +
+                 Dec(3 * kVlmax));
+  rep->Check(vma_cells == 12,
+             "coverage: " + Dec(vma_cells) + " vma cells ran, expected 12");
+  rep->Check(vta_cells == 12,
+             "coverage: " + Dec(vta_cells) + " vta cells ran, expected 12");
+  rep->Check(anchor_cells == 3,
+             "coverage: " + Dec(anchor_cells) + " spec-anchor cells ran, expected 3");
+}
+
 // ============================================================================
 // I-061 -- the same-hart line coalescer (CASE=coalesce.element_faults).
 //
@@ -8464,6 +8707,8 @@ int main(int argc, char** argv) {
       RunMaskPrefixVstartCase(&dut, &clk, &reporter);
     } else if (options.case_id == "rvv.mask_prefix_semantics") {
       RunMaskPrefixSemanticsCase(&dut, &clk, &reporter);
+    } else if (options.case_id == "rvv.mask_prefix_masked") {
+      RunMaskPrefixMaskedCase(&dut, &clk, &reporter);
     } else if (options.case_id == "coalesce.element_faults") {
       RunCoalCase(&dut, &clk, &reporter, &coal_cov);
     } else {
@@ -8562,6 +8807,12 @@ int main(int argc, char** argv) {
   if (options.case_id == "rvv.mask_prefix_semantics") {
     return reporter.Finish("PASS", "checks=" + Dec(reporter.checks()) + " ops=3"
                                        " positions=16 allzero=3 anchors=9 cycles=" +
+                                       Dec(cycles));
+  }
+  if (options.case_id == "rvv.mask_prefix_masked") {
+    return reporter.Finish("PASS", "checks=" + Dec(reporter.checks()) + " ops=3"
+                                       " positions=16 masked_before=45 masked_only=48"
+                                       " vma=12 vta=12 anchors=3 cycles=" +
                                        Dec(cycles));
   }
   return reporter.Finish("PASS", "checks=" + Dec(reporter.checks()) + " combos=" +

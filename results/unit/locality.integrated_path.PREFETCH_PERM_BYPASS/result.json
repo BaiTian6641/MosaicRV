@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "case": "locality.integrated_path",
+  "verdict": "FAIL",
+  "detail": "locality integration: on/off identical, structures used, class rule checked, no prefetch reaches a device",
+  "seed": 1,
+  "max_cycles": 4000000,
+  "checks": 37,
+  "failures": 2,
+  "image": "",
+  "expect": "",
+  "tool": "verilator",
+  "timestamp": "2026-10-02T20:35:28Z",
+  "first_mismatch": "prefetch data-port addresses: expected only the program's own accesses, got unexpected 0x80200000",
+  "failed_checks": ["prefetch: no locality structure reaches an address outside the program's own normal memory", "both: no locality structure reaches an address outside the program's own normal memory"]
+}

@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "case": "core.corpus_sweep",
+  "verdict": "PASS",
+  "detail": "programs=13 inputs=3 runs=39 pass=39 fail=0 stopped=0 cycles=17484988 retires=2774478 oracle=tools/host_oracle.py",
+  "seed": 1,
+  "max_cycles": 4000000,
+  "checks": 40,
+  "failures": 0,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-02T20:38:07Z",
+  "first_mismatch": ""
+}

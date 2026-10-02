@@ -84,8 +84,6 @@ constexpr int kMaxRunCycles = 400000;
 constexpr int kDrainCycles = 64;
 
 constexpr uint64_t kRamBase = 0x80000000ull;
-constexpr uint64_t kSigBase = 0x80000400ull;
-constexpr uint64_t kToHost = 0x80001000ull;
 
 // The program's data lines. The L1 is 8 sets of 32 bytes, direct mapped, so the
 // set of an address is (addr >> 5) & 7. The reuse pair A/B and the class-check
@@ -94,12 +92,15 @@ constexpr uint64_t kToHost = 0x80001000ull;
 //   A 0x840 -> set 2   B 0x940 -> set 2
 //   C 0x8A0 -> set 5   D 0x9A0 -> set 5
 //   E 0x8E0 -> set 7   F 0x9E0 -> set 7
-// The prefetch stream is base 0x2000 + i*0x100, all set 0 with a stride of eight
-// lines, so every access misses the L1 and the stride is learnable.
+// The prefetch stream is base 0x1FF000 + i*0x100: all set 0, a stride of eight
+// lines, so every access misses the L1 and the stride is learnable -- and its
+// last candidate falls one line past the top of RAM (0x80200000), which is the
+// address a prefetch must never reach.
 constexpr uint64_t kOffA = 0x040, kOffB = 0x140;
 constexpr uint64_t kOffC = 0x0A0, kOffD = 0x1A0;
 constexpr uint64_t kOffE = 0x0E0, kOffF = 0x1E0;
-constexpr uint64_t kPfBase = 0x2000;
+constexpr uint64_t kOffPfBase = 0x0C0;
+constexpr uint64_t kPfBase = 0x1FF000;
 constexpr int kPfLines = 16;
 
 constexpr uint64_t kUartScratch = 0x0010000Cull;
@@ -150,10 +151,13 @@ class Asm {
   void Lui(int rd, int imm20) { Emit(EncU(imm20, rd, 0x37)); }
   void Addi(int rd, int rs1, int imm) { Emit(EncI(imm, rs1, kF3Addi, rd, kOpImm)); }
   void Add(int rd, int rs1, int rs2) { Emit(EncR(0, rs2, rs1, kF3Add, rd, kOpOp)); }
+  void Xor(int rd, int rs1, int rs2) { Emit(EncR(0, rs2, rs1, 4, rd, kOpOp)); }
   void Ld(int rd, int rs1, int imm) { Emit(EncI(imm, rs1, kF3Ld, rd, kOpLoad)); }
+  void Lw(int rd, int rs1, int imm) { Emit(EncI(imm, rs1, 2, rd, kOpLoad)); }
   void Sd(int rs2, int rs1, int imm) { Emit(EncS(imm, rs2, rs1, kF3Sd, kOpStore)); }
   void Sw(int rs2, int rs1, int imm) { Emit(EncS(imm, rs2, rs1, kF3Sw, kOpStore)); }
   void Amo(int rd, int rs2, int rs1) { Emit(AmoAddD(rd, rs2, rs1)); }
+  void FenceI() { Emit(0x0000100fu); }
   void Blt(int rs1, int rs2, int label) {
     bfix_.push_back({int(code_.size()), label, rs1, rs2});
     code_.push_back(0);
@@ -315,7 +319,9 @@ class Bus {
 std::vector<uint8_t> BuildProgram() {
   Asm a;
   const int x0 = 0, t0 = 5, t1 = 6, t2 = 7, s0 = 8, s1 = 9, a1 = 11, a2 = 12;
-  const int a3 = 13, a5 = 15, s2 = 18, s3 = 19, s4 = 20, s5 = 21, t3 = 28;
+  const int a3 = 13, a5 = 15, s2 = 18, s3 = 19, s4 = 20, s5 = 21, t3 = 28, t5 = 30,
+            t6 = 31;
+  const int t7 = 26, t8 = 27;
 
   // s0 = 0x80000800 (the data base). `auipc` gives the PC-relative high part;
   // the 0x800 adjustment is 0x7ff + 1 because an immediate of 0x800 has bit 11
@@ -341,28 +347,6 @@ std::vector<uint8_t> BuildProgram() {
   a.Addi(s1, s1, 1);
   a.Blt(s1, a1, reuse);
 
-  // ---- phase 4: the access-class markers (C and D collide in set 5) -------
-  // The four markers bracket a load and a store. The bracketed load must consult
-  // the buffer and hit; the bracketed store -- whose line the L1 has just
-  // evicted, so it takes a read for ownership -- must not consult it at all.
-  a.Ld(t0, s0, int(kOffC));
-  a.Ld(t0, s0, int(kOffD));
-  a.Ld(t0, s0, int(kOffC));
-  a.Ld(t0, s0, int(kOffD));
-  const int m11 = a.Label();
-  a.Addi(t3, x0, 0x11);
-  a.Sw(t3, t4, 0);
-  a.Ld(t0, s0, int(kOffC));              // L1 miss -> buffer hit (positive control)
-  a.Addi(t3, x0, 0x12);
-  a.Sw(t3, t4, 0);
-  a.Ld(t0, s0, int(kOffD));              // the L1's set 5 now holds D
-  a.Addi(t3, x0, 0x21);
-  a.Sw(t3, t4, 0);
-  a.Sd(x0, s0, int(kOffC));              // store C: L1 miss -> read for ownership
-  a.Addi(t3, x0, 0x22);
-  a.Sw(t3, t4, 0);
-  (void)m11;
-
   // ---- phase 5: the store-invalidation check (E and F collide in set 7) ---
   a.Ld(t0, s0, int(kOffF));
   a.Ld(t0, s0, int(kOffE));              // fills E into the L1 and the buffer
@@ -374,12 +358,9 @@ std::vector<uint8_t> BuildProgram() {
   a.Ld(t2, s0, int(kOffE));              // must see memory (105), not the clean copy
 
   // ---- phase 2: the prefetch stream (base 0x80002000, stride 0x100) -------
-  a.Addi(s3, s0, 0x7ff);
-  a.Addi(s3, s3, 1);
-  a.Addi(s3, s3, 0x7ff);
-  a.Addi(s3, s3, 1);
-  a.Addi(s3, s3, 0x7ff);
-  a.Addi(s3, s3, 1);                     // s3 = 0x80002000
+  // The stream's base is a data word in the image (0x801FF000: near the top of
+  // RAM, so the stream's last candidate falls one line past the end).
+  a.Ld(s3, s0, int(kOffPfBase));         // s3 = 0x801FF000
   a.Addi(s2, x0, 0);                     // s2 = the iteration index
   a.Addi(a3, x0, kPfLines);
   const int pf = a.Label();
@@ -390,6 +371,42 @@ std::vector<uint8_t> BuildProgram() {
   a.Addi(s2, s2, 1);
   a.Blt(s2, a3, pf);
 
+  // ---- phase 4: the access-class markers (C and D collide in set 5) -------
+  // The class check comes last, so that no cacheable *load* can execute after
+  // its closing marker and leak into the counted window. Each window is bounded
+  // so that out-of-order execution cannot move the bracketed access out of it:
+  //
+  //   * an opening marker is a device **load**, and the bracketed access's
+  //     address is computed from its data (`xor t6,t5,t5` is a real dependency
+  //     on t5), so the access cannot execute before the marker's request; and
+  //     the marker is serialized, so every older access has already retired.
+  //   * a closing marker is a device **load** whose address depends on the
+  //     bracketed *load*'s result, or a device **store**, which the store queue
+  //     drains in order -- after the bracketed store's own transaction.
+  //
+  // Window 1 brackets a load that must consult the buffer and hit. Window 2
+  // brackets a store whose read-for-ownership must not consult it at all.
+  a.Ld(t0, s0, int(kOffC));
+  a.Ld(t0, s0, int(kOffD));
+  a.Ld(t0, s0, int(kOffC));
+  a.Ld(t0, s0, int(kOffD));              // the L1's set 5 now holds D
+  a.Lw(t5, t4, 0);                       // M1: opening marker (device load)
+  a.Xor(t6, t5, t5);                     // t6 = 0, but a real dependency on t5
+  a.Add(t6, t6, s0);
+  a.Ld(t0, t6, int(kOffC));              // L1 miss -> buffer hit (positive control)
+  a.Xor(t7, t0, t0);                     // t7 = 0, depends on the control load
+  a.Add(t7, t7, t4);                     // t7 = the marker address
+  a.Lw(t5, t7, 0);                       // M2: closing marker (device load)
+  a.Xor(t8, t5, t5);                     // depends on M2
+  a.Add(t8, t8, s0);
+  a.Ld(t0, t8, int(kOffD));              // evicts C from the L1 again
+  a.Lw(t5, t4, 0);                       // M3: opening marker (device load)
+  a.Xor(t6, t5, t5);
+  a.Add(t6, t6, s0);
+  a.Sd(x0, t6, int(kOffC));              // store C: L1 miss -> read for ownership
+  a.Addi(t3, x0, 0x21);
+  a.Sw(t3, t4, 0);                       // M4: closing marker (device store)
+
   // ---- signatures and exit ------------------------------------------------
   a.Addi(a5, s0, -0x400);                // a5 = 0x80000400 (the signature)
   a.Sd(a2, a5, 0);                       // sig[0]: both accumulators
@@ -398,6 +415,12 @@ std::vector<uint8_t> BuildProgram() {
   a.Addi(s4, s4, 1);                     // s4 = 0x80001000 (tohost)
   a.Addi(s5, x0, 1);
   a.Sd(s5, s4, 0);
+  // The exit word and the signature live in cacheable RAM, so a write-back data
+  // cache holds them until something writes the cache back. This core's only
+  // data-cache writeback a program can ask for is its FENCE.I (which flushes the
+  // data cache and then invalidates the instruction cache), and the harness
+  // observes memory -- without it the run never reports finished.
+  a.FenceI();
   const int hang = a.Label();
   a.Bind(hang);
   g_park_pc = kRamBase + uint64_t(a.off());
@@ -433,6 +456,7 @@ std::vector<uint8_t> BuildProgram() {
   put(kDataBase + kOffD, 13);
   put(kDataBase + kOffE, 100);
   put(kDataBase + kOffF, 17);
+  put(kDataBase + kOffPfBase, 0x801FF000ull);
   for (int i = 0; i < kPfLines; i++) put(kPfBase + uint64_t(i) * 0x100, uint64_t((i + 1) * 3));
   return image;
 }
@@ -457,6 +481,7 @@ struct Counters {
 
 struct MarkerSample {
   uint32_t value = 0;
+  bool is_store = false;
   Counters at;
 };
 
@@ -486,13 +511,13 @@ class CoreRun {
  public:
   CoreRun(Vmosaic_core_tb* dut, Reporter* rep) : dut_(dut), rep_(rep) {}
 
-  RunRec Run(bool llb_en, bool pf_en, uint32_t retire_n, bool cache_en = true) {
+  RunRec Run(bool llb_en, bool pf_en, uint32_t retire_n) {
     MemoryModel mem;
     std::vector<uint8_t> image = BuildProgram();
     mosaic::Image img;
     mosaic::Segment seg;
     seg.vaddr = kRamBase;
-    seg.memsz = 0x4000;
+    seg.memsz = image.size();
     seg.filesz = image.size();
     seg.flags = 7;
     seg.data = image;
@@ -544,6 +569,15 @@ class CoreRun {
     rec.imem_beats = imem.accepted();
     rec.dmem_beats = dmem.accepted();
     for (const auto& t : dmem.txns()) rec.dmem_addrs.push_back(t.req.addr);
+    if (std::getenv("LOCALITY_DUMP") != nullptr) {
+      for (const auto& t : dmem.txns()) {
+        if (t.req.addr == kUartScratch) {
+          std::printf("    [uart] cycle=%llu we=%d size=%u wstrb=0x%x wdata=0x%llx\n",
+                      (unsigned long long)t.cycle, t.req.we ? 1 : 0, t.req.size,
+                      unsigned(t.req.wstrb), (unsigned long long)t.req.wdata);
+        }
+      }
+    }
     mem.ReadSignature(&rec.sig);
     if (std::getenv("LOCALITY_DUMP") != nullptr) {
       const uint64_t addrs[] = {0x80000000ull, 0x80000040ull, 0x80000400ull,
@@ -686,9 +720,10 @@ class CoreRun {
       // A marker: a word store to the UART scratch. The value rides in the lanes
       // the endpoint aligned it to (the byte at `addr` is lane addr[2:0], and
       // addr[2:0] is 4 here), so it is bits 32..63 of the port's data.
-      if (r.we && r.addr == kUartScratch) {
+      if (r.addr == kUartScratch) {
         MarkerSample s;
-        s.value = uint32_t((r.wdata >> 32) & 0xffffffffull);
+        s.value = r.we ? uint32_t((r.wdata >> 32) & 0xffffffffull) : 0;
+        s.is_store = r.we;
         s.at = Snapshot();
         markers_.push_back(s);
       }
@@ -919,20 +954,28 @@ int main(int argc, char** argv) {
   // Marker 0x11..0x12 brackets one load that must consult the buffer and hit;
   // marker 0x21..0x22 brackets one store whose read-for-ownership must not
   // consult it at all.
+  if (std::getenv("LOCALITY_DUMP") != nullptr) {
+    for (size_t i = 0; i < llb_c.rec.markers.size(); i++) {
+      const MarkerSample& m = llb_c.rec.markers[i];
+      std::printf("    [marker] %zu store=%d value=0x%x hit=%u miss=%u fill=%u inv=%u\n", i,
+                  m.is_store ? 1 : 0, m.value, m.at.llb_hit, m.at.llb_miss, m.at.llb_fill,
+                  m.at.llb_inv);
+    }
+  }
   const bool markers_ok = llb_c.rec.markers.size() == 4;
   reporter.Check(markers_ok, "the four class-check markers reach the data port");
   if (markers_ok) {
-    const MarkerSample& m11 = llb_c.rec.markers[0];
-    const MarkerSample& m12 = llb_c.rec.markers[1];
-    const MarkerSample& m21 = llb_c.rec.markers[2];
-    const MarkerSample& m22 = llb_c.rec.markers[3];
-    reporter.Check(m11.value == 0x11 && m12.value == 0x12 && m21.value == 0x21 &&
-                   m22.value == 0x22,
-                   "the class-check markers arrive in order with their own values");
-    const uint32_t load_lookups = (m12.at.llb_hit - m11.at.llb_hit) +
-                                  (m12.at.llb_miss - m11.at.llb_miss);
-    const uint32_t store_lookups = (m22.at.llb_hit - m21.at.llb_hit) +
-                                   (m22.at.llb_miss - m21.at.llb_miss);
+    const MarkerSample& m1 = llb_c.rec.markers[0];
+    const MarkerSample& m2 = llb_c.rec.markers[1];
+    const MarkerSample& m3 = llb_c.rec.markers[2];
+    const MarkerSample& m4 = llb_c.rec.markers[3];
+    reporter.Check(!m1.is_store && !m2.is_store && !m3.is_store && m4.is_store &&
+                   m4.value == 0x21,
+                   "the class-check markers arrive in order, load/load/load/store");
+    const uint32_t load_lookups = (m2.at.llb_hit - m1.at.llb_hit) +
+                                  (m2.at.llb_miss - m1.at.llb_miss);
+    const uint32_t store_lookups = (m4.at.llb_hit - m3.at.llb_hit) +
+                                   (m4.at.llb_miss - m3.at.llb_miss);
     if (load_lookups != 1) {
       reporter.Mismatch("the class-check positive control", "one buffer lookup for the load",
                         std::to_string(load_lookups) + " lookups");
@@ -943,8 +986,8 @@ int main(int argc, char** argv) {
       reporter.Mismatch("the store's read-for-ownership",
                         "the buffer is not consulted",
                         std::to_string(store_lookups) + " lookups ("
-                        + std::to_string(m22.at.llb_hit - m21.at.llb_hit) + " hits, "
-                        + std::to_string(m22.at.llb_miss - m21.at.llb_miss) + " misses)");
+                        + std::to_string(m4.at.llb_hit - m3.at.llb_hit) + " hits, "
+                        + std::to_string(m4.at.llb_miss - m3.at.llb_miss) + " misses)");
     }
     reporter.Check(store_lookups == 0,
                    "a store's read-for-ownership does not consult the locality buffer");
@@ -963,7 +1006,7 @@ int main(int argc, char** argv) {
           device_req = true;
           bad = addr;
         }
-      } else if (addr < kRamBase || addr >= kRamBase + 0x4000) {
+      } else if (addr < kRamBase || addr >= kRamBase + 0x200000ull) {
         device_req = true;
         bad = addr;
       }
