@@ -82,6 +82,15 @@ module mosaic_core_tb (
     input  logic        lane_quota_req_i,
     input  logic [3:0]  lane_quota_val_i,
 
+    // ------------------------------------ the vector coalescing switch (I-084)
+    // The one switch the equal-resource comparison flips in the vector memory
+    // path (I-061). Low -- the reset value in every driver that predates this
+    // package -- keeps same-hart, same-beat line coalescing on, exactly as the
+    // core built it before; high turns it off so one program can be measured
+    // with and without it. It is not architectural: only the number of memory
+    // requests changes, never the bytes they carry.
+    input  logic        vec_coalesce_dis_i,
+
     // ----------------------------------- standalone L1 cache path (directed)
     // A second instance of the *same* wrapper the core uses, exposed directly so
     // the directed control phases can drive refills, evictions, faults and a
@@ -376,6 +385,7 @@ module mosaic_core_tb (
     output logic [31:0]        o_vec_retire_ctr_o,
     output logic [31:0]        o_vec_fault_ctr_o,
     output logic [31:0]        o_vec_lsu_req_ctr_o,
+    output logic [31:0]        o_vec_lsu_merge_ctr_o,
     output logic [31:0]        o_vec_chain_accept_ctr_o,
     output logic [31:0]        o_vec_chain_refuse_ctr_o,
     output logic [31:0]        o_vec_desc_alloc_ctr_o,
@@ -405,6 +415,10 @@ module mosaic_core_tb (
     output logic [31:0]        o_lane_pub_mid_macro_ctr_o,
     output logic [31:0]        o_lane_abort_ctr_o,
     output logic [255:0]       o_lane_elem_ctr_o,
+    // I-084: the lane broker's own budget (its widest legal share and its
+    // out-of-reset share), read from the broker rather than restated here.
+    output logic [3:0]         o_lane_quota_max_o,
+    output logic [3:0]         o_lane_quota_reset_o,
     output logic [31:0] o_csr_wr_o,
     output logic [31:0] o_csr_illegal_wr_o,
     output logic [31:0] o_csr_trap_o,
@@ -516,6 +530,15 @@ module mosaic_core_tb (
     output logic [31:0] o_geom_uop_id_w_o,
     output logic [31:0] o_geom_prf_entries_o,
     output logic [31:0] o_geom_prf_tag_w_o,
+    // I-084: the resource geometry the equal-resource comparison asserts is
+    // identical across configurations -- the integer PRF's bank count and the
+    // L1's line/set/way geometry. They are the *core's* own numbers (the core
+    // single-sources them and exports them), not a formula this wrapper
+    // re-invents, so the comparison checks the machine that was built.
+    output logic [31:0] o_geom_prf_banks_o,
+    output logic [31:0] o_geom_cache_line_bytes_o,
+    output logic [31:0] o_geom_cache_sets_o,
+    output logic [31:0] o_geom_cache_ways_o,
     output logic [31:0] o_geom_int_gen_w_o,
     output logic [31:0] o_geom_iq_entries_o,
     output logic [31:0] o_geom_occ_w_o,
@@ -687,6 +710,7 @@ module mosaic_core_tb (
       .loc_snoop_all_i (loc_snoop_all_i),
       .lane_quota_req_i(lane_quota_req_i),
       .lane_quota_val_i(lane_quota_val_i),
+      .vec_coalesce_dis_i(vec_coalesce_dis_i),
       .irq_soft_i      (irq_soft_i),
       .irq_timer_i     (irq_timer_i),
       .irq_ext_i       (irq_ext_i),
@@ -719,6 +743,7 @@ module mosaic_core_tb (
       .o_vec_retire_ctr(o_vec_retire_ctr_o),
       .o_vec_fault_ctr (o_vec_fault_ctr_o),
       .o_vec_lsu_req_ctr(o_vec_lsu_req_ctr_o),
+      .o_vec_lsu_merge_ctr(o_vec_lsu_merge_ctr_o),
       .o_vec_chain_accept_ctr(o_vec_chain_accept_ctr_o),
       .o_vec_chain_refuse_ctr(o_vec_chain_refuse_ctr_o),
       .o_vec_desc_alloc_ctr(o_vec_desc_alloc_ctr_o),
@@ -747,6 +772,12 @@ module mosaic_core_tb (
       .o_lane_pub_mid_macro_ctr(o_lane_pub_mid_macro_ctr_o),
       .o_lane_abort_ctr(o_lane_abort_ctr_o),
       .o_lane_elem_ctr (o_lane_elem_ctr_o),
+      .o_lane_quota_max(o_lane_quota_max_o),
+      .o_lane_quota_reset(o_lane_quota_reset_o),
+      .o_geom_prf_banks(o_geom_prf_banks_o),
+      .o_geom_cache_line_bytes(o_geom_cache_line_bytes_o),
+      .o_geom_cache_sets(o_geom_cache_sets_o),
+      .o_geom_cache_ways(o_geom_cache_ways_o),
       .o_csr_wr_ctr    (o_csr_wr_o),
       .o_csr_illegal_wr_ctr(o_csr_illegal_wr_o),
       .o_csr_trap_ctr  (o_csr_trap_o),

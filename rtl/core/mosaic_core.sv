@@ -110,6 +110,20 @@ localparam int unsigned CORE_OCC_W   = $clog2(CORE_ROB_N + 1);
 localparam int unsigned CORE_ARCH_N  = mosaic_cfg_pkg::MOSAIC_ARCH_INT_REGS;
 localparam int unsigned CORE_PRF_N   = mosaic_cfg_pkg::MOSAIC_INT_PRF_ENTRIES;
 localparam int unsigned CORE_MAP_W   = CORE_TAG_W + CORE_IGEN_W;
+// I-084: the resource geometry the equal-resource comparison asserts is
+// identical in every configuration. Defined here, once, and read by the two
+// cache-path instantiations and the evidence ports below, so the number the
+// comparison checks and the number the machine is built with cannot drift.
+// The L1 is direct-mapped (`mosaic_cache` is a direct-mapped cache), so its
+// "ways" is one and is stated rather than inferred.
+localparam int unsigned CORE_CACHE_LINE_BYTES = 32;
+localparam int unsigned CORE_CACHE_SETS       = 8;
+localparam int unsigned CORE_CACHE_WAYS       = 1;
+// The vector engine's VLEN, in bits, and the lane broker's budget, in lanes.
+// Both are passed to the units that own them (mosaic_vec_* / mosaic_lane_broker)
+// and exported, so the comparison reads the broker's own budget.
+localparam int unsigned CORE_VEC_VLEN        = 128;
+localparam logic [3:0]  CORE_LANE_QUOTA_MAX  = 4'd8;
 // The memory path's geometry, from the generated profile like everything else.
 localparam int unsigned CORE_LQ_N    = mosaic_cfg_pkg::MOSAIC_LQ_ENTRIES;
 localparam int unsigned CORE_SQ_N    = mosaic_cfg_pkg::MOSAIC_SQ_ENTRIES;
@@ -182,6 +196,17 @@ module mosaic_core (
     // quota stays at its reset value of 8 and behaviour is unchanged.
     input  logic                        lane_quota_req_i,
     input  logic [3:0]                  lane_quota_val_i,
+
+    // ------------------------------------------ the vector coalescing switch (I-084)
+    // I-061's same-hart, same-beat line coalescing was enabled unconditionally
+    // in the core's vector memory path (`exec_coalesce_i` tied high). The
+    // equal-resource comparison of I-084 needs it as a *variable*, so it is
+    // exposed as the one switch the comparison flips: high turns coalescing off
+    // for the run, low (the reset value in every driver that predates this
+    // package) leaves it on, exactly as before, so no existing machine moves.
+    // It is not architectural: coalescing changes only how many memory requests
+    // carry the same bytes, never which bytes are read or written.
+    input  logic                        vec_coalesce_dis_i,
 
     // ------------------------------------------------- instruction memory port
     output logic                        imem_req_valid,
@@ -488,6 +513,22 @@ module mosaic_core (
     output logic [31:0]                 o_lane_pub_mid_macro_ctr,
     output logic [31:0]                 o_lane_abort_ctr,
     output logic [255:0]                o_lane_elem_ctr,
+    // --------------------------------------------------- I-084 evidence
+    // The three facts the equal-resource comparison needs and cannot derive
+    // from anywhere else: the elements the vector coalescer removed from the
+    // request stream (`o_vec_lsu_merge_ctr`, zero when coalescing is off), the
+    // lane broker's budget (`o_lane_quota_max`/`o_lane_quota_reset`), and the
+    // configured geometry of the two resources a performance comparison could
+    // secretly change -- the integer PRF banks and the L1 (line bytes, sets,
+    // ways). They are constants of the elaboration and counters of the run;
+    // nothing in the core reads them.
+    output logic [31:0]                 o_vec_lsu_merge_ctr,
+    output logic [3:0]                  o_lane_quota_max,
+    output logic [3:0]                  o_lane_quota_reset,
+    output logic [31:0]                 o_geom_prf_banks,
+    output logic [31:0]                 o_geom_cache_line_bytes,
+    output logic [31:0]                 o_geom_cache_sets,
+    output logic [31:0]                 o_geom_cache_ways,
     output logic [31:0]                 o_csr_wr_ctr,
     output logic [31:0]                 o_csr_illegal_wr_ctr,
     output logic [31:0]                 o_csr_trap_ctr,
@@ -1524,6 +1565,8 @@ module mosaic_core (
   logic [6:0]                 vec_lsu_stop_elem;
   logic [7:0]                 vec_lsu_elems;
   logic [31:0]                vec_lsu_req_ctr;
+  // I-084: the elements the vector coalescer removed from the request stream.
+  logic [31:0]                vec_lsu_merge_ctr;
 
   // mosaic_vec_restart: the partial-trap / vstart controller.
   logic                       vec_rst_exec_valid;
@@ -1615,6 +1658,9 @@ module mosaic_core (
   logic [31:0]                lane_publish_ctr, lane_ack_req_ctr, lane_ack_ctr;
   logic [31:0]                lane_req_mid_macro_ctr, lane_pub_mid_macro_ctr;
   logic [31:0]                lane_abort_ctr;
+  // I-084: the broker's own budget, read back so the comparison states the
+  // budget rather than restating it.
+  logic [3:0]                 lane_quota_max, lane_quota_reset;
   logic                       lane_ack;
   logic                       lane_macro_insert;
   logic                       lane_wb_new;
@@ -1910,8 +1956,8 @@ module mosaic_core (
   // this is the wiring.
   mosaic_l1_cache_path #(
       .IS_FETCH      (1'b1),
-      .LINE_BYTES    (32),
-      .SETS          (8),
+      .LINE_BYTES    (CORE_CACHE_LINE_BYTES),
+      .SETS          (CORE_CACHE_SETS),
       .ADDR_WIDTH    (64),
       .CPU_DATA_WIDTH(64),
       .ID_W          (CORE_REQ_ID_W),
@@ -3577,7 +3623,9 @@ module mosaic_core (
   assign vec_vset_vs_off = (o_csr_mstatus[10:9] == 2'b00);
 `endif
 
-  mosaic_vec_cfg u_vec_cfg (
+  mosaic_vec_cfg #(
+      .VLEN (CORE_VEC_VLEN)
+  ) u_vec_cfg (
       .clk_i            (clk),
       .rst_i            (rst),
       .vset_valid_i     (vec_vset_valid),
@@ -3884,7 +3932,7 @@ module mosaic_core (
   assign vec_alu_mask_en = vec_pay_q.mask_en;
 
   mosaic_vec_alu #(
-      .VLEN (128),
+      .VLEN (CORE_VEC_VLEN),
       .ELEN (64),
       .NFAM (17)
   ) u_vec_alu (
@@ -3969,7 +4017,7 @@ module mosaic_core (
   assign vec_lsu_mask_en   = vec_pay_q.mask_en;
 
   mosaic_vec_lsu #(
-      .VLEN (128),
+      .VLEN (CORE_VEC_VLEN),
       .ELEN (64),
       .NLSM (8)
   ) u_vec_lsu (
@@ -3991,10 +4039,13 @@ module mosaic_core (
       .exec_base_i        (vec_lsu_base),
       .exec_stride_i      (vec_lsu_stride),
       .exec_mask_en_i     (vec_lsu_mask_en),
-      // I-061: same-hart, same-beat line coalescing is enabled for the core's
-      // vector memory path. A vector macro has no atomic class, so `atomic` is
+      // I-061: same-hart, same-beat line coalescing for the core's vector memory
+      // path. I-084 exposes it as a switch: `vec_coalesce_dis_i` low (the reset
+      // value in every driver that predates I-084) enables it exactly as the
+      // former tie-high did; high disables it so one program can be measured
+      // with and without it. A vector macro has no atomic class, so `atomic` is
       // clear; the coalescer still takes the device predicate from the map.
-      .exec_coalesce_i    (1'b1),
+      .exec_coalesce_i    (~vec_coalesce_dis_i),
       .exec_atomic_i      (1'b0),
       .busy_o             (vec_lsu_busy),
       .done_o             (vec_lsu_done),
@@ -4007,7 +4058,7 @@ module mosaic_core (
       .stop_elem_o        (vec_lsu_stop_elem),
       .elems_o            (vec_lsu_elems),
       .req_ctr_o          (vec_lsu_req_ctr),
-      .merge_ctr_o        (),
+      .merge_ctr_o        (vec_lsu_merge_ctr),
       .vrf_rd_valid_o     (vec_lsu_rd_valid),
       .vrf_rd_base_o      (vec_lsu_rd_base),
       .vrf_rd_elem_o      (vec_lsu_rd_elem),
@@ -4050,7 +4101,7 @@ module mosaic_core (
   assign vec_rst_exec_nf   = vec_pay_q.nf;
 
   mosaic_vec_restart #(
-      .VLEN (128),
+      .VLEN (CORE_VEC_VLEN),
       .ELEN (64)
   ) u_vec_restart (
       .clk_i              (clk),
@@ -4525,7 +4576,12 @@ module mosaic_core (
   // will not publish without it, so a quota is never committed over live state.
   assign lane_ack = (vec_state_q == VEC_IDLE) && !vec_valid_q && !vec_wb_pending_q;
 
-  mosaic_lane_broker u_lane_broker (
+  mosaic_lane_broker #(
+      // I-084: the out-of-reset share, named here so the number the
+      // equal-resource comparison reads (`o_lane_quota_reset`) is the number the
+      // broker starts at.
+      .QUOTA_RESET (CORE_LANE_QUOTA_MAX)
+  ) u_lane_broker (
       .clk             (clk),
       .rst             (rst),
       .req_valid_i     (lane_quota_req_i),
@@ -4548,7 +4604,9 @@ module mosaic_core (
       .o_ack_ctr       (lane_ack_ctr),
       .o_req_mid_macro_ctr (lane_req_mid_macro_ctr),
       .o_pub_mid_macro_ctr (lane_pub_mid_macro_ctr),
-      .o_abort_ctr     (lane_abort_ctr)
+      .o_abort_ctr     (lane_abort_ctr),
+      .o_quota_max     (lane_quota_max),
+      .o_quota_reset   (lane_quota_reset)
   );
 
   // The per-macro lane plan: the quota in force when the macro *launched*. It is
@@ -4594,6 +4652,17 @@ module mosaic_core (
   assign o_lane_req_mid_macro_ctr = lane_req_mid_macro_ctr;
   assign o_lane_pub_mid_macro_ctr = lane_pub_mid_macro_ctr;
   assign o_lane_abort_ctr    = lane_abort_ctr;
+  // I-084 evidence. `o_vec_lsu_merge_ctr` is the coalescer's own transaction
+  // reduction (the elements it removed from the request stream); the rest are
+  // the elaboration's resource counts, single-sourced from the localparams
+  // above and the broker's own budget ports.
+  assign o_vec_lsu_merge_ctr      = vec_lsu_merge_ctr;
+  assign o_lane_quota_max         = lane_quota_max;
+  assign o_lane_quota_reset       = lane_quota_reset;
+  assign o_geom_prf_banks         = 32'(CORE_BANKS);
+  assign o_geom_cache_line_bytes  = 32'(CORE_CACHE_LINE_BYTES);
+  assign o_geom_cache_sets        = 32'(CORE_CACHE_SETS);
+  assign o_geom_cache_ways        = 32'(CORE_CACHE_WAYS);
 
   // The vector-state write predicate for mstatus.VS. It is recorded per ROB slot
   // at allocation (like the FP FS predicate) and read when that slot retires, so
@@ -6549,8 +6618,8 @@ module mosaic_core (
   // served from a stale line (see the report's "not covered").
   mosaic_l1_cache_path #(
       .IS_FETCH      (1'b0),
-      .LINE_BYTES    (32),
-      .SETS          (8),
+      .LINE_BYTES    (CORE_CACHE_LINE_BYTES),
+      .SETS          (CORE_CACHE_SETS),
       .ADDR_WIDTH    (64),
       .CPU_DATA_WIDTH(64),
       .ID_W          (1),

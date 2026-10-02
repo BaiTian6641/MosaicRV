@@ -1994,6 +1994,9 @@
   },
   "perf.equal_resource_compare": {
    "task": "I-084",
+   "profiles": [
+    "p1"
+   ],
    "top": "mosaic_core_tb",
    "rtl": [
     "rtl/core/mosaic_pkg.sv",

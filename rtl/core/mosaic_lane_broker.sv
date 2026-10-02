@@ -104,7 +104,15 @@ module mosaic_lane_broker #(
     output logic [31:0]      o_ack_ctr,
     output logic [31:0]      o_req_mid_macro_ctr,
     output logic [31:0]      o_pub_mid_macro_ctr,
-    output logic [31:0]      o_abort_ctr
+    output logic [31:0]      o_abort_ctr,
+    // I-084: the *budget* this broker shares out, as opposed to the share in
+    // force (`o_quota`). The equal-resource comparison in
+    // sim/unit/tb_core_perf.cpp must state that the lane budget is identical in
+    // every configuration, and the budget is this broker's widest legal share,
+    // so it is read from the broker rather than restated by the harness. Both
+    // are constants of the elaboration, not state.
+    output logic [3:0]       o_quota_max,
+    output logic [3:0]       o_quota_reset
 );
 
   // The FSM's generation and count widths are its own `localparam`s, derived
@@ -234,6 +242,8 @@ module mosaic_lane_broker #(
   assign o_req_mid_macro_ctr = req_mid_macro_ctr;
   assign o_pub_mid_macro_ctr = pub_mid_macro_ctr;
   assign o_abort_ctr     = fsm_abort_ctr;
+  assign o_quota_max     = QUOTA_MAX;
+  assign o_quota_reset   = QUOTA_RESET;
 
   always_ff @(posedge clk) begin
     if (rst) begin
