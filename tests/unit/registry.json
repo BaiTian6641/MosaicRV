@@ -1721,8 +1721,7 @@
     "sim/unit/tb_soc.cpp"
    ],
    "max_cycles": 200000,
-   "seed": 1,
-   "pending": true
+   "seed": 1
   },
   "rvv.descriptor_legality": {
    "task": "I-051",

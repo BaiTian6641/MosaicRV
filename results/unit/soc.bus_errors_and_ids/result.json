@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "case": "soc.bus_errors_and_ids",
+  "verdict": "PASS",
+  "detail": "accepted=15 normal=14 error=1 decerr=1 slverr=0 rx_pop=4 tx=3 exit=1 cycles=187",
+  "seed": 1,
+  "max_cycles": 200000,
+  "checks": 48,
+  "failures": 0,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-02T10:57:02Z",
+  "first_mismatch": ""
+}

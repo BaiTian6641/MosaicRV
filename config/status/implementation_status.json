@@ -63,7 +63,8 @@
     "V-043",
     "I-043",
     "I-050",
-    "I-051"
+    "I-051",
+    "I-047"
   ],
   "evidence": {
     "I-001": {
@@ -771,6 +772,17 @@
       "verdict": "PASS",
       "notes": "The RVV descriptor and profile freeze -- the entry point of the vector chain. Case PASS from a clean build: 336 checks over 9284 enumerated combinations (2628 legal, 6588 illegal and rejected), 28 cycles, at VLEN=128 / ELEN=64 as the plan fixes them. The descriptor carries macro identity, an element bitmap and fault progress rather than one ROB entry per element, which is the card's rule and the reason vector work can exist in this machine at all: a 128-bit operation is one macro with a progress bitmap, not 16 uops fighting for ROB entries. Three mutants each exit 1 with a named first failure and a recorded hash: ILLEGAL_ACCEPTED (an illegal EEW/EMUL/SEW/overlap combination executing), LOSE_PROGRESS (a descriptor losing element progress, which would silently truncate a vector operation) and LANE_VLEN (a lane-count change altering the architectural VLEN -- the card's explicit fail mode, and the property the project's whole 'one hart keeps its architectural state across lane partitioning' claim rests on). The module is profile-independent: the same shipping binary hash was produced for p0 and p2, and the case passes under both. ACT4 was re-run and stays 127/127 (act_commit 96493a91...), and six memory/core cases were re-run green. SCOPE, stated by the lane: this is a module-level package -- the descriptor is NOT wired into the core or the LSU endpoint, and the vector datapaths (I-052..I-059) do not exist; deferred matrix rows are the vf4/vf8 extension ratios, segment (nf) and indexed address-group accesses, and fractional-LMUL field progress; vma/vta are not legality inputs; and only one descriptor exists (chaining is I-058). File hashes for the module, wrapper, driver and control runner are recorded in the report, as are the three mutant hashes.",
       "report": "results/reports/I-051-rvv-descriptor.md"
+    },
+    "I-047": {
+      "cases": [
+        "soc.bus_errors_and_ids"
+      ],
+      "commands": [
+        "python3 tools/run_unit.py --profile p0 --case soc.bus_errors_and_ids"
+      ],
+      "verdict": "PASS",
+      "notes": "The SoC interconnect and error completion -- the first REAL device implementations, where the memory map, UART, timer and interrupt wiring had until now existed only inside testbench models. Case PASS from a clean build under p0 and p1: 48 checks, 187 cycles, with the RESULT line carrying the counts (accepted=15 normal=14 error=1 decerr=1 slverr=0, 4 device pops, 3 transmits, 1 exit). THE ACCEPTANCE RULE IS THE CONSERVATION IDENTITY and it is checked every cycle: every accepted request receives exactly one completion, normal or error -- which is precisely what the card's fail mode ('an AXI response error is dropped and the ROB waits for ever') looks like when it happens. THE ERROR MAPPING IS SPECIFIED rather than left to circumstance: an unmapped address produces DECERR (err=2) and involves no slave; a peripheral refusal -- a ROM write, a write into the read-only harness window, an unmodelled or misaligned device register, an AMO to a device -- produces SLVERR (err=1) with no side effect; both are delivered as the memory response's fault bit, which the LSU endpoint maps to a load access fault (5) or a store access fault (7) by the access's own write-enable. Four mutants each exit 1 with a named first failure: DROP_ERROR (the card's fail mode), ID_SWAP (a response delivered to the wrong requester), STROBE_DROP (a narrow write losing its byte enables) and DUP_COMPLETE (a duplicated completion). Nine cases were re-run green, including the whole corpus sweep, MMIO exactly-once, the memory cases, and ACT4 which stays 127/127. SCOPE, stated by the lane: this is an additive module-level package -- rtl/soc/mosaic_soc.sv is a single self-contained module instantiated only by its own testbench, and it is NOT wired into the LSU endpoint or the core (that integration is separate work). It is a local bus with the properties the card requires (ID, strobes, backpressure, error completions) rather than a full AXI implementation: one outstanding transaction per slave, MAX_OUTSTANDING=4, no bursts and no separate channels. There is no PLIC (raw device interrupt lines only). The peripheral register map is V-019's, newly implemented in RTL, and the three existing device models are recorded as disagreeing rather than silently reconciled. mtime is a free-running counter with no timebase, write path or cross-domain synchronisation; the UART is a byte pipe without baud, framing or overrun; partial non-contiguous strobes are honoured but no core path drives them; there is no ECC or RAM collision matrix; and the campaign is directed rather than randomised.",
+      "report": "results/reports/I-047-soc.md"
     }
   },
   "blocked_tasks": {},

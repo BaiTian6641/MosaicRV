@@ -289,6 +289,16 @@ module mosaic_soc #(
   localparam logic [63:0] HARN_ID        = 64'h00;
   localparam logic [31:0] HARN_ID_VALUE  = 32'h54455354;  // "TEST"
 
+  // A negative-control switch: when set, every byte-strobe check is bypassed and
+  // a write merges all of its bytes. Shipping builds pass STROBE_ALWAYS = 0.
+`ifdef MOSAIC_SOC_MUTANT_STROBE_DROP
+  localparam bit STROBE_ALWAYS = 1'b1;
+  localparam bit LANE_IGNORE   = 1'b1;
+`else
+  localparam bit STROBE_ALWAYS = 1'b0;
+  localparam bit LANE_IGNORE   = 1'b0;
+`endif
+
   // ------------------------------------------------------------- helpers
   // Containment by wrapped subtraction: an address below the base cannot be
   // mistaken for one inside, whatever the base is.
@@ -385,8 +395,8 @@ module mosaic_soc #(
   // Peripheral state.
   logic [31:0] uart_scratch_q;
   logic [31:0] rx_mem [RX_DEPTH];
-  logic [3:0]  rx_wr_q;
-  logic [3:0]  rx_rd_q;
+  logic [2:0]  rx_wr_q;
+  logic [2:0]  rx_rd_q;
   logic [3:0]  rx_count_q;
   logic [31:0] msip_q;
   logic [63:0] mtime_q;
@@ -405,7 +415,7 @@ module mosaic_soc #(
   logic             accept_c;
   logic             accept_m0_c;
 
-  always_comb begin
+  always_comb begin : free_slot
     free_c     = 1'b0;
     free_idx_c = '0;
     for (int unsigned i = 0; i < MAX_OUTSTANDING; i++) begin
@@ -420,7 +430,7 @@ module mosaic_soc #(
   // the round-robin bit -- never on the accepted requester's own ready, and
   // never on a slave. There is no path from an acceptance back to its own
   // offer, so no combinational ready loop exists here.
-  always_comb begin
+  always_comb begin : accept_arb
     accept_c    = 1'b0;
     accept_m0_c = 1'b0;
     if (free_c) begin
@@ -449,7 +459,7 @@ module mosaic_soc #(
   logic            acc_amo_c;
   logic [ID_W-1:0] acc_id_c;
 
-  always_comb begin
+  always_comb begin : accept_payload
     acc_we_c    = accept_m0_c ? m0_req_we_i    : m1_req_we_i;
     acc_addr_c  = accept_m0_c ? m0_req_addr_i  : m1_req_addr_i;
     acc_size_c  = accept_m0_c ? m0_req_size_i  : m1_req_size_i;
@@ -463,7 +473,7 @@ module mosaic_soc #(
   logic       dec_hit_c;
   logic [2:0] dec_slv_c;
 
-  always_comb begin
+  always_comb begin : decode
     logic in_rom, in_uart, in_harness, in_clint, in_msip, in_ram;
     in_rom     = in_region(acc_addr_c, ROM_BASE,   ROM_SIZE);
     in_uart    = in_region(acc_addr_c, UART_BASE,  UART_SIZE);
@@ -486,7 +496,7 @@ module mosaic_soc #(
   logic             sl_disp_c [NSLV];
   logic [IDX_W-1:0] sl_disp_idx_c [NSLV];
 
-  always_comb begin
+  always_comb begin : dispatch
     for (int unsigned s = 0; s < NSLV; s++) begin
       sl_disp_c[s]     = 1'b0;
       sl_disp_idx_c[s] = '0;
@@ -512,7 +522,7 @@ module mosaic_soc #(
   logic [ID_W-1:0] sl_d_id_c    [NSLV];
   logic [3:0]      sl_d_nbytes_c [NSLV];
 
-  always_comb begin
+  always_comb begin : dispatch_payload
     for (int unsigned s = 0; s < NSLV; s++) begin
       sl_d_we_c[s]     = txn_we[sl_disp_idx_c[s]];
       sl_d_addr_c[s]   = txn_addr[sl_disp_idx_c[s]];
@@ -540,12 +550,29 @@ module mosaic_soc #(
   logic [3:0] clint_mtime_off_c, clint_mtimecmp_off_c, clint_exit_off_c;
   logic [3:0] harn_off_c, msip_off_c;
 
+  // The byte lane and register offset a device write actually uses. The strobe
+  // mutant forces both to zero, which is the "the peripheral shifts the data
+  // instead of the strobes selecting lanes" defect the LSU endpoint's header
+  // names: a byte store into a wide register then lands on the wrong byte.
+  logic [2:0] uart_wlane_c, clint_wlane_c, msip_wlane_c;
+  logic [3:0] uart_woff_c, clint_woff_c, exit_woff_c, msip_woff_c;
+
+  always_comb begin : write_lane
+    uart_wlane_c  = LANE_IGNORE ? 3'd0 : sl_d_addr_c[SLV_UART][2:0];
+    clint_wlane_c = LANE_IGNORE ? 3'd0 : sl_d_addr_c[SLV_CLINT][2:0];
+    msip_wlane_c  = LANE_IGNORE ? 3'd0 : sl_d_addr_c[SLV_MSIP][2:0];
+    uart_woff_c   = LANE_IGNORE ? 4'd0 : uart_scratch_off_c;
+    clint_woff_c  = LANE_IGNORE ? 4'd0 : clint_mtimecmp_off_c;
+    exit_woff_c   = LANE_IGNORE ? 4'd0 : clint_exit_off_c;
+    msip_woff_c   = LANE_IGNORE ? 4'd0 : msip_off_c;
+  end
+
   logic uart_sel_rx_c, uart_sel_tx_c, uart_sel_status_c, uart_sel_scratch_c;
   logic clint_sel_mtime_c, clint_sel_mtimecmp_c, clint_sel_exit_c;
   logic harn_sel_id_c;
   logic uart_status_value_c;
 
-  always_comb begin
+  always_comb begin : slave_rsp
     uart_rx_off_c      = sl_d_addr_c[SLV_UART][3:0]  - UART_RX[3:0];
     uart_status_off_c  = sl_d_addr_c[SLV_UART][3:0]  - UART_STATUS[3:0];
     uart_scratch_off_c = sl_d_addr_c[SLV_UART][3:0]  - UART_SCRATCH[3:0];
@@ -617,7 +644,7 @@ module mosaic_soc #(
         if (sl_d_we_c[SLV_UART]) begin
           sl_err_c[SLV_UART] = ERR_SLVERR;
         end else begin
-          sl_rdata_c[SLV_UART] = lane_extract({31'b0, uart_status_value_c},
+          sl_rdata_c[SLV_UART] = lane_extract({63'b0, uart_status_value_c},
                                               uart_status_off_c, sl_d_size_c[SLV_UART],
                                               sl_d_addr_c[SLV_UART][2:0]);
         end
@@ -672,7 +699,7 @@ module mosaic_soc #(
 
     // --- MSIP (p1). A 32-bit word: a read returns the pending bit.
     if (sl_disp_c[SLV_MSIP] && !msip_write_c) begin
-      sl_rdata_c[SLV_MSIP] = lane_extract({32'd0, msip_q[0]}, msip_off_c,
+      sl_rdata_c[SLV_MSIP] = lane_extract({32'd0, msip_q}, msip_off_c,
                                           sl_d_size_c[SLV_MSIP],
                                           sl_d_addr_c[SLV_MSIP][2:0]);
     end
@@ -699,7 +726,7 @@ module mosaic_soc #(
   endfunction
 `endif
 
-  always_comb begin
+  always_comb begin : deliver
     for (int unsigned m = 0; m < 2; m++) begin
       dlv_valid_c[m] = 1'b0;
       dlv_idx_c[m]   = '0;
@@ -767,8 +794,8 @@ module mosaic_soc #(
       slv_err_ctr_q    <= 32'd0;
       id_mismatch_q    <= 1'b0;
       uart_scratch_q   <= 32'd0;
-      rx_wr_q          <= 4'd0;
-      rx_rd_q          <= 4'd0;
+      rx_wr_q          <= 3'd0;
+      rx_rd_q          <= 3'd0;
       rx_count_q       <= 4'd0;
       msip_q           <= 32'd0;
       mtime_q          <= 64'd0;
@@ -829,19 +856,12 @@ module mosaic_soc #(
       // RAM. A write merges only the strobed lanes; that is what makes a narrow
       // store into a wide memory word a narrow store.
       if (sl_disp_c[SLV_RAM] && sl_d_we_c[SLV_RAM]) begin
-`ifdef MOSAIC_SOC_MUTANT_STROBE_DROP
         for (int unsigned b = 0; b < 8; b++) begin
-          ram[sl_d_addr_c[SLV_RAM][3 +: RAM_IDX_W]][8*b +: 8] <=
-              sl_d_wdata_c[SLV_RAM][8*b +: 8];
-        end
-`else
-        for (int unsigned b = 0; b < 8; b++) begin
-          if (sl_d_wstrb_c[SLV_RAM][b]) begin
+          if (STROBE_ALWAYS || sl_d_wstrb_c[SLV_RAM][b]) begin
             ram[sl_d_addr_c[SLV_RAM][3 +: RAM_IDX_W]][8*b +: 8] <=
                 sl_d_wdata_c[SLV_RAM][8*b +: 8];
           end
         end
-`endif
       end
 
       // ROM load port.
@@ -852,10 +872,10 @@ module mosaic_soc #(
       // UART RX queue: push from the serial side, pop on an RX read dispatch.
       if (uart_rx_push_i && (rx_count_q != RX_DEPTH_V)) begin
         rx_mem[rx_wr_q] <= {24'd0, uart_rx_data_i};
-        rx_wr_q         <= rx_wr_q + 4'd1;
+        rx_wr_q         <= rx_wr_q + 3'd1;
       end
       if (uart_rx_pop_c) begin
-        rx_rd_q           <= rx_rd_q + 4'd1;
+        rx_rd_q           <= rx_rd_q + 3'd1;
         uart_rx_pop_ctr_q <= uart_rx_pop_ctr_q + 32'd1;
       end
       if (uart_rx_push_i && (rx_count_q != RX_DEPTH_V) && !uart_rx_pop_c) begin
@@ -870,7 +890,7 @@ module mosaic_soc #(
         uart_tx_valid_q <= 1'b1;
         uart_tx_ctr_q   <= uart_tx_ctr_q + 32'd1;
         for (int unsigned b = 0; b < 8; b++) begin
-          if (sl_d_wstrb_c[SLV_UART][b]) begin
+          if (STROBE_ALWAYS || sl_d_wstrb_c[SLV_UART][b]) begin
             uart_tx_data_q <= sl_d_wdata_c[SLV_UART][8*b +: 8];
           end
         end
@@ -884,9 +904,9 @@ module mosaic_soc #(
           && !sl_d_amo_c[SLV_UART]) begin
         for (int unsigned i = 0; i < 8; i++) begin
           if (i[3:0] < sl_d_nbytes_c[SLV_UART]) begin
-            if (sl_d_wstrb_c[SLV_UART][sl_d_addr_c[SLV_UART][2:0] + i[2:0]]) begin
-              uart_scratch_q[(uart_scratch_off_c + i[3:0])*8 +: 8] <=
-                  sl_d_wdata_c[SLV_UART][(sl_d_addr_c[SLV_UART][2:0] + i[2:0])*8 +: 8];
+            if (STROBE_ALWAYS || sl_d_wstrb_c[SLV_UART][uart_wlane_c + i[2:0]]) begin
+              uart_scratch_q[(uart_woff_c + i[3:0])*8 +: 8] <=
+                  sl_d_wdata_c[SLV_UART][(uart_wlane_c + i[2:0])*8 +: 8];
             end
           end
         end
@@ -896,9 +916,9 @@ module mosaic_soc #(
           && !sl_d_amo_c[SLV_CLINT]) begin
         for (int unsigned i = 0; i < 8; i++) begin
           if (i[3:0] < sl_d_nbytes_c[SLV_CLINT]) begin
-            if (sl_d_wstrb_c[SLV_CLINT][sl_d_addr_c[SLV_CLINT][2:0] + i[2:0]]) begin
-              mtimecmp_q[(clint_mtimecmp_off_c + i[3:0])*8 +: 8] <=
-                  sl_d_wdata_c[SLV_CLINT][(sl_d_addr_c[SLV_CLINT][2:0] + i[2:0])*8 +: 8];
+            if (STROBE_ALWAYS || sl_d_wstrb_c[SLV_CLINT][clint_wlane_c + i[2:0]]) begin
+              mtimecmp_q[(clint_woff_c + i[3:0])*8 +: 8] <=
+                  sl_d_wdata_c[SLV_CLINT][(clint_wlane_c + i[2:0])*8 +: 8];
             end
           end
         end
@@ -909,9 +929,9 @@ module mosaic_soc #(
         clint_exit_ctr_q <= clint_exit_ctr_q + 32'd1;
         for (int unsigned i = 0; i < 8; i++) begin
           if (i[3:0] < sl_d_nbytes_c[SLV_CLINT]) begin
-            if (sl_d_wstrb_c[SLV_CLINT][sl_d_addr_c[SLV_CLINT][2:0] + i[2:0]]) begin
-              exit_code_q[(clint_exit_off_c + i[3:0])*8 +: 8] <=
-                  sl_d_wdata_c[SLV_CLINT][(sl_d_addr_c[SLV_CLINT][2:0] + i[2:0])*8 +: 8];
+            if (STROBE_ALWAYS || sl_d_wstrb_c[SLV_CLINT][clint_wlane_c + i[2:0]]) begin
+              exit_code_q[(exit_woff_c + i[3:0])*8 +: 8] <=
+                  sl_d_wdata_c[SLV_CLINT][(clint_wlane_c + i[2:0])*8 +: 8];
             end
           end
         end
@@ -920,9 +940,9 @@ module mosaic_soc #(
       if (msip_write_c) begin
         for (int unsigned i = 0; i < 8; i++) begin
           if (i[3:0] < sl_d_nbytes_c[SLV_MSIP]) begin
-            if (sl_d_wstrb_c[SLV_MSIP][sl_d_addr_c[SLV_MSIP][2:0] + i[2:0]]) begin
-              msip_q[(msip_off_c + i[3:0])*8 +: 8] <=
-                  sl_d_wdata_c[SLV_MSIP][(sl_d_addr_c[SLV_MSIP][2:0] + i[2:0])*8 +: 8];
+            if (STROBE_ALWAYS || sl_d_wstrb_c[SLV_MSIP][msip_wlane_c + i[2:0]]) begin
+              msip_q[(msip_woff_c + i[3:0])*8 +: 8] <=
+                  sl_d_wdata_c[SLV_MSIP][(msip_wlane_c + i[2:0])*8 +: 8];
             end
           end
         end
@@ -962,7 +982,9 @@ module mosaic_soc #(
         txn_done[dlv_idx_c[0]] <= 1'b0;
         if (dlv_err0_c) begin
           completed_err_q <= completed_err_q + 32'd1;
-          slv_err_ctr_q   <= slv_err_ctr_q + 32'd1;
+          if (txn_err[dlv_idx_c[0]] == ERR_SLVERR) begin
+            slv_err_ctr_q <= slv_err_ctr_q + 32'd1;
+          end
         end else begin
           completed_norm_q <= completed_norm_q + 32'd1;
         end
@@ -976,7 +998,9 @@ module mosaic_soc #(
         txn_done[dlv_idx_c[1]] <= 1'b0;
         if (dlv_err1_c) begin
           completed_err_q <= completed_err_q + 32'd1;
-          slv_err_ctr_q   <= slv_err_ctr_q + 32'd1;
+          if (txn_err[dlv_idx_c[1]] == ERR_SLVERR) begin
+            slv_err_ctr_q <= slv_err_ctr_q + 32'd1;
+          end
         end else begin
           completed_norm_q <= completed_norm_q + 32'd1;
         end
