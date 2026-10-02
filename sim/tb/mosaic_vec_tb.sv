@@ -263,6 +263,9 @@ module mosaic_vec_tb (
     output logic                       lsu_trap_o,
     output logic [6:0]                 lsu_trap_elem_o,
     output logic [7:0]                 lsu_elems_o,
+    output logic [3:0]                 lsu_trap_code_o,
+    output logic                       lsu_stopped_o,
+    output logic [6:0]                 lsu_stop_elem_o,
     output logic [31:0]                lsu_req_ctr_o,
     output logic                       lsu_mem_req_valid_o,
     input  logic                       lsu_mem_req_ready_i,
@@ -278,10 +281,102 @@ module mosaic_vec_tb (
     input  logic [6:0]                 lsu_mem_rsp_elem_i,
     input  logic [3:0]                 lsu_mem_rsp_field_i,
     input  logic                       lsu_mem_rsp_fault_i,
-    input  logic [63:0]                lsu_mem_rsp_rdata_i
+    input  logic [63:0]                lsu_mem_rsp_rdata_i,
+
+    // ------------- vector floating-point unit (I-055) ----------------------
+    /* verilator lint_off UNUSEDSIGNAL */
+    input  logic [9:0]                 fp_caps_i,
+    input  logic                       fp_exec_valid_i,
+    input  logic [4:0]                 fp_family_i,
+    input  logic [3:0]                 fp_op_i,
+    input  logic [1:0]                 fp_form_i,
+    input  logic [4:0]                 fp_vd_i,
+    input  logic [4:0]                 fp_vs1_i,
+    input  logic [4:0]                 fp_vs2_i,
+    input  logic [63:0]                fp_scalar_i,
+    input  logic                       fp_mask_en_i,
+    input  logic [2:0]                 fp_rm_i,
+    input  logic [2:0]                 fp_frm_i,
+    input  logic                       fp_commit_valid_i,
+    input  logic                       fp_flush_i,
+    /* verilator lint_on UNUSEDSIGNAL */
+    output logic                       fp_busy_o,
+    output logic                       fp_done_o,
+    output logic                       fp_illegal_o,
+    output logic                       fp_trap_o,
+    output logic [6:0]                 fp_trap_elem_o,
+    output logic [7:0]                 fp_elems_o,
+    output logic [7:0]                 fp_cur_o,
+    output logic [63:0]                fp_acc_o,
+    output logic [7:0]                 fp_writes_o,
+    output logic [4:0]                 fp_fflags_pending_o,
+    output logic [4:0]                 fp_fflags_arch_o,
+    output logic                       fp_commit_o,
+    output logic [4:0]                 fp_commit_fflags_o,
+    output logic [15:0]                fp_commit_ctr_o,
+    output logic [15:0]                fp_flush_ctr_o,
+    output logic [15:0]                fp_spurious_ctr_o,
+    output logic [15:0]                fp_inactive_flag_ctr_o,
+    output logic                       fp_macro_pending_o,
+    output logic                       fp_flag_trace_valid_o,
+    output logic [7:0]                 fp_flag_trace_elem_o,
+    output logic [4:0]                 fp_flag_trace_flags_o,
+    output logic [31:0]                fp_fpu_issues_o,
+    output logic [7:0]                 fp_fpu_latency_o,
+    output logic [7:0]                 fp_last_latency_o,
+
+    // ------------- vector restart controller (I-057) -----------------------
+    // The controller observes the packetizer and the descriptor; the case owns
+    // `rst_bind_i` to take the descriptor's progress ports away from the driver.
+    /* verilator lint_off UNUSEDSIGNAL */
+    input  logic                       rst_bind_i,
+    input  logic                       rst_exec_valid_i,
+    input  logic [3:0]                 rst_exec_mode_i,
+    input  logic                       rst_exec_we_i,
+    input  logic                       rst_exec_fof_i,
+    input  logic [3:0]                 rst_exec_nf_i,
+    input  logic                       rst_intr_i,
+    input  logic [3:0]                 lsu_mem_rsp_fault_code_i,
+    input  logic                       desc_fault_clear,
+    /* verilator lint_on UNUSEDSIGNAL */
+    output logic                       rst_elem_done_valid_o,
+    output logic [6:0]                 rst_elem_done_index_o,
+    output logic                       rst_fault_valid_o,
+    output logic [6:0]                 rst_fault_elem_o,
+    output logic [3:0]                 rst_fault_code_o,
+    output logic                       o_rst_busy_o,
+    output logic                       o_rst_resolved_o,
+    output logic                       o_rst_illegal_o,
+    output logic                       o_rst_trap_o,
+    output logic [6:0]                 o_rst_vstart_o,
+    output logic [3:0]                 o_rst_trap_code_o,
+    output logic                       o_rst_vl_write_o,
+    output logic [7:0]                 o_rst_vl_new_o,
+    output logic                       o_rst_fof_trim_o,
+    output logic                       o_rst_complete_o,
+    output logic                       o_rst_retire_ok_o,
+    output logic                       o_rst_restart_ready_o,
+    output logic [6:0]                 o_rst_restart_vstart_o,
+    output logic [7:0]                 o_rst_elems_committed_o,
+    output logic                       o_rst_prefix_agree_o
 );
 
   logic [127:0] elem_bitmap;
+
+  // I-057 descriptor binding. When the restart case owns the progress ports
+  // (`rst_bind_i`), the restart controller drives the descriptor's element and
+  // fault progress and reads the bitmap/prefix back; otherwise the driver drives
+  // them directly (the descriptor-legality case).
+  logic        desc_elem_done_valid;
+  logic [6:0]  desc_elem_done_index;
+  logic        desc_fault_valid;
+  logic [6:0]  desc_fault_elem;
+  logic [3:0]  desc_fault_code;
+  assign desc_elem_done_valid = rst_bind_i ? rst_elem_done_valid_o : elem_done_valid;
+  assign desc_elem_done_index = rst_bind_i ? rst_elem_done_index_o : elem_done_index;
+  assign desc_fault_valid     = rst_bind_i ? rst_fault_valid_o     : fault_valid;
+  assign desc_fault_elem      = rst_bind_i ? rst_fault_elem_o      : fault_elem;
+  assign desc_fault_code      = rst_bind_i ? rst_fault_code_o      : fault_code;
 
   mosaic_vec_desc #(
       .VLEN        (128),
@@ -327,12 +422,13 @@ module mosaic_vec_tb (
       .alloc_rob_gen_i       (alloc_rob_gen),
       .alloc_uop_index_i     (alloc_uop_index),
 
-      .elem_done_valid_i     (elem_done_valid),
-      .elem_done_index_i     (elem_done_index),
+      .elem_done_valid_i     (desc_elem_done_valid),
+      .elem_done_index_i     (desc_elem_done_index),
 
-      .fault_valid_i         (fault_valid),
-      .fault_elem_i          (fault_elem),
-      .fault_code_i          (fault_code),
+      .fault_valid_i         (desc_fault_valid),
+      .fault_elem_i          (desc_fault_elem),
+      .fault_code_i          (desc_fault_code),
+      .fault_clear_i         (desc_fault_clear),
 
       .release_i             (desc_release),
 
@@ -508,6 +604,34 @@ module mosaic_vec_tb (
   logic [63:0] lsu_wr_data;
   logic        lsu_wr_gnt;
 
+  // I-057 restart controller wires
+  logic        rst_stop_w;
+  logic [3:0]  lsu_trap_code_w;
+  logic        lsu_stopped_w;
+  logic [6:0]  lsu_stop_elem_w;
+
+  assign lsu_trap_code_o = lsu_trap_code_w;
+  assign lsu_stopped_o   = lsu_stopped_w;
+  assign lsu_stop_elem_o = lsu_stop_elem_w;
+
+  logic        fp_rd_valid;
+  logic [4:0]  fp_rd_base;
+  logic [6:0]  fp_rd_elem;
+  logic [2:0]  fp_rd_sew;
+  logic [3:0]  fp_rd_lmul;
+  logic [15:0] fp_rd_tag;
+  logic        fp_rd_gnt;
+  logic        fp_rd_rsp_valid;
+  logic [15:0] fp_rd_rsp_tag;
+  logic [63:0] fp_rd_rsp_data;
+  logic        fp_wr_valid;
+  logic [4:0]  fp_wr_base;
+  logic [6:0]  fp_wr_elem;
+  logic [2:0]  fp_wr_sew;
+  logic [3:0]  fp_wr_lmul;
+  logic [63:0] fp_wr_data;
+  logic        fp_wr_gnt;
+
   always_comb begin
     vrf_rd_valid_f          = '0;
     vrf_rd_base_f           = '0;
@@ -523,30 +647,42 @@ module mosaic_vec_tb (
     vrf_wr_data_f           = '0;
 
     vrf_rd_valid_f[0]       = mem_owner_i ? mem_rd_valid_i
-                            : (lsu_busy_o ? lsu_rd_valid : alu_rd_valid);
+                            : (lsu_busy_o ? lsu_rd_valid
+                            : (fp_busy_o ? fp_rd_valid : alu_rd_valid));
     vrf_rd_base_f[4:0]      = mem_owner_i ? mem_rd_base_i
-                            : (lsu_busy_o ? lsu_rd_base : alu_rd_base);
+                            : (lsu_busy_o ? lsu_rd_base
+                            : (fp_busy_o ? fp_rd_base : alu_rd_base));
     vrf_rd_elem_f[6:0]      = mem_owner_i ? mem_rd_elem_i
-                            : (lsu_busy_o ? lsu_rd_elem : alu_rd_elem);
+                            : (lsu_busy_o ? lsu_rd_elem
+                            : (fp_busy_o ? fp_rd_elem : alu_rd_elem));
     vrf_rd_sew_f[2:0]       = mem_owner_i ? mem_rd_sew_i
-                            : (lsu_busy_o ? lsu_rd_sew : alu_rd_sew);
+                            : (lsu_busy_o ? lsu_rd_sew
+                            : (fp_busy_o ? fp_rd_sew : alu_rd_sew));
     vrf_rd_lmul_f[3:0]      = mem_owner_i ? mem_rd_lmul_i
-                            : (lsu_busy_o ? lsu_rd_lmul : alu_rd_lmul);
+                            : (lsu_busy_o ? lsu_rd_lmul
+                            : (fp_busy_o ? fp_rd_lmul : alu_rd_lmul));
     vrf_rd_tag_f[15:0]      = mem_owner_i ? mem_rd_tag_i
-                            : (lsu_busy_o ? lsu_rd_tag : alu_rd_tag);
+                            : (lsu_busy_o ? lsu_rd_tag
+                            : (fp_busy_o ? fp_rd_tag : alu_rd_tag));
 
     vrf_wr_valid_f[0]       = mem_owner_i ? mem_wr_valid_i
-                            : (lsu_busy_o ? lsu_wr_valid : alu_wr_valid);
+                            : (lsu_busy_o ? lsu_wr_valid
+                            : (fp_busy_o ? fp_wr_valid : alu_wr_valid));
     vrf_wr_base_f[4:0]      = mem_owner_i ? mem_wr_base_i
-                            : (lsu_busy_o ? lsu_wr_base : alu_wr_base);
+                            : (lsu_busy_o ? lsu_wr_base
+                            : (fp_busy_o ? fp_wr_base : alu_wr_base));
     vrf_wr_elem_f[6:0]      = mem_owner_i ? mem_wr_elem_i
-                            : (lsu_busy_o ? lsu_wr_elem : alu_wr_elem);
+                            : (lsu_busy_o ? lsu_wr_elem
+                            : (fp_busy_o ? fp_wr_elem : alu_wr_elem));
     vrf_wr_sew_f[2:0]       = mem_owner_i ? mem_wr_sew_i
-                            : (lsu_busy_o ? lsu_wr_sew : alu_wr_sew);
+                            : (lsu_busy_o ? lsu_wr_sew
+                            : (fp_busy_o ? fp_wr_sew : alu_wr_sew));
     vrf_wr_lmul_f[3:0]      = mem_owner_i ? mem_wr_lmul_i
-                            : (lsu_busy_o ? lsu_wr_lmul : alu_wr_lmul);
+                            : (lsu_busy_o ? lsu_wr_lmul
+                            : (fp_busy_o ? fp_wr_lmul : alu_wr_lmul));
     vrf_wr_data_f[63:0]     = mem_owner_i ? mem_wr_data_i
-                            : (lsu_busy_o ? lsu_wr_data : alu_wr_data);
+                            : (lsu_busy_o ? lsu_wr_data
+                            : (fp_busy_o ? fp_wr_data : alu_wr_data));
   end
 
   assign alu_rd_gnt       = vrf_rd_gnt_f[0];
@@ -560,6 +696,12 @@ module mosaic_vec_tb (
   assign lsu_rd_rsp_tag   = vrf_rd_rsp_tag_f[15:0];
   assign lsu_rd_rsp_data  = vrf_rd_rsp_data_f[63:0];
   assign lsu_wr_gnt       = vrf_wr_gnt_f[0];
+
+  assign fp_rd_gnt        = vrf_rd_gnt_f[0];
+  assign fp_rd_rsp_valid  = vrf_rd_rsp_valid_f[0];
+  assign fp_rd_rsp_tag    = vrf_rd_rsp_tag_f[15:0];
+  assign fp_rd_rsp_data   = vrf_rd_rsp_data_f[63:0];
+  assign fp_wr_gnt        = vrf_wr_gnt_f[0];
 
   assign mem_rd_gnt_o       = vrf_rd_gnt_f[0];
   assign mem_rd_rsp_valid_o = vrf_rd_rsp_valid_f[0];
@@ -754,6 +896,10 @@ module mosaic_vec_tb (
       .illegal_o          (lsu_illegal_o),
       .trap_o             (lsu_trap_o),
       .trap_elem_o        (lsu_trap_elem_o),
+      .trap_code_o        (lsu_trap_code_w),
+      .stop_i             (rst_stop_w),
+      .stopped_o          (lsu_stopped_w),
+      .stop_elem_o        (lsu_stop_elem_w),
       .elems_o            (lsu_elems_o),
       .req_ctr_o          (lsu_req_ctr_o),
 
@@ -790,7 +936,155 @@ module mosaic_vec_tb (
       .mem_rsp_elem_i     (lsu_mem_rsp_elem_i),
       .mem_rsp_field_i    (lsu_mem_rsp_field_i),
       .mem_rsp_fault_i    (lsu_mem_rsp_fault_i),
+      .mem_rsp_fault_code_i (lsu_mem_rsp_fault_code_i),
       .mem_rsp_rdata_i    (lsu_mem_rsp_rdata_i)
+  );
+
+  // ==========================================================================
+  // I-057: the vector restart controller. It observes the packetizer's
+  // element-granular fault report and boundary stop, binds the descriptor's
+  // element bitmap and fault record, and produces the architectural `vstart`,
+  // the fault-only-first `vl` trim and the retire gate. It owns no storage but
+  // the walk over the elements that took effect.
+  // ==========================================================================
+  mosaic_vec_restart #(
+      .VLEN (128),
+      .ELEN (64)
+  ) u_vec_restart (
+      .clk_i              (clk),
+      .rst_i              (rst),
+
+      .exec_valid_i       (rst_exec_valid_i),
+      .exec_mode_i        (rst_exec_mode_i),
+      .exec_we_i          (rst_exec_we_i),
+      .exec_fof_i         (rst_exec_fof_i),
+      .exec_nf_i          (rst_exec_nf_i),
+
+      .cfg_vtype_i        (cfg_snap_vtype),
+      .cfg_vl_i           (cfg_snap_vl[7:0]),
+      .cfg_vstart_i       (cfg_snap_vstart[6:0]),
+
+      .lsu_busy_i         (lsu_busy_o),
+      .lsu_done_i         (lsu_done_o),
+      .lsu_illegal_i      (lsu_illegal_o),
+      .lsu_trap_i         (lsu_trap_o),
+      .lsu_trap_elem_i    (lsu_trap_elem_o),
+      .lsu_trap_code_i    (lsu_trap_code_w),
+      .lsu_stopped_i      (lsu_stopped_w),
+      .lsu_stop_elem_i    (lsu_stop_elem_w),
+      .lsu_elems_i        (lsu_elems_o),
+
+      .intr_i             (rst_intr_i),
+      .stop_o             (rst_stop_w),
+
+      .elem_done_valid_o  (rst_elem_done_valid_o),
+      .elem_done_index_o  (rst_elem_done_index_o),
+      .fault_valid_o      (rst_fault_valid_o),
+      .fault_elem_o       (rst_fault_elem_o),
+      .fault_code_o       (rst_fault_code_o),
+      .desc_valid_i       (o_valid),
+      .desc_bitmap_i      (elem_bitmap),
+      .desc_prefix_i      (o_prefix),
+
+      .o_busy_o           (o_rst_busy_o),
+      .o_resolved_o       (o_rst_resolved_o),
+      .o_illegal_o        (o_rst_illegal_o),
+      .o_trap_o           (o_rst_trap_o),
+      .o_vstart_o         (o_rst_vstart_o),
+      .o_trap_code_o      (o_rst_trap_code_o),
+      .o_vl_write_o       (o_rst_vl_write_o),
+      .o_vl_new_o         (o_rst_vl_new_o),
+      .o_fof_trim_o       (o_rst_fof_trim_o),
+      .o_complete_o       (o_rst_complete_o),
+      .o_retire_ok_o      (o_rst_retire_ok_o),
+      .o_restart_ready_o  (o_rst_restart_ready_o),
+      .o_restart_vstart_o (o_rst_restart_vstart_o),
+      .o_elems_committed_o (o_rst_elems_committed_o),
+      .o_prefix_agree_o   (o_rst_prefix_agree_o)
+  );
+
+  // ==========================================================================
+  // I-055: the vector floating-point unit. It reuses the tested `mosaic_fpu`
+  // datapath (I-049) behind its tagged handshake -- the same one instance the
+  // scalar `mosaic_fp_unit` consumes -- and shares the single VRF read slot and
+  // write port with the ALU and the LSU through the same driver arbitration
+  // (`mem_owner_i` > LSU busy > FP busy > ALU). Its configuration is the same
+  // I-052 snapshot; the floating-point rounding mode `frm` is a separate input
+  // because it lives in the scalar `fcsr`, not in `vxrm`.
+  // ==========================================================================
+  mosaic_vec_fp #(
+      .VLEN (128),
+      .ELEN (64),
+      .NFAM (10)
+  ) u_vec_fp (
+      .clk_i              (clk),
+      .rst_i              (rst),
+
+      .caps_i             (fp_caps_i),
+
+      .cfg_vtype_i        (cfg_snap_vtype),
+      .cfg_vl_i           (cfg_snap_vl[7:0]),
+      .cfg_vstart_i       (cfg_snap_vstart[6:0]),
+      .cfg_frm_i          (fp_frm_i),
+
+      .exec_valid_i       (fp_exec_valid_i),
+      .exec_family_i      (fp_family_i),
+      .exec_op_i          (fp_op_i),
+      .exec_form_i        (fp_form_i),
+      .exec_vd_i          (fp_vd_i),
+      .exec_vs1_i         (fp_vs1_i),
+      .exec_vs2_i         (fp_vs2_i),
+      .exec_scalar_i      (fp_scalar_i),
+      .exec_mask_en_i     (fp_mask_en_i),
+      .exec_rm_i          (fp_rm_i),
+
+      .commit_valid_i     (fp_commit_valid_i),
+      .flush_i            (fp_flush_i),
+
+      .exec_busy_o        (fp_busy_o),
+      .exec_done_o        (fp_done_o),
+      .exec_illegal_o     (fp_illegal_o),
+      .exec_trap_o        (fp_trap_o),
+      .exec_trap_elem_o   (fp_trap_elem_o),
+      .exec_elems_o       (fp_elems_o),
+      .exec_cur_o         (fp_cur_o),
+      .exec_acc_o         (fp_acc_o),
+      .exec_writes_o      (fp_writes_o),
+
+      .o_fflags_pending_o (fp_fflags_pending_o),
+      .o_fflags_arch_o    (fp_fflags_arch_o),
+      .o_commit_o         (fp_commit_o),
+      .o_commit_fflags_o  (fp_commit_fflags_o),
+      .o_commit_ctr_o     (fp_commit_ctr_o),
+      .o_flush_ctr_o      (fp_flush_ctr_o),
+      .o_spurious_ctr_o   (fp_spurious_ctr_o),
+      .o_inactive_flag_ctr_o (fp_inactive_flag_ctr_o),
+      .o_macro_pending_o  (fp_macro_pending_o),
+      .o_flag_trace_valid_o (fp_flag_trace_valid_o),
+      .o_flag_trace_elem_o  (fp_flag_trace_elem_o),
+      .o_flag_trace_flags_o (fp_flag_trace_flags_o),
+      .o_fpu_issues_o     (fp_fpu_issues_o),
+      .o_fpu_latency_o    (fp_fpu_latency_o),
+      .o_last_latency_o   (fp_last_latency_o),
+
+      .vrf_rd_valid_o     (fp_rd_valid),
+      .vrf_rd_base_o      (fp_rd_base),
+      .vrf_rd_elem_o      (fp_rd_elem),
+      .vrf_rd_sew_o       (fp_rd_sew),
+      .vrf_rd_lmul_o      (fp_rd_lmul),
+      .vrf_rd_tag_o       (fp_rd_tag),
+      .vrf_rd_gnt_i       (fp_rd_gnt),
+      .vrf_rd_rsp_valid_i (fp_rd_rsp_valid),
+      .vrf_rd_rsp_tag_i   (fp_rd_rsp_tag),
+      .vrf_rd_rsp_data_i  (fp_rd_rsp_data),
+
+      .vrf_wr_valid_o     (fp_wr_valid),
+      .vrf_wr_base_o      (fp_wr_base),
+      .vrf_wr_elem_o      (fp_wr_elem),
+      .vrf_wr_sew_o       (fp_wr_sew),
+      .vrf_wr_lmul_o      (fp_wr_lmul),
+      .vrf_wr_data_o      (fp_wr_data),
+      .vrf_wr_gnt_i       (fp_wr_gnt)
   );
 
 

@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "case": "rvv.fp_flags_reduction",
+  "verdict": "FAIL",
+  "detail": "checks=7564 cycles=60263",
+  "seed": 1,
+  "max_cycles": 200000,
+  "checks": 7564,
+  "failures": 503,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-02T14:57:01Z",
+  "first_mismatch": "",
+  "failed_checks": ["fpelem minmax op0 sew64 form0 e0: got 0x0000000000000000 expected 0x7ff0000000000000", "fpelem minmax op0 sew64 form0 e1: got 0x0000000000000000 expected 0x7ff8000000000000", "fpelem minmax op0 sew64 form0 e0: got 0x0000000000000000 expected 0xfff0000000000000", "fpelem minmax op0 sew64 form0 e1: got 0x0000000000000000 expected 0x7ff4000000000000", "fpelem minmax op0 sew64 form0 e1: got 0x0000000000000000 expected 0x7ff0000000000000", "fpelem minmax op0 sew64 form0 e0: got 0x0000000000000000 expected 0x8000000000000000", "fpelem minmax op0 sew64 form0 e1: got 0x0000000000000000 expected 0xfff0000000000000", "fpelem minmax op0 sew64 form0 e0: got 0x0000000000000000 expected 0x7ff8000000000000", "fpelem minmax op0 sew64 form0 e1: got 0x0000000000000000 expected 0x4330000000000000", "fpelem minmax op0 sew64 form0 e0: got 0x0000000000000000 expected 0x7ff4000000000000", "fpelem minmax op0 sew64 form0 e1: got 0x0000000000000000 expected 0x3ff0000000000000", "fpelem minmax op0 sew64 form0 e0: got 0x0000000000000000 expected 0xfff0000000000000", "fpelem minmax op0 sew64 form0 e1: got 0x0000000000000000 expected 0x4000000000000000", "fpelem minmax op0 sew64 form0 e1: got 0x0000000000000000 expected 0x3fe0000000000000", "fpelem minmax op0 sew64 form0 e0: got 0x0000000000000000 expected 0x4330000000000000", "fpelem minmax op0 sew64 form0 e1: got 0x0000000000000000 expected 0xbff8000000000000", "fpelem minmax op0 sew64 form0 e0: got 0x0000000000000000 expected 0x3ff0000000000000", "fpelem minmax op0 sew64 form0 e1: got 0x0000000000000000 expected 0x400c000000000000", "fpelem minmax op0 sew64 form0 e0: got 0x0000000000000000 expected 0x4000000000000000", "fpelem minmax op0 sew64 form0 e1: got 0x0000000000000000 expected 0x7ff0000000000000", "fpelem minmax op0 sew64 form0 e0: got 0x0000000000000000 expected 0x3fe0000000000000", "fpelem minmax op0 sew64 form0 e1: got 0x0000000000000000 expected 0xfff0000000000000", "fpelem minmax op0 sew64 form0 e0: got 0x0000000000000000 expected 0xbff8000000000000", "fpelem minmax op0 sew64 form0 e0: got 0x0000000000000000 expected 0x400c000000000000", "fpelem minmax op0 sew64 form0 e1: got 0x0000000000000000 expected 0x8000000000000000", "fpelem minmax op0 sew64 form1 e0: got 0x0000000000000000 expected 0x8000000000000000", "fpelem minmax op0 sew64 form1 e1: got 0x0000000000000000 expected 0x8000000000000000", "fpelem minmax op0 sew64 form1 e0: got 0x0000000000000000 expected 0x7ff8000000000000", "fpelem minmax op0 sew64 form1 e1: got 0x0000000000000000 expected 0x7ff8000000000000", "fpelem minmax op0 sew64 form1 e0: got 0x0000000000000000 expected 0x7ff4000000000000", "fpelem minmax op0 sew64 form1 e1: got 0x0000000000000000 expected 0x7ff4000000000000", "fpelem minmax op0 sew64 form1 e0: got 0x0000000000000000 expected 0x400c000000000000"]
+}

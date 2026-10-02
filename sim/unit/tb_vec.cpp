@@ -35,9 +35,15 @@
 
 #include <verilated.h>
 
+#include <cfenv>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "sim_common.h"
@@ -3058,8 +3064,11 @@ struct LsuMem {
   int req_count = 0;
   int device_reqs = 0;
   int ram_reqs = 0;
+  // I-057: how many times each byte has been written, so a duplicated store
+  // side effect across a restart is visible rather than inferred.
+  std::vector<int> byte_writes;
 
-  LsuMem() : mem(static_cast<size_t>(kSize)) {
+  LsuMem() : mem(static_cast<size_t>(kSize)), byte_writes(static_cast<size_t>(kSize), 0) {
     for (int i = 0; i < kSize; ++i) {
       mem[static_cast<size_t>(i)] = static_cast<uint8_t>(Pat(4000 + i) & 0xFFull);
     }
@@ -3080,7 +3089,10 @@ struct LsuMem {
     regions.push_back(b);
   }
 
-  void ResetCounters() { req_count = 0; device_reqs = 0; ram_reqs = 0; }
+  void ResetCounters() {
+    req_count = 0; device_reqs = 0; ram_reqs = 0;
+    for (size_t i = 0; i < byte_writes.size(); ++i) byte_writes[i] = 0;
+  }
 
   int RegionOf(uint64_t byte) const {
     for (size_t i = 0; i < regions.size(); ++i) {
@@ -3109,6 +3121,7 @@ struct LsuMem {
       if ((mask >> k) & 1u) {
         mem[static_cast<size_t>((beat + static_cast<uint64_t>(k)) & 0xFFFFull)] =
             static_cast<uint8_t>((wdata >> (8 * k)) & 0xFFull);
+        byte_writes[static_cast<size_t>((beat + static_cast<uint64_t>(k)) & 0xFFFFull)] += 1;
       }
     }
   }
@@ -3135,6 +3148,17 @@ struct LsuStim {
   bool mask_en = false;
   uint8_t caps = 0xFF;
   bool mem_ready = true;
+  // ---- I-057 restart controller -----------------------------------------
+  bool fof = false;             // fault-only-first unit-stride load
+  bool intr = false;            // precise interrupt request at a boundary
+  int fault_code = 0;           // class forwarded with a faulting response
+  bool bind = false;            // the controller owns the descriptor progress
+  bool desc_alloc = false;
+  int desc_alloc_vl = 0;
+  int desc_alloc_vstart = 0;
+  uint64_t desc_alloc_vtype = 0;
+  bool desc_release = false;
+  bool desc_fault_clear = false;
 };
 
 struct LsuObs {
@@ -3146,6 +3170,28 @@ struct LsuObs {
   uint64_t req_addr = 0;
   uint8_t req_mask = 0;
   uint64_t req_wdata = 0;
+  // ---- I-057 -------------------------------------------------------------
+  int trap_code = 0;
+  bool stopped = false;
+  int stop_elem = 0;
+  bool rst_busy = false, rst_resolved = false, rst_illegal = false;
+  bool rst_trap = false;
+  int rst_vstart = 0;
+  int rst_trap_code = 0;
+  bool rst_vl_write = false;
+  int rst_vl_new = 0;
+  bool rst_fof_trim = false;
+  bool rst_complete = false, rst_retire_ok = false;
+  bool rst_restart_ready = false;
+  int rst_restart_vstart = 0;
+  int rst_elems_committed = 0;
+  bool rst_prefix_agree = false;
+  // descriptor read-back
+  bool desc_valid = false;
+  int desc_prefix = 0, desc_done_ctr = 0;
+  bool desc_fault_valid = false;
+  int desc_fault_elem = 0, desc_fault_code = 0;
+  uint64_t desc_bm_lo = 0, desc_bm_hi = 0;
 };
 
 class Lsu {
@@ -3158,6 +3204,16 @@ class Lsu {
   }
 
   void BindMem(LsuMem* m) { mem_ = m; }
+
+  // Clear the recorded request stream and the in-flight pipeline, so two runs
+  // of one macro can be observed separately or together.
+  void ClearReqs() {
+    reqs_.clear();
+    pending_.clear();
+    overlapped_ = false;
+    ordered_overlap_ = false;
+    max_outstanding_ = 0;
+  }
 
   struct Pending {
     int elem = 0;
@@ -3217,7 +3273,36 @@ class Lsu {
     d_->lsu_mem_rsp_elem_i = static_cast<uint8_t>(re & 0x7F);
     d_->lsu_mem_rsp_field_i = static_cast<uint8_t>(rf & 0xF);
     d_->lsu_mem_rsp_fault_i = rfault ? 1 : 0;
+    d_->lsu_mem_rsp_fault_code_i = rfault ? static_cast<uint8_t>(s.fault_code & 0xF) : 0;
     d_->lsu_mem_rsp_rdata_i = rdata;
+
+    // ---- I-057 restart controller -----------------------------------------
+    // `bind` gives the controller the descriptor's progress ports; when it is
+    // clear the driver drives them (here: idle), so the descriptor case keeps
+    // its own ownership.
+    d_->rst_bind_i = s.bind ? 1 : 0;
+    d_->rst_exec_valid_i = s.exec_valid ? 1 : 0;
+    d_->rst_exec_mode_i = static_cast<uint8_t>(s.mode & 0xF);
+    d_->rst_exec_we_i = s.we ? 1 : 0;
+    d_->rst_exec_fof_i = s.fof ? 1 : 0;
+    d_->rst_exec_nf_i = static_cast<uint8_t>(s.nf & 0xF);
+    d_->rst_intr_i = s.intr ? 1 : 0;
+    d_->alloc_valid = s.desc_alloc ? 1 : 0;
+    d_->alloc_vtype = s.desc_alloc_vtype;
+    d_->alloc_vl = static_cast<uint8_t>(s.desc_alloc_vl & 0xFF);
+    d_->alloc_vstart = static_cast<uint8_t>(s.desc_alloc_vstart & 0x7F);
+    d_->alloc_vd = static_cast<uint8_t>(s.vd & 0x1F);
+    d_->alloc_mask_ver = 0;
+    d_->alloc_rob_index = 0;
+    d_->alloc_rob_gen = 0;
+    d_->alloc_uop_index = 0;
+    d_->desc_release = s.desc_release ? 1 : 0;
+    d_->desc_fault_clear = s.desc_fault_clear ? 1 : 0;
+    d_->elem_done_valid = 0;
+    d_->elem_done_index = 0;
+    d_->fault_valid = 0;
+    d_->fault_elem = 0;
+    d_->fault_code = 0;
 
     d_->eval();
     const bool pre_req = d_->lsu_mem_req_valid_o != 0;
@@ -3249,6 +3334,33 @@ class Lsu {
     o.req_addr = pre_addr;
     o.req_mask = pre_mask;
     o.req_wdata = pre_wdata;
+
+    o.trap_code = static_cast<int>(d_->lsu_trap_code_o);
+    o.stopped = d_->lsu_stopped_o != 0;
+    o.stop_elem = static_cast<int>(d_->lsu_stop_elem_o);
+    o.rst_busy = d_->o_rst_busy_o != 0;
+    o.rst_resolved = d_->o_rst_resolved_o != 0;
+    o.rst_illegal = d_->o_rst_illegal_o != 0;
+    o.rst_trap = d_->o_rst_trap_o != 0;
+    o.rst_vstart = static_cast<int>(d_->o_rst_vstart_o);
+    o.rst_trap_code = static_cast<int>(d_->o_rst_trap_code_o);
+    o.rst_vl_write = d_->o_rst_vl_write_o != 0;
+    o.rst_vl_new = static_cast<int>(d_->o_rst_vl_new_o);
+    o.rst_fof_trim = d_->o_rst_fof_trim_o != 0;
+    o.rst_complete = d_->o_rst_complete_o != 0;
+    o.rst_retire_ok = d_->o_rst_retire_ok_o != 0;
+    o.rst_restart_ready = d_->o_rst_restart_ready_o != 0;
+    o.rst_restart_vstart = static_cast<int>(d_->o_rst_restart_vstart_o);
+    o.rst_elems_committed = static_cast<int>(d_->o_rst_elems_committed_o);
+    o.rst_prefix_agree = d_->o_rst_prefix_agree_o != 0;
+    o.desc_valid = d_->o_valid != 0;
+    o.desc_prefix = static_cast<int>(d_->o_prefix);
+    o.desc_done_ctr = static_cast<int>(d_->o_elems_done_ctr);
+    o.desc_fault_valid = d_->o_fault_valid != 0;
+    o.desc_fault_elem = static_cast<int>(d_->o_fault_elem);
+    o.desc_fault_code = static_cast<int>(d_->o_fault_code);
+    o.desc_bm_lo = d_->o_elem_bitmap_lo;
+    o.desc_bm_hi = d_->o_elem_bitmap_hi;
 
     if (pre_req && s.mem_ready) {
       if (!pending_.empty()) {
@@ -3941,6 +4053,1980 @@ void RunLsuCase(Vmosaic_vec_tb* dut, ClockDriver* clk, Reporter* rep, LsuCoverag
              "coverage: " + Dec(cov->modes) + " modes ran, expected " + Dec(LS_MODE_COUNT));
 }
 
+// ============================================================================
+// I-055 -- vector floating point and per-element flags
+//           (CASE=rvv.fp_flags_reduction).
+//
+// The expectation is computed here from the V specification's operation table,
+// with the host's floating-point unit and <fenv.h> supplying the arithmetic and
+// the exception flags for the value cases (the style I-049's CASE=fp.
+// operation_matrix established), a bit-level model supplying the NaN rules
+// (which the host's payload-propagating NaN cannot express), and a bit-level
+// model supplying the saturating fp->integer conversions (which C's conversion
+// leaves undefined out of range). No comparison uses an epsilon anywhere: every
+// deterministic result is compared with `==` on the bit pattern, and the
+// unordered reductions are compared against an explicitly enumerated permitted
+// set -- the values reachable by any valid reduction tree. That distinction is
+// the point of the case: an epsilon would accept an implementation that
+// reassociated an *ordered* reduction.
+//
+// The register file is modelled as 32 x 128-bit values and addressed with the
+// same (base, element, SEW, LMUL) rule the VRF implements.
+// ============================================================================
+
+enum : int {
+  FF_ELEM = 0, FF_MINMAX = 1, FF_SGNJ = 2, FF_CMP = 3, FF_CVT = 4,
+  FF_WIDE = 5, FF_NARROW = 6, FF_REDSUM = 7, FF_REDMINMAX = 8, FF_REDWIDE = 9,
+  FF_COUNT = 10
+};
+const uint64_t kAllFpCaps = (1ull << FF_COUNT) - 1ull;
+
+const char* FpFamilyName(int f) {
+  switch (f) {
+    case FF_ELEM: return "elem";
+    case FF_MINMAX: return "minmax";
+    case FF_SGNJ: return "sgnj";
+    case FF_CMP: return "cmp";
+    case FF_CVT: return "cvt";
+    case FF_WIDE: return "wide";
+    case FF_NARROW: return "narrow";
+    case FF_REDSUM: return "redsum";
+    case FF_REDMINMAX: return "redminmax";
+    case FF_REDWIDE: return "redwide";
+    default: return "?";
+  }
+}
+
+int FpFamilyOps(int f) {
+  switch (f) {
+    case FF_ELEM: return 6;
+    case FF_MINMAX: return 2;
+    case FF_SGNJ: return 3;
+    case FF_CMP: return 6;
+    case FF_CVT: return 4;
+    case FF_WIDE: return 5;
+    case FF_NARROW: return 7;
+    case FF_REDSUM: return 2;
+    case FF_REDMINMAX: return 2;
+    case FF_REDWIDE: return 2;
+    default: return 0;
+  }
+}
+
+// The five RISC-V flags in their CSR bit order, {NV,DZ,OF,UF,NX}.
+enum : uint32_t { FL_NX = 1u, FL_UF = 2u, FL_OF = 4u, FL_DZ = 8u, FL_NV = 16u };
+
+std::string FlagStr(uint32_t f) {
+  std::string s;
+  s += (f & FL_NV) ? "N" : "-";
+  s += (f & FL_DZ) ? "D" : "-";
+  s += (f & FL_OF) ? "O" : "-";
+  s += (f & FL_UF) ? "U" : "-";
+  s += (f & FL_NX) ? "X" : "-";
+  return s;
+}
+
+// ------------------------------------------------------------ bit patterns
+uint32_t F32Bits(float f) { uint32_t u = 0; std::memcpy(&u, &f, 4); return u; }
+float F32From(uint32_t u) { float f = 0; std::memcpy(&f, &u, 4); return f; }
+uint64_t F64Bits(double d) { uint64_t u = 0; std::memcpy(&u, &d, 8); return u; }
+double F64From(uint64_t u) { double d = 0; std::memcpy(&d, &u, 8); return d; }
+
+uint64_t CanonNaN(bool fmt) {
+  return fmt ? 0x0000'0000'7FC0'0000ull : 0x7FF8'0000'0000'0000ull;
+}
+bool IsNaNBits(uint64_t bits, bool fmt) {
+  if (fmt) return ((bits >> 23) & 0xFFull) == 0xFFull && (bits & 0x7FFFFFull) != 0;
+  return ((bits >> 52) & 0x7FFull) == 0x7FFull && (bits & 0xFFFFFFFFFFFFFull) != 0;
+}
+bool IsSNaNBits(uint64_t bits, bool fmt) {
+  if (!IsNaNBits(bits, fmt)) return false;
+  if (fmt) return ((bits >> 22) & 1ull) == 0;
+  return ((bits >> 51) & 1ull) == 0;
+}
+bool SignBitOf(uint64_t bits, bool fmt) {
+  return fmt ? ((bits >> 31) & 1ull) != 0 : ((bits >> 63) & 1ull) != 0;
+}
+
+int HostModeOf(int rm) {
+  switch (rm) {
+    case 1: return FE_TOWARDZERO;
+    case 2: return FE_DOWNWARD;
+    case 3: return FE_UPWARD;
+    default: return FE_TONEAREST;
+  }
+}
+uint32_t MapFlags(int f) {
+  uint32_t r = 0;
+  if (f & FE_INEXACT) r |= FL_NX;
+  if (f & FE_UNDERFLOW) r |= FL_UF;
+  if (f & FE_OVERFLOW) r |= FL_OF;
+  if (f & FE_DIVBYZERO) r |= FL_DZ;
+  if (f & FE_INVALID) r |= FL_NV;
+  return r;
+}
+
+struct FpExp {
+  uint64_t bits = 0;
+  uint32_t flags = 0;
+};
+
+// op: 0 add, 1 sub, 2 mul, 3 div. The host's unit supplies the value and the
+// flags; the NaN rules come from the bit model, because the host propagates a
+// payload while this design returns the canonical NaN.
+FpExp HostArithExp(int hop, bool fmt, uint64_t a, uint64_t b, int rm) {
+  FpExp e;
+  if (IsNaNBits(a, fmt) || IsNaNBits(b, fmt)) {
+    e.bits = CanonNaN(fmt);
+    e.flags = (IsSNaNBits(a, fmt) || IsSNaNBits(b, fmt)) ? FL_NV : 0u;
+    return e;
+  }
+  feclearexcept(FE_ALL_EXCEPT);
+  fesetround(HostModeOf(rm));
+  bool is_nan = false;
+  if (fmt) {
+    volatile float va = F32From(static_cast<uint32_t>(a));
+    volatile float vb = F32From(static_cast<uint32_t>(b));
+    float r = va;
+    switch (hop) {
+      case 0: r = static_cast<float>(va + vb); break;
+      case 1: r = static_cast<float>(va - vb); break;
+      case 2: r = static_cast<float>(va * vb); break;
+      default: r = static_cast<float>(va / vb); break;
+    }
+    is_nan = std::isnan(r) != 0;
+    e.bits = F32Bits(r);
+  } else {
+    volatile double va = F64From(a);
+    volatile double vb = F64From(b);
+    double r = va;
+    switch (hop) {
+      case 0: r = static_cast<double>(va + vb); break;
+      case 1: r = static_cast<double>(va - vb); break;
+      case 2: r = static_cast<double>(va * vb); break;
+      default: r = static_cast<double>(va / vb); break;
+    }
+    is_nan = std::isnan(r) != 0;
+    e.bits = F64Bits(r);
+  }
+  e.flags = MapFlags(fetestexcept(FE_ALL_EXCEPT));
+  fesetround(FE_TONEAREST);
+  // 0*inf, inf-inf, 0/0, inf/inf: the design returns the canonical NaN and NV.
+  if (is_nan) {
+    e.bits = CanonNaN(fmt);
+    e.flags = FL_NV;
+  }
+  return e;
+}
+
+bool NumLt(uint64_t a, uint64_t b, bool fmt) {
+  return fmt ? (F32From(static_cast<uint32_t>(a)) < F32From(static_cast<uint32_t>(b)))
+             : (F64From(a) < F64From(b));
+}
+bool NumEq(uint64_t a, uint64_t b, bool fmt) {
+  return fmt ? (F32From(static_cast<uint32_t>(a)) == F32From(static_cast<uint32_t>(b)))
+             : (F64From(a) == F64From(b));
+}
+
+// RISC-V fmin/fmax: NaN handling and the sign of a zero result are defined by
+// the ISA, not by the host's fmin/fmax, so the model is written out.
+FpExp MinMaxExp(bool is_min, bool fmt, uint64_t a, uint64_t b) {
+  FpExp e;
+  bool na = IsNaNBits(a, fmt), nb = IsNaNBits(b, fmt);
+  if (na && nb) {
+    e.bits = CanonNaN(fmt);
+    e.flags = (IsSNaNBits(a, fmt) || IsSNaNBits(b, fmt)) ? FL_NV : 0u;
+    return e;
+  }
+  if (na) { e.bits = b; e.flags = IsSNaNBits(a, fmt) ? FL_NV : 0u; return e; }
+  if (nb) { e.bits = a; e.flags = IsSNaNBits(b, fmt) ? FL_NV : 0u; return e; }
+  if (NumLt(a, b, fmt)) { e.bits = is_min ? a : b; return e; }
+  if (NumLt(b, a, fmt)) { e.bits = is_min ? b : a; return e; }
+  // equal, or +0 vs -0
+  bool sa = SignBitOf(a, fmt);
+  e.bits = is_min ? (sa ? a : b) : (sa ? b : a);
+  return e;
+}
+
+FpExp SgnjExp(int op, bool fmt, uint64_t a, uint64_t b) {
+  FpExp e;
+  uint64_t magmask = fmt ? 0x0000'0000'7FFFFFFFull : 0x7FFF'FFFF'FFFF'FFFFull;
+  uint64_t sbit = fmt ? 0x0000'0000'80000000ull : 0x8000'0000'0000'0000ull;
+  uint64_t sa = a & sbit, sb = b & sbit;
+  uint64_t s = (op == 0) ? sb : (op == 1 ? (sb ^ sbit) : (sa ^ sb));
+  e.bits = (a & magmask) | s;
+  return e;
+}
+
+// op: 0 eq, 1 ne, 2 lt, 3 le, 4 gt, 5 ge. The NV rule is the ISA's: vmfeq and
+// vmfne raise it only for a signalling NaN, the ordering compares for any NaN.
+FpExp CmpExp(int op, bool fmt, uint64_t a, uint64_t b) {
+  FpExp e;
+  bool na = IsNaNBits(a, fmt), nb = IsNaNBits(b, fmt);
+  bool sn = IsSNaNBits(a, fmt) || IsSNaNBits(b, fmt);
+  bool res = false;
+  if (op == 0 || op == 1) {
+    e.flags = sn ? FL_NV : 0u;
+    bool eq = !na && !nb && NumEq(a, b, fmt);
+    res = (op == 0) ? eq : !eq;
+  } else {
+    e.flags = (na || nb) ? FL_NV : 0u;
+    if (!na && !nb) {
+      bool lt = NumLt(a, b, fmt);
+      bool eq = NumEq(a, b, fmt);
+      switch (op) {
+        case 2: res = lt; break;
+        case 3: res = lt || eq; break;
+        case 4: res = NumLt(b, a, fmt); break;
+        default: res = NumLt(b, a, fmt) || NumEq(b, a, fmt); break;
+      }
+    }
+  }
+  e.bits = res ? 1u : 0u;
+  return e;
+}
+
+// --------------------------------------------------- saturating fp -> int
+// Written from the ISA: NaN and infinity raise NV and deliver the saturating
+// value with no NX; a value outside the target range raises NV and saturates;
+// otherwise the value is rounded by the active mode and NX is raised when the
+// rounding was inexact.
+void FpToIntExp(uint64_t bits, bool fmt, int rm, bool is_signed, bool iw,
+                uint64_t* out, uint32_t* flags) {
+  const int fw = fmt ? 23 : 52;
+  const int bias = fmt ? 127 : 1023;
+  const int ebits = fmt ? 8 : 11;
+  const uint64_t frac_mask = fmt ? 0x7FFFFFull : 0xFFFFFFFFFFFFFull;
+  const int width = iw ? 64 : 32;
+  const uint64_t umax = iw ? 0xFFFF'FFFF'FFFF'FFFFull : 0xFFFF'FFFFull;
+  const uint64_t smax = iw ? 0x7FFF'FFFF'FFFF'FFFFull : 0x7FFF'FFFFull;
+  const uint64_t smin_mag = iw ? 0x8000'0000'0000'0000ull : 0x8000'0000ull;
+
+  bool sign = ((bits >> (fw + ebits)) & 1ull) != 0;
+  uint64_t expf = (bits >> fw) & ((1ull << ebits) - 1ull);
+  uint64_t frac = bits & frac_mask;
+  *flags = 0;
+  *out = 0;
+
+  if (expf == ((1ull << ebits) - 1ull)) {          // NaN or infinity
+    *flags = FL_NV;
+    *out = is_signed ? (sign ? smin_mag : smax) : (sign ? 0ull : umax);
+    return;
+  }
+
+  uint64_t m;
+  int e2;
+  if (expf == 0) { m = frac; e2 = 1 - bias - fw; }
+  else { m = frac | (1ull << fw); e2 = static_cast<int>(expf) - bias - fw; }
+
+  using u128 = unsigned __int128;
+  u128 mag = 0;
+  bool inexact = false;
+  if (e2 >= 64) {
+    mag = (static_cast<u128>(1) << 100);           // larger than any target
+  } else if (e2 >= 0) {
+    mag = static_cast<u128>(m) << e2;
+  } else {
+    int d = -e2;
+    u128 qq = 0;
+    bool halfbit = false, below = false;
+    if (d >= 128) {
+      qq = 0;
+      inexact = (m != 0);
+    } else {
+      qq = static_cast<u128>(m) >> d;
+      u128 rr = static_cast<u128>(m) & ((static_cast<u128>(1) << d) - 1);
+      inexact = (rr != 0);
+      halfbit = (d - 1 < 64) && (((m >> (d - 1)) & 1ull) != 0);
+      if (d >= 2) {
+        int dd = d - 1;
+        uint64_t lowmask = (dd >= 64) ? ~0ull : ((1ull << dd) - 1ull);
+        below = (m & lowmask) != 0;
+      }
+    }
+    bool up = false;
+    switch (rm) {
+      case 1: up = false; break;                              // RTZ
+      case 2: up = inexact && sign; break;                    // RDN
+      case 3: up = inexact && !sign; break;                   // RUP
+      case 4: up = halfbit; break;                            // RMM
+      default: up = halfbit && (below || ((qq & 1) != 0)); break;  // RNE
+    }
+    mag = qq + (up ? 1 : 0);
+  }
+
+  if (is_signed) {
+    if (sign) {
+      if (mag > static_cast<u128>(smin_mag)) {
+        *flags = FL_NV;
+        *out = smin_mag;
+      } else {
+        *out = static_cast<uint64_t>(-static_cast<int64_t>(mag));
+        if (!inexact && false) {}
+        if (inexact) *flags = FL_NX;
+      }
+    } else {
+      if (mag > static_cast<u128>(smax)) {
+        *flags = FL_NV;
+        *out = smax;
+      } else {
+        *out = static_cast<uint64_t>(mag);
+        if (inexact) *flags = FL_NX;
+      }
+    }
+  } else {
+    if (sign) {
+      if (mag != 0) { *flags = FL_NV; *out = 0; }
+      else { *out = 0; if (inexact) *flags = FL_NX; }
+    } else {
+      if (mag > static_cast<u128>(umax)) {
+        *flags = FL_NV;
+        *out = umax;
+      } else {
+        *out = static_cast<uint64_t>(mag);
+        if (inexact) *flags = FL_NX;
+      }
+    }
+  }
+  *out &= (width == 64) ? ~0ull : 0xFFFF'FFFFull;
+}
+
+FpExp IntToFpExp(uint64_t value, bool is_signed, bool src64, bool fmt, int rm) {
+  FpExp e;
+  int64_t sv;
+  if (src64) sv = is_signed ? static_cast<int64_t>(value)
+                            : static_cast<int64_t>(value & 0x7FFF'FFFF'FFFF'FFFFull);
+  else sv = is_signed ? static_cast<int64_t>(static_cast<int32_t>(value))
+                      : static_cast<int64_t>(value & 0xFFFF'FFFFull);
+  uint64_t uv = static_cast<uint64_t>(sv);
+  feclearexcept(FE_ALL_EXCEPT);
+  fesetround(HostModeOf(rm));
+  if (fmt) {
+    volatile float r = is_signed ? static_cast<float>(sv) : static_cast<float>(uv);
+    e.bits = F32Bits(r);
+  } else {
+    volatile double r = is_signed ? static_cast<double>(sv) : static_cast<double>(uv);
+    e.bits = F64Bits(r);
+  }
+  e.flags = MapFlags(fetestexcept(FE_ALL_EXCEPT));
+  fesetround(FE_TONEAREST);
+  return e;
+}
+
+// fp -> fp format conversion (widening is exact, narrowing rounds).
+FpExp FmtCvtExp(bool src_fmt, bool dst_fmt, uint64_t bits, int rm) {
+  FpExp e;
+  if (IsNaNBits(bits, src_fmt)) {
+    e.bits = CanonNaN(dst_fmt);
+    e.flags = IsSNaNBits(bits, src_fmt) ? FL_NV : 0u;
+    return e;
+  }
+  feclearexcept(FE_ALL_EXCEPT);
+  fesetround(HostModeOf(rm));
+  if (dst_fmt) {
+    volatile float r = F32From(static_cast<uint32_t>(bits));
+    e.bits = F32Bits(r);
+  } else {
+    volatile double r = src_fmt ? static_cast<double>(F32From(static_cast<uint32_t>(bits)))
+                                : F64From(bits);
+    e.bits = F64Bits(r);
+  }
+  e.flags = MapFlags(fetestexcept(FE_ALL_EXCEPT));
+  fesetround(FE_TONEAREST);
+  return e;
+}
+
+// One element's expectation for the element-wise families. `vs2` is the source
+// element, `b` is the second operand (vs1's element for .vv, the scalar for
+// .vf). Conversions ignore `b`.
+FpExp FpElemExp(int fam, int op, int sew_l, uint64_t vs2, uint64_t b, int rm) {
+  // The oracle's convention matches the FPU's `req_fmt_i`: true is single
+  // precision, which is SEW=32.
+  bool fmt = (sew_l == 5);
+  switch (fam) {
+    case FF_ELEM:
+      switch (op) {
+        case 0: return HostArithExp(0, fmt, vs2, b, rm);
+        case 1: return HostArithExp(1, fmt, vs2, b, rm);
+        case 2: return HostArithExp(1, fmt, b, vs2, rm);   // vfrsub
+        case 3: return HostArithExp(2, fmt, vs2, b, rm);
+        case 4: return HostArithExp(3, fmt, vs2, b, rm);
+        default: return HostArithExp(3, fmt, b, vs2, rm);  // vfrdiv
+      }
+    case FF_MINMAX:
+      return MinMaxExp(op == 0, fmt, vs2, b);
+    case FF_SGNJ:
+      return SgnjExp(op, fmt, vs2, b);
+    case FF_CMP:
+      return CmpExp(op, fmt, vs2, b);
+    case FF_CVT: {
+      FpExp e;
+      switch (op) {
+        case 0: FpToIntExp(vs2, fmt, rm, false, !fmt, &e.bits, &e.flags); return e;
+        case 1: FpToIntExp(vs2, fmt, rm, true, !fmt, &e.bits, &e.flags); return e;
+        case 2: return IntToFpExp(vs2, false, !fmt, fmt, rm);
+        default: return IntToFpExp(vs2, true, !fmt, fmt, rm);
+      }
+    }
+    case FF_WIDE: {
+      FpExp e;
+      switch (op) {
+        case 0: FpToIntExp(vs2, true, rm, false, true, &e.bits, &e.flags); return e;
+        case 1: FpToIntExp(vs2, true, rm, true, true, &e.bits, &e.flags); return e;
+        case 2: return IntToFpExp(vs2, false, false, false, rm);
+        case 3: return IntToFpExp(vs2, true, false, false, rm);
+        default: return FmtCvtExp(true, false, vs2, rm);   // vfwcvt.f.f.v
+      }
+    }
+    default: {  // FF_NARROW
+      FpExp e;
+      switch (op) {
+        case 0: FpToIntExp(vs2, false, rm, false, false, &e.bits, &e.flags); return e;
+        case 1: FpToIntExp(vs2, false, rm, true, false, &e.bits, &e.flags); return e;
+        case 2: return IntToFpExp(vs2, false, true, true, rm);
+        case 3: return IntToFpExp(vs2, true, true, true, rm);
+        case 4: return FmtCvtExp(false, true, vs2, rm);    // vfncvt.f.f.w
+        case 5: FpToIntExp(vs2, false, 1, false, false, &e.bits, &e.flags); return e;
+        default: FpToIntExp(vs2, false, 1, true, false, &e.bits, &e.flags); return e;
+      }
+    }
+  }
+}
+
+// ------------------------------------------------- the unordered comparator
+// The spec permits vfredusum/vfwredusum to produce any result reachable by a
+// binary reduction tree whose nodes round an *exact* intermediate sum to a
+// format at least as wide as the element format. This enumerates that set:
+// every tree shape over the active elements plus the scalar accumulator, at
+// both permitted internal precisions (SEW and 2*SEW), with the root rounded to
+// the result format. An implementation may also add one additive identity, so a
+// zero result may carry either sign.
+void CollectTree(std::vector<double> vals, bool internal_wide, bool root_wide,
+                 int rm, std::set<uint64_t>* out) {
+  if (vals.size() == 1) {
+    double v = vals[0];
+    if (root_wide) {
+      out->insert(F64Bits(v));
+    } else {
+      volatile float f = static_cast<float>(v);
+      out->insert(static_cast<uint64_t>(F32Bits(f)));
+    }
+    return;
+  }
+  for (size_t i = 0; i < vals.size(); ++i) {
+    for (size_t j = i + 1; j < vals.size(); ++j) {
+      feclearexcept(FE_ALL_EXCEPT);
+      fesetround(HostModeOf(rm));
+      double s;
+      if (internal_wide) {
+        volatile double d = vals[i] + vals[j];
+        s = d;
+      } else {
+        volatile float f = static_cast<float>(vals[i]) + static_cast<float>(vals[j]);
+        s = static_cast<double>(f);
+      }
+      fesetround(FE_TONEAREST);
+      std::vector<double> next;
+      for (size_t k = 0; k < vals.size(); ++k) {
+        if (k != i && k != j) next.push_back(vals[k]);
+      }
+      next.push_back(s);
+      CollectTree(next, internal_wide, root_wide, rm, out);
+    }
+  }
+}
+
+std::set<uint64_t> UnorderedPermitted(const std::vector<double>& elems, double acc,
+                                      bool root_wide, int rm) {
+  std::set<uint64_t> out;
+  std::vector<double> leaves;
+  leaves.push_back(acc);
+  for (double e : elems) leaves.push_back(e);
+  if (leaves.size() == 1) {
+    if (root_wide) out.insert(F64Bits(acc));
+    else out.insert(static_cast<uint64_t>(F32Bits(static_cast<float>(acc))));
+    return out;
+  }
+  CollectTree(leaves, true, root_wide, rm, &out);
+  if (!root_wide) CollectTree(leaves, false, root_wide, rm, &out);
+  // the additive-identity allowance: a zero result may be either signed zero
+  uint64_t pz = root_wide ? 0ull : 0ull;
+  uint64_t nz = root_wide ? 0x8000'0000'0000'0000ull : 0x0000'0000'8000'0000ull;
+  if (out.count(pz) != 0) out.insert(nz);
+  if (out.count(nz) != 0) out.insert(pz);
+  return out;
+}
+
+// ------------------------------------------------------------ the harness
+struct FpStim {
+  uint64_t caps = kAllFpCaps;
+  bool exec_valid = false;
+  int family = 0, op = 0, form = 0, vd = 0, vs1 = 0, vs2 = 0;
+  uint64_t scalar = 0;
+  bool mask_en = false;
+  int rm = 7;
+  int frm = 0;
+  bool commit_valid = false;
+  bool flush = false;
+};
+
+struct FpObs {
+  bool busy = false, done = false, illegal = false, trap = false;
+  int elems = 0, cur = 0, writes = 0;
+  uint64_t acc = 0;
+  uint32_t pending = 0, arch = 0;
+  bool commit = false;
+  uint32_t commit_flags = 0;
+  int commit_ctr = 0, flush_ctr = 0, spurious_ctr = 0, inactive_flag_ctr = 0;
+  bool macro_pending = false;
+  bool trace_valid = false;
+  int trace_elem = 0;
+  uint32_t trace_flags = 0;
+  int issues = 0, last_lat = 0;
+  int rd_gnt = 0, rd_bad = 0, wr_gnt = 0;
+};
+
+class VecFp {
+ public:
+  VecFp(Vmosaic_vec_tb* d, ClockDriver* clk) : d_(d), clk_(clk) {}
+
+  FpObs Cycle(const FpStim& s) {
+    d_->rst = 0;
+    d_->cfg_vset_valid = 0;
+    d_->cfg_snap_capture = 0;
+    d_->cfg_replay_valid = 0;
+    d_->cfg_exec_valid = 0;
+    d_->cfg_csr_valid = 0;
+    d_->mem_owner_i = 0;
+    d_->mem_rd_valid_i = 0;
+    d_->mem_wr_valid_i = 0;
+    d_->alu_caps_i = 0x1FFFF;
+    d_->alu_exec_valid_i = 0;
+    d_->el_valid_i = 0;
+    d_->lsu_caps_i = 0xFF;
+    d_->lsu_exec_valid_i = 0;
+    d_->lsu_mem_req_ready_i = 1;
+    d_->lsu_mem_rsp_valid_i = 0;
+
+    d_->fp_caps_i = static_cast<uint16_t>(s.caps & 0x3FFull);
+    d_->fp_exec_valid_i = s.exec_valid ? 1 : 0;
+    d_->fp_family_i = static_cast<uint8_t>(s.family & 0x1F);
+    d_->fp_op_i = static_cast<uint8_t>(s.op & 0xF);
+    d_->fp_form_i = static_cast<uint8_t>(s.form & 0x3);
+    d_->fp_vd_i = static_cast<uint8_t>(s.vd & 0x1F);
+    d_->fp_vs1_i = static_cast<uint8_t>(s.vs1 & 0x1F);
+    d_->fp_vs2_i = static_cast<uint8_t>(s.vs2 & 0x1F);
+    d_->fp_scalar_i = s.scalar;
+    d_->fp_mask_en_i = s.mask_en ? 1 : 0;
+    d_->fp_rm_i = static_cast<uint8_t>(s.rm & 0x7);
+    d_->fp_frm_i = static_cast<uint8_t>(s.frm & 0x7);
+    d_->fp_commit_valid_i = s.commit_valid ? 1 : 0;
+    d_->fp_flush_i = s.flush ? 1 : 0;
+
+    d_->eval();
+    d_->clk = 1;
+    d_->eval();
+    d_->clk = 0;
+    d_->eval();
+
+    FpObs o;
+    o.busy = d_->fp_busy_o != 0;
+    o.done = d_->fp_done_o != 0;
+    o.illegal = d_->fp_illegal_o != 0;
+    o.trap = d_->fp_trap_o != 0;
+    o.elems = static_cast<int>(d_->fp_elems_o);
+    o.cur = static_cast<int>(d_->fp_cur_o);
+    o.writes = static_cast<int>(d_->fp_writes_o);
+    o.acc = d_->fp_acc_o;
+    o.pending = d_->fp_fflags_pending_o;
+    o.arch = d_->fp_fflags_arch_o;
+    o.commit = d_->fp_commit_o != 0;
+    o.commit_flags = d_->fp_commit_fflags_o;
+    o.commit_ctr = static_cast<int>(d_->fp_commit_ctr_o);
+    o.flush_ctr = static_cast<int>(d_->fp_flush_ctr_o);
+    o.spurious_ctr = static_cast<int>(d_->fp_spurious_ctr_o);
+    o.inactive_flag_ctr = static_cast<int>(d_->fp_inactive_flag_ctr_o);
+    o.macro_pending = d_->fp_macro_pending_o != 0;
+    o.trace_valid = d_->fp_flag_trace_valid_o != 0;
+    o.trace_elem = static_cast<int>(d_->fp_flag_trace_elem_o);
+    o.trace_flags = d_->fp_flag_trace_flags_o;
+    o.issues = static_cast<int>(d_->fp_fpu_issues_o);
+    o.last_lat = static_cast<int>(d_->fp_last_latency_o);
+    o.rd_gnt = static_cast<int>(d_->vrf_rd_gnt_ctr_o);
+    o.rd_bad = static_cast<int>(d_->vrf_rd_bad_ctr_o);
+    o.wr_gnt = static_cast<int>(d_->vrf_wr_gnt_ctr_o);
+
+    clk_->Tick();
+    return o;
+  }
+
+  // Launch one packet and run to completion, collecting the flag trace.
+  FpObs Run(const FpStim& s, std::vector<std::pair<int, uint32_t> >* trace = nullptr) {
+    FpStim launch = s;
+    launch.exec_valid = true;
+    FpObs o = Cycle(launch);
+    FpStim idle;
+    idle.caps = s.caps;
+    idle.frm = s.frm;
+    int guard = 0;
+    while (!o.done && ++guard < 200000) {
+      if (trace != nullptr && o.trace_valid) {
+        trace->push_back(std::make_pair(o.trace_elem, o.trace_flags));
+      }
+      o = Cycle(idle);
+    }
+    if (trace != nullptr && o.trace_valid) {
+      trace->push_back(std::make_pair(o.trace_elem, o.trace_flags));
+    }
+    return o;
+  }
+
+  // One cycle with the packet engine idle (used for commit/flush strobes).
+  FpObs Idle(const FpStim& s) { return Cycle(s); }
+
+  uint64_t SnapVtype() { return d_->cfg_snap_vtype; }
+
+ private:
+  Vmosaic_vec_tb* d_;
+  ClockDriver* clk_;
+};
+
+// ------------------------------------------------------------ coverage
+struct FpCov {
+  bool cell[FF_COUNT][2][2] = {};   // family x SEW(32,64) x form/element
+  int cells = 0;
+};
+
+// Configure the I-052 unit and capture the snapshot the FP unit executes from.
+void FpConfig(Cfg* cfg, int sew_l, int vlmul, int vta, int vma, uint64_t avl) {
+  ConfigureVec(cfg, sew_l, vlmul, vta, vma, avl);
+}
+
+// Interesting operands for a width: numbers, zeros, infinities and the two NaN
+// classes, so the NaN rules and the flags are exercised, not merely the values.
+std::vector<uint64_t> FpValues(int sew_l) {
+  std::vector<uint64_t> v;
+  if (sew_l == 5) {
+    const uint64_t f[] = {0x3F800000ull, 0x40000000ull, 0x3F000000ull,
+                          0xBFC00000ull, 0x40600000ull, 0x7F800000ull,
+                          0xFF800000ull, 0x00000000ull, 0x80000000ull,
+                          0x7FC00000ull, 0x7FA00000ull, 0x00000001ull,
+                          0x7F7FFFFFull, 0x4B000000ull};
+    for (uint64_t x : f) v.push_back(x);
+  } else {
+    const uint64_t f[] = {0x3FF0000000000000ull, 0x4000000000000000ull,
+                          0x3FE0000000000000ull, 0xBFF8000000000000ull,
+                          0x400C000000000000ull, 0x7FF0000000000000ull,
+                          0xFFF0000000000000ull, 0x0000000000000000ull,
+                          0x8000000000000000ull, 0x7FF8000000000000ull,
+                          0x7FF4000000000000ull, 0x0000000000000001ull,
+                          0x7FEFFFFFFFFFFFFFull, 0x4330000000000000ull};
+    for (uint64_t x : f) v.push_back(x);
+  }
+  return v;
+}
+
+int FpVlmax(int sew_l, int lmul_e) {
+  int e = 7 + lmul_e - sew_l;
+  return e < 0 ? 0 : (1 << e);
+}
+
+// One element-wise packet: prime the operands, run, and compare every
+// destination element and the aggregate flags with the oracle.
+void RunFpElemPacket(Cfg* cfg, Vec* vec, VecFp* fp, Reporter* rep, FpCov* cov,
+                     int fam, int op, int form, int sew_l, int lmul_e,
+                     const std::vector<uint64_t>& va,
+                     const std::vector<uint64_t>& vb, uint64_t scalar, int rm,
+                     bool mask_en, uint64_t mbits) {
+  const bool fmt = (sew_l == 6);
+  const int vlmax = FpVlmax(sew_l, lmul_e);
+  const int vd = 8, vs1 = 16, vs2 = 24;
+  const std::string name = std::string("fpelem ") + FpFamilyName(fam) + " op" +
+                           Dec(op) + " sew" + Dec(1 << sew_l) + " form" + Dec(form);
+  FpConfig(cfg, sew_l, VlmulOfExp(lmul_e), 0, 0, 64);
+
+  HostVrf vf;
+  // The source element width is SEW for most families and 2*SEW for a narrowing
+  // conversion (vfncvt reads a double-width source), so the prime follows the
+  // source's own (SEW, LMUL), not the destination's.
+  const int sw = (fam == FF_NARROW) ? (sew_l + 1) : sew_l;
+  const int sl = (fam == FF_NARROW) ? (lmul_e + 1) : lmul_e;
+  for (int i = 0; i < vlmax; ++i) {
+    uint64_t a = va[static_cast<size_t>(i % va.size())];
+    uint64_t b = (form == 0) ? vb[static_cast<size_t>(i % vb.size())] : scalar;
+    vec->Prime(vf, vs2, i, sw, sl, a);
+    if (form == 0) vec->Prime(vf, vs1, i, sw, sl, b);
+  }
+  if (mask_en) {
+    for (int byte = 0; byte < 16; ++byte) {
+      uint64_t val = (mbits >> (8 * byte)) & 0xFFull;
+      vec->Prime(vf, 0, byte, 3, 0, val);
+    }
+  }
+  if (fam == FF_CMP) {
+    for (int i = 0; i < 16; ++i) vec->Prime(vf, vd, i, 3, 0, 0x5A5A5A5A5A5A5A5Aull);
+  }
+
+  FpStim s;
+  s.family = fam; s.op = op; s.form = form; s.vd = vd; s.vs1 = vs1; s.vs2 = vs2;
+  s.scalar = scalar; s.mask_en = mask_en; s.rm = rm;
+  FpObs o = fp->Run(s);
+
+  rep->Check(!o.illegal, name + ": a declared family was refused");
+  rep->Check(!o.trap, name + ": the packet trapped");
+
+  uint32_t exp_flags = 0;
+  int active = 0;
+  for (int i = 0; i < vlmax; ++i) {
+    bool act = true;
+    if (mask_en) act = ((mbits >> i) & 1ull) != 0;
+    uint64_t a = va[static_cast<size_t>(i % va.size())];
+    uint64_t b = (form == 0) ? vb[static_cast<size_t>(i % vb.size())] : scalar;
+    FpExp e = FpElemExp(fam, op, sew_l, a, b, rm);
+    if (act) {
+      active += 1;
+      exp_flags |= e.flags;
+    }
+    if (fam == FF_CMP) {
+      // the destination bit is the comparison result for an active element
+      bool want = act ? (e.bits != 0) : ((mbits >> i) & 1ull) != 0;
+      (void)want;
+    }
+  }
+  if (fam == FF_CMP) {
+    // The destination is a mask register. Elements 0..vlmax-1 are written;
+    // the rest of the byte was primed and must be undisturbed, which is what
+    // proves the read-modify-write. vma/vta are 0 here, so an inactive
+    // element's bit is undisturbed too.
+    const uint64_t primed = 0x5Aull;
+    uint64_t want = 0;
+    for (int i = 0; i < 8; ++i) {
+      bool bit;
+      if (i < vlmax) {
+        bool act = !mask_en || (((mbits >> i) & 1ull) != 0);
+        if (act) {
+          uint64_t a = va[static_cast<size_t>(i % va.size())];
+          uint64_t b = (form == 0) ? vb[static_cast<size_t>(i % vb.size())] : scalar;
+          bit = FpElemExp(fam, op, sew_l, a, b, rm).bits != 0;
+        } else {
+          bit = ((primed >> i) & 1ull) != 0;   // undisturbed
+        }
+      } else {
+        bit = ((primed >> i) & 1ull) != 0;     // outside the destination group
+      }
+      want |= (bit ? 1ull : 0ull) << i;
+    }
+    uint64_t got = vec->Peek(vd, 0, 3, 0) & 0xFFull;
+    rep->Check(got == want, name + ": mask byte " + mosaic::Hex(got, 2) +
+                                " expected " + mosaic::Hex(want, 2));
+    // the neighbouring bytes were primed and must be untouched
+    rep->Check((vec->Peek(vd, 1, 3, 0) & 0xFFull) == primed,
+               name + ": a neighbouring mask byte was disturbed");
+  } else {
+    for (int i = 0; i < vlmax; ++i) {
+      bool act = !mask_en || (((mbits >> i) & 1ull) != 0);
+      uint64_t a = va[static_cast<size_t>(i % va.size())];
+      uint64_t b = (form == 0) ? vb[static_cast<size_t>(i % vb.size())] : scalar;
+      FpExp e = FpElemExp(fam, op, sew_l, a, b, rm);
+      int dw = (fam == FF_WIDE) ? (sew_l + 1) : sew_l;
+      int dl = (fam == FF_WIDE) ? (lmul_e + 1) : lmul_e;
+      uint64_t got = vec->Peek(vd, i, dw, dl);
+      uint64_t want;
+      if (act) want = e.bits & MaskW(1 << dw);
+      else want = MaskW(1 << dw);   // vma/vta agnostic: all-ones
+      rep->Check(got == want, name + " e" + Dec(i) + ": got " +
+                                  mosaic::Hex(got, 16) + " expected " +
+                                  mosaic::Hex(want, 16));
+    }
+  }
+  rep->Check(o.pending == exp_flags,
+             name + ": pending flags " + FlagStr(o.pending) + " expected " +
+                 FlagStr(exp_flags));
+  rep->Check(o.elems == active,
+             name + ": " + Dec(o.elems) + " active elements, expected " + Dec(active));
+  rep->Check(o.inactive_flag_ctr == 0,
+             name + ": an inactive element contributed a flag");
+  if (cov != nullptr) {
+    int wi = (sew_l == 6) ? 1 : 0;
+    if (!cov->cell[fam][wi][form]) {
+      cov->cell[fam][wi][form] = true;
+      cov->cells += 1;
+    }
+  }
+}
+
+// -------------------------------------------------------- phase 1: element lane
+void PhaseFpElementLane(Cfg* cfg, Vec* vec, VecFp* fp, Reporter* rep, FpCov* cov) {
+  const int fams[] = {FF_ELEM, FF_MINMAX, FF_SGNJ};
+  for (int sew_l = 5; sew_l <= 6; ++sew_l) {
+    std::vector<uint64_t> vals = FpValues(sew_l);
+    for (int fam : fams) {
+      for (int op = 0; op < FpFamilyOps(fam); ++op) {
+        for (int form = 0; form <= 1; ++form) {
+          for (size_t k = 0; k < vals.size(); ++k) {
+            std::vector<uint64_t> va, vb;
+            va.push_back(vals[k]);
+            vb.push_back(vals[(k + 5) % vals.size()]);
+            // fill the rest of the group with a second pair
+            va.push_back(vals[(k + 3) % vals.size()]);
+            vb.push_back(vals[(k + 9) % vals.size()]);
+            uint64_t scalar = vals[(k + 7) % vals.size()];
+            RunFpElemPacket(cfg, vec, fp, rep, cov, fam, op, form, sew_l, 0,
+                            va, vb, scalar, 0, false, 0);
+          }
+        }
+      }
+    }
+  }
+  // one LMUL=2 cell at SEW=32 to exercise grouping
+  std::vector<uint64_t> vals = FpValues(5);
+  for (int op = 0; op < 6; ++op) {
+    RunFpElemPacket(cfg, vec, fp, rep, cov, FF_ELEM, op, 0, 5, 1, vals, vals,
+                    0, 0, false, 0);
+  }
+}
+
+// -------------------------------------------------------- phase 2: masked sNaN
+// Both directions: an active sNaN sets NV and yields the canonical NaN; a
+// masked-off sNaN sets nothing and performs no operation.
+void PhaseFpMaskedSNaN(Cfg* cfg, Vec* vec, VecFp* fp, Reporter* rep) {
+  const int sew_l = 5;
+  const int vd = 8, vs1 = 16, vs2 = 24;
+  const uint64_t snan = 0x7FA00000ull;      // signalling NaN, single
+  const uint64_t one = 0x3F800000ull;
+  const uint64_t two = 0x40000000ull;
+
+  // (a) active sNaN: element 0 is sNaN, unmasked
+  {
+    FpConfig(cfg, sew_l, 0, 0, 0, 64);
+    HostVrf vf;
+    for (int i = 0; i < 4; ++i) {
+      vec->Prime(vf, vs2, i, sew_l, 0, (i == 0) ? snan : one);
+      vec->Prime(vf, vs1, i, sew_l, 0, two);
+    }
+    FpStim s;
+    s.family = FF_ELEM; s.op = 0; s.form = 0; s.vd = vd; s.vs1 = vs1; s.vs2 = vs2;
+    FpObs o = fp->Run(s);
+    rep->Check((o.pending & FL_NV) != 0,
+               "masked-snan active: an active sNaN did not set NV");
+    uint64_t got = vec->Peek(vd, 0, sew_l, 0);
+    rep->Check(got == 0x7FC00000ull,
+               "masked-snan active: result " + mosaic::Hex(got, 16) +
+                   " expected the canonical quiet NaN");
+    rep->Check(o.elems == 4, "masked-snan active: 4 elements expected, got " +
+                                 Dec(o.elems));
+    rep->Check(o.issues == 4, "masked-snan active: 4 FPU operations expected, got " +
+                                  Dec(o.issues));
+  }
+
+  // (b) the same sNaN masked off: no NV, no operation, destination undisturbed
+  {
+    FpConfig(cfg, sew_l, 0, 0, 0, 64);
+    HostVrf vf;
+    for (int i = 0; i < 4; ++i) {
+      vec->Prime(vf, vs2, i, sew_l, 0, (i == 1) ? snan : one);
+      vec->Prime(vf, vs1, i, sew_l, 0, two);
+    }
+    // mask register v0: bit 1 clear, bits 0/2/3 set
+    uint64_t mbits = 0x0Dull;   // 0b1101
+    vec->Prime(vf, 0, 0, 3, 0, mbits & 0xFFull);
+    vec->Prime(vf, 0, 1, 3, 0, (mbits >> 8) & 0xFFull);
+    // destination primed with a sentinel so "undisturbed" is observable
+    for (int i = 0; i < 4; ++i) vec->Prime(vf, vd, i, sew_l, 0, 0xDEADBEEFull);
+
+    FpStim s;
+    s.family = FF_ELEM; s.op = 0; s.form = 0; s.vd = vd; s.vs1 = vs1; s.vs2 = vs2;
+    s.mask_en = true;
+    FpObs o = fp->Run(s);
+    rep->Check((o.pending & FL_NV) == 0,
+               "masked-snan inactive: a masked-off sNaN polluted NV");
+    rep->Check(o.pending == 0,
+               "masked-snan inactive: pending flags " + FlagStr(o.pending) +
+                   " expected none");
+    rep->Check(o.elems == 3, "masked-snan inactive: 3 active elements expected, got " +
+                                 Dec(o.elems));
+    rep->Check(o.issues == 3,
+               "masked-snan inactive: 3 FPU operations expected (the masked-off "
+               "element must not compute), got " + Dec(o.issues));
+    rep->Check(o.inactive_flag_ctr == 0,
+               "masked-snan inactive: an inactive element contributed a flag");
+    uint64_t got = vec->Peek(vd, 1, sew_l, 0);
+    rep->Check(got == 0xDEADBEEFull,
+               "masked-snan inactive: the masked-off destination was disturbed: " +
+                   mosaic::Hex(got, 16));
+  }
+}
+
+// -------------------------------------------------------- phase 3: conversions
+void PhaseFpConversions(Cfg* cfg, Vec* vec, VecFp* fp, Reporter* rep, FpCov* cov) {
+  // same-width conversions at both SEW widths
+  for (int sew_l = 5; sew_l <= 6; ++sew_l) {
+    std::vector<uint64_t> vals = FpValues(sew_l);
+    for (int op = 0; op < 4; ++op) {
+      for (size_t k = 0; k < vals.size(); ++k) {
+        std::vector<uint64_t> va, vb;
+        va.push_back(vals[k]);
+        va.push_back(vals[(k + 6) % vals.size()]);
+        vb.push_back(0);
+        vb.push_back(0);
+        RunFpElemPacket(cfg, vec, fp, rep, cov, FF_CVT, op, 0, sew_l, 0, va, vb,
+                        0, 0, false, 0);
+      }
+    }
+  }
+  // widening conversions (SEW=32 -> 64)
+  {
+    std::vector<uint64_t> vals = FpValues(5);
+    for (int op = 0; op < FpFamilyOps(FF_WIDE); ++op) {
+      for (size_t k = 0; k < vals.size(); ++k) {
+        std::vector<uint64_t> va, vb;
+        va.push_back(vals[k]);
+        va.push_back(vals[(k + 4) % vals.size()]);
+        vb.push_back(0);
+        vb.push_back(0);
+        RunFpElemPacket(cfg, vec, fp, rep, cov, FF_WIDE, op, 0, 5, 0, va, vb, 0,
+                        0, false, 0);
+      }
+    }
+  }
+  // narrowing conversions (source 64 -> 32)
+  {
+    std::vector<uint64_t> vals = FpValues(6);
+    for (int op = 0; op < FpFamilyOps(FF_NARROW); ++op) {
+      for (size_t k = 0; k < vals.size(); ++k) {
+        std::vector<uint64_t> va, vb;
+        va.push_back(vals[k]);
+        va.push_back(vals[(k + 4) % vals.size()]);
+        vb.push_back(0);
+        vb.push_back(0);
+        RunFpElemPacket(cfg, vec, fp, rep, cov, FF_NARROW, op, 0, 5, 0, va, vb,
+                        0, 0, false, 0);
+      }
+    }
+  }
+}
+
+// -------------------------------------------------------- phase 3b: compares
+// The six FP comparisons produce a mask, and their NV rule is the ISA's:
+// vmfeq/vmfne raise it only for a signalling NaN, the ordering compares for any
+// NaN. The NaN operands in the value set exercise exactly that split.
+void PhaseFpCompare(Cfg* cfg, Vec* vec, VecFp* fp, Reporter* rep, FpCov* cov) {
+  for (int sew_l = 5; sew_l <= 6; ++sew_l) {
+    std::vector<uint64_t> vals = FpValues(sew_l);
+    for (int op = 0; op < FpFamilyOps(FF_CMP); ++op) {
+      for (int form = 0; form <= 1; ++form) {
+        for (size_t k = 0; k < vals.size(); ++k) {
+          std::vector<uint64_t> va, vb;
+          va.push_back(vals[k]);
+          vb.push_back(vals[(k + 5) % vals.size()]);
+          va.push_back(vals[(k + 3) % vals.size()]);
+          vb.push_back(vals[(k + 9) % vals.size()]);
+          uint64_t scalar = vals[(k + 7) % vals.size()];
+          RunFpElemPacket(cfg, vec, fp, rep, cov, FF_CMP, op, form, sew_l, 0,
+                          va, vb, scalar, 0, false, 0);
+        }
+      }
+    }
+  }
+}
+
+// -------------------------------------------------------- phase 4: reductions
+// The ordered reductions are checked bit-exactly against the serial fold in
+// element order; the unordered ones against the enumerated permitted set. The
+// element vectors are chosen so that the left fold and the right fold differ,
+// which is what makes the bit-exact check discriminating: an implementation
+// that reassociated an ordered reduction would fail it, and a case that compared
+// with an epsilon would not.
+void RunFpReduction(Cfg* cfg, Vec* vec, VecFp* fp, Reporter* rep, FpCov* cov,
+                    int fam, int op, int sew_l, int lmul_e, bool mask_en,
+                    uint64_t mbits, const std::vector<uint64_t>& elems,
+                    uint64_t acc0) {
+  const bool wide = (fam == FF_REDWIDE);
+  const bool fmt = (sew_l == 6);
+  const int vlmax = FpVlmax(sew_l, lmul_e);
+  const int vd = 8, vs1 = 16, vs2 = 24;
+  const int acc_sew_l = wide ? (sew_l + 1) : sew_l;
+  const int acc_lmul = wide ? (lmul_e + 1) : lmul_e;
+  const std::string name = std::string("fpred ") + FpFamilyName(fam) + " op" +
+                           Dec(op) + " sew" + Dec(1 << sew_l);
+  FpConfig(cfg, sew_l, VlmulOfExp(lmul_e), 0, 0, 64);
+
+  HostVrf vf;
+  vec->Prime(vf, vs1, 0, acc_sew_l, acc_lmul, acc0);
+  for (int i = 0; i < vlmax; ++i) {
+    vec->Prime(vf, vs2, i, sew_l, lmul_e, elems[static_cast<size_t>(i % elems.size())]);
+  }
+  if (mask_en) {
+    vec->Prime(vf, 0, 0, 3, 0, mbits & 0xFFull);
+    vec->Prime(vf, 0, 1, 3, 0, (mbits >> 8) & 0xFFull);
+  }
+
+  FpStim s;
+  s.family = fam; s.op = op; s.vd = vd; s.vs1 = vs1; s.vs2 = vs2;
+  s.mask_en = mask_en; s.rm = 0;
+  std::vector<std::pair<int, uint32_t> > trace;
+  FpObs o = fp->Run(s, &trace);
+
+  rep->Check(!o.illegal, name + ": refused");
+
+  // the serial, ascending fold, element by element
+  uint64_t acc = acc0;
+  uint32_t exp_flags = 0;
+  std::vector<double> elems_d;
+  int active = 0;
+  for (int i = 0; i < vlmax; ++i) {
+    bool act = !mask_en || (((mbits >> i) & 1ull) != 0);
+    if (!act) continue;
+    active += 1;
+    uint64_t e = elems[static_cast<size_t>(i % elems.size())];
+    if (wide) {
+      double ed = static_cast<double>(F32From(static_cast<uint32_t>(e)));
+      elems_d.push_back(ed);
+      FpExp add = HostArithExp(0, false, acc, F64Bits(ed), 0);
+      acc = add.bits;
+      exp_flags |= add.flags;
+    } else if (fam == FF_REDMINMAX) {
+      FpExp mm = MinMaxExp(op == 0, fmt, acc, e);
+      acc = mm.bits;
+      exp_flags |= mm.flags;
+      elems_d.push_back(fmt ? F64From(e)
+                            : static_cast<double>(F32From(static_cast<uint32_t>(e))));
+    } else {
+      FpExp add = HostArithExp(0, fmt, acc, e, 0);
+      acc = add.bits;
+      exp_flags |= add.flags;
+      elems_d.push_back(fmt ? F64From(e)
+                            : static_cast<double>(F32From(static_cast<uint32_t>(e))));
+    }
+  }
+
+  // the ordering is observable through the flag trace: ascending from vstart
+  bool ascending = true;
+  int prev = -1;
+  for (auto& t : trace) {
+    if (t.first <= prev) ascending = false;
+    prev = t.first;
+  }
+  rep->Check(ascending, name + ": the element fold order was not ascending");
+
+  // the right fold, for the discriminating-vector property
+  uint64_t acc_r = acc0;
+  for (int i = vlmax - 1; i >= 0; --i) {
+    bool act = !mask_en || (((mbits >> i) & 1ull) != 0);
+    if (!act) continue;
+    uint64_t e = elems[static_cast<size_t>(i % elems.size())];
+    if (wide) {
+      double ed = static_cast<double>(F32From(static_cast<uint32_t>(e)));
+      acc_r = HostArithExp(0, false, acc_r, F64Bits(ed), 0).bits;
+    } else if (fam == FF_REDMINMAX) {
+      acc_r = MinMaxExp(op == 0, fmt, acc_r, e).bits;
+    } else {
+      acc_r = HostArithExp(0, fmt, acc_r, e, 0).bits;
+    }
+  }
+
+  const bool ordered = (op == 0);
+  if (fam == FF_REDMINMAX) {
+    rep->Check(o.acc == acc, name + ": acc " + mosaic::Hex(o.acc, 16) +
+                                 " expected " + mosaic::Hex(acc, 16));
+    rep->Check(o.pending == exp_flags, name + ": flags " + FlagStr(o.pending) +
+                                           " expected " + FlagStr(exp_flags));
+  } else if (ordered) {
+    // deterministic: bit-exact, and the vectors make the association visible
+    rep->Check(acc != acc_r,
+               name + " ordered: the chosen vectors do not distinguish the two "
+               "associations, so the bit-exact check proves nothing");
+    rep->Check(o.acc == acc, name + " ordered: acc " + mosaic::Hex(o.acc, 16) +
+                                 " expected " + mosaic::Hex(acc, 16) +
+                                 " (bit-exact; the reassociated value is " +
+                                 mosaic::Hex(acc_r, 16) + ")");
+    rep->Check(o.acc != acc_r,
+               name + " ordered: the result equals the reassociated fold");
+    rep->Check(o.pending == exp_flags, name + " ordered: flags " +
+                                           FlagStr(o.pending) + " expected " +
+                                           FlagStr(exp_flags));
+  } else {
+    // permitted to differ: the result must be in the enumerated tree set
+    double accd = wide ? F64From(acc0)
+                       : (fmt ? F64From(acc0)
+                              : static_cast<double>(F32From(static_cast<uint32_t>(acc0))));
+    std::set<uint64_t> permit = UnorderedPermitted(elems_d, accd, wide, 0);
+    uint64_t got = wide ? o.acc : (o.acc & MaskW(1 << sew_l));
+    bool in_set = permit.count(got) != 0;
+    std::string list;
+    for (uint64_t x : permit) {
+      if (list.size() < 200) list += " " + mosaic::Hex(x, 16);
+    }
+    rep->Check(in_set, name + " unordered: result " + mosaic::Hex(got, 16) +
+                           " is not in the permitted set {" + list + " }");
+    // the permitted set is a finite set of bit patterns, not a tolerance: for
+    // these vectors it holds more than one value, so the comparator is a real
+    // membership test.
+    rep->Check(permit.size() >= 2, name + " unordered: the permitted set holds " +
+                                       Dec(static_cast<int>(permit.size())) +
+                                       " value(s), so the vectors do not exercise "
+                                       "a permitted difference");
+  }
+  rep->Check(o.elems == active, name + ": " + Dec(o.elems) + " folds, expected " +
+                                    Dec(active));
+  if (cov != nullptr) {
+    int wi = (sew_l == 6) ? 1 : 0;
+    if (!cov->cell[fam][wi][0]) { cov->cell[fam][wi][0] = true; cov->cells += 1; }
+  }
+}
+
+void PhaseFpReductions(Cfg* cfg, Vec* vec, VecFp* fp, Reporter* rep, FpCov* cov) {
+  // SEW=32: 1.0, 2^24, 1.0, -2^24 -- the left fold is 0 and the right fold is 1.
+  const std::vector<uint64_t> v32 = {0x3F800000ull, 0x4B800000ull,
+                                     0x3F800000ull, 0xCB800000ull};
+  // SEW=64 (LMUL=2 so the group holds four elements): 1.0, 2^53, 1.0, -2^53.
+  const std::vector<uint64_t> v64 = {0x3FF0000000000000ull, 0x4340000000000000ull,
+                                     0x3FF0000000000000ull, 0xC340000000000000ull};
+  // widening reduction: 1.0, 2^60, 1.0, -2^60 -- the f64 fold loses the 1s.
+  const std::vector<uint64_t> vw = {0x3F800000ull, 0x5D800000ull,
+                                    0x3F800000ull, 0xDD800000ull};
+
+  for (int op = 0; op < 2; ++op) {
+    RunFpReduction(cfg, vec, fp, rep, cov, FF_REDSUM, op, 5, 0, false, 0, v32, 0);
+    RunFpReduction(cfg, vec, fp, rep, cov, FF_REDSUM, op, 6, 1, false, 0, v64, 0);
+    RunFpReduction(cfg, vec, fp, rep, cov, FF_REDMINMAX, op, 5, 0, false, 0, v32, 0);
+    RunFpReduction(cfg, vec, fp, rep, cov, FF_REDMINMAX, op, 6, 1, false, 0, v64, 0);
+    RunFpReduction(cfg, vec, fp, rep, cov, FF_REDWIDE, op, 5, 0, false, 0, vw, 0);
+  }
+  // a masked reduction: the masked-off element is not folded
+  RunFpReduction(cfg, vec, fp, rep, cov, FF_REDSUM, 0, 5, 0, true, 0x0Dull, v32, 0);
+  RunFpReduction(cfg, vec, fp, rep, cov, FF_REDSUM, 1, 5, 0, true, 0x0Dull, v32, 0);
+}
+
+// -------------------------------------------------------- phase 5: rounding
+// A tie is rounded differently by different modes; vxrm is a fixed-point field
+// and must have no effect on the floating-point path.
+void PhaseFpRounding(Cfg* cfg, Vec* vec, VecFp* fp, Reporter* rep) {
+  const int sew_l = 5;
+  const int vd = 8, vs1 = 16, vs2 = 24;
+  const uint64_t one = 0x3F800000ull;
+  const uint64_t tie = 0x33000000ull;   // 2^-25: 1.0 + 2^-25 is a tie in single
+  const int modes[4] = {0, 3, 2, 1};    // RNE, RUP, RDN, RTZ
+  const uint64_t want[4] = {0x3F800000ull, 0x3F800001ull, 0x3F800000ull, 0x3F800000ull};
+  for (int mi = 0; mi < 4; ++mi) {
+    FpConfig(cfg, sew_l, 0, 0, 0, 64);
+    HostVrf vf;
+    for (int i = 0; i < 4; ++i) {
+      vec->Prime(vf, vs2, i, sew_l, 0, one);
+      vec->Prime(vf, vs1, i, sew_l, 0, tie);
+    }
+    FpStim s;
+    s.family = FF_ELEM; s.op = 0; s.form = 0; s.vd = vd; s.vs1 = vs1; s.vs2 = vs2;
+    s.rm = 7;             // dynamic: take frm
+    s.frm = modes[mi];
+    FpObs o = fp->Run(s);
+    uint64_t got = vec->Peek(vd, 0, sew_l, 0);
+    rep->Check(got == want[mi], std::string("round frm") + Dec(modes[mi]) +
+                                   ": got " + mosaic::Hex(got, 16) + " expected " +
+                                   mosaic::Hex(want[mi], 16));
+    rep->Check((o.pending & FL_NX) != 0, std::string("round frm") + Dec(modes[mi]) +
+                                             ": an inexact tie did not set NX");
+  }
+  // the same tie with vxrm varying: the result must not move
+  for (int vxrm = 0; vxrm < 4; ++vxrm) {
+    FpConfig(cfg, sew_l, 0, 0, 0, 64);
+    (void)CsrWrite(cfg, kCsrVxrm, static_cast<uint64_t>(vxrm));
+    CfgStim cap;
+    cap.snap_capture = true;
+    cfg->Cycle(cap);
+    HostVrf vf;
+    for (int i = 0; i < 4; ++i) {
+      vec->Prime(vf, vs2, i, sew_l, 0, one);
+      vec->Prime(vf, vs1, i, sew_l, 0, tie);
+    }
+    FpStim s;
+    s.family = FF_ELEM; s.op = 0; s.form = 0; s.vd = vd; s.vs1 = vs1; s.vs2 = vs2;
+    s.rm = 7; s.frm = 3;   // RUP
+    (void)fp->Run(s);
+    uint64_t got = vec->Peek(vd, 0, sew_l, 0);
+    rep->Check(got == 0x3F800001ull,
+               std::string("round vxrm") + Dec(vxrm) +
+                   ": the fixed-point rounding field changed an FP result: " +
+                   mosaic::Hex(got, 16));
+  }
+}
+
+// -------------------------------------------------- phase 6: flag aggregate
+// A whole macro, including masked-off elements, and the commit boundary.
+void PhaseFpFlagAggregate(Cfg* cfg, Vec* vec, VecFp* fp, Reporter* rep) {
+  const int sew_l = 5;
+  const int vd = 8, vs1 = 16, vs2 = 24;
+  const uint64_t snan = 0x7FA00000ull;
+  const uint64_t inf = 0x7F800000ull;
+  const uint64_t one = 0x3F800000ull;
+
+  // A macro with a masked-off sNaN and an active inf-inf (which sets NV): the
+  // aggregate is the OR over the active elements only, and nothing is
+  // architectural until the macro commits.
+  FpConfig(cfg, sew_l, 0, 0, 0, 64);
+  HostVrf vf;
+  for (int i = 0; i < 4; ++i) {
+    vec->Prime(vf, vs2, i, sew_l, 0, (i == 0) ? inf : ((i == 1) ? snan : one));
+    vec->Prime(vf, vs1, i, sew_l, 0, (i == 0) ? inf : one);
+  }
+  vec->Prime(vf, 0, 0, 3, 0, 0x0Dull);   // element 1 masked off
+  FpStim s;
+  s.family = FF_ELEM; s.op = 0; s.form = 0; s.vd = vd; s.vs1 = vs1; s.vs2 = vs2;
+  s.mask_en = true;
+  FpObs o = fp->Run(s);
+  uint32_t want = FL_NV;   // inf - inf on element 0 only
+  rep->Check(o.pending == want, "agg: pending " + FlagStr(o.pending) + " expected " +
+                                    FlagStr(want));
+  rep->Check(o.elems == 3, "agg: 3 active elements expected, got " + Dec(o.elems));
+  rep->Check(o.inactive_flag_ctr == 0, "agg: an inactive element contributed a flag");
+
+  // the premature-flag fail mode: nothing architectural before the commit
+  FpStim idle;
+  FpObs before = fp->Idle(idle);
+  rep->Check(before.arch == 0,
+             "agg: flags became architectural before the macro retired: " +
+                 FlagStr(before.arch));
+  rep->Check(before.macro_pending, "agg: a completed macro is not pending");
+
+  // the commit
+  FpStim cm;
+  cm.commit_valid = true;
+  FpObs after = fp->Idle(cm);
+  rep->Check(after.commit, "agg: the commit did not take effect");
+  rep->Check(after.arch == want, "agg: architectural flags " + FlagStr(after.arch) +
+                                     " expected " + FlagStr(want));
+  rep->Check(after.commit_ctr == 1, "agg: commit counter " + Dec(after.commit_ctr) +
+                                        " expected 1");
+  rep->Check(after.pending == 0, "agg: pending flags were not cleared at commit");
+
+  // a squashed macro contributes nothing: run a flag-producing macro, flush it,
+  // and require the architectural flags to be unchanged.
+  FpConfig(cfg, sew_l, 0, 0, 0, 64);
+  HostVrf vf2;
+  for (int i = 0; i < 4; ++i) {
+    vec->Prime(vf2, vs2, i, sew_l, 0, inf);
+    vec->Prime(vf2, vs1, i, sew_l, 0, inf);
+  }
+  FpStim s2;
+  s2.family = FF_ELEM; s2.op = 0; s2.form = 0; s2.vd = vd; s2.vs1 = vs1; s2.vs2 = vs2;
+  FpObs o2 = fp->Run(s2);
+  rep->Check(o2.pending == FL_NV, "agg squash: pending NV expected");
+  FpStim fl;
+  fl.flush = true;
+  FpObs after_flush = fp->Idle(fl);
+  rep->Check(after_flush.pending == 0, "agg squash: the flush did not clear pending");
+  rep->Check(after_flush.arch == want, "agg squash: a squashed macro changed the "
+                                       "architectural flags: " + FlagStr(after_flush.arch));
+  rep->Check(after_flush.flush_ctr == 1, "agg squash: flush counter " +
+                                             Dec(after_flush.flush_ctr) + " expected 1");
+
+  // a commit with no completed macro is spurious and changes nothing
+  FpStim sp;
+  sp.commit_valid = true;
+  FpObs spurious = fp->Idle(sp);
+  rep->Check(spurious.arch == want, "agg: a spurious commit changed the flags");
+  rep->Check(spurious.spurious_ctr == 1, "agg: spurious commit counter " +
+                                             Dec(spurious.spurious_ctr) + " expected 1");
+}
+
+// -------------------------------------------------------- phase 7: capability
+void PhaseFpCapGate(Cfg* cfg, Vec* vec, VecFp* fp, Reporter* rep) {
+  const int sew_l = 5;
+  FpConfig(cfg, sew_l, 0, 0, 0, 64);
+  HostVrf vf;
+  for (int i = 0; i < 4; ++i) {
+    vec->Prime(vf, 16, i, sew_l, 0, 0x3F800000ull);
+    vec->Prime(vf, 24, i, sew_l, 0, 0x40000000ull);
+  }
+  // every declared family runs
+  for (int fam = 0; fam < FF_COUNT; ++fam) {
+    FpStim s;
+    s.family = fam; s.op = 0; s.vd = 8; s.vs1 = 16; s.vs2 = 24;
+    FpObs o = fp->Run(s);
+    rep->Check(!o.illegal, std::string("capgate: family ") + FpFamilyName(fam) +
+                               " was refused although declared");
+  }
+  // each family is refused with its bit clear and issues no VRF transaction
+  for (int fam = 0; fam < FF_COUNT; ++fam) {
+    FpStim s;
+    s.family = fam; s.op = 0; s.vd = 8; s.vs1 = 16; s.vs2 = 24;
+    s.caps = kAllFpCaps & ~(1ull << fam);
+    FpObs o = fp->Run(s);
+    rep->Check(o.illegal, std::string("capgate: family ") + FpFamilyName(fam) +
+                              " ran with its capability bit clear");
+  }
+  // an unknown family id is refused
+  {
+    FpStim s;
+    s.family = 15; s.op = 0; s.vd = 8; s.vs1 = 16; s.vs2 = 24;
+    FpObs o = fp->Run(s);
+    rep->Check(o.illegal, "capgate: an unknown family id was not refused");
+  }
+  // an operation outside the family's table is refused
+  {
+    FpStim s;
+    s.family = FF_MINMAX; s.op = 5; s.vd = 8; s.vs1 = 16; s.vs2 = 24;
+    FpObs o = fp->Run(s);
+    rep->Check(o.illegal, "capgate: an unknown operation id was not refused");
+  }
+  // SEW=16 is refused: the F/D datapath has no half format
+  {
+    FpConfig(cfg, 4, 0, 0, 0, 64);
+    FpStim s;
+    s.family = FF_ELEM; s.op = 0; s.vd = 8; s.vs1 = 16; s.vs2 = 24;
+    FpObs o = fp->Run(s);
+    rep->Check(o.illegal, "capgate: SEW=16 was not refused");
+  }
+  // widening at LMUL=8 is refused: the effective LMUL would be 16
+  {
+    FpConfig(cfg, 5, 3, 0, 0, 64);
+    FpStim s;
+    s.family = FF_WIDE; s.op = 4; s.vd = 8; s.vs1 = 16; s.vs2 = 24;
+    FpObs o = fp->Run(s);
+    rep->Check(o.illegal, "capgate: widening at LMUL=8 was not refused");
+  }
+}
+
+// -------------------------------------------------------- phase 8: latency
+void PhaseFpLatency(Cfg* cfg, Vec* vec, VecFp* fp, Reporter* rep) {
+  const int sew_l = 5;
+  FpConfig(cfg, sew_l, 0, 0, 0, 64);
+  HostVrf vf;
+  for (int i = 0; i < 4; ++i) {
+    vec->Prime(vf, 16, i, sew_l, 0, 0x3F800000ull);
+    vec->Prime(vf, 24, i, sew_l, 0, 0x40000000ull);
+  }
+  FpStim add;
+  add.family = FF_ELEM; add.op = 0; add.vd = 8; add.vs1 = 16; add.vs2 = 24;
+  FpObs oa = fp->Run(add);
+  rep->Check(oa.last_lat == 1, "latency: an add declared latency " +
+                                   Dec(oa.last_lat) + " expected 1");
+  uint64_t t0 = 0, t1 = 0;
+  {
+    t0 = 0;
+    (void)t0;
+  }
+  FpStim div;
+  div.family = FF_ELEM; div.op = 4; div.vd = 8; div.vs1 = 16; div.vs2 = 24;
+  FpObs od = fp->Run(div);
+  rep->Check(od.last_lat == 66, "latency: a divide declared latency " +
+                                    Dec(od.last_lat) + " expected 66");
+  rep->Check(od.issues == 4, "latency: 4 divide operations expected, got " +
+                                 Dec(od.issues));
+  (void)t1;
+}
+
+// ------------------------------------------------------------------- runner
+void RunVecFpCase(Vmosaic_vec_tb* dut, ClockDriver* clk, Reporter* rep, FpCov* cov) {
+  Cfg cfg(dut, clk);
+  Vec vec(dut, clk);
+  VecFp fp(dut, clk);
+  // settle the FP inputs before anything else runs
+  {
+    FpStim idle;
+    (void)fp.Cycle(idle);
+  }
+  PhaseFpElementLane(&cfg, &vec, &fp, rep, cov);
+  PhaseFpMaskedSNaN(&cfg, &vec, &fp, rep);
+  PhaseFpConversions(&cfg, &vec, &fp, rep, cov);
+  PhaseFpRounding(&cfg, &vec, &fp, rep);
+  PhaseFpFlagAggregate(&cfg, &vec, &fp, rep);
+  PhaseFpReductions(&cfg, &vec, &fp, rep, cov);
+  PhaseFpCapGate(&cfg, &vec, &fp, rep);
+  PhaseFpLatency(&cfg, &vec, &fp, rep);
+
+  for (int f = 0; f < FF_COUNT; ++f) {
+    bool any = cov->cell[f][0][0] || cov->cell[f][0][1] || cov->cell[f][1][0] ||
+               cov->cell[f][1][1];
+    rep->Check(any, std::string("coverage: family ") + FpFamilyName(f) +
+                        " was never exercised");
+  }
+}
+
+// ============================================================================
+// I-057 -- the partial-trap / `vstart` / fault-only-first controller.
+//
+// The oracle below is written from the pinned V spec's rules (quoted in
+// rtl/core/mosaic_vec_restart.sv), not read from the DUT: a rule set that agreed
+// with the DUT by construction would agree with a wrong DUT.  The expected
+// `vstart`, `vl` trim, committed element set, store side effects and destination
+// state are computed here, and the DUT's descriptor bitmap is only ever
+// *compared* against them.
+// ============================================================================
+
+// the controller's fault classes (rtl/core/mosaic_vec_restart.sv)
+enum : int { RC_NONE = 0, RC_PAGE = 1, RC_ACCESS = 2, RC_INTR = 3, RC_OTHER = 4 };
+
+const char* RstCodeName(int c) {
+  switch (c) {
+    case RC_NONE: return "none";
+    case RC_PAGE: return "page";
+    case RC_ACCESS: return "access";
+    case RC_INTR: return "interrupt";
+    default: return "other";
+  }
+}
+
+// the four forms this package claims for the boundary sweep
+enum : int {
+  RF_UNIT_LOAD = 0, RF_UNIT_STORE = 1, RF_STRIDED_LOAD = 2, RF_STRIDED_STORE = 3,
+  RF_FORM_COUNT = 4
+};
+
+struct RstForm {
+  int mode;
+  bool we;
+  int64_t stride;
+  const char* name;
+};
+
+const RstForm kRstForms[RF_FORM_COUNT] = {
+    {LS_UNIT,    false, 0, "unit-load"},
+    {LS_UNIT,    true,  0, "unit-store"},
+    {LS_STRIDED, false, 8, "strided-load"},
+    {LS_STRIDED, true,  8, "strided-store"},
+};
+
+// ------------------------------------------------------------- the host oracle
+struct RstExpect {
+  bool trap = false;
+  int vstart = 0;
+  int trap_code = RC_NONE;
+  bool vl_write = false;
+  int vl_new = 0;
+  bool complete = true;
+  int committed = 0;
+};
+
+// The specification's rule, applied on the host:
+//   * a synchronous fault at element k: `vstart` = k, the elements strictly
+//     before k took effect, no trim (R1);
+//   * a fault-only-first unit-stride load: element 0 raises the trap with `vl`
+//     unmodified; element k > 0 is absorbed with `vl` = k and no trap (R3);
+//   * anything else -- a store, a strided form, an interrupt -- always traps.
+RstExpect HostRst(int mode, bool we, bool fof, int vl, int vstart, int fault_elem,
+                  int fault_code) {
+  RstExpect e;
+  if (fault_elem < 0) {
+    e.complete = true;
+    e.committed = vl - vstart;
+    return e;
+  }
+  e.committed = fault_elem - vstart;
+  const bool absorb = fof && !we && (mode == LS_UNIT) && (fault_elem > 0) &&
+                      (fault_code == RC_PAGE || fault_code == RC_ACCESS);
+  if (absorb) {
+    e.trap = false;
+    e.vl_write = true;
+    e.vl_new = fault_elem;
+    e.complete = true;
+  } else {
+    e.trap = true;
+    e.vstart = fault_elem;
+    e.trap_code = fault_code;
+    e.complete = false;
+  }
+  return e;
+}
+
+// -------------------------------------------------------------- the runner
+struct RstCfg {
+  int mode = LS_UNIT;
+  bool we = false;
+  bool fof = false;
+  int sew_l = 3, lmul = 0, idx_l = 3;
+  int vd = 8, data = 16, index = 24;
+  uint64_t base = 0x8000;
+  int64_t stride = 0;
+  int vl = 6;
+  bool mask_en = false;
+  int vta = 0, vma = 0;
+};
+
+void RstFillStim(LsuStim* s, const RstCfg& R, bool exec) {
+  s->exec_valid = exec;
+  s->mode = R.mode;
+  s->we = R.we;
+  s->fof = R.fof;
+  s->nf = 1;
+  s->vd = R.vd;
+  s->data = R.data;
+  s->index = R.index;
+  s->idx_sew = R.idx_l;
+  s->base = R.base;
+  s->stride = static_cast<uint64_t>(R.stride);
+  s->mask_en = R.mask_en;
+  s->bind = true;
+  s->mem_ready = true;
+}
+
+void RstAlloc(Lsu* lsu, int vl, int vstart, uint64_t vtype) {
+  LsuStim s;
+  s.bind = true;
+  s.desc_alloc = true;
+  s.desc_alloc_vl = vl;
+  s.desc_alloc_vstart = vstart;
+  s.desc_alloc_vtype = vtype;
+  lsu->Step(s);
+}
+
+void RstRelease(Lsu* lsu) {
+  LsuStim s;
+  s.bind = true;
+  s.desc_release = true;
+  lsu->Step(s);
+}
+
+void RstFaultClear(Lsu* lsu) {
+  LsuStim s;
+  s.bind = true;
+  s.desc_fault_clear = true;
+  lsu->Step(s);
+}
+
+struct RstResult {
+  LsuObs o;
+  bool early_complete = false;
+};
+
+// Run one macro to completion (the drain included) and then let the controller
+// finish its walk over the committed elements.  `fault_elem` < 0 injects no
+// fault; `intr_at` >= 0 paces the memory so exactly that many elements are
+// performed and then requests a boundary stop.
+RstResult RstRunMacro(Cfg* cfg, Vec* vec, Lsu* lsu, LsuMem* mem, const RstCfg& R,
+                      int vstart, int fault_elem, int fault_code, int intr_at) {
+  (void)vec;
+  LsuConfig(cfg, R.sew_l, VlmulOfExp(R.lmul), static_cast<uint64_t>(R.vl), vstart,
+            R.vta, R.vma);
+  mem->fault_enable = (fault_elem >= 0);
+  mem->fault_all = false;
+  mem->fault_elem = fault_elem;
+  mem->fault_field = 0;
+
+  LsuStim s;
+  RstFillStim(&s, R, true);
+  s.fault_code = fault_code;
+  LsuObs o = lsu->Step(s);
+
+  RstResult res;
+  bool stopping = false;
+  int guard = 0;
+  while (!o.done && ++guard < 40000) {
+    if (o.rst_complete && o.busy) res.early_complete = true;
+    LsuStim t;
+    RstFillStim(&t, R, false);
+    t.fault_code = fault_code;
+    if (intr_at >= 0) {
+      if (o.elems >= intr_at) stopping = true;
+      if (stopping) {
+        t.intr = true;
+        t.mem_ready = false;
+      }
+    }
+    o = lsu->Step(t);
+  }
+  // let the controller walk the committed elements into the descriptor
+  while (o.rst_busy && ++guard < 40000) {
+    LsuStim t;
+    RstFillStim(&t, R, false);
+    o = lsu->Step(t);
+  }
+  mem->fault_enable = false;
+  res.o = o;
+  return res;
+}
+
+struct RstCoverage {
+  int cells = 0;
+  bool form_pos[RF_FORM_COUNT][16] = {};
+  int intr_cells = 0;
+  int fof_cells = 0;
+  int restart_cells = 0;
+};
+
+// --------------------------------------------------------------- phases
+
+// R4: a macro is complete only after the packetizer drained every response, not
+// when the last request was offered.  This phase runs a clean macro and requires
+// that `o_complete_o` never stands while the packetizer is busy.
+void PhaseRstRetireGate(Cfg* cfg, Vec* vec, Lsu* lsu, LsuMem* mem, Reporter* rep,
+                        RstCoverage* cov) {
+  (void)cov;
+  const int vl = 6;
+  mem->OneRam();
+  mem->ResetCounters();
+  RstCfg R;
+  R.mode = LS_UNIT; R.we = false; R.vl = vl; R.base = 0x8000;
+  lsu->ClearReqs();
+  RstAlloc(lsu, vl, 0, Vtypei(R.sew_l, R.lmul));
+  HostVrf vf;
+  for (int i = 0; i < vl; ++i) vec->Prime(vf, R.vd, i, R.sew_l, R.lmul, Pat(31 * i + 11) & 0xFFull);
+  RstResult res = RstRunMacro(cfg, vec, lsu, mem, R, 0, -1, RC_NONE, -1);
+  rep->Check(!res.early_complete,
+             "retire-gate: o_complete_o stood while the packetizer was busy -- the "
+             "last packet had arrived, the responses had not drained");
+  rep->Check(res.o.rst_complete && res.o.rst_retire_ok,
+             "retire-gate: a clean macro did not complete");
+  rep->Check(!res.o.rst_trap, "retire-gate: a clean macro raised a trap");
+  rep->Check(res.o.rst_prefix_agree, "retire-gate: bitmap and prefix disagree");
+  rep->Check(res.o.desc_prefix == vl,
+             "retire-gate: prefix " + Dec(res.o.desc_prefix) + " expected " + Dec(vl));
+  RstRelease(lsu);
+}
+
+// A fault at *every* legal element boundary, for each claimed form and both
+// fault classes: `vstart` is the faulting index, the elements before it took
+// effect, the faulting one and later did not, and the descriptor's bitmap and
+// fault record say so.
+void PhaseRstFaultBoundaries(Cfg* cfg, Vec* vec, Lsu* lsu, LsuMem* mem, Reporter* rep,
+                             RstCoverage* cov) {
+  const int vl = 6;
+  const int codes[2] = {RC_PAGE, RC_ACCESS};
+  for (int f = 0; f < RF_FORM_COUNT; ++f) {
+    const RstForm& F = kRstForms[f];
+    for (int pos = 0; pos < vl; ++pos) {
+      for (int ci = 0; ci < 2; ++ci) {
+        const int code = codes[ci];
+        mem->OneRam();
+        mem->ResetCounters();
+        RstCfg R;
+        R.mode = F.mode; R.we = F.we; R.stride = F.stride; R.vl = vl;
+        R.base = 0x8000 + 0x100 * f + 0x10 * pos + ci;
+        lsu->ClearReqs();
+        RstAlloc(lsu, vl, 0, Vtypei(R.sew_l, R.lmul));
+        HostVrf vf;
+        const int grp = R.we ? R.data : R.vd;
+        std::vector<uint64_t> val(static_cast<size_t>(vl), 0);
+        for (int i = 0; i < vl; ++i) {
+          val[static_cast<size_t>(i)] = Pat(97 * f + 13 * i + 5) & 0xFFull;
+          vec->Prime(vf, grp, i, R.sew_l, R.lmul, val[static_cast<size_t>(i)]);
+        }
+        std::vector<uint8_t> before(mem->mem.begin(), mem->mem.begin() + 0x9000);
+
+        RstResult res = RstRunMacro(cfg, vec, lsu, mem, R, 0, pos, code, -1);
+        const RstExpect ex = HostRst(R.mode, R.we, false, vl, 0, pos, code);
+        const std::string name = std::string("fault-boundary ") + F.name + " at " +
+                                 Dec(pos) + " code " + RstCodeName(code);
+
+        rep->Check(res.o.trap && res.o.trap_elem == pos,
+                   name + ": packetizer vstart " + Dec(res.o.trap_elem) + " expected " + Dec(pos));
+        rep->Check(res.o.trap_code == code,
+                   name + ": packetizer class " + RstCodeName(res.o.trap_code) + " expected " +
+                       RstCodeName(code));
+        rep->Check(res.o.rst_trap && res.o.rst_vstart == ex.vstart,
+                   name + ": controller trap=" + Dec(res.o.rst_trap) + " vstart=" +
+                       Dec(res.o.rst_vstart) + " expected 1/" + Dec(ex.vstart));
+        rep->Check(res.o.rst_trap_code == ex.trap_code,
+                   name + ": controller class " + RstCodeName(res.o.rst_trap_code) + " expected " +
+                       RstCodeName(ex.trap_code));
+        rep->Check(!res.o.rst_vl_write && !res.o.rst_fof_trim,
+                   name + ": a macro that must trap trimmed vl");
+        rep->Check(!res.o.rst_complete && !res.o.rst_retire_ok,
+                   name + ": a trapped macro was called complete");
+        rep->Check(res.o.rst_elems_committed == ex.committed,
+                   name + ": committed " + Dec(res.o.rst_elems_committed) + " expected " +
+                       Dec(ex.committed));
+        rep->Check(res.o.desc_prefix == pos && res.o.desc_fault_valid &&
+                       res.o.desc_fault_elem == pos && res.o.desc_fault_code == code,
+                   name + ": descriptor prefix=" + Dec(res.o.desc_prefix) + " fault=" +
+                       Dec(res.o.desc_fault_valid) + "/" + Dec(res.o.desc_fault_elem) + "/" +
+                       RstCodeName(res.o.desc_fault_code));
+        rep->Check(res.o.rst_prefix_agree, name + ": bitmap and prefix disagree");
+
+        bool ok = true;
+        std::string detail;
+        for (int e = 0; e < vl; ++e) {
+          const uint64_t addr = R.base + static_cast<uint64_t>(e) *
+                                (F.mode == LS_UNIT ? 1ull : static_cast<uint64_t>(R.stride));
+          if (R.we) {
+            const uint8_t got = mem->mem[static_cast<size_t>(addr & 0xFFFFull)];
+            const uint8_t want = (e < pos)
+                                     ? static_cast<uint8_t>(val[static_cast<size_t>(e)])
+                                     : before[static_cast<size_t>(addr)];
+            if (got != want) { ok = false; detail += " mem" + Dec(e); }
+          } else {
+            const uint64_t got = vec->MemRead(grp, e, R.sew_l, R.lmul);
+            const uint64_t want = (e < pos) ? mem->Elem(addr, 1) : val[static_cast<size_t>(e)];
+            if (got != want) { ok = false; detail += " dest" + Dec(e); }
+          }
+        }
+        rep->Check(ok, name + ": the partial state is wrong:" + detail);
+
+        cov->form_pos[f][pos] = true;
+        cov->cells += 1;
+        RstRelease(lsu);
+      }
+    }
+  }
+}
+
+// A precise interrupt at an element boundary: the packetizer stops at the
+// boundary, the controller traps with `vstart` = the first unperformed element
+// and never trims `vl`, and the elements before the boundary took effect.
+void PhaseRstInterrupt(Cfg* cfg, Vec* vec, Lsu* lsu, LsuMem* mem, Reporter* rep,
+                       RstCoverage* cov) {
+  const int vl = 6;
+  for (int b = 0; b < vl; ++b) {
+    mem->OneRam();
+    mem->ResetCounters();
+    RstCfg R;
+    R.mode = LS_UNIT; R.we = false; R.vl = vl; R.base = 0x9000;
+    lsu->ClearReqs();
+    RstAlloc(lsu, vl, 0, Vtypei(R.sew_l, R.lmul));
+    HostVrf vf;
+    std::vector<uint64_t> val(static_cast<size_t>(vl), 0);
+    for (int i = 0; i < vl; ++i) {
+      val[static_cast<size_t>(i)] = Pat(41 * i + 3) & 0xFFull;
+      vec->Prime(vf, R.vd, i, R.sew_l, R.lmul, val[static_cast<size_t>(i)]);
+    }
+    RstResult res = RstRunMacro(cfg, vec, lsu, mem, R, 0, -1, RC_NONE, b);
+    const std::string name = "interrupt at boundary " + Dec(b) + " of " + Dec(vl);
+
+    rep->Check(res.o.stopped && res.o.stop_elem == b,
+               name + ": packetizer stopped=" + Dec(res.o.stopped) + " at " +
+                   Dec(res.o.stop_elem) + " expected " + Dec(b));
+    rep->Check(res.o.rst_trap && res.o.rst_trap_code == RC_INTR && res.o.rst_vstart == b,
+               name + ": controller trap=" + Dec(res.o.rst_trap) + " class=" +
+                   RstCodeName(res.o.rst_trap_code) + " vstart=" + Dec(res.o.rst_vstart) +
+                   " expected trap=1 class=interrupt vstart=" + Dec(b));
+    rep->Check(!res.o.rst_vl_write, name + ": an interrupt trimmed vl");
+    rep->Check(res.o.desc_prefix == b && res.o.desc_fault_valid &&
+                   res.o.desc_fault_code == RC_INTR,
+               name + ": descriptor prefix=" + Dec(res.o.desc_prefix) + " class=" +
+                   RstCodeName(res.o.desc_fault_code));
+    bool ok = true;
+    for (int e = 0; e < vl; ++e) {
+      const uint64_t got = vec->MemRead(R.vd, e, R.sew_l, R.lmul);
+      const uint64_t want = (e < b) ? mem->Elem(R.base + static_cast<uint64_t>(e), 1)
+                                    : val[static_cast<size_t>(e)];
+      if (got != want) ok = false;
+    }
+    rep->Check(ok, name + ": the partial destination state is wrong");
+    cov->intr_cells += 1;
+    RstRelease(lsu);
+  }
+}
+
+// Fault-only-first, the sharp edge: element 0 raises the trap with `vl`
+// unmodified; a later element is absorbed with `vl` = the faulting index and no
+// trap; a strided form or a store is never absorbed.
+void PhaseRstFof(Cfg* cfg, Vec* vec, Lsu* lsu, LsuMem* mem, Reporter* rep,
+                 RstCoverage* cov) {
+  const int vl = 6;
+  // (a) element 0 faults: the trap is taken and `vl` is not modified
+  for (int ci = 0; ci < 2; ++ci) {
+    const int code = (ci == 0) ? RC_PAGE : RC_ACCESS;
+    mem->OneRam();
+    mem->ResetCounters();
+    RstCfg R;
+    R.mode = LS_UNIT; R.we = false; R.fof = true; R.vl = vl; R.base = 0xA000 + 0x20 * ci;
+    lsu->ClearReqs();
+    RstAlloc(lsu, vl, 0, Vtypei(R.sew_l, R.lmul));
+    HostVrf vf;
+    std::vector<uint64_t> val(static_cast<size_t>(vl), 0);
+    for (int i = 0; i < vl; ++i) {
+      val[static_cast<size_t>(i)] = Pat(29 * i + 9) & 0xFFull;
+      vec->Prime(vf, R.vd, i, R.sew_l, R.lmul, val[static_cast<size_t>(i)]);
+    }
+    RstResult res = RstRunMacro(cfg, vec, lsu, mem, R, 0, 0, code, -1);
+    const std::string name = std::string("fof element-0 fault code ") + RstCodeName(code);
+    rep->Check(res.o.rst_trap && res.o.rst_vstart == 0,
+               name + ": trap=" + Dec(res.o.rst_trap) + " vstart=" + Dec(res.o.rst_vstart) +
+                   " (the specification takes the trap on element 0)");
+    rep->Check(!res.o.rst_vl_write && !res.o.rst_fof_trim,
+               name + ": element 0 was absorbed instead of trapping");
+    rep->Check(res.o.desc_fault_valid && res.o.desc_fault_elem == 0,
+               name + ": no fault was recorded");
+    cov->fof_cells += 1;
+    RstRelease(lsu);
+  }
+
+  // (b) a later element faults: absorbed, `vl` shortened, no trap
+  for (int k = 1; k < vl; ++k) {
+    for (int ci = 0; ci < 2; ++ci) {
+      const int code = (ci == 0) ? RC_PAGE : RC_ACCESS;
+      mem->OneRam();
+      mem->ResetCounters();
+      RstCfg R;
+      R.mode = LS_UNIT; R.we = false; R.fof = true; R.vl = vl;
+      R.base = 0xB000 + 0x40 * k + 0x10 * ci;
+      lsu->ClearReqs();
+      RstAlloc(lsu, vl, 0, Vtypei(R.sew_l, R.lmul));
+      HostVrf vf;
+      std::vector<uint64_t> val(static_cast<size_t>(vl), 0);
+      for (int i = 0; i < vl; ++i) {
+        val[static_cast<size_t>(i)] = Pat(37 * i + 13) & 0xFFull;
+        vec->Prime(vf, R.vd, i, R.sew_l, R.lmul, val[static_cast<size_t>(i)]);
+      }
+      RstResult res = RstRunMacro(cfg, vec, lsu, mem, R, 0, k, code, -1);
+      const RstExpect ex = HostRst(R.mode, R.we, true, vl, 0, k, code);
+      const std::string name = "fof later fault at " + Dec(k) + " code " + RstCodeName(code);
+
+      rep->Check(!res.o.rst_trap && res.o.rst_vl_write && res.o.rst_fof_trim &&
+                     res.o.rst_vl_new == ex.vl_new,
+                 name + ": trap=" + Dec(res.o.rst_trap) + " vl_write=" +
+                     Dec(res.o.rst_vl_write) + " vl_new=" + Dec(res.o.rst_vl_new) +
+                     " expected no trap and vl=" + Dec(ex.vl_new));
+      rep->Check(res.o.rst_complete && res.o.rst_retire_ok && !res.o.rst_restart_ready,
+                 name + ": a trimmed macro did not complete normally");
+      rep->Check(res.o.rst_elems_committed == k,
+                 name + ": committed " + Dec(res.o.rst_elems_committed) + " expected " + Dec(k));
+      rep->Check(res.o.desc_prefix == k && !res.o.desc_fault_valid,
+                 name + ": prefix=" + Dec(res.o.desc_prefix) + " fault=" +
+                     Dec(res.o.desc_fault_valid));
+      bool ok = true;
+      for (int e = 0; e < vl; ++e) {
+        const uint64_t got = vec->MemRead(R.vd, e, R.sew_l, R.lmul);
+        const uint64_t want = (e < k) ? mem->Elem(R.base + static_cast<uint64_t>(e), 1)
+                                      : val[static_cast<size_t>(e)];
+        if (got != want) ok = false;
+      }
+      rep->Check(ok, name + ": the faulting element or a later one was written, or an "
+                        "earlier one was lost");
+      cov->fof_cells += 1;
+      RstRelease(lsu);
+    }
+  }
+
+  // (c) only the unit-stride load form may absorb: a strided form and a store
+  //     raise the fault
+  struct Neg { int mode; bool we; const char* name; };
+  const Neg negs[2] = {{LS_STRIDED, false, "fof strided load"},
+                       {LS_UNIT, true, "fof store"}};
+  for (int n = 0; n < 2; ++n) {
+    mem->OneRam();
+    mem->ResetCounters();
+    RstCfg R;
+    R.mode = negs[n].mode; R.we = negs[n].we; R.fof = true; R.vl = vl;
+    R.base = 0xC000 + 0x100 * n; R.stride = 8;
+    lsu->ClearReqs();
+    RstAlloc(lsu, vl, 0, Vtypei(R.sew_l, R.lmul));
+    HostVrf vf;
+    const int grp = R.we ? R.data : R.vd;
+    for (int i = 0; i < vl; ++i) vec->Prime(vf, grp, i, R.sew_l, R.lmul, Pat(17 * i + 1) & 0xFFull);
+    RstResult res = RstRunMacro(cfg, vec, lsu, mem, R, 0, 3, RC_PAGE, -1);
+    rep->Check(res.o.rst_trap && !res.o.rst_vl_write,
+               std::string(negs[n].name) + ": absorbed a fault it may not (trap=" +
+                   Dec(res.o.rst_trap) + " vl_write=" + Dec(res.o.rst_vl_write) + ")");
+    RstRelease(lsu);
+  }
+}
+
+// R2: a restart must not duplicate an irreversible side effect.  A store that
+// already wrote its early elements is restarted from the controller's restart
+// point; every byte is written exactly once across the fault and the restart.
+void PhaseRstRestart(Cfg* cfg, Vec* vec, Lsu* lsu, LsuMem* mem, Reporter* rep,
+                     RstCoverage* cov) {
+  const int vl = 6;
+  const int ks[3] = {0, 2, 5};
+  for (int ki = 0; ki < 3; ++ki) {
+    const int k = ks[ki];
+    mem->OneRam();
+    mem->ResetCounters();
+    RstCfg R;
+    R.mode = LS_UNIT; R.we = true; R.vl = vl; R.base = 0xD000;
+    lsu->ClearReqs();
+    RstAlloc(lsu, vl, 0, Vtypei(R.sew_l, R.lmul));
+    HostVrf vf;
+    std::vector<uint64_t> src(static_cast<size_t>(vl), 0);
+    for (int i = 0; i < vl; ++i) {
+      src[static_cast<size_t>(i)] = Pat(53 * i + 7) & 0xFFull;
+      vec->Prime(vf, R.data, i, R.sew_l, R.lmul, src[static_cast<size_t>(i)]);
+    }
+    std::vector<uint8_t> before(mem->mem.begin(), mem->mem.begin() + 0xE000);
+    const std::string name = "restart store fault at " + Dec(k);
+
+    RstResult r1 = RstRunMacro(cfg, vec, lsu, mem, R, 0, k, RC_PAGE, -1);
+    rep->Check(r1.o.rst_trap && r1.o.rst_vstart == k,
+               name + ": run1 vstart=" + Dec(r1.o.rst_vstart) + " expected " + Dec(k));
+    rep->Check(r1.o.rst_restart_ready && r1.o.rst_restart_vstart == k,
+               name + ": restart point " + Dec(r1.o.rst_restart_vstart) + " expected " + Dec(k));
+    bool ok1 = true;
+    for (int e = 0; e < vl; ++e) {
+      const uint64_t addr = R.base + static_cast<uint64_t>(e);
+      const int c = mem->byte_writes[static_cast<size_t>(addr & 0xFFFFull)];
+      const uint8_t got = mem->mem[static_cast<size_t>(addr & 0xFFFFull)];
+      if (e < k) {
+        if (c != 1 || got != static_cast<uint8_t>(src[static_cast<size_t>(e)])) ok1 = false;
+      } else if (c != 0 || got != before[static_cast<size_t>(addr)]) {
+        ok1 = false;
+      }
+    }
+    rep->Check(ok1, name + ": the partial store state after the fault is wrong");
+
+    // restart: consume the fault record, keep the bitmap, re-execute from the
+    // controller's restart point (the first element not performed)
+    RstFaultClear(lsu);
+    const int reqs_before = static_cast<int>(lsu->reqs().size());
+    RstResult r2 = RstRunMacro(cfg, vec, lsu, mem, R, k, -1, RC_NONE, -1);
+    rep->Check(!r2.o.rst_trap && r2.o.rst_complete && r2.o.rst_retire_ok,
+               name + ": the restart did not complete cleanly");
+    rep->Check(r2.o.desc_prefix == vl && r2.o.rst_prefix_agree,
+               name + ": after the restart prefix=" + Dec(r2.o.desc_prefix) + " expected " + Dec(vl));
+    bool ok2 = true;
+    for (int e = 0; e < vl; ++e) {
+      const uint64_t addr = R.base + static_cast<uint64_t>(e);
+      if (mem->byte_writes[static_cast<size_t>(addr & 0xFFFFull)] != 1) ok2 = false;
+      if (mem->mem[static_cast<size_t>(addr & 0xFFFFull)] !=
+          static_cast<uint8_t>(src[static_cast<size_t>(e)])) {
+        ok2 = false;
+      }
+    }
+    rep->Check(ok2, name + ": a store side effect was duplicated or lost across the restart");
+
+    // the restart issued exactly the remaining elements: the faulting element is
+    // re-issued (its store was withheld), the committed ones are not
+    const std::vector<LsuRec>& reqs = lsu->reqs();
+    bool seq = (static_cast<int>(reqs.size()) == vl + 1);
+    for (int i = 0; i <= k && seq; ++i) {
+      if (reqs[static_cast<size_t>(i)].elem != i) seq = false;
+    }
+    for (int j = 0; j < vl - k && seq; ++j) {
+      if (reqs[static_cast<size_t>(k + 1 + j)].elem != k + j) seq = false;
+    }
+    rep->Check(seq, name + ": the two runs issued " + Dec(reqs.size()) + " requests; expected " +
+                     Dec(vl + 1) + " (elements 0.." + Dec(k) + " then " + Dec(k) + ".." +
+                     Dec(vl - 1) + ")");
+    rep->Check(static_cast<int>(lsu->reqs().size()) - reqs_before == vl - k,
+               name + ": the restart issued " +
+                   Dec(static_cast<int>(lsu->reqs().size()) - reqs_before) + " requests, expected " +
+                   Dec(vl - k));
+    cov->restart_cells += 1;
+    RstRelease(lsu);
+  }
+}
+
+void RunVecRestartCase(Vmosaic_vec_tb* dut, ClockDriver* clk, Reporter* rep,
+                       RstCoverage* cov) {
+  Cfg cfg(dut, clk);
+  Vec vec(dut, clk);
+  LsuMem mem;
+  Lsu lsu(dut, clk);
+  lsu.BindMem(&mem);
+
+  // the retire gate runs first, so the "last packet arrived" defect is named
+  PhaseRstRetireGate(&cfg, &vec, &lsu, &mem, rep, cov);
+  PhaseRstFaultBoundaries(&cfg, &vec, &lsu, &mem, rep, cov);
+  PhaseRstInterrupt(&cfg, &vec, &lsu, &mem, rep, cov);
+  PhaseRstFof(&cfg, &vec, &lsu, &mem, rep, cov);
+  PhaseRstRestart(&cfg, &vec, &lsu, &mem, rep, cov);
+
+  // coverage is asserted, not implied: every claimed form saw a fault at every
+  // element boundary
+  for (int f = 0; f < RF_FORM_COUNT; ++f) {
+    int seen = 0;
+    for (int p = 0; p < 6; ++p) if (cov->form_pos[f][p]) seen += 1;
+    rep->Check(seen == 6, std::string("coverage: form ") + kRstForms[f].name + " saw " +
+                              Dec(seen) + " element boundaries, expected 6");
+  }
+  rep->Check(cov->cells >= 48, "coverage: only " + Dec(cov->cells) + " boundary cells ran");
+  rep->Check(cov->intr_cells == 6, "coverage: " + Dec(cov->intr_cells) +
+                                       " interrupt boundaries ran, expected 6");
+  rep->Check(cov->fof_cells >= 12, "coverage: only " + Dec(cov->fof_cells) + " FOF cells ran");
+  rep->Check(cov->restart_cells == 3, "coverage: " + Dec(cov->restart_cells) +
+                                          " restart cells ran, expected 3");
+}
+
 int main(int argc, char** argv) {
   mosaic::Options options;
   std::string error;
@@ -3961,6 +6047,8 @@ int main(int argc, char** argv) {
   LayoutCounts layout_counts;
   Coverage vec_cov;
   LsuCoverage lsu_cov;
+  FpCov fp_cov;
+  RstCoverage rst_cov;
 
   std::string detail;
   bool aborted = false;
@@ -3986,6 +6074,10 @@ int main(int argc, char** argv) {
       RunVecIntCase(&dut, &clk, &reporter, &vec_cov);
     } else if (options.case_id == "rvv.memory_modes") {
       RunLsuCase(&dut, &clk, &reporter, &lsu_cov);
+    } else if (options.case_id == "rvv.fp_flags_reduction") {
+      RunVecFpCase(&dut, &clk, &reporter, &fp_cov);
+    } else if (options.case_id == "rvv.partial_fault_restart") {
+      RunVecRestartCase(&dut, &clk, &reporter, &rst_cov);
     } else if (options.case_id == "rvv.vtype_layout") {
       RunVtypeLayoutCase(&dut, &unit, &clk, &reporter, &layout_counts);
     } else {
@@ -4031,9 +6123,21 @@ int main(int argc, char** argv) {
                                        Dec(vec_cov.cells) + " families=" + Dec(VF_COUNT) +
                                        " cycles=" + Dec(cycles));
   }
+  if (options.case_id == "rvv.fp_flags_reduction") {
+    return reporter.Finish("PASS", "checks=" + Dec(reporter.checks()) + " families=" +
+                                       Dec(FF_COUNT) + " cells=" + Dec(fp_cov.cells) +
+                                       " cycles=" + Dec(cycles));
+  }
   if (options.case_id == "rvv.memory_modes") {
     return reporter.Finish("PASS", "checks=" + Dec(reporter.checks()) + " modes=" +
                                        Dec(lsu_cov.modes) + " cells=" + Dec(lsu_cov.cells) +
+                                       " cycles=" + Dec(cycles));
+  }
+  if (options.case_id == "rvv.partial_fault_restart") {
+    return reporter.Finish("PASS", "checks=" + Dec(reporter.checks()) + " cells=" +
+                                       Dec(rst_cov.cells) + " interrupts=" +
+                                       Dec(rst_cov.intr_cells) + " fof=" + Dec(rst_cov.fof_cells) +
+                                       " restarts=" + Dec(rst_cov.restart_cells) +
                                        " cycles=" + Dec(cycles));
   }
   return reporter.Finish("PASS", "checks=" + Dec(reporter.checks()) + " combos=" +

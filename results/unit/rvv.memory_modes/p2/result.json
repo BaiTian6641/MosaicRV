@@ -1,15 +1,15 @@
 {
   "schema_version": 1,
-  "case": "rvv.vset_boundaries",
+  "case": "rvv.memory_modes",
   "verdict": "PASS",
-  "detail": "checks=571 vtypes=64 avl_bands=36 cycles=276",
+  "detail": "checks=2350 modes=8 cells=61 cycles=3893",
   "seed": 1,
   "max_cycles": 200000,
-  "checks": 571,
+  "checks": 2350,
   "failures": 0,
   "image": "",
   "expect": "",
   "tool": "Verilator 5.052 2026-09-05",
-  "timestamp": "2026-10-02T14:50:35Z",
+  "timestamp": "2026-10-02T14:57:43Z",
   "first_mismatch": ""
 }

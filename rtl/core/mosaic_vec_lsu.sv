@@ -74,6 +74,23 @@
 // load, and the negative control `MOSAIC_VEC_LSU_MUTANT_WHOLE_FAULT` is exactly
 // that defect.
 //
+// The fault class travels with the response (`mem_rsp_fault_code_i`) and out on
+// `trap_code_o`, because I-057's restart controller must tell a page fault or
+// an access fault (which a fault-only-first load may absorb) from anything else
+// (which it may not). The class is opaque to this unit: it carries four bits and
+// never decodes them.
+//
+// ------------------------------------------------------- the boundary stop
+//
+// A precise interrupt is taken at an element boundary, not mid-item. Asserting
+// `stop_i` makes the unit finish the item it is on, offer nothing past the
+// boundary, drain every outstanding response (so a store already accepted is
+// performed and a load already accepted is written back), and finish with
+// `stopped_o` and `stop_elem_o` = the first element *not* performed. That is the
+// element a resume writes to `vstart`. `stop_i` therefore behaves like the
+// fault path without a fault: it is checked only at the item boundary in
+// ST_SCAN, and it sets `stopped_o`, never `trap_o`.
+//
 // ------------------------------------------------------ ordering and the network
 //
 // The indexed forms are provided in both an *ordered* form (`vluxei`/`vsuxei`,
@@ -174,6 +191,16 @@ module mosaic_vec_lsu #(
     output logic                    illegal_o,
     output logic                    trap_o,
     output logic [6:0]              trap_elem_o,
+    output logic [3:0]              trap_code_o,
+    // ------------------------------------------------- partial-trap stop
+    // A precise interrupt is taken at an element boundary: asserting `stop_i`
+    // makes the unit finish the item it is on, issue nothing past the boundary,
+    // drain every outstanding response, and finish with `stopped_o` and
+    // `stop_elem_o` = the first element not performed.  A fault reports
+    // `trap_o`, never both.
+    input  logic                    stop_i,
+    output logic                    stopped_o,
+    output logic [6:0]              stop_elem_o,
     output logic [7:0]              elems_o,
     output logic [31:0]             req_ctr_o,
 
@@ -215,6 +242,7 @@ module mosaic_vec_lsu #(
     input  logic [6:0]              mem_rsp_elem_i,
     input  logic [3:0]              mem_rsp_field_i,
     input  logic                    mem_rsp_fault_i,
+    input  logic [3:0]              mem_rsp_fault_code_i,
     input  logic [63:0]             mem_rsp_rdata_i
 );
 
@@ -379,6 +407,10 @@ module mosaic_vec_lsu #(
   logic        illegal_r;
   logic        trap_r;
   logic [6:0]  trap_elem_r;
+  logic [3:0]  trap_code_r;
+  logic        stopped_r;
+  logic [6:0]  stop_elem_r;
+  logic        stop_pending_q;
   logic [7:0]  elems_r;
   logic [31:0] reqctr_r;
   logic [31:0] vrdctr_r;
@@ -516,6 +548,9 @@ module mosaic_vec_lsu #(
   assign illegal_o   = illegal_r;
   assign trap_o      = trap_r;
   assign trap_elem_o = trap_elem_r;
+  assign trap_code_o = trap_code_r;
+  assign stopped_o   = stopped_r;
+  assign stop_elem_o = stop_elem_r;
   assign elems_o     = elems_r;
   assign req_ctr_o   = reqctr_r;
 
@@ -779,6 +814,10 @@ module mosaic_vec_lsu #(
       illegal_r      <= 1'b0;
       trap_r         <= 1'b0;
       trap_elem_r    <= 7'd0;
+      trap_code_r    <= 4'd0;
+      stopped_r      <= 1'b0;
+      stop_elem_r    <= 7'd0;
+      stop_pending_q <= 1'b0;
       elems_r        <= 8'd0;
       reqctr_r       <= 32'd0;
       vrdctr_r       <= 32'd0;
@@ -801,6 +840,11 @@ module mosaic_vec_lsu #(
 `endif
     end else begin
       done_r <= 1'b0;
+
+      // ---- boundary stop request (I-057) -------------------------------
+      // Latched here so a one-cycle request is not lost while the unit is
+      // reading operands; consumed at the next item boundary in ST_SCAN.
+      if (stop_i && busy_r && !abort_q) stop_pending_q <= 1'b1;
 
       // ---- VRF read response -------------------------------------------
       if (vrf_rd_rsp_valid_i) begin
@@ -825,6 +869,7 @@ module mosaic_vec_lsu #(
         if (mem_rsp_fault_i && !abort_q) begin
           abort_q <= 1'b1;
           trap_r  <= 1'b1;
+          trap_code_r <= mem_rsp_fault_code_i;
 `ifdef MOSAIC_VEC_LSU_MUTANT_WHOLE_FAULT
           // NEGATIVE CONTROL: the fault is reported with vstart reset to zero.
           trap_elem_r <= 7'd0;
@@ -887,6 +932,10 @@ module mosaic_vec_lsu #(
             illegal_r   <= 1'b0;
             trap_r      <= 1'b0;
             trap_elem_r <= 7'd0;
+            trap_code_r <= 4'd0;
+            stopped_r   <= 1'b0;
+            stop_elem_r <= 7'd0;
+            stop_pending_q <= 1'b0;
             elems_r     <= 8'd0;
             reqctr_r    <= 32'd0;
             vrdctr_r    <= 32'd0;
@@ -963,6 +1012,13 @@ module mosaic_vec_lsu #(
         ST_SCAN: begin
           if (int'(elem_q) >= elem_end) begin
             state_q <= ST_DRAIN;
+          end else if (stop_pending_q && !abort_q) begin
+            // the boundary stop: nothing at or after elem_q has been offered,
+            // so elem_q is the first element not performed
+            stopped_r   <= 1'b1;
+            stop_elem_r <= elem_q[6:0];
+            abort_q     <= 1'b1;
+            state_q     <= ST_WAIT;
           end else if (need_mask_c) begin
             vr_kind_q <= 3'd1;
             state_q   <= ST_MASK;
@@ -1014,6 +1070,13 @@ module mosaic_vec_lsu #(
               field_q <= main_nfield_c;
               state_q <= ST_SCAN;
             end
+          end else if (stop_pending_q) begin
+            // the memory cannot take this item and a boundary stop is pending:
+            // stop before it, so nothing at elem_q is performed
+            stopped_r   <= 1'b1;
+            stop_elem_r <= elem_q[6:0];
+            abort_q     <= 1'b1;
+            state_q     <= ST_WAIT;
           end
         end
 

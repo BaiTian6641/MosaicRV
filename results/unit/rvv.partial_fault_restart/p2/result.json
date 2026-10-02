@@ -1,15 +1,15 @@
 {
   "schema_version": 1,
-  "case": "rvv.vset_boundaries",
+  "case": "rvv.partial_fault_restart",
   "verdict": "PASS",
-  "detail": "checks=571 vtypes=64 avl_bands=36 cycles=276",
+  "detail": "checks=613 cells=48 interrupts=6 fof=12 restarts=3 cycles=2859",
   "seed": 1,
   "max_cycles": 200000,
-  "checks": 571,
+  "checks": 613,
   "failures": 0,
   "image": "",
   "expect": "",
   "tool": "Verilator 5.052 2026-09-05",
-  "timestamp": "2026-10-02T14:50:35Z",
+  "timestamp": "2026-10-02T14:59:28Z",
   "first_mismatch": ""
 }

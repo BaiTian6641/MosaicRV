@@ -111,6 +111,13 @@
 //     once seen (`o_accepting_elems_o` drops, so younger elements cannot commit
 //     past a fault).
 //
+// I-057 binds this progress to the packetizer's fault report: the restart
+// controller (`mosaic_vec_restart`) drives `elem_done_*` and `fault_*` and reads
+// `o_elem_bitmap_o`/`o_prefix_o` back, so the restart point is the descriptor's
+// own first clear bit rather than a second copy of the progress. A restart of
+// the same macro consumes the fault record through `fault_clear_i` and leaves
+// the bitmap alone, so the committed prefix survives into the re-execution.
+//
 // Reset has a defined effect: it clears the descriptor and its counters, and an
 // allocate or element-done pulse presented *while* reset is asserted is
 // ignored. That is the "transaction in flight at reset" rule for this package:
@@ -212,6 +219,10 @@ module mosaic_vec_desc #(
     input  logic                       fault_valid_i,
     input  logic [6:0]                 fault_elem_i,
     input  logic [3:0]                 fault_code_i,
+    // A restart of the same macro (I-057) consumes the recorded fault and
+    // re-executes from `vstart`, but keeps the element bitmap: this pulse
+    // clears the fault record only, so the committed prefix survives.
+    input  logic                       fault_clear_i,
 
     // ---- release / retire --------------------------------------------------
     input  logic                       release_i,
@@ -734,6 +745,13 @@ module mosaic_vec_desc #(
         fault_valid_q <= 1'b1;
         fault_elem_q  <= fault_elem_i;
         fault_code_q  <= fault_code_i;
+      end else if (fault_clear_i && valid_q) begin
+        // A restart consumes the recorded fault without disturbing the bitmap,
+        // so the committed prefix survives into the re-execution.  A same-cycle
+        // new fault takes precedence, which is why this is the `else`.
+        fault_valid_q <= 1'b0;
+        fault_elem_q  <= 7'd0;
+        fault_code_q  <= 4'd0;
       end
       if (alloc_valid_i && alloc_ready_o) begin
         // The allocate is last so that a same-cycle release-and-allocate
