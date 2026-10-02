@@ -1,16 +1,15 @@
 {
   "schema_version": 1,
   "case": "interrupt.boundary_replay",
-  "verdict": "FAIL",
-  "detail": "contract violated after 61 comparisons: sync-and-glitch: cycle 31 post-edge mip: expected 0x0000000000000080, got 0x00000000000000a0",
+  "verdict": "PASS",
+  "detail": "interrupt contract holds: 17238 comparisons over 5784 cycles, 1471 offered traps (MEI 242 / MSI 703 / MTI 526), 99 legal wakes, seed 1",
   "seed": 1,
   "max_cycles": 200000,
   "checks": 1,
-  "failures": 1,
+  "failures": 0,
   "image": "",
   "expect": "",
   "tool": "Verilator 5.052 2026-09-05",
-  "timestamp": "2026-10-02T11:12:29Z",
-  "first_mismatch": "sync-and-glitch: cycle 31 post-edge mip: expected 0x0000000000000080, got 0x00000000000000a0: expected contract holds, got contract violated",
-  "failed_checks": ["no contract violation in any phase"]
+  "timestamp": "2026-10-02T11:45:55Z",
+  "first_mismatch": ""
 }

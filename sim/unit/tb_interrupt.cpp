@@ -79,6 +79,9 @@
 #include <vector>
 
 #include "sim_common.h"
+#include "mosaic_csr_table.h"
+
+#include <cstring>
 #include "Vmosaic_interrupt_tb.h"
 
 namespace {
@@ -104,15 +107,32 @@ std::string Dec(uint64_t value) { return std::to_string(value); }
 // Written from the contract, not read out of the DUT: the shadow has to be an
 // independent statement of what these values mean.
 constexpr uint32_t kBitMsip = 3;
+constexpr uint32_t kBitStip = 5;
 constexpr uint32_t kBitMtip = 7;
 constexpr uint32_t kBitMeip = 11;
 
 constexpr uint64_t kCauseMsi = 0x8000000000000003ull;
+constexpr uint64_t kCauseSti = 0x8000000000000005ull;
 constexpr uint64_t kCauseMti = 0x8000000000000007ull;
 constexpr uint64_t kCauseMei = 0x800000000000000bull;
 
-// config/csr/mode_m.json, mip "writable_fields": ["7", "3"].
-constexpr uint64_t kMipWritableMask = (1ull << kBitMtip) | (1ull << kBitMsip);
+// The writable mip bits come from the profile's own generated CSR table, not
+// from a literal. A p1 machine implements STIP (bit 5) because it has S-mode and
+// a supervisor timer source, so a shadow that hardcoded p0's ["7","3"] was
+// modelling a different machine than the one under test.
+uint64_t MipWritableMaskFromProfile() {
+  for (unsigned i = 0; i < MOSAIC_CSR_COUNT; i++) {
+    if (std::strcmp(MOSAIC_CSR_TABLE[i].name, "mip") == 0) return MOSAIC_CSR_TABLE[i].wmask;
+  }
+  return 0;
+}
+const uint64_t kMipWritableMask = MipWritableMaskFromProfile();
+// A supervisor timer source exists exactly when STIP is a writable bit.
+const bool kHasStip = ((kMipWritableMask >> kBitStip) & 1ull) != 0;
+// One timer source, two pending bits: a timer event raises MTIP and, in a
+// profile with a supervisor timer, STIP as well.
+const uint64_t kStipBit = kHasStip ? (1ull << kBitStip) : 0ull;
+const uint64_t kTimerPendingBits = (1ull << kBitMtip) | kStipBit;
 
 // mosaic_pkg::csr_op_e
 constexpr uint32_t kCsrNone = 0;
@@ -164,6 +184,7 @@ class ShadowInterrupt {
     meta_ = 0;
     sync_ = 0;
     sw_msip_ = false;
+    sw_stip_ = false;
     sw_mtip_ = false;
     halted_ = false;
     irq_ctr_ = 0;
@@ -179,6 +200,10 @@ class ShadowInterrupt {
     if (sync_bit(0) || sw_msip_) mip |= (1ull << kBitMsip);
     if (sync_bit(1) || sw_mtip_) mip |= (1ull << kBitMtip);
     if (sync_bit(2)) mip |= (1ull << kBitMeip);
+    // The platform timer raises STIP as well as MTIP in a profile that has a
+    // supervisor timer (the one timer, and the delegation registers decide which
+    // mode takes it). Software may also latch and clear it through mip[5].
+    if (kHasStip && (sync_bit(1) || sw_stip_)) mip |= (1ull << kBitStip);
     return mip;
   }
 
@@ -200,6 +225,8 @@ class ShadowInterrupt {
       o->irq_cause = kCauseMsi;
     } else if (((take >> kBitMtip) & 1) != 0) {
       o->irq_cause = kCauseMti;
+    } else if (((take >> kBitStip) & 1) != 0) {
+      o->irq_cause = kCauseSti;
     } else {
       o->irq_cause = 0;
     }
@@ -220,19 +247,24 @@ class ShadowInterrupt {
     const uint32_t sync_next = meta_;
 
     bool msip = sw_msip_;
+    bool stip = sw_stip_;
     bool mtip = sw_mtip_;
     if (s.mip_we) {
       const uint64_t wd = s.mip_wdata & kMipWritableMask;
       const bool wd_msip = ((wd >> kBitMsip) & 1) != 0;
+      const bool wd_stip = ((wd >> kBitStip) & 1) != 0;
       const bool wd_mtip = ((wd >> kBitMtip) & 1) != 0;
       if (s.mip_op == kCsrRw) {
         msip = wd_msip;
+        stip = wd_stip;
         mtip = wd_mtip;
       } else if (s.mip_op == kCsrRs) {
         msip = msip || wd_msip;
+        stip = stip || wd_stip;
         mtip = mtip || wd_mtip;
       } else if (s.mip_op == kCsrRc) {
         msip = msip && !wd_msip;
+        stip = stip && !wd_stip;
         mtip = mtip && !wd_mtip;
       }
       // CSR_NONE with mip_we asserted writes nothing: the latch holds.
@@ -261,6 +293,7 @@ class ShadowInterrupt {
     meta_ = meta_next;
     sync_ = sync_next;
     sw_msip_ = msip;
+    sw_stip_ = stip;
     sw_mtip_ = mtip;
     halted_ = halted_d;
   }
@@ -281,6 +314,7 @@ class ShadowInterrupt {
   uint32_t meta_ = 0;
   uint32_t sync_ = 0;
   bool sw_msip_ = false;
+  bool sw_stip_ = false;
   bool sw_mtip_ = false;
   bool halted_ = false;
   uint8_t irq_ctr_ = 0;
@@ -419,6 +453,13 @@ class Harness {
     dut_->mie = s.mie;
     dut_->mideleg = s.mideleg;
     dut_->mstatus_mie = s.mstatus_mie ? 1 : 0;
+    // The shadow models a hart executing in M-mode: a non-delegated interrupt is
+    // gated by mstatus.MIE and a delegated one is not taken at all, which is the
+    // module's decision for priv=M. Driving priv=M (and SIE=0, unused from M)
+    // keeps the model an honest statement of the machine under test instead of an
+    // accident of an undriven input.
+    dut_->priv = 3;
+    dut_->mstatus_sie = 0;
     dut_->mip_we = s.mip_we ? 1 : 0;
     dut_->mip_op = s.mip_op;
     dut_->mip_wdata = s.mip_wdata;
@@ -620,7 +661,7 @@ void PhaseSyncAndGlitch(Harness* h) {
     h->Cycle(p);
     Require(h->cycles() == driven + 3, "sync-and-glitch: cycle accounting",
             "unexpected cycle count");
-    Require(h->pre().irq_timer_pending && h->pre().mip == (1ull << kBitMtip),
+    Require(h->pre().irq_timer_pending && h->pre().mip == kTimerPendingBits,
             "sync-and-glitch: a one-cycle pulse was not visible after two edges",
             "pre-edge cycle " + Dec(h->cycles()) + " mip=" + mosaic::Hex(h->pre().mip));
     // Exactly one cycle: the pre-edge snapshot of the next cycle is already
@@ -662,7 +703,7 @@ void PhaseSyncAndGlitch(Harness* h) {
     one.irq_ext = (bit & 4u) != 0;
     Settle(h, one, 4);
     const uint64_t expected = (one.irq_soft ? (1ull << kBitMsip) : 0) |
-                              (one.irq_timer ? (1ull << kBitMtip) : 0) |
+                              (one.irq_timer ? kTimerPendingBits : 0) |
                               (one.irq_ext ? (1ull << kBitMeip) : 0);
     Require(h->pre().mip == expected, "sync-and-glitch: source bit " + Dec(bit),
             "expected " + mosaic::Hex(expected) + ", got " + mosaic::Hex(h->pre().mip));
@@ -683,7 +724,8 @@ void PhaseMasking(Harness* h) {
   s.irq_timer = true;
   s.irq_ext = true;
   Settle(h, s, 4);
-  Require(h->pre().mip == kAllMie, "masking: setup", "not all three sources are pending");
+  Require(h->pre().mip == (kAllMie | kStipBit), "masking: setup",
+          "not all three sources are pending");
 
   // All eight mie combinations, all three sources pending.
   for (uint32_t mask = 0; mask < 8; mask++) {
@@ -746,7 +788,7 @@ void PhaseMasking(Harness* h) {
     Require(h->pre().irq_cause == kCauseMti, "masking: cause with mstatus.MIE=0",
             "expected the masked candidate " + mosaic::Hex(kCauseMti) + ", got " +
                 mosaic::Hex(h->pre().irq_cause));
-    Require(h->pre().mip == (1ull << kBitMtip), "masking: pending while masked",
+    Require(h->pre().mip == kTimerPendingBits, "masking: pending while masked",
             "the pending bit was dropped by masking, not delayed");
     h->Cycle(m);
     Require(!h->pre().irq_valid, "masking: mstatus.MIE=0 holds",
@@ -1097,7 +1139,10 @@ void PhaseMipSoftwareWrite(Harness* h) {
     Settle(h, s, 2);
     s.mip_we = true;
     s.mip_op = kCsrRs;
-    s.mip_wdata = (1ull << kBitMeip) | (1ull << 5) | (1ull << 63);
+    // Bits 11 and 63 are read-only in every profile; bit 5 is read-only only
+    // where the profile has no supervisor timer, so it is included only when it
+    // really is read-only.
+    s.mip_wdata = (1ull << kBitMeip) | (1ull << 63) | (kHasStip ? 0ull : (1ull << 5));
     h->Cycle(s);
     Require(h->post().mip == 0, "mip-software-write: write to a read-only bit",
             "mip=" + mosaic::Hex(h->post().mip) + " after writing bits 11, 5 and 63");
@@ -1132,7 +1177,7 @@ void PhaseMipSoftwareWrite(Harness* h) {
     s.mip_we = false;
     s.mip_wdata = 0;
     h->Cycle(s);
-    Require(h->post().mip == (1ull << kBitMtip),
+    Require(h->post().mip == kTimerPendingBits,
             "mip-software-write: a software clear dropped a platform request",
             "mip=" + mosaic::Hex(h->post().mip));
     Require(h->pre().irq_valid && h->pre().irq_cause == kCauseMti,

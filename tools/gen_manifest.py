@@ -656,6 +656,13 @@ def render_sv_csr_package(bundle: config_check.Bundle) -> str:
     csrs = collect_csrs(bundle)
     translation = has_translation(csrs)
     modes_list = list(profile["privilege_modes"])
+    # misa is *derived*, not table-frozen: its extension bits are exactly the
+    # advertised capability list (the same derivation the build manifest uses),
+    # so the value the CSR file reports and the value the manifest publishes
+    # cannot disagree. The table's own `reset` row was the last hand-kept copy
+    # of this fact and had already drifted (it lacked A and C at p1).
+    advertised, _pending = config_check.advertised_capabilities(bundle)
+    misa_reset = config_check.misa_value(advertised, profile["xlen"])
 
     # The HPM counter shadows (Zihpm). A profile that implements no HPM counter
     # still implements hpmcounter3..31 as read-only-zero shadows, so the RTL
@@ -761,15 +768,16 @@ def render_sv_csr_package(bundle: config_check.Bundle) -> str:
         for mode in csr["modes"]:
             modes_mask |= {"U": 1 << 0, "S": 1 << 1, "H": 1 << 2, "M": 1 << 3}[mode]
         add("  // ---------------------------------------------------------------- %s" % csr["name"])
+        reset_value = misa_reset if csr["name"] == "misa" else csr["reset"]
         add("  // 0x%03X, %d-bit, access %s, %s, reset 0x%X, modes %s"
-            % (csr["address"], width, access, csr["behavior"], csr["reset"],
+            % (csr["address"], width, access, csr["behavior"], reset_value,
                "/".join(sorted(csr["modes"]))))
         if note:
             add(note)
         add("  localparam logic [11:0] MOSAIC_CSR_ADDR_%-11s = 12'h%03x;"
             % (name, csr["address"]))
         add("  localparam logic [63:0] MOSAIC_CSR_RESET_%-10s = %s;"
-            % (name, _hex64(csr["reset"])))
+            % (name, _hex64(reset_value)))
         add("  localparam logic [63:0] MOSAIC_CSR_WMASK_%-10s = %s;"
             % (name, _hex64(wmask)))
         add("  localparam logic        MOSAIC_CSR_WRITE_LEGAL_%-2s = 1'b%d;"

@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "case": "boot.p1_contract",
+  "verdict": "FAIL",
+  "detail": "contract violated: signature: the payload's self-check signature is not the independently computed one",
+  "seed": 1,
+  "max_cycles": 4000000,
+  "checks": 5,
+  "failures": 1,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-02T11:44:10Z",
+  "first_mismatch": "signature word 0: expected 0x004c696e75782036 (independently computed), got 0x9e0c6d2f8eb81eb1",
+  "failed_checks": ["no contract violation"]
+}

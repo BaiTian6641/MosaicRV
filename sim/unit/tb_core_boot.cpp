@@ -513,7 +513,9 @@ void BuildM(Asm* a) {
   pte(kRoot + 8 * 1, 0);
 #else
   pte(kRoot + 8 * 1, PteNonleaf(kL1T));
-  pte(kL1T + 8 * 2, PteNonleaf(kL0T));
+  // VA 0x4000_0000 has vpn2 = 1, vpn1 = 0, vpn0 = 0, so the test subtree hangs
+  // off L1T[0] and L0T[0..5].
+  pte(kL1T + 8 * 0, PteNonleaf(kL0T));
   pte(kL0T + 8 * 0x00, PteLeaf(kPageA, kPteRW));
   pte(kL0T + 8 * 0x01, PteLeaf(kPageB, kPteRW));
   pte(kL0T + 8 * 0x02, PteLeaf(kPageC, kPteRW));
@@ -544,15 +546,15 @@ void BuildS(Asm* a) {
   a->Li(7, kValB);
   a->Sd(7, 6, 0);
 
-  a->Mark("f1_pc");
   a->Li(6, kVaBad);
+  a->Mark("f1_pc");
   a->Ld(20, 6, 0);
-  a->Mark("f2_pc");
   a->Li(6, kVaE);
   a->Li(7, 0xDEAD);
+  a->Mark("f2_pc");
   a->Sd(7, 6, 0);
-  a->Mark("f3_pc");
   a->Li(6, kVaXonly);
+  a->Mark("f3_pc");
   a->Ld(20, 6, 0);
 
   a->Li(6, kVaC);
@@ -571,8 +573,8 @@ void BuildS(Asm* a) {
   a->Csrw(kCsrSatp, 0);
   a->SfenceVma();
 
-  a->Mark("f4_pc");
   a->Li(6, kOutside);
+  a->Mark("f4_pc");
   a->Ld(20, 6, 0);
 
   a->Mark("ecall_pc");
@@ -606,9 +608,15 @@ void BuildS(Asm* a) {
   a->JalSelf();
   a->Mark("sti_resume");
 
-  // The supervisor software interrupt: raise SSIP, then spin.
+  // The supervisor software interrupt: raise SSIP, let the CSR macro drain,
+  // then spin at a single instruction so the interrupted PC is deterministic.
   a->Li(6, 0x2);
   a->Csrw(kCsrSip, 6);
+  // The interrupt is offered at the first boundary after the CSR write commits,
+  // which is this first nop. Naming it is what makes the interrupted PC an
+  // ISA-level fact rather than a timing observation.
+  a->Mark("ssi_trap_pc");
+  for (int i = 0; i < 8; i++) a->Addi(0, 0, 0);
   a->Mark("ssi_spin");
   a->JalSelf();
   a->Mark("ssi_resume");
@@ -708,7 +716,7 @@ std::vector<ExpectedTrap> BuildExpected(const Firmware& fw) {
       {"machine timer interrupt in S", kCauseMti, L.at("timer_m_spin"), 0, false},
       {"instruction access fault (M-mode)", kExcInsnAccess, kOutside, kOutside, false},
       {"supervisor timer interrupt", kCauseSti, L.at("timer_s_spin"), 0, true},
-      {"supervisor software interrupt", kCauseSsi, L.at("ssi_spin"), 0, true},
+      {"supervisor software interrupt", kCauseSsi, L.at("ssi_trap_pc"), 0, true},
   };
 }
 
@@ -780,7 +788,6 @@ class Harness {
   bool saw_retire(uint64_t pc) const { return retired_.count(pc) != 0; }
   bool saw_sret() const { return saw_sret_; }
   bool sret_sie() const { return sret_sie_; }
-  uint64_t last_sret_cycle() const { return last_sret_cycle_; }
   void SetTimer(bool on) { timer_ = on; }
 
   void Reset(int n) { for (int i = 0; i < n; i++) Cycle(true); }
@@ -883,11 +890,27 @@ class Harness {
       const uint64_t pc = static_cast<uint64_t>(dut_->ev_pc_o[lane * 2]) |
                           (static_cast<uint64_t>(dut_->ev_pc_o[lane * 2 + 1]) << 32);
       retired_.insert(pc);
+      if (Debug()) std::printf("    [ret] cycle=%llu pc=%s\n",
+                               static_cast<unsigned long long>(cycles_), U64(pc).c_str());
+    }
+    if (Debug() && cycles_ > 2510) {
+      std::printf("    [st] c=%llu fpc=%s hv=%d hpc=%s priv=%d stop=%d rec=%u rob=%u commit=%u\n",
+                  static_cast<unsigned long long>(cycles_), U64(dut_->o_fetch_pc_o).c_str(),
+                  dut_->o_dbg_head_valid_o, U64(dut_->o_dbg_head_pc_o).c_str(),
+                  static_cast<int>(dut_->o_priv_o), dut_->o_stopped_o,
+                  dut_->o_recovering_o, dut_->o_rob_occupied_o, dut_->o_commit_o);
+    }
+    // `o_sret_valid_o` is the pre-edge view of the return; the state it restores
+    // is therefore read on the *following* cycle, after the architectural update.
+    if (sret_pending_) {
+      if ((dut_->o_sstatus_o & 0x2) == 0) sret_sie_ = false;   // sstatus.SIE
+      sret_pending_ = false;
     }
     if (dut_->o_sret_valid_o != 0) {
+      if (Debug()) std::printf("    [sret] cycle=%llu\n",
+                               static_cast<unsigned long long>(cycles_));
       saw_sret_ = true;
-      if ((dut_->o_sstatus_o & 0x2) == 0) sret_sie_ = false;   // sstatus.SIE
-      last_sret_cycle_ = cycles_;
+      sret_pending_ = true;
     }
     if (dut_->o_trap_valid_o != 0) {
       TrapObs t;
@@ -917,8 +940,8 @@ class Harness {
   uint64_t mtime_ = 0;
   bool timer_ = false;
   bool saw_sret_ = false;
+  bool sret_pending_ = false;
   bool sret_sie_ = true;
-  uint64_t last_sret_cycle_ = 0;
   std::set<uint64_t> retired_;
   std::vector<TrapObs> traps_;
 };
@@ -1013,6 +1036,15 @@ void RunCase(Vmosaic_core_tb* dut, mosaic::Reporter* reporter, uint64_t max_cycl
   MemWrite64(&mem, kLogBase, 0);
   WriteDtb(&mem, manifest.isa_string);
 
+  if (Debug()) {
+    for (uint64_t a = 0x80008190; a < 0x800081d0; a += 4)
+      std::printf("    [img] %s = %08x\n", U64(a).c_str(), fw.image.Word(a));
+    for (uint64_t a = 0x800082a0; a < 0x800082f0; a += 4)
+      std::printf("    [img] %s = %08x\n", U64(a).c_str(), fw.image.Word(a));
+    std::printf("    [lbl] ssi_spin=%s ssi_resume=%s s_handler=%s\n",
+                U64(fw.labels.at("ssi_spin")).c_str(), U64(fw.labels.at("ssi_resume")).c_str(),
+                U64(fw.labels.at("s_handler")).c_str());
+  }
   Harness h(dut, &mem, &fw.image, max_cycles, g.retire_width);
   h.Reset(kResetCycles);
 
@@ -1033,84 +1065,9 @@ void RunCase(Vmosaic_core_tb* dut, mosaic::Reporter* reporter, uint64_t max_cycl
     if (!raised_mti && h.saw_retire(spin_m)) { h.SetTimer(true); raised_mti = true; }
     if (!raised_sti && h.saw_retire(spin_s)) { h.SetTimer(true); raised_sti = true; }
     h.Cycle(false);
-    if (Debug() && h.traps().size() >= 12) break;
-  }
-
-  // ---------------------------------------------------------------- PTW probe
-  // A directed probe of the standalone page-table walker with the exact tables
-  // the firmware built, so a fault here names the walker rather than the core.
-  if (Debug()) {
-    struct ProbeResult { bool fault; uint64_t pa; uint64_t cause; };
-    auto probe = [&](uint64_t va, uint32_t kind) -> ProbeResult {
-      ProbeResult out{false, 0, 0};
-      bool accepted = false, pending = false;
-      uint64_t pte_value = 0;
-      for (int c = 0; c < 400; c++) {
-        dut->rst = 0;
-        dut->irq_soft_i = dut->irq_timer_i = dut->irq_ext_i = 0;
-        dut->mtime_i = c;
-        dut->imem_req_ready_i = 1; dut->imem_rsp_valid_i = 0; dut->imem_rsp_rdata_i = 0;
-        dut->imem_rsp_fault_i = 0; dut->imem_rsp_id_i = 0; dut->imem_rsp_epoch_i = 0;
-        dut->imem_rsp_len_i = 0;
-        dut->dmem_req_ready_i = 1; dut->dmem_rsp_valid_i = 0; dut->dmem_rsp_rdata_i = 0;
-        dut->dmem_rsp_fault_i = 0;
-        dut->ext_write_valid_i = 0; dut->arb_req_valid0_i = 0; dut->arb_req_valid1_i = 0;
-        dut->arb_head_valid_i = 0; dut->arb_head_retire_i = 0;
-        dut->ptw_xl_valid_i = accepted ? 0 : 1;
-        dut->ptw_xl_va_i = va; dut->ptw_xl_kind_i = kind; dut->ptw_xl_priv_i = 1;
-        dut->ptw_xl_mode_i = 8; dut->ptw_xl_ppn_i = kRoot >> 12;
-        dut->ptw_xl_sum_i = 0; dut->ptw_xl_mxr_i = 0; dut->ptw_xl_cancel_i = 0;
-        dut->ptw_xl_rsp_ready_i = 1;
-        dut->ptw_mem_req_ready_i = 1;
-        if (pending) { dut->ptw_mem_rsp_valid_i = 1; dut->ptw_mem_rsp_rdata_i = pte_value;
-                       dut->ptw_mem_rsp_fault_i = 0; }
-        else { dut->ptw_mem_rsp_valid_i = 0; dut->ptw_mem_rsp_rdata_i = 0;
-               dut->ptw_mem_rsp_fault_i = 0; }
-        dut->eval();
-        if (std::getenv("BOOT_PROBE_DEBUG"))
-          std::printf("      [probe-c] c=%d ready=%d acc=%d memreq=%d memaddr=%s pend=%d rspv=%d\n",
-                      c, dut->ptw_xl_ready_o, accepted, dut->ptw_mem_req_valid_o,
-                      U64(dut->ptw_mem_req_addr_o).c_str(), pending, dut->ptw_xl_rsp_valid_o);
-        if (dut->ptw_xl_valid_i && dut->ptw_xl_ready_o) accepted = true;
-        if (dut->ptw_mem_req_valid_o && dut->ptw_mem_req_ready_i) {
-          MemRead64(&mem, dut->ptw_mem_req_addr_o, &pte_value);
-          pending = true;
-        }
-        if (dut->ptw_mem_rsp_valid_i && dut->ptw_mem_rsp_ready_o) pending = false;
-        if (dut->ptw_xl_rsp_valid_o) {
-          out.fault = dut->ptw_xl_fault_o != 0;
-          out.pa = dut->ptw_xl_pa_o;
-          out.cause = dut->ptw_xl_cause_o;
-          break;
-        }
-        dut->clk = 0; dut->eval();
-        dut->clk = 1; dut->eval();
-        dut->clk = 0; dut->eval();
-      }
-      return out;
-    };
-    for (auto pr : {std::pair<uint64_t, uint32_t>{kVaA, 0}, {kVaB, 1}, {kVaC, 0},
-                    {kVaBad, 0}, {kVaE, 1}, {kRamBase + 0x2000, 0}}) {
-      ProbeResult r = probe(pr.first, pr.second);
-      std::printf("    [probe] va=%s kind=%u -> fault=%d pa=%s cause=%s\n",
-                  U64(pr.first).c_str(), pr.second, r.fault ? 1 : 0,
-                  U64(r.pa).c_str(), U64(r.cause).c_str());
-    }
   }
 
   reporter->Check(mem.passed(), "the payload exited normally (tohost pass code)");
-  if (Debug()) {
-    uint64_t v = 0;
-    for (uint64_t a : {kRoot + 8, kRoot + 16, kL1Id, kL1T + 16, kL0T,
-                       kL0T + 8, kL0T + 16, kL0T + 24, kL0T + 32, kL0T + 40}) {
-      MemRead64(&mem, a, &v);
-      std::printf("    [pte] %s = %s\n", U64(a).c_str(), U64(v).c_str());
-    }
-    uint64_t cnt = 0;
-    MemRead64(&mem, kLogBase, &cnt);
-    std::printf("    [log] count=%llu\n", static_cast<unsigned long long>(cnt));
-  }
-
   // ---------------------------------------------------------- the hardware traps
   const std::vector<TrapObs>& got = h.traps();
   reporter->Check(got.size() == expected.size(),

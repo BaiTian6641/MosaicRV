@@ -249,32 +249,32 @@
         "ACT4 Zicntr",
         "ACT4 Zihpm"
       ],
-   "reason": "The counter CSR suites are generated per profile. Zihpm IS run against the p1 core by tools/run_act_dut.py -- both Zihpm-csrrs-00 and Zihpm-csrrc-00 execute and pass, and the runner's applicable set counts them -- so the only counter work a suite does not cover is the p0 core, which is M-only and has no less-privileged mode for the mcounteren/scounteren gate to exercise; and Zicntr, which no profile advertises (see EX-025) so its suite produces no ELF.",
-   "spec_clause": "RISC-V Privileged Spec, Zicntr/Zihpm counter CSRs (cycle, time, instret and the HPM counters).",
-   "alternative_verification": {
-    "status": "covered",
-    "cases": [
-     "csr.precise_trap_mret",
-     "csr.rule_ledger"
-    ],
-    "checks": [],
-    "note": "The Zihpm shadow behaviour that used to be asserted in prose is now checked: csr.precise_trap_mret's reset-state phase reads hpmcounter3..31 through the DUT and requires each to be implemented, to read the read-only-zero shadow value, and to be unwritable, and its illegal-address phase derives from the generated table which addresses exist; csr.rule_ledger carries one hpmcounter3..31.value rule per shadow, so the coverage assertion visits all 29. Both cases pass. The p1 ACT4 Zihpm ELFs pass on the same core."
-   },
-   "affected_cases": [
-    {
-     "case": "csr.rule_ledger",
-     "fields": [
-      "mcycle",
-      "minstret"
-     ]
-    },
-    {
-     "case": "csr.precise_trap_mret",
-     "fields": []
-    }
-   ],
-   "affected_scope": "tools/run_act_dut.py; config/csr/mode_m.json; config/csr/mode_su.json",
-   "end_condition": "A DUT with an S/U trap frame runs the ACT4 Zicntr suite, and the suite manifest lists none deferred."
+      "reason": "The counter CSR suites are generated per profile. Zihpm IS run against the p1 core by tools/run_act_dut.py -- both Zihpm-csrrs-00 and Zihpm-csrrc-00 execute and pass, and the runner's applicable set counts them -- so the only counter work a suite does not cover is the p0 core, which is M-only and has no less-privileged mode for the mcounteren/scounteren gate to exercise; and Zicntr, which no profile advertises (see EX-025) so its suite produces no ELF.",
+      "spec_clause": "RISC-V Privileged Spec, Zicntr/Zihpm counter CSRs (cycle, time, instret and the HPM counters).",
+      "alternative_verification": {
+        "status": "covered",
+        "cases": [
+          "csr.precise_trap_mret",
+          "csr.rule_ledger"
+        ],
+        "checks": [],
+        "note": "The Zihpm shadow behaviour that used to be asserted in prose is now checked: csr.precise_trap_mret's reset-state phase reads hpmcounter3..31 through the DUT and requires each to be implemented, to read the read-only-zero shadow value, and to be unwritable, and its illegal-address phase derives from the generated table which addresses exist; csr.rule_ledger carries one hpmcounter3..31.value rule per shadow, so the coverage assertion visits all 29. Both cases pass. The p1 ACT4 Zihpm ELFs pass on the same core."
+      },
+      "affected_cases": [
+        {
+          "case": "csr.rule_ledger",
+          "fields": [
+            "mcycle",
+            "minstret"
+          ]
+        },
+        {
+          "case": "csr.precise_trap_mret",
+          "fields": []
+        }
+      ],
+      "affected_scope": "tools/run_act_dut.py; config/csr/mode_m.json; config/csr/mode_su.json",
+      "end_condition": "A DUT with an S/U trap frame runs the ACT4 Zicntr suite, and the suite manifest lists none deferred."
     },
     {
       "id": "EX-010",
@@ -349,38 +349,38 @@
     {
       "id": "EX-012",
       "kind": "skip",
-   "subjects": [
-    "ACT4 ELFs for the p1 extensions still without DUT evidence: Zicond (no suite in the frozen checkout), Zmmul, Zicntr, Zicbom, Zicbop and CMO, and the privileged-mode tests/priv corpus",
-    "The five ACT4 ELFs that run on the p1 DUT and fail: Zca-c.lui-00 (compressed LUI immediate), Zalrsc-sc.d-00 / Zalrsc-sc.w-00 (SC returns failure where the reference succeeds) and Zihpm-csrrc-00 / Zihpm-csrrs-00 (HPM csrrc/csrrs read-modify-write)"
-   ],
-   "reason": "tools/run_act_dut.py now generates and executes the p1 advertised ACT4 set on the integrated out-of-order core (mosaic_core_tb) and records every pass and fail: 122 of 127 ELFs pass, 5 fail (results/reports/V-043-act4.md). The remaining gaps are (a) Zicond, which the p1 profile claims but the frozen riscv-arch-test checkout has no suite for, (b) Zmmul, Zicntr, Zicbom, Zicbop and CMO, which config/profiles/p1.json claims but tools/check_profile.py --all reports not yet implemented/not advertised, so no applicable ELF is generated, and (c) the privileged-mode corpus, which this configuration does not generate.",
+      "subjects": [
+        "ACT4 ELFs for the p1 extensions still without DUT evidence: Zicond (no suite in the frozen checkout), Zmmul, Zicntr, Zicbom, Zicbop and CMO, and the privileged-mode tests/priv corpus",
+        "The five ACT4 ELFs that run on the p1 DUT and fail: Zca-c.lui-00 (compressed LUI immediate), Zalrsc-sc.d-00 / Zalrsc-sc.w-00 (SC returns failure where the reference succeeds) and Zihpm-csrrc-00 / Zihpm-csrrs-00 (HPM csrrc/csrrs read-modify-write)"
+      ],
+      "reason": "tools/run_act_dut.py now generates and executes the p1 advertised ACT4 set on the integrated out-of-order core (mosaic_core_tb) and records every pass and fail: 122 of 127 ELFs pass, 5 fail (results/reports/V-043-act4.md). The remaining gaps are (a) Zicond, which the p1 profile claims but the frozen riscv-arch-test checkout has no suite for, (b) Zmmul, Zicntr, Zicbom, Zicbop and CMO, which config/profiles/p1.json claims but tools/check_profile.py --all reports not yet implemented/not advertised, so no applicable ELF is generated, and (c) the privileged-mode corpus, which this configuration does not generate.",
       "spec_clause": "RISC-V ISA manual, A and C extension chapters and the Zicond/Zmmul/CMO extension specifications.",
       "alternative_verification": {
         "status": "open",
         "cases": [],
         "checks": [],
-   "note": "The p1 DUT now executes the ACT4 corpus: CASE=core.act_dut (sim/unit/tb_core_act.cpp) runs every generated ELF on mosaic_core_tb and reports 122/127 passing, with per-ELF logs in results/v043 and the full record in results/reports/V-043-act4.md. The runner is calibrated (a corrupted expected-signature word and an ALU mutant both make it exit 1). The five failing ELFs and the extensions with no suite or no advertised implementation remain open."
-  },
-  "affected_cases": [
-   {
-    "case": "amo.linearization",
-    "fields": []
-   },
-   {
-    "case": "lrsc.reservation_progress",
-    "fields": []
-   },
-   {
-    "case": "compressed.cross_boundary",
-    "fields": []
-   },
-   {
-    "case": "core.act_dut",
-    "fields": []
-   }
-  ],
-  "affected_scope": "tools/run_act_dut.py; sim/unit/tb_core_act.cpp; tests/act4/mosaic-p1/; config/capability_ladder.json; config/profiles/p1.json",
-  "end_condition": "An ACT4 ELF for each advertised p1 extension executes on the p1 DUT and passes -- currently met for I, M, Zicsr, Zifencei, Zihpm, Zaamo and Zca except the five failures named above -- and Zicond/Zmmul/CMO either gain a suite that runs or are dropped from the p1 profile."
+        "note": "The p1 DUT now executes the ACT4 corpus: CASE=core.act_dut (sim/unit/tb_core_act.cpp) runs every generated ELF on mosaic_core_tb and reports 122/127 passing, with per-ELF logs in results/v043 and the full record in results/reports/V-043-act4.md. The runner is calibrated (a corrupted expected-signature word and an ALU mutant both make it exit 1). The five failing ELFs and the extensions with no suite or no advertised implementation remain open."
+      },
+      "affected_cases": [
+        {
+          "case": "amo.linearization",
+          "fields": []
+        },
+        {
+          "case": "lrsc.reservation_progress",
+          "fields": []
+        },
+        {
+          "case": "compressed.cross_boundary",
+          "fields": []
+        },
+        {
+          "case": "core.act_dut",
+          "fields": []
+        }
+      ],
+      "affected_scope": "tools/run_act_dut.py; sim/unit/tb_core_act.cpp; tests/act4/mosaic-p1/; config/capability_ladder.json; config/profiles/p1.json",
+      "end_condition": "An ACT4 ELF for each advertised p1 extension executes on the p1 DUT and passes -- currently met for I, M, Zicsr, Zifencei, Zihpm, Zaamo and Zca except the five failures named above -- and Zicond/Zmmul/CMO either gain a suite that runs or are dropped from the p1 profile."
     },
     {
       "id": "EX-013",
@@ -1604,6 +1604,56 @@
       ],
       "affected_scope": "tests/programs/Makefile; sim/unit/tb_core_corpus.cpp",
       "end_condition": "Every corpus ELF the cases load is generated before the case runs, so the failure path never fires."
+    },
+    {
+      "id": "EX-053",
+      "kind": "skip",
+      "subjects": [
+        "a p1 Linux boot artifact: a firmware image, a DTB, a kernel image and a rootfs"
+      ],
+      "reason": "I-048's Stage A (the S-mode bare-metal boot contract) is delivered and CASE=boot.p1_contract passes, but Stage B (the Linux contract) cannot be run here: there is no firmware DTb, kernel image or rootfs anywhere on disk (find over the tree returns none), build/p1/manifest.json is a configuration manifest rather than a boot image, and the ACT4 ELF set is not a boot image. The card's own words are that a Linux banner is not a pass, so Stage B is recorded as missing rather than simulated.",
+      "spec_clause": "RISC-V Linux boot protocol: an M-mode firmware (e.g. OpenSBI) hands off to a S-mode kernel with a device tree blob; the kernel mounts a rootfs and runs init. No artifact of that chain exists in this environment.",
+      "alternative_verification": {
+        "status": "open",
+        "cases": [],
+        "checks": [],
+        "note": "Nothing covers the Linux contract. Stage A covers the supervisor-mode contract Linux depends on (page-fault delegation, STI/SSI in S-mode, sfence.vma, misa vs the platform description) and is recorded in results/reports/I-048-p1-boot.md; it is not evidence of a Linux boot."
+      },
+      "affected_cases": [
+        {
+          "case": "boot.p1_contract",
+          "fields": [
+            "stage B"
+          ]
+        }
+      ],
+      "affected_scope": "results/reports/I-048-p1-boot.md; config/validation/exclusion_ledger.json; tests/boot/",
+      "end_condition": "A firmware image, a DTB matching the enabled ISA, a kernel image and a rootfs become available with recorded sha256 hashes, and CASE=boot.p1_contract runs the userspace self-check (signature and exit) against them -- the card's pass criterion, not a banner."
+    },
+    {
+      "id": "EX-054",
+      "kind": "skip",
+      "subjects": [
+        "rvv.vset_boundaries"
+      ],
+      "reason": "The case is registered in tests/unit/registry.json with \"pending\": true (task I-052) and has no recorded result; the vector lane's driver is still in flight. A pending case is not evidence.",
+      "spec_clause": "RISC-V V extension: vsetvl/vsetvli/vsetivli configuration, vl/vtype/vill/vstart rules.",
+      "alternative_verification": {
+        "status": "open",
+        "cases": [],
+        "checks": [],
+        "note": "Nothing covers it yet; the I-052 lane owns it."
+      },
+      "affected_cases": [
+        {
+          "case": "rvv.vset_boundaries",
+          "fields": [
+            "result"
+          ]
+        }
+      ],
+      "affected_scope": "tests/unit/registry.json; results/unit/rvv.vset_boundaries/",
+      "end_condition": "The driver lands, the case passes from a clean build, a result.json is recorded, and the pending marker is cleared by the integration lead."
     }
   ]
 }

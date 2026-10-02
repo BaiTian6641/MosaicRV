@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "case": "boot.p1_contract",
+  "verdict": "FAIL",
+  "detail": "contract violated: traps: the trap count differs from the ISA-derived expectation",
+  "seed": 1,
+  "max_cycles": 4000000,
+  "checks": 4,
+  "failures": 2,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-02T11:43:56Z",
+  "first_mismatch": "trap count: expected 10, got 14",
+  "failed_checks": ["the DUT took every expected trap and no other (14 vs 10)", "no contract violation"]
+}

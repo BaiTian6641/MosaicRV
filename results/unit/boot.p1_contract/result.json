@@ -1,15 +1,15 @@
 {
   "schema_version": 1,
-  "case": "trap.precise_state",
+  "case": "boot.p1_contract",
   "verdict": "PASS",
-  "detail": "checks=167810 comparisons=65917 cycles=12081 retires=4740 traps=35 seed=1",
+  "detail": "stage A: not applicable, profile p0 has no S-mode",
   "seed": 1,
   "max_cycles": 4000000,
-  "checks": 167811,
+  "checks": 1,
   "failures": 0,
   "image": "",
   "expect": "",
   "tool": "Verilator 5.052 2026-09-05",
-  "timestamp": "2026-10-02T11:47:32Z",
+  "timestamp": "2026-10-02T11:42:29Z",
   "first_mismatch": ""
 }
