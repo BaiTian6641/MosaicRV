@@ -49,8 +49,8 @@
 // ------------------------------------------------------------ what this is not
 //
 // The numbers are a measurement *of this program on this geometry*: one hart,
-// one 8-entry fully associative 32-byte locality buffer, one 16-entry stride
-// table of depth 4, an 8-set 32-byte L1, and a directed stride/locality
+// one 8-entry fully associative 64-byte locality buffer, one 16-entry stride
+// table of depth 4, a 32-set 4-way 64-byte L1, and a directed stride/locality
 // workload. No general hit rate, no energy claim, and no multi-hart coherence
 // claim is made or inferable. See results/reports/I-060-locality-integration.md,
 // "not covered".
@@ -81,24 +81,39 @@ namespace {
 
 constexpr int kResetCycles = 8;
 constexpr int kMaxRunCycles = 400000;
-constexpr int kDrainCycles = 64;
+// The exit word and the signature are *cacheable* stores: with the cache on the
+// harness sees them only when the data cache is written back, which the program
+// asks for with a FENCE.I at the end. That flush now walks 32 sets x 4 ways and
+// issues the writebacks it finds, so the drain must cover the whole flush for
+// both the exit word and the signature to be visible. 64 cycles covered the
+// original 8-set direct-mapped L1; the enlarged L1 needs more.
+constexpr int kDrainCycles = 1024;
 
 constexpr uint64_t kRamBase = 0x80000000ull;
 
-// The program's data lines. The L1 is 8 sets of 32 bytes, direct mapped, so the
-// set of an address is (addr >> 5) & 7. The reuse pair A/B and the class-check
-// pair C/D and the store-check pair E/F are each chosen to collide in one set,
-// which is what makes an access miss the L1 and reach the locality path.
-//   A 0x840 -> set 2   B 0x940 -> set 2
-//   C 0x8A0 -> set 5   D 0x9A0 -> set 5
-//   E 0x8E0 -> set 7   F 0x9E0 -> set 7
-// The prefetch stream is base 0x1FF000 + i*0x100: all set 0, a stride of eight
+// The program's data lines. The L1D is 32 sets of 64 bytes, 4 ways, so the set
+// of an offset is (off >> 6) & 31, and adding 0x800 (bit 11) to an offset keeps
+// the set and names a different line. Four ways means a line leaves the L1 only
+// when a fifth distinct line of the same set is installed (round-robin), so the
+// program puts every line below in L1 set 17 (0x440 + 0x800*k):
+//   reuse loop   A..E   0x440 0xC40 0x1440 0x1C40 0x2440
+//   store check  amo    0x2C40 (memory value 100)
+//   class check  Ck     0x3440, with fresh same-set fillers 0x3C40..0x5440
+// Five lines in a four-way set means every turn of the reuse loop installs the
+// line the previous turn evicted, and that access is served by the buffer. The
+// class-check subject is then filled into the buffer, evicted from the L1 by
+// four fresh fillers (four installs cycle every way), and loaded again.
+//
+// The prefetch stream is base 0x1FF000 + i*0x100: all set 0, a stride of four
 // lines, so every access misses the L1 and the stride is learnable -- and its
 // last candidate falls one line past the top of RAM (0x80200000), which is the
 // address a prefetch must never reach.
-constexpr uint64_t kOffA = 0x040, kOffB = 0x140;
-constexpr uint64_t kOffC = 0x0A0, kOffD = 0x1A0;
-constexpr uint64_t kOffE = 0x0E0, kOffF = 0x1E0;
+constexpr uint64_t kOffA = 0x440, kOffB = 0xC40, kOffC = 0x1440, kOffD = 0x1C40,
+                   kOffE = 0x2440;
+constexpr uint64_t kOffAmo = 0x2C40;
+constexpr uint64_t kOffCk = 0x3440;
+constexpr uint64_t kOffCkF0 = 0x3C40, kOffCkF1 = 0x4440, kOffCkF2 = 0x4C40,
+                   kOffCkF3 = 0x5440;
 constexpr uint64_t kOffPfBase = 0x0C0;
 constexpr uint64_t kPfBase = 0x1FF000;
 constexpr int kPfLines = 16;
@@ -322,6 +337,7 @@ std::vector<uint8_t> BuildProgram() {
   const int a3 = 13, a5 = 15, s2 = 18, s3 = 19, s4 = 20, s5 = 21, t3 = 28, t5 = 30,
             t6 = 31;
   const int t7 = 26, t8 = 27;
+  const int s6 = 22, s7 = 23, s8 = 24, s9 = 25;
 
   // s0 = 0x80000800 (the data base). `auipc` gives the PC-relative high part;
   // the 0x800 adjustment is 0x7ff + 1 because an immediate of 0x800 has bit 11
@@ -334,30 +350,56 @@ std::vector<uint8_t> BuildProgram() {
   a.Lui(t4, 0x00100);          // t4 = 0x00100000
   a.Addi(t4, t4, 0x00C);       // t4 = 0x0010000C (the UART scratch: the marker port)
 
-  // ---- phase 1: the reuse loop (A and B collide in L1 set 2) --------------
-  a.Addi(a2, x0, 0);            // accumulator
+  // ---- phase 1: the reuse loop (five lines, one L1 set) -------------------
+  // Five lines in a four-way L1 set: the first turn installs A..E and leaves
+  // four resident; every access after that installs the line the previous
+  // access evicted, so each misses the L1 and is served by the buffer.
+  // Eight turns of (7+9+11+13+15) = 440.
+  //
+  // Each line's address lives in its own register: the lines are 0x800 apart
+  // and the Ld immediate only reaches +/-2 KB.
+  a.Addi(s6, s0, 0x440);       // A
+  a.Addi(s7, s6, 0x7ff);       // B = A + 0x800
+  a.Addi(s7, s7, 1);
+  a.Addi(s8, s7, 0x7ff);       // C
+  a.Addi(s8, s8, 1);
+  a.Addi(s9, s8, 0x7ff);       // D
+  a.Addi(s9, s9, 1);
+  a.Addi(t8, s9, 0x7ff);       // E
+  a.Addi(t8, t8, 1);
+  a.Addi(a2, x0, 0);           // accumulator
   a.Addi(s1, x0, 0);
-  a.Addi(a1, x0, 32);
+  a.Addi(a1, x0, 8);
   const int reuse = a.Label();
   a.Bind(reuse);
-  a.Ld(t0, s0, int(kOffA));
+  a.Ld(t0, s6, 0);
   a.Add(a2, a2, t0);
-  a.Ld(t1, s0, int(kOffB));
-  a.Add(a2, a2, t1);
+  a.Ld(t0, s7, 0);
+  a.Add(a2, a2, t0);
+  a.Ld(t0, s8, 0);
+  a.Add(a2, a2, t0);
+  a.Ld(t0, s9, 0);
+  a.Add(a2, a2, t0);
+  a.Ld(t0, t8, 0);
+  a.Add(a2, a2, t0);
   a.Addi(s1, s1, 1);
   a.Blt(s1, a1, reuse);
 
-  // ---- phase 5: the store-invalidation check (E and F collide in set 7) ---
-  a.Ld(t0, s0, int(kOffF));
-  a.Ld(t0, s0, int(kOffE));              // fills E into the L1 and the buffer
-  a.Ld(t0, s0, int(kOffF));              // evicts E from the L1 cleanly
-  a.Addi(s2, s0, int(kOffE));            // s2 = &E
+  // ---- phase 5: the store-invalidation check -----------------------------
+  // The load fills the AMO's line into the L1 and the buffer. The AMO bypasses
+  // the cache, so the core invalidates that line in both the L1 and the buffer;
+  // the load after it must then miss both and see memory (100 + 5 = 105). With
+  // MOSAIC_LLB_MUTANT_STORE_NO_INVALIDATE the buffer keeps its clean copy and
+  // the load returns 100.
+  a.Addi(s6, t8, 0x7ff);                 // s6 = the next line of the same set
+  a.Addi(s6, s6, 1);                     // s6 = s0 + 0x2C40 (the AMO's line)
+  a.Ld(t0, s6, 0);                       // L1 miss -> buffer copy of the AMO's line
+  a.Addi(s2, s6, 0);                     // s2 = &AMO line
   a.Addi(t1, x0, 5);
-  a.Amo(x0, t1, s2);                     // memory[E] += 5; the store pulse must kill
-                                         // the buffer's copy of E
-  a.Ld(t2, s0, int(kOffE));              // must see memory (105), not the clean copy
+  a.Amo(x0, t1, s2);                     // memory[AMO] += 5; kills L1 and buffer copies
+  a.Ld(t2, s6, 0);                       // must see memory (105), not the clean copy
 
-  // ---- phase 2: the prefetch stream (base 0x80002000, stride 0x100) -------
+  // ---- phase 2: the prefetch stream (base 0x801FF000, stride 0x100) -------
   // The stream's base is a data word in the image (0x801FF000: near the top of
   // RAM, so the stream's last candidate falls one line past the end).
   a.Ld(s3, s0, int(kOffPfBase));         // s3 = 0x801FF000
@@ -371,7 +413,7 @@ std::vector<uint8_t> BuildProgram() {
   a.Addi(s2, s2, 1);
   a.Blt(s2, a3, pf);
 
-  // ---- phase 4: the access-class markers (C and D collide in set 5) -------
+  // ---- phase 4: the access-class markers ----------------------------------
   // The class check comes last, so that no cacheable *load* can execute after
   // its closing marker and leak into the counted window. Each window is bounded
   // so that out-of-order execution cannot move the bracketed access out of it:
@@ -386,24 +428,38 @@ std::vector<uint8_t> BuildProgram() {
   //
   // Window 1 brackets a load that must consult the buffer and hit. Window 2
   // brackets a store whose read-for-ownership must not consult it at all.
-  a.Ld(t0, s0, int(kOffC));
-  a.Ld(t0, s0, int(kOffD));
-  a.Ld(t0, s0, int(kOffC));
-  a.Ld(t0, s0, int(kOffD));              // the L1's set 5 now holds D
+  // The subject and its four fillers are the next five lines of the same set,
+  // each in its own register (the Ld immediate only reaches +/-2 KB).
+  a.Addi(s6, s6, 0x7ff);                 // s6 = s0 + 0x3440 (the subject)
+  a.Addi(s6, s6, 1);
+  a.Addi(s7, s6, 0x7ff);                 // filler 0
+  a.Addi(s7, s7, 1);
+  a.Addi(s8, s7, 0x7ff);                 // filler 1
+  a.Addi(s8, s8, 1);
+  a.Addi(s9, s8, 0x7ff);                 // filler 2
+  a.Addi(s9, s9, 1);
+  a.Addi(t8, s9, 0x7ff);                 // filler 3
+  a.Addi(t8, t8, 1);
+  a.Ld(t0, s6, 0);                       // fresh line -> L1 miss, buffer fill
+  a.Ld(t0, s7, 0);                       // four fresh same-set fillers: four
+  a.Ld(t0, s8, 0);                       // installs cycle every way, so the
+  a.Ld(t0, s9, 0);                       // subject leaves the L1 (it stays in
+  a.Ld(t0, t8, 0);                       // the buffer)
   a.Lw(t5, t4, 0);                       // M1: opening marker (device load)
   a.Xor(t6, t5, t5);                     // t6 = 0, but a real dependency on t5
-  a.Add(t6, t6, s0);
-  a.Ld(t0, t6, int(kOffC));              // L1 miss -> buffer hit (positive control)
+  a.Add(t6, t6, s6);                     // t6 = &subject
+  a.Ld(t0, t6, 0);                       // L1 miss -> buffer hit (positive control)
   a.Xor(t7, t0, t0);                     // t7 = 0, depends on the control load
   a.Add(t7, t7, t4);                     // t7 = the marker address
   a.Lw(t5, t7, 0);                       // M2: closing marker (device load)
-  a.Xor(t8, t5, t5);                     // depends on M2
-  a.Add(t8, t8, s0);
-  a.Ld(t0, t8, int(kOffD));              // evicts C from the L1 again
+  a.Ld(t0, s7, 0);                       // four same-set installs again: the
+  a.Ld(t0, s8, 0);                       // subject leaves the L1 once more, so
+  a.Ld(t0, s9, 0);                       // the store below misses and takes a
+  a.Ld(t0, t8, 0);                       // read for ownership
   a.Lw(t5, t4, 0);                       // M3: opening marker (device load)
   a.Xor(t6, t5, t5);
-  a.Add(t6, t6, s0);
-  a.Sd(x0, t6, int(kOffC));              // store C: L1 miss -> read for ownership
+  a.Add(t6, t6, s6);                     // t6 = &subject
+  a.Sd(x0, t6, 0);                       // store: L1 miss -> read for ownership
   a.Addi(t3, x0, 0x21);
   a.Sw(t3, t4, 0);                       // M4: closing marker (device store)
 
@@ -454,8 +510,13 @@ std::vector<uint8_t> BuildProgram() {
   put(kDataBase + kOffB, 9);
   put(kDataBase + kOffC, 11);
   put(kDataBase + kOffD, 13);
-  put(kDataBase + kOffE, 100);
-  put(kDataBase + kOffF, 17);
+  put(kDataBase + kOffE, 15);
+  put(kDataBase + kOffAmo, 100);
+  put(kDataBase + kOffCk, 11);
+  put(kDataBase + kOffCkF0, 1);
+  put(kDataBase + kOffCkF1, 2);
+  put(kDataBase + kOffCkF2, 3);
+  put(kDataBase + kOffCkF3, 4);
   put(kDataBase + kOffPfBase, 0x801FF000ull);
   for (int i = 0; i < kPfLines; i++) put(kPfBase + uint64_t(i) * 0x100, uint64_t((i + 1) * 3));
   return image;
@@ -580,9 +641,9 @@ class CoreRun {
     }
     mem.ReadSignature(&rec.sig);
     if (std::getenv("LOCALITY_DUMP") != nullptr) {
-      const uint64_t addrs[] = {0x80000000ull, 0x80000040ull, 0x80000400ull,
-                                0x80000840ull, 0x80000940ull, 0x800008A0ull,
-                                0x800008E0ull, 0x80002000ull};
+      const uint64_t addrs[] = {0x80000000ull, 0x80000400ull, 0x80000C40ull,
+                                0x80001440ull, 0x80001C40ull, 0x80002440ull,
+                                0x80003440ull, 0x801FF000ull};
       std::printf("    [mem] (llb=%d pf=%d) park_pc=0x%llx retires=%zu\n", llb_en ? 1 : 0,
                   pf_en ? 1 : 0, (unsigned long long)g_park_pc, observed_.size());
       for (uint64_t a : addrs) {
@@ -924,9 +985,10 @@ int main(int argc, char** argv) {
   auto sigword = [](const RunRec& r, size_t i) -> uint64_t {
     return r.sig.size() > i ? r.sig[i] : 0;
   };
-  // phase 1: 32 * (7 + 9) = 512. phase 2: 3*(1+..+16) = 408. Total 920.
-  reporter.Check(sigword(base.rec, 0) == 920, "the loop accumulators reach 920");
-  // phase 5: the AMO adds 5 to E (which starts at 100) and the load must see 105.
+  // phase 1: 8 * (7 + 9 + 11 + 13 + 15) = 440. phase 2: 3*(1+..+16) = 408. Total 848.
+  reporter.Check(sigword(base.rec, 0) == 848, "the loop accumulators reach 848");
+  // phase 5: the AMO adds 5 to its line (which starts at 100) and the load must
+  // see 105.
   reporter.Check(sigword(base.rec, 1) == 105,
                  "the load after the AMO sees memory (105), not a stale clean copy");
 
@@ -951,8 +1013,8 @@ int main(int argc, char** argv) {
                  "the prefetcher issues nothing when it is off");
 
   // -------------------------------------------------- phase 3: the class rule
-  // Marker 0x11..0x12 brackets one load that must consult the buffer and hit;
-  // marker 0x21..0x22 brackets one store whose read-for-ownership must not
+  // The first marker pair brackets one load that must consult the buffer and
+  // hit; the second brackets one store whose read-for-ownership must not
   // consult it at all.
   if (std::getenv("LOCALITY_DUMP") != nullptr) {
     for (size_t i = 0; i < llb_c.rec.markers.size(); i++) {

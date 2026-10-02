@@ -74,11 +74,14 @@ module mosaic_l1_cache_path #(
   parameter bit  IS_FETCH     = 1'b0,
   parameter int  LINE_BYTES   = 32,
   parameter int  SETS         = 8,
+  parameter int  WAYS         = 1,
+  parameter int  MSHR_ENTRIES = 4,
   parameter int  ADDR_WIDTH   = 64,
   parameter int  CPU_DATA_WIDTH = 64,
   parameter int  ID_W         = 1,
   parameter int  EPOCH_W      = 1,
-  localparam int INDEX_BITS   = $clog2(SETS)
+  localparam int INDEX_BITS   = $clog2(SETS),
+  localparam int WAY_BITS     = (WAYS > 1) ? $clog2(WAYS) : 1
 ) (
   input  logic                          clk,
   input  logic                          rst,
@@ -87,6 +90,11 @@ module mosaic_l1_cache_path #(
   input  logic                          en_i,        // runtime cache enable
   input  logic                          flush_i,     // level: invalidate and hold off
   output logic                          flush_done,  // level: flush complete
+  // A bypassed atomic to a cacheable address: drop the cached line (writing a
+  // dirty one back first). Only the data side acts on it; the instruction cache
+  // is read-only and is flushed by FENCE.I.
+  input  logic                          inv_valid_i,
+  input  logic [ADDR_WIDTH-1:0]         inv_pa_i,
 
   // ----------------------------------------------------------- CPU request
   input  logic                          cpu_req_valid_i,
@@ -260,47 +268,152 @@ module mosaic_l1_cache_path #(
   logic [63:0]             lat_pc_q;
 
   /* verilator lint_off PINCONNECTEMPTY */
-  mosaic_cache #(
-    .CPU_DATA_WIDTH (CPU_DATA_WIDTH),
-    .LINE_BYTES     (LINE_BYTES),
-    .SETS           (SETS),
-    .ADDR_WIDTH     (ADDR_WIDTH),
-    .READ_ONLY      (IS_FETCH)
-  ) u_cache (
-    .clk            (clk),
-    .rst            (rst),
-    .cpu_req_valid  (cache_cpu_req_valid),
-    .cpu_req_we     (cpu_req_i.we),
-    .cpu_req_addr   (cpu_req_i.addr),
-    .cpu_req_wdata  (cpu_req_i.wdata),
-    .cpu_req_wmask  (cpu_req_i.wstrb),
-    .cpu_req_ready  (cache_cpu_req_ready),
-    .cpu_resp_valid (cache_cpu_resp_valid),
-    .cpu_resp_rdata (cache_cpu_resp_rdata),
-    .cpu_resp_fault (cache_cpu_resp_fault),
-    .mem_req_valid  (cache_mem_req_valid),
-    .mem_req_we     (cache_mem_req_we),
-    .mem_req_addr   (cache_mem_req_addr),
-    .mem_req_wdata  (cache_mem_req_wdata),
-    .mem_req_ready  (cache_mem_req_ready),
-    .mem_resp_valid (cache_mem_resp_valid),
-    .mem_resp_rdata (cache_mem_resp_rdata),
-    .mem_resp_fault (cache_mem_resp_fault),
-    .flush_valid    (cache_flush_valid),
-    .flush_ready    (cache_flush_ready),
-    .flush_done     (cache_flush_done),
-    .flush_busy     (),
-    .dbg_index      (dbg_index_i),
-    .dbg_valid      (dbg_valid_o),
-    .dbg_dirty      (dbg_dirty_o),
-    .dbg_tag        (),
-    .dbg_data       (),
-    .ev_hit         (o_hit),
-    .ev_miss        (o_miss),
-    .ev_refill      (o_refill),
-    .ev_writeback   (o_writeback),
-    .ev_fault       (o_fault)
-  );
+  generate
+    if (IS_FETCH) begin : g_icache
+      // The L1I is I-043's verified non-blocking read L1 (`mosaic_mshr`) itself.
+      // It keeps an outstanding-miss table of MSHR_ENTRIES entries, coalesces a
+      // second request to a line already being fetched, and matches a refill to
+      // its entry by the line address rather than by arrival order. The line
+      // adapter this wrapper hands it is single-outstanding, so the read in
+      // flight is the one last issued; its address is latched and replayed as
+      // the response identity (which is what the MSHR matches on).
+      logic                      mshr_req_ready;
+      logic                      mshr_rsp_valid;
+      logic [CPU_DATA_WIDTH-1:0] mshr_rsp_rdata;
+      logic                      mshr_rsp_fault;
+      logic                      mshr_mem_req_valid;
+      logic [ADDR_WIDTH-1:0]     mshr_mem_req_addr;
+      logic                      mshr_mem_req_ready;
+      logic [ADDR_WIDTH-1:0]     mshr_rd_addr_q;
+      logic                      mshr_flush_ready;
+      logic                      mshr_flush_done;
+
+      assign cache_cpu_req_ready  = mshr_req_ready;
+      assign cache_cpu_resp_valid = mshr_rsp_valid;
+      assign cache_cpu_resp_rdata = mshr_rsp_rdata;
+      assign cache_cpu_resp_fault = mshr_rsp_fault;
+
+      assign cache_mem_req_valid  = mshr_mem_req_valid;
+      assign cache_mem_req_we     = 1'b0;
+      assign cache_mem_req_addr   = mshr_mem_req_addr;
+      assign cache_mem_req_wdata  = {LINE_BITS{1'b0}};
+      assign mshr_mem_req_ready   = cache_mem_req_ready;
+
+      always_ff @(posedge clk) begin
+        if (mshr_mem_req_valid && mshr_mem_req_ready) mshr_rd_addr_q <= mshr_mem_req_addr;
+      end
+
+      assign cache_flush_ready    = mshr_flush_ready;
+      assign cache_flush_done     = mshr_flush_done;
+      // The instruction cache is read-only: a bypassed atomic cannot touch it,
+      // and its own invalidate is the FENCE.I flush.
+      /* verilator lint_off UNUSEDSIGNAL */
+      logic unused_inv;
+      assign unused_inv = inv_valid_i ^ (^inv_pa_i);
+      /* verilator lint_on UNUSEDSIGNAL */
+      // A read-only cache never writes back, and an instruction cache has no
+      // store path: nothing drives these here.
+      assign o_writeback          = 1'b0;
+      assign dbg_dirty_o          = 1'b0;
+
+      mosaic_mshr #(
+        .CPU_DATA_WIDTH (CPU_DATA_WIDTH),
+        .LINE_BYTES     (LINE_BYTES),
+        .SETS           (SETS),
+        .WAYS           (WAYS),
+        .ADDR_WIDTH     (ADDR_WIDTH),
+        .MSHR_ENTRIES   (MSHR_ENTRIES),
+        .ID_WIDTH       (ID_W)
+      ) u_mshr (
+        .clk            (clk),
+        .rst            (rst),
+        .req_valid      (cache_cpu_req_valid),
+        .req_addr       (cpu_req_i.addr),
+        .req_id         (cpu_req_id_i),
+        .req_ready      (mshr_req_ready),
+        .cancel_valid   (1'b0),
+        .cancel_id      ({ID_W{1'b0}}),
+        .resp_valid     (mshr_rsp_valid),
+        .resp_id        (),
+        .resp_rdata     (mshr_rsp_rdata),
+        .resp_fault     (mshr_rsp_fault),
+        .mem_req_valid  (mshr_mem_req_valid),
+        .mem_req_addr   (mshr_mem_req_addr),
+        .mem_req_ready  (mshr_mem_req_ready),
+        .mem_resp_valid (cache_mem_resp_valid),
+        .mem_resp_addr  (mshr_rd_addr_q),
+        .mem_resp_rdata (cache_mem_resp_rdata),
+        .mem_resp_fault (cache_mem_resp_fault),
+        .flush_valid    (cache_flush_valid),
+        .flush_ready    (mshr_flush_ready),
+        .flush_done     (mshr_flush_done),
+        .flush_busy     (),
+        .dbg_index      (dbg_index_i),
+        .dbg_way        ({WAY_BITS{1'b0}}),
+        .dbg_valid      (dbg_valid_o),
+        .dbg_tag        (),
+        .dbg_data       (),
+        .dbg_outstanding(),
+        .dbg_waiters    (),
+        .ev_hit         (o_hit),
+        .ev_miss        (o_miss),
+        .ev_coalesce    (),
+        .ev_refill      (o_refill),
+        .ev_fault       (o_fault),
+        .ev_cancel      (),
+        .ev_drop        ()
+      );
+    end else begin : g_dcache
+      mosaic_cache #(
+        .CPU_DATA_WIDTH (CPU_DATA_WIDTH),
+        .LINE_BYTES     (LINE_BYTES),
+        .SETS           (SETS),
+        .WAYS           (WAYS),
+        .ADDR_WIDTH     (ADDR_WIDTH),
+        .READ_ONLY      (1'b0),
+        .MSHR_ENTRIES   (MSHR_ENTRIES)
+      ) u_cache (
+        .clk            (clk),
+        .rst            (rst),
+        .cpu_req_valid  (cache_cpu_req_valid),
+        .cpu_req_we     (cpu_req_i.we),
+        .cpu_req_addr   (cpu_req_i.addr),
+        .cpu_req_wdata  (cpu_req_i.wdata),
+        .cpu_req_wmask  (cpu_req_i.wstrb),
+        .cpu_req_ready  (cache_cpu_req_ready),
+        .cpu_resp_valid (cache_cpu_resp_valid),
+        .cpu_resp_rdata (cache_cpu_resp_rdata),
+        .cpu_resp_fault (cache_cpu_resp_fault),
+        .mem_req_valid  (cache_mem_req_valid),
+        .mem_req_we     (cache_mem_req_we),
+        .mem_req_addr   (cache_mem_req_addr),
+        .mem_req_wdata  (cache_mem_req_wdata),
+        .mem_req_ready  (cache_mem_req_ready),
+        .mem_resp_valid (cache_mem_resp_valid),
+        .mem_resp_rdata (cache_mem_resp_rdata),
+        .mem_resp_fault (cache_mem_resp_fault),
+        .flush_valid    (cache_flush_valid),
+        .flush_ready    (cache_flush_ready),
+        .flush_done     (cache_flush_done),
+        .flush_busy     (),
+        .inv_valid      (inv_valid_i),
+        .inv_addr       (inv_pa_i),
+        .dbg_index      (dbg_index_i),
+        .dbg_way        ({WAY_BITS{1'b0}}),
+        .dbg_valid      (dbg_valid_o),
+        .dbg_dirty      (dbg_dirty_o),
+        .dbg_tag        (),
+        .dbg_data       (),
+        .ev_hit         (o_hit),
+        .ev_miss        (o_miss),
+        .ev_coalesce    (),
+        .ev_refill      (o_refill),
+        .ev_writeback   (o_writeback),
+        .ev_fault       (o_fault),
+        .o_outstanding  ()
+      );
+    end
+  endgenerate
   /* verilator lint_on PINCONNECTEMPTY */
 
   mosaic_cache_line_bridge #(

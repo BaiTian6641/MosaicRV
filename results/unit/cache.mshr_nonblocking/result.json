@@ -2,14 +2,14 @@
   "schema_version": 1,
   "case": "cache.mshr_nonblocking",
   "verdict": "PASS",
-  "detail": "mshr: hit=1 miss=21 coalesce=3 refill=14 fault=2 cancel=3 reads=17 max_outstanding=4 cycles=78",
+  "detail": "mshr: hit=1 miss=21 coalesce=3 refill=14 fault=2 cancel=3 reads=17 max_outstanding=4 cycles=81 | nb-l1d: hit=1 miss=13 coalesce=2 refill=10 fault=1 wb=1 reads=11 cycles=154",
   "seed": 1,
   "max_cycles": 200000,
-  "checks": 59,
+  "checks": 96,
   "failures": 0,
   "image": "",
   "expect": "",
   "tool": "Verilator 5.052 2026-09-05",
-  "timestamp": "2026-10-02T19:48:19Z",
+  "timestamp": "2026-10-02T23:07:06Z",
   "first_mismatch": ""
 }

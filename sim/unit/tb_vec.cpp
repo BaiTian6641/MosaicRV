@@ -730,6 +730,15 @@ void PhaseResetInFlight(Dut* d, Reporter* rep) {
   rep->Check(BitmapBit(o.bm_lo, o.bm_hi, 0), "reset-in-flight: element 0 not recorded");
 
   // Reset with the macro in flight, and pulses presented while reset is high.
+  //
+  // The contract this asserts is *reset dominance on the DUT*: with `rst` high
+  // the descriptor unit must leave no state behind, and the allocate / element
+  // done / fault pulses offered on these cycles must not create or preserve any.
+  // That is the opposite direction from the harness-side reset-traffic rule
+  // (V-010), which says a *bus model* ignores a request the DUT presents while
+  // reset is asserted. There is no bus model here -- the DUT's ports are driven
+  // directly -- so V-010 does not apply to this case, and the two contracts are
+  // not in conflict: one constrains the environment, this one the DUT.
   for (int i = 0; i < 2; ++i) {
     Stim r;
     r.rst = true;

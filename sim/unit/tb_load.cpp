@@ -1134,6 +1134,51 @@ class Bench {
     }
   }
 
+  // ------------------------------------------- the one bus-model advance (V-010)
+  // Both the shipping cycle loop and the reset-traffic control below call this,
+  // so the control exercises the real accept path rather than a copy of it. The
+  // reset-traffic rule lives in one place (`mosaic::BusResetGate`): while reset
+  // is asserted the model accepts nothing and delivers nothing. With the gate in
+  // its shipping state this is statement-for-statement the pre-rule behaviour --
+  // a reset edge used not to step the model at all -- and a live edge is
+  // unchanged because the gate is transparent when reset is low.
+  void StepMemoryPorts(bool rst, const Stim& s) {
+    if (!bus_gate_.MayDeliver(rst)) return;
+    const bool lq_accept =
+        bus_gate_.MayAccept(rst, last_.lq_mem_req_valid && s.lq_mem_req_ready);
+    const bool sq_accept =
+        bus_gate_.MayAccept(rst, last_.sq_mem_req_valid && s.sq_mem_req_ready);
+    mem_.Step(&mem_.lq, s.lq_latency, lq_accept, s.lq_mem_req_ready,
+              last_.lq_mem_req_we, last_.lq_mem_req_addr, SizeBytes(last_.lq_mem_req_size),
+              last_.lq_mem_req_wdata, last_.lq_mem_rsp_ready, s.lq_mem_fault);
+    mem_.Step(&mem_.sq, s.sq_latency, sq_accept, s.sq_mem_req_ready,
+              last_.sq_mem_req_we, last_.sq_mem_req_addr, SizeBytes(last_.sq_mem_req_size),
+              last_.sq_mem_req_wdata, last_.sq_mem_rsp_ready, s.sq_mem_fault);
+  }
+
+  // ------------------------------------------------ reset-traffic control (V-010)
+  // Offers one request to the load memory port with reset asserted, through the
+  // same gate the cycle loop uses, and returns true iff the model accepted it.
+  // In the shipping configuration it must refuse; with the accept-during-reset
+  // control engaged the same path must accept, which is what proves the rule
+  // check can fail rather than passing because nothing was ever offered.
+  bool PresentLqDuringReset() {
+    mem_.lq = Memory::Port();
+    Stim s;
+    s.lq_mem_req_ready = true;
+    s.sq_mem_req_ready = true;
+    const DutOut saved = last_;
+    last_.lq_mem_req_valid = true;
+    last_.lq_mem_req_we = false;
+    last_.lq_mem_req_addr = Memory::kBase;
+    last_.lq_mem_req_size = 3;  // 8 bytes
+    last_.lq_mem_req_wdata = 0;
+    last_.lq_mem_rsp_ready = false;
+    StepMemoryPorts(/*rst=*/true, s);
+    last_ = saved;
+    return mem_.lq.accepted != 0;
+  }
+
   // --------------------------------------------- apply the cycle's edge
   void CommitEdge(const Stim& s, bool rst) {
     if (rst) {
@@ -1143,17 +1188,17 @@ class Bench {
       result_pending_ = false;
       pending_ = Expected();
       tallies_ = DutOut();
+      // The bus model still goes through the gate on a reset edge, so a request
+      // the DUT presents while reset is asserted is refused by the rule rather
+      // than by this branch happening not to run. With the gate in its shipping
+      // state this is a no-op, exactly as before.
+      StepMemoryPorts(rst, s);
       return;
     }
 
     // The memory ports advance with the pre-edge request signals. The consumer's
     // response readiness is the endpoint's own `mem_rsp_ready_o`.
-    mem_.Step(&mem_.lq, s.lq_latency, last_.lq_mem_req_valid, s.lq_mem_req_ready,
-              last_.lq_mem_req_we, last_.lq_mem_req_addr, SizeBytes(last_.lq_mem_req_size),
-              last_.lq_mem_req_wdata, last_.lq_mem_rsp_ready, s.lq_mem_fault);
-    mem_.Step(&mem_.sq, s.sq_latency, last_.sq_mem_req_valid, s.sq_mem_req_ready,
-              last_.sq_mem_req_we, last_.sq_mem_req_addr, SizeBytes(last_.sq_mem_req_size),
-              last_.sq_mem_req_wdata, last_.sq_mem_rsp_ready, s.sq_mem_fault);
+    StepMemoryPorts(rst, s);
 
     // ---- load queue ----
     const bool rsp_now = last_.lq_ep_rsp_valid && last_.lq_rsp_ready;
@@ -1278,6 +1323,7 @@ class Bench {
   uint64_t max_cycles_;
   Geom g_;
   Memory mem_;
+  mosaic::BusResetGate bus_gate_;
   std::vector<uint8_t> exp_mem_;
 
   std::vector<LqEnt> shadow_lq_;
@@ -1665,6 +1711,29 @@ class Bench {
     EndPhase();
   }
 
+  // ------------------------------------------------------- the rule (V-010)
+  void PhaseResetTraffic() {
+    Phase("reset-traffic");
+    Fresh();
+    // The shipping configuration: a request presented while reset is asserted
+    // is refused, so nothing is accepted, queued or delivered.
+    Require(!PresentLqDuringReset(), "reset-traffic",
+            "the memory model accepted a request while reset was asserted");
+    // The negative control: bypassing the gate makes the same path accept, so
+    // the check above is a guard that has been seen to fire rather than one
+    // that cannot fail.
+    bus_gate_.SetAcceptDuringResetControl(true);
+    const bool control_accepted = PresentLqDuringReset();
+    bus_gate_.SetAcceptDuringResetControl(false);
+    Require(control_accepted, "reset-traffic",
+            "the accept-during-reset control did not fire: the reset-traffic "
+            "guard is untested");
+    // The control is not left engaged: the shipping path refuses again.
+    Require(!PresentLqDuringReset(), "reset-traffic",
+            "the accept-during-reset control was left engaged");
+    EndPhase();
+  }
+
  private:
   // Offer a load without waiting for it: used where the load must be blocked.
   void AllocLoadRun_NoSettle(const LqEnt& e) { OfferLoad(e); }
@@ -1696,6 +1765,7 @@ int main(int argc, char** argv) {
     bench.ReadGeometry();
 
     bench.PhaseResetState();
+    bench.PhaseResetTraffic();
     bench.PhaseNarrow();
     bench.PhaseWide();
     bench.PhaseYoungest();

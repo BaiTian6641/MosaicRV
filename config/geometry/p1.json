@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "profile": "p1",
-  "source": "docs/implementation-plan.md#1.2 p1 baseline: same geometry as p0 plus blocking L1I/L1D introduced by I-042; a smaller FPGA profile (ROB=32, PRF=64) is permitted by the plan but keeps the same ISA and two real clusters",
+  "source": "docs/implementation-plan.md#1.2 p1 baseline: same geometry as p0 plus the L1I/L1D introduced by I-042, now config-driven and enlarged to 8 KB each (32 sets x 64 B x 4 ways) with a non-blocking read path (I-043's MSHR); a smaller FPGA profile (ROB=32, PRF=64) is permitted by the plan but keeps the same ISA and two real clusters",
   "frontend": {
     "fetch_outstanding": 4,
     "btb_entries": 128,
@@ -37,11 +37,11 @@
   },
   "caches": {
     "line_bytes": 64,
-    "l1i_sets": 256,
+    "l1i_sets": 32,
     "l1i_ways": 4,
-    "l1d_sets": 256,
+    "l1d_sets": 32,
     "l1d_ways": 4,
-    "mshrs": 2
+    "mshrs": 4
   },
   "pmp": {
     "entries": 16,

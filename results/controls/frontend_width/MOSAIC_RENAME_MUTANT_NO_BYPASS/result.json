@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "case": "perf.equal_resource_compare",
+  "verdict": "FAIL",
+  "detail": "contract violated: baseline on vec_stream: the machine stopped on an instruction it refuses (unsupported=1 illegal=1)",
+  "seed": 1,
+  "max_cycles": 4000000,
+  "checks": 0,
+  "failures": 0,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-02T23:35:54Z",
+  "first_mismatch": "baseline on vec_stream: the machine stopped on an instruction it refuses (unsupported=1 illegal=1): expected the equal-resource comparison, got contract violated"
+}

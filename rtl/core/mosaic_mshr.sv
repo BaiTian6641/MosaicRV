@@ -93,7 +93,8 @@
 module mosaic_mshr #(
   parameter int CPU_DATA_WIDTH = 64,    // bits per CPU access (a word)
   parameter int LINE_BYTES     = 32,    // bytes per line, power of two
-  parameter int SETS           = 8,     // sets, direct-mapped
+  parameter int SETS           = 8,     // sets
+  parameter int WAYS           = 1,     // associativity (1 = direct-mapped)
   parameter int ADDR_WIDTH     = 32,    // physical address width
   parameter int MSHR_ENTRIES   = 4,     // outstanding-miss entries
   parameter int ID_WIDTH       = 3,     // request id bits (1 << ID_WIDTH ids)
@@ -102,6 +103,7 @@ module mosaic_mshr #(
   localparam int LINE_BITS     = LINE_BYTES * 8,
   localparam int OFFSET_BITS   = $clog2(LINE_BYTES),
   localparam int INDEX_BITS    = $clog2(SETS),
+  localparam int WAY_BITS      = (WAYS > 1) ? $clog2(WAYS) : 1,
   localparam int TAG_WIDTH     = ADDR_WIDTH - OFFSET_BITS - INDEX_BITS,
   localparam int WORD_BITS     = $clog2(CPU_BYTES),          // byte-in-word bits
   localparam int WORD_IDX_BITS = OFFSET_BITS - WORD_BITS,    // word-in-line bits
@@ -131,6 +133,16 @@ module mosaic_mshr #(
   output logic [CPU_DATA_WIDTH-1:0]   resp_rdata,
   output logic                        resp_fault,
 
+  // ----------------------------------------------------------------- flush
+  // Invalidate every line. The read path is clean, so a flush writes nothing
+  // back: `flush_done` rises once the valid bits are cleared. Any refill
+  // already in flight is absorbed -- its response matches no live entry after
+  // the flush and is ignored -- so a flush never installs a stale line.
+  input  logic                        flush_valid,
+  output logic                        flush_ready,
+  output logic                        flush_done,
+  output logic                        flush_busy,
+
   // ----------------------------------------------------------- memory port
   output logic                        mem_req_valid,
   output logic [ADDR_WIDTH-1:0]       mem_req_addr,   // line aligned
@@ -144,6 +156,7 @@ module mosaic_mshr #(
 
   // -------------------------------------------------------- state inspection
   input  logic [INDEX_BITS-1:0]       dbg_index,
+  input  logic [WAY_BITS-1:0]         dbg_way,
   output logic                        dbg_valid,
   output logic [TAG_WIDTH-1:0]        dbg_tag,
   output logic [LINE_BITS-1:0]        dbg_data,
@@ -163,9 +176,10 @@ module mosaic_mshr #(
   //  ------------------------------------------------------------------ storage
   // Same contract as I-042: no reset and no initial value on the arrays; the
   // valid bit is the only per-line control state and it IS cleared by `rst`.
-  logic [LINE_BITS-1:0] data_mem [SETS];
-  logic [TAG_WIDTH-1:0] tag_mem  [SETS];
-  logic [SETS-1:0]      valid;
+  logic [LINE_BITS-1:0]      data_mem [SETS][WAYS];
+  logic [TAG_WIDTH-1:0]      tag_mem  [SETS][WAYS];
+  logic [SETS-1:0][WAYS-1:0] valid;
+  logic [SETS-1:0][WAY_BITS-1:0] rr;      // round-robin victim pointer per set
 
   // ------------------------------------------------------------------ MSHR
   logic                  e_valid   [MSHR_ENTRIES];
@@ -210,8 +224,20 @@ module mosaic_mshr #(
   assign req_word  = req_addr[OFFSET_BITS - 1 : WORD_BITS];
   assign req_line  = {req_addr[ADDR_WIDTH - 1 : OFFSET_BITS], {OFFSET_BITS{1'b0}}};
 
-  logic req_hit;
-  assign req_hit = valid[req_index] && (tag_mem[req_index] == req_tag);
+  logic [WAYS-1:0]     way_hit;
+  logic [WAY_BITS-1:0] req_hit_way;
+  logic                req_hit;
+  always_comb begin
+    way_hit = '0;
+    for (int unsigned w = 0; w < WAYS; w++) begin
+      if (valid[req_index][w] && (tag_mem[req_index][w] == req_tag)) way_hit[w] = 1'b1;
+    end
+    req_hit     = |way_hit;
+    req_hit_way = '0;
+    for (int unsigned w = 0; w < WAYS; w++) begin
+      if (!req_hit_way[0] && way_hit[w]) req_hit_way = w[WAY_BITS-1:0];
+    end
+  end
 
   // ---------------------------------------------------------- MSHR lookups
   logic                    dup_found;
@@ -246,7 +272,12 @@ module mosaic_mshr #(
   assign dup_use = dup_found;
 `endif
 
-  assign req_ready = req_hit || dup_use || free_found;
+  logic flushing_q;
+  logic flush_done_r;
+  assign req_ready = (req_hit || dup_use || free_found) && !flush_valid && !flushing_q;
+  assign flush_ready = !flushing_q;
+  assign flush_busy  = flushing_q;
+  assign flush_done  = flush_done_r;
 
   // ------------------------------------------------------------ memory issue
   logic                    issue_valid;
@@ -351,9 +382,9 @@ module mosaic_mshr #(
 `endif
 
   // ------------------------------------------------------------ debug view
-  assign dbg_valid = valid[dbg_index];
-  assign dbg_tag   = tag_mem[dbg_index];
-  assign dbg_data  = data_mem[dbg_index];
+  assign dbg_valid = valid[dbg_index][dbg_way];
+  assign dbg_tag   = tag_mem[dbg_index][dbg_way];
+  assign dbg_data  = data_mem[dbg_index][dbg_way];
 
   logic [ENT_CNT_BITS-1:0] outstanding_count;
   logic [ENT_CNT_BITS:0]   outstanding_sum;
@@ -396,7 +427,9 @@ module mosaic_mshr #(
   logic                    install_en;
   logic [ENT_IDX_BITS-1:0] install_idx;
   logic [INDEX_BITS-1:0]   install_set;
+  logic [WAY_BITS-1:0]     install_way;
   assign install_set = nx_line[install_idx][OFFSET_BITS+INDEX_BITS-1:OFFSET_BITS];
+  assign install_way = rr[install_set];
 
   logic [IDS-1:0] req_id_bit;
   logic [IDS-1:0] cancel_id_bit;
@@ -514,7 +547,10 @@ module mosaic_mshr #(
     ev_drop     <= 1'b0;
 
     if (rst) begin
-      valid           <= {SETS{1'b0}};
+      valid           <= '0;
+      rr              <= '0;
+      flushing_q      <= 1'b0;
+      flush_done_r    <= 1'b0;
       hit_resp_valid_r <= 1'b0;
       hit_resp_id_r    <= '0;
       hit_resp_data_r  <= '0;
@@ -555,10 +591,11 @@ module mosaic_mshr #(
 
       // Install the line the next-state logic selected.
       if (install_now) begin
-        valid[install_set]    <= 1'b1;
-        tag_mem[install_set]  <= nx_line[install_idx][ADDR_WIDTH-1:OFFSET_BITS+INDEX_BITS];
-        data_mem[install_set] <= nx_data[install_idx];
-        ev_refill             <= 1'b1;
+        valid[install_set][install_way]   <= 1'b1;
+        tag_mem[install_set][install_way] <= nx_line[install_idx][ADDR_WIDTH-1:OFFSET_BITS+INDEX_BITS];
+        data_mem[install_set][install_way]<= nx_data[install_idx];
+        rr[install_set] <= (install_way == WAY_BITS'(WAYS-1)) ? '0 : (install_way + 1'b1);
+        ev_refill       <= 1'b1;
       end
       if (drop_now) ev_drop <= 1'b1;   // a cancelled refill absorbed, not installed
 
@@ -566,7 +603,7 @@ module mosaic_mshr #(
       if (req_valid && req_ready && req_hit) begin
         hit_resp_valid_r <= 1'b1;
         hit_resp_id_r    <= req_id;
-        hit_resp_data_r  <= data_mem[req_index][int'(req_word) * CPU_DATA_WIDTH +: CPU_DATA_WIDTH];
+        hit_resp_data_r  <= data_mem[req_index][req_hit_way][int'(req_word) * CPU_DATA_WIDTH +: CPU_DATA_WIDTH];
       end else if (hit_resp_valid_r) begin
         hit_resp_valid_r <= 1'b0;
       end
@@ -584,6 +621,23 @@ module mosaic_mshr #(
         for (int unsigned i = 0; i < MSHR_ENTRIES; i++) begin
           if (resp_match[i]) ev_fault <= 1'b1;
         end
+      end
+
+      // Flush: absorb the table and drop every tag. Clean lines owe memory
+      // nothing, so there is no writeback to drain; a refill already on the
+      // wire matches no live entry afterwards and is ignored. This block is
+      // last so it overrides the per-entry next-state values above.
+      flush_done_r <= 1'b0;
+      if (flush_valid && !flushing_q) begin
+        flushing_q   <= 1'b1;
+        flush_done_r <= 1'b1;
+        valid        <= '0;
+        rr           <= '0;
+        for (int unsigned i = 0; i < MSHR_ENTRIES; i++) begin
+          e_valid[i] <= 1'b0;
+        end
+      end else if (!flush_valid) begin
+        flushing_q <= 1'b0;
       end
     end
   end

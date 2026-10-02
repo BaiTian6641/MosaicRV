@@ -97,6 +97,12 @@ localparam int unsigned CORE_REQ_ID_W = (CORE_FETCH_N <= 1) ? 1 : $clog2(CORE_FE
 // The fetch unit's `outstanding_count` is one bit wider than an index because it
 // must be able to name "full" as well as 0..CORE_FETCH_N-1.
 localparam int unsigned CORE_FETCH_CNT_W = $clog2(CORE_FETCH_N + 1);
+// The decoded-instruction queue's depth. Eight entries is the front end's
+// run-ahead: enough that a fetch bubble or a one-cycle dispatch stall no longer
+// stalls the fetch stream, and enough to hold the pair a two-wide allocation
+// wants even when fetch is delivering one per cycle.
+localparam int unsigned CORE_DBUF_DEPTH = 8;
+localparam int unsigned CORE_DBUF_CNT_W = $clog2(CORE_DBUF_DEPTH + 1);
 localparam int unsigned CORE_EPOCH_W = (CORE_ROB_N <= 1) ? 2 : $clog2(CORE_ROB_N) + 1;
 localparam int unsigned CORE_RET_N   = mosaic_cfg_pkg::MOSAIC_RETIRE_WIDTH;
 localparam int unsigned CORE_RET_ID_W = 2 * CORE_TAG_W;
@@ -114,11 +120,33 @@ localparam int unsigned CORE_MAP_W   = CORE_TAG_W + CORE_IGEN_W;
 // identical in every configuration. Defined here, once, and read by the two
 // cache-path instantiations and the evidence ports below, so the number the
 // comparison checks and the number the machine is built with cannot drift.
-// The L1 is direct-mapped (`mosaic_cache` is a direct-mapped cache), so its
-// "ways" is one and is stated rather than inferred.
+// Every number comes from the profile's own `caches` block through the
+// generated config package, so the declared geometry and the built geometry are
+// one fact. The L1I and L1D may differ (the L1I is served by mosaic_mshr, the
+// L1D by mosaic_cache); the `o_geom_cache_*` evidence ports report the L1D.
+// `MOSAIC_MEM_SMALL_CACHE` is a *measurement* switch, not a configuration: it
+// rebuilds the machine with the original 256-byte direct-mapped stand-in so the
+// before/after table in results/reports/memory-subsystem-scale.md compares the
+// enlarged L1 against exactly what it replaced. It is never defined in a
+// shipping build, and `make check-config` would reject a profile that declared
+// this geometry.
+`ifdef MOSAIC_MEM_SMALL_CACHE
 localparam int unsigned CORE_CACHE_LINE_BYTES = 32;
-localparam int unsigned CORE_CACHE_SETS       = 8;
-localparam int unsigned CORE_CACHE_WAYS       = 1;
+localparam int unsigned CORE_L1I_SETS         = 8;
+localparam int unsigned CORE_L1I_WAYS         = 1;
+localparam int unsigned CORE_L1D_SETS         = 8;
+localparam int unsigned CORE_L1D_WAYS         = 1;
+localparam int unsigned CORE_MSHR_ENTRIES     = 4;
+`else
+localparam int unsigned CORE_CACHE_LINE_BYTES = mosaic_cfg_pkg::MOSAIC_CACHE_LINE_BYTES;
+localparam int unsigned CORE_L1I_SETS         = mosaic_cfg_pkg::MOSAIC_L1I_SETS;
+localparam int unsigned CORE_L1I_WAYS         = mosaic_cfg_pkg::MOSAIC_L1I_WAYS;
+localparam int unsigned CORE_L1D_SETS         = mosaic_cfg_pkg::MOSAIC_L1D_SETS;
+localparam int unsigned CORE_L1D_WAYS         = mosaic_cfg_pkg::MOSAIC_L1D_WAYS;
+localparam int unsigned CORE_MSHR_ENTRIES     = mosaic_cfg_pkg::MOSAIC_MSHR_ENTRIES;
+`endif
+localparam int unsigned CORE_CACHE_SETS       = CORE_L1D_SETS;
+localparam int unsigned CORE_CACHE_WAYS       = CORE_L1D_WAYS;
 // The vector engine's VLEN, in bits, and the lane broker's budget, in lanes.
 // Both are passed to the units that own them (mosaic_vec_* / mosaic_lane_broker)
 // and exported, so the comparison reads the broker's own budget.
@@ -637,6 +665,22 @@ module mosaic_core #(
     output logic [4:0]                  o_dbg_desc_rd0,
     output logic [4:0]                  o_dbg_desc_rd1,
     output logic [31:0]                 o_dbg_alloc_ctr,
+    // Two-wide evidence: cycles two macros were allocated, and cycles a pair was
+    // inserted together. Front-end width is measured from these, not asserted.
+    output logic [31:0]                 o_dbg_alloc2_ctr,
+    output logic [31:0]                 o_dbg_pair_ctr,
+    output logic [31:0]                 o_dbg_disp_occ_sum,
+    output logic [31:0]                 o_dbg_iq_occ_sum,
+    // The decoded-instruction queue's occupancy summed over cycles (its depth is
+    // CORE_DBUF_DEPTH), and the cycles the allocation barrier held: together they
+    // say whether the front end is starved of instructions or of permission.
+    output logic [31:0]                 o_dbg_iqueue_occ_sum,
+    output logic [31:0]                 o_dbg_barrier_ctr,
+    output logic [31:0]                 o_dbg_pair_offer_ctr,
+    output logic [31:0]                 o_dbg_l1_elig_ctr,
+    output logic [31:0]                 o_dbg_fetch_rsp_ctr,
+    output logic [31:0]                 o_dbg_fetch_req_ctr,
+    output logic [31:0]                 o_dbg_recover_ctr,
     output logic [31:0]                 o_dbg_ins_ctr,
     // The rename readiness state, so a case that stops making progress can name
     // the mapping that stalled instead of only that nothing retired:
@@ -725,7 +769,13 @@ module mosaic_core #(
   logic                      alloc_is_branch_macro;
   logic                      redir_act_valid, redir_act_taken;
 
-  // decode buffer
+  // decoded-instruction queue (the front end's depth)
+  // The two-entry decode buffer that used to sit here is `mosaic_idec_queue`
+  // now: a real queue (depth 8) that lets fetch run ahead of a dispatch stall
+  // and that can hand dispatch two decoded instructions in one cycle -- which
+  // two-wide allocation needs and a two-entry buffer cannot reliably supply.
+  // The port names `dbuf_*` are kept because the consumer sites below read the
+  // same fields; only the depth and the two-lane pop are new.
   mosaic_pkg::decode_ctl_t   dec_ctl_comb;
   mosaic_pkg::decode_ctl_t   dbuf_ctl_new;
   logic                      dbuf_valid [0:1];
@@ -733,25 +783,19 @@ module mosaic_core #(
   mosaic_pkg::decode_ctl_t   dbuf_ctl   [0:1];
   // I-041: the delivered instruction's own length and bits, stored beside the
   // control word so the retire event can carry them. They are the *fetch*
-  // unit's values, never derived here from the decoded control.
+  // unit's values, never derived here from the decoded control. Both lanes carry
+  // their own pair.
   logic [2:0]                dbuf_len   [0:1];
   logic [31:0]               dbuf_bits  [0:1];
-  logic [1:0]                dbuf_cnt;
-  logic                      dbuf_take, dbuf_push, dbuf_room;
-  // The push slot and the buffer's next state. The push lands at the tail
-  // *after* this cycle's pop, so it is `dbuf_cnt - dbuf_take`, and the next
-  // state is computed per slot rather than by two independent writes to the
-  // same one -- see the always_comb in section 2.
-  logic                      dbuf_push_at;
-  logic [1:0]                dbuf_valid_n;
-  logic [CORE_XLEN-1:0]      dbuf_pc_n  [0:1];
-  mosaic_pkg::decode_ctl_t   dbuf_ctl_n [0:1];
-  logic [2:0]                dbuf_len_n  [0:1];
-  logic [31:0]               dbuf_bits_n [0:1];
+  logic                      dbuf_push, dbuf_room, dbuf_hold;
+  logic [1:0]                dbuf_pop_count;
+  logic [CORE_DBUF_CNT_W-1:0] dbuf_occupancy;
 
   // dispatch
   logic [4:0]                alloc_rd_w;
-  logic                      disp_take, disp_unsupported;
+  logic [4:0]                alloc_rd2_w;
+  logic                      disp_unsupported;
+  logic                      rob_empty;
   logic [1:0]                disp_rq_valid, disp_rq_written;
   logic [1:0][CORE_TAG_W-1:0]  disp_rq_tag;
   logic [1:0][CORE_IGEN_W-1:0] disp_rq_gen;
@@ -760,7 +804,8 @@ module mosaic_core #(
   logic                      ren_alloc_req, ren_alloc_accepted, ren_alloc_exhausted;
   logic                      ren_alloc_squashed, ren_alloc_is_x0, ren_alloc_new_valid;
   // F/D (I-050): the namespace of each renamed operand, driven by dispatch.
-  logic                      ren_alloc_is_fp, ren_rs1_is_fp, ren_rs2_is_fp;
+  logic                      ren_alloc_is_fp, ren_alloc2_is_fp;
+  logic                      ren_rs1_is_fp, ren_rs2_is_fp;
   logic                      ren_commit_is_fp, ren_commit2_is_fp;
   logic [CORE_TAG_W-1:0]     ren_new_tag;
   logic [CORE_IGEN_W-1:0]    ren_new_gen;
@@ -773,6 +818,17 @@ module mosaic_core #(
   logic [CORE_PRF_N-1:0]     ren_gen_valid;
   logic [CORE_TAG_W-1:0]     ren_rs1_tag, ren_rs2_tag;
   logic [CORE_IGEN_W-1:0]    ren_rs1_gen, ren_rs2_gen;
+  // Lane 1's allocation and source reads (the two-wide rename group).
+  logic                      ren_alloc2_req, ren_alloc2_accepted, ren_alloc2_exhausted;
+  logic                      ren_alloc2_squashed, ren_alloc2_is_x0, ren_alloc2_new_valid;
+  logic [CORE_TAG_W-1:0]     ren_new2_tag;
+  logic [CORE_IGEN_W-1:0]    ren_new2_gen;
+  logic [4:0]                ren_rs3_addr, ren_rs4_addr;
+  logic                      ren_rs3_is_fp, ren_rs4_is_fp;
+  logic                      ren_rs3_is_x0, ren_rs4_is_x0;
+  logic                      ren_rs3_bypass, ren_rs4_bypass;
+  logic [CORE_TAG_W-1:0]     ren_rs3_tag, ren_rs4_tag;
+  logic [CORE_IGEN_W-1:0]    ren_rs3_gen, ren_rs4_gen;
   logic                      ren_wb_valid;
   logic [CORE_TAG_W-1:0]     ren_wb_tag;
   logic [CORE_IGEN_W-1:0]    ren_wb_gen;
@@ -801,6 +857,12 @@ module mosaic_core #(
   logic [CORE_PGEN_W-1:0]    desc_wr_gen;
   logic [4:0]                desc_wr_rd;
   logic                      desc_wr_reg_we;
+  logic                      desc_wr2_valid;
+  logic [CORE_IDX_W-1:0]     desc_wr2_index;
+  logic [CORE_TAG_W-1:0]     desc_wr2_tag;
+  logic [CORE_PGEN_W-1:0]    desc_wr2_gen;
+  logic [4:0]                desc_wr2_rd;
+  logic                      desc_wr2_reg_we;
   logic [31:0]               desc_live_ctr;
   logic [4:0]                desc_rd0, desc_rd1;
   // I-041: the retiring instruction's own length and bits, read back from the
@@ -832,6 +894,16 @@ module mosaic_core #(
   logic                      rob_alloc_ok, rob_alloc_refused;
   logic [CORE_IDX_W-1:0]     rob_alloc_index;
   logic [CORE_RGEN_W-1:0]    rob_alloc_gen;
+  // Lane 1's ROB allocation (the second port this package added to mosaic_rob).
+  logic                      rob_alloc2_valid;
+  logic [CORE_TAG_W-1:0]     rob_alloc2_tag;
+  logic [CORE_XLEN-1:0]      rob_alloc2_pc;
+  logic [3:0]                rob_alloc2_num_uops;
+  logic                      rob_alloc2_exc, rob_alloc2_open;
+  logic                      rob_alloc2_ok;
+  logic [CORE_IDX_W-1:0]     rob_alloc2_index;
+  logic [CORE_RGEN_W-1:0]    rob_alloc2_gen;
+  logic                      rob_free_two;
   logic                      rob_cmp_valid;
   logic [CORE_IDX_W-1:0]     rob_cmp_index;
   logic [CORE_RGEN_W-1:0]    rob_cmp_gen;
@@ -891,6 +963,12 @@ module mosaic_core #(
   logic [31:0]               c0_bp_unauth, c1_bp_unauth;
   logic [31:0]               c0_bp_flush, c1_bp_flush;
   logic [31:0]               c0_count, c1_count;
+  // Issue-queue occupancy summed over cycles, so the case can report a mean
+  // depth: the resource that becomes binding as allocation widens.
+  logic [31:0]               iq_occ_sum;
+  logic [31:0]               iqueue_occ_sum;
+  logic [31:0]               barrier_ctr;
+  logic [31:0]               fetch_rsp_ctr, fetch_req_ctr, recover_ctr;
   // I-090: the strategy the fabric actually sees. `MOSAIC_FAB_MUTANT_NO_DELTA`
   // is the measurement control: it holds this low whatever the input says, so
   // the "dynamic" run of the case is the fixed machine and the case's
@@ -1038,7 +1116,8 @@ module mosaic_core #(
   logic [31:0] commit_ctr, redirect_ctr, recovering_ctr, stop_ctr, cycle_ctr;
   logic [31:0] squash_under_ctr, journal_ovf_ctr;
   logic [31:0] squash_acc_ctr, ckpt_ctr;
-  logic [31:0] disp_alloc_ctr, disp_ins_ctr;
+  logic [31:0] disp_alloc_ctr, disp_alloc2_ctr, disp_pair_ctr, disp_ins_ctr;
+  logic [31:0] disp_occ_sum, disp_pair_offer_ctr, disp_l1_elig_ctr;
 
   // ------------------------------------------------------- the memory path
   // Everything the integrated LSU needs between dispatch, the two queues and
@@ -1295,6 +1374,9 @@ module mosaic_core #(
   logic                       desc_wr_is_store;
   logic [2:0]                 desc_wr_len;
   logic [31:0]                desc_wr_insn;
+  logic                       desc_wr2_is_store;
+  logic [2:0]                 desc_wr2_len;
+  logic [31:0]                desc_wr2_insn;
   logic [CORE_IDX_W-1:0]      rob_alloc_ptr;
   logic [31:0] squash_nc_ctr;
   logic        core_stop_prev;
@@ -1820,6 +1902,8 @@ module mosaic_core #(
   logic                     icache_flush_done;
   logic                     dcache_flush;
   logic                     dcache_flush_done;
+  logic                     dcache_inv_valid;
+  logic [63:0]              dcache_inv_addr;
 
   // The data side: the LSU endpoint's memory port is the wrapper's CPU side and
   // the endpoint's slot on the PTE/data arbiter is its memory side.
@@ -1978,7 +2062,9 @@ module mosaic_core #(
   mosaic_l1_cache_path #(
       .IS_FETCH      (1'b1),
       .LINE_BYTES    (CORE_CACHE_LINE_BYTES),
-      .SETS          (CORE_CACHE_SETS),
+      .SETS          (CORE_L1I_SETS),
+      .WAYS          (CORE_L1I_WAYS),
+      .MSHR_ENTRIES  (CORE_MSHR_ENTRIES),
       .ADDR_WIDTH    (64),
       .CPU_DATA_WIDTH(64),
       .ID_W          (CORE_REQ_ID_W),
@@ -1989,6 +2075,8 @@ module mosaic_core #(
       .en_i            (cache_en_i),
       .flush_i         (icache_flush),
       .flush_done      (icache_flush_done),
+      .inv_valid_i     (1'b0),
+      .inv_pa_i        (64'd0),
       .cpu_req_valid_i (ic_cpu_req_valid),
       .cpu_req_ready_o (ic_cpu_req_ready),
       .cpu_req_i       (ic_cpu_req),
@@ -2054,7 +2142,7 @@ module mosaic_core #(
       .o_loc_pf_fill              (),
       .o_loc_pf_fill_refused      (),
       .o_loc_pf_mem               (),
-      .dbg_index_i     (3'b0),
+      .dbg_index_i     ('0),
       .dbg_valid_o     (),
       .dbg_dirty_o     ()
   );
@@ -2791,115 +2879,54 @@ module mosaic_core #(
     end
   end
 
-  assign dbuf_take = disp_take;
-  assign dbuf_room = (dbuf_cnt < 2'd2) || dbuf_take;
-  // Every kind of delivery advances the buffer: an instruction (out_valid), and
-  // an undecodable response (out_illegal / out_fault) as a control word that is
-  // fully illegal, so dispatch refuses it and the machine stops *at that
-  // instruction* with its PC rather than skipping over it. A delivery that is
-  // never pushed is an instruction the machine silently executed past.
+  // ---------------------------------------------------- the instruction queue
+  // The delivery handshake is unchanged from the two-entry buffer: a delivery is
+  // pushed when the queue has room after this cycle's pop, and the pop is
+  // dispatch's own decision (`dbuf_pop_count`), so a refused macro is consumed
+  // exactly once and a pair that both allocated is consumed in the one cycle.
+  assign dbuf_hold = core_stop || wfi_halt;
+  // The delivery handshake must agree with the queue's own discard rule: a
+  // delivery is accepted exactly when `fetch_out_ready` is high, and the queue
+  // gives `purge` priority over a push in the same cycle (the delivery is
+  // younger than the redirect that discards it). Gating the push on `purge`
+  // while leaving `ready` high would tell the fetch unit the response was
+  // consumed and then drop it -- an instruction silently lost in the one cycle
+  // a redirect and a delivery coincide.
   assign dbuf_push = (fetch_out_valid || fetch_out_illegal || fetch_out_fault ||
                       fetch_pmp_deny_c) &&
-                     dbuf_room && !core_stop && !wfi_halt;
-  assign fetch_out_ready = dbuf_room && !core_stop && !wfi_halt;
+                     dbuf_room && !dbuf_hold;
+  assign fetch_out_ready = dbuf_room && !dbuf_hold;
 
-  // The buffer's next state, one expression per slot. The valid entries are
-  // always the contiguous run `[0 .. dbuf_cnt-1]`, oldest at slot 0:
-  //
-  //   * a pop shifts every entry down by one and invalidates the slot it
-  //     vacated, unless this cycle's push lands there;
-  //   * a push lands at the tail *after* the pop, `dbuf_cnt - dbuf_take`.
-  //
-  // Writing slot 0 whenever nothing was popped -- the form this replaces --
-  // overwrites a live entry when the buffer holds exactly one entry in slot 1,
-  // which is the state a pop leaves behind: the next push then lands *in front
-  // of* an older instruction, and the two swap places in program order. That is
-  // not a scheduling freedom: the ROB allocates in the order dispatch presents
-  // macros, so the machine would retire two instructions out of program order.
-  // CASE=fabric.fixed_two_cluster reads the retirement stream back in program
-  // order, and it is what caught this.
-  always_comb begin
-    // The push slot is the tail after this cycle's pop, `dbuf_cnt - dbuf_take`,
-    // and only its low bit is ever needed: a push is offered only when that
-    // difference is 0 or 1 (`dbuf_room` refuses a full buffer with no pop), and
-    // the low bit of a difference is the xor of the operands' low bits.
-`ifdef MOSAIC_CORE_MUTANT_DBUF_PUSH_SLOT
-    // NEGATIVE CONTROL for the ordering fix below: the slot is chosen from the
-    // pop alone, which is the form that overwrites a live entry when the buffer
-    // holds one entry in slot 1. CASE=fabric.fixed_two_cluster must then fail
-    // its program-order comparison (the first two macros are allocated in the
-    // wrong order); see results/reports/I-023-core.md.
-    dbuf_push_at = dbuf_take;
-`else
-    dbuf_push_at = dbuf_cnt[0] ^ dbuf_take;
-`endif
-    dbuf_valid_n[0] = dbuf_valid[0];
-    dbuf_valid_n[1] = dbuf_valid[1];
-    dbuf_pc_n    = dbuf_pc;
-    dbuf_ctl_n   = dbuf_ctl;
-    dbuf_len_n   = dbuf_len;
-    dbuf_bits_n  = dbuf_bits;
-    if (dbuf_take) begin
-      dbuf_valid_n[0] = dbuf_valid[1];
-      dbuf_pc_n[0]    = dbuf_pc[1];
-      dbuf_ctl_n[0]   = dbuf_ctl[1];
-      dbuf_len_n[0]   = dbuf_len[1];
-      dbuf_bits_n[0]  = dbuf_bits[1];
-      // The entry's old slot is invalidated. With the push slot chosen above,
-      // the live entries are exactly `[0 .. dbuf_cnt-1]`; a pop that is not
-      // accompanied by a push would otherwise leave the shifted entry alive in
-      // slot 1 and re-dispatch it on the next pop. This case does not reach
-      // that state -- it needs the buffer full and then drained with no
-      // delivery alongside, i.e. dispatch and fetch stalled together -- and the
-      // gap is recorded in results/reports/I-023-core.md rather than claimed.
-      dbuf_valid_n[1] = 1'b0;
-    end
-    if (dbuf_push) begin
-      dbuf_valid_n[dbuf_push_at] = 1'b1;
+  mosaic_idec_queue #(
+      .DEPTH (CORE_DBUF_DEPTH),
+      .XLEN  (CORE_XLEN)
+  ) u_iqueue (
+      .clk        (clk),
+      .rst        (rst),
+      .push_valid (dbuf_push),
       // A denied fetch carries no response, so its PC is the one the request was
       // about to be issued for.
-      dbuf_pc_n[dbuf_push_at]    = fetch_pmp_deny_c ? fetch_next_pc : fetch_out_pc;
-      dbuf_ctl_n[dbuf_push_at]   = dbuf_ctl_new;
-      // The instruction's own length and its own bits travel with it, so the
-      // retire event can report what the instruction *was*, not what the
-      // decoder made of it.
-      dbuf_len_n[dbuf_push_at]   = fetch_out_len;
-      dbuf_bits_n[dbuf_push_at]  = fetch_out_bits;
-    end
-  end
-
-  always_ff @(posedge clk) begin
-    if (rst) begin
-      dbuf_cnt      <= 2'd0;
-      dbuf_valid[0] <= 1'b0;
-      dbuf_valid[1] <= 1'b0;
-    end else if (dbuf_purge || core_stop) begin
-      // A redirect discards everything fetched before it; a stop freezes the
-      // buffer where it is (the refused macro must stay refused).
-`ifdef MOSAIC_CORE_MUTANT_NO_PURGE
-      // NEGATIVE CONTROL: the redirect does not purge the younger work it
-      // discards. The taken branch's fall-through instruction is already in the
-      // buffer, so it is dispatched after the redirect as though it were on the
-      // correct path, retires, and the case's per-instruction comparison against
-      // the reference names it. CASE=core.corpus_branch must fail.
-      if (1'b0) begin
-`else
-      if (dbuf_purge) begin
-`endif
-        dbuf_valid[0] <= 1'b0;
-        dbuf_valid[1] <= 1'b0;
-        dbuf_cnt      <= 2'd0;
-      end
-    end else begin
-      dbuf_valid[0] <= dbuf_valid_n[0];
-      dbuf_valid[1] <= dbuf_valid_n[1];
-      dbuf_pc       <= dbuf_pc_n;
-      dbuf_ctl      <= dbuf_ctl_n;
-      dbuf_len      <= dbuf_len_n;
-      dbuf_bits     <= dbuf_bits_n;
-      dbuf_cnt      <= dbuf_cnt + {1'b0, dbuf_push} - {1'b0, dbuf_take};
-    end
-  end
+      .push_pc    (fetch_pmp_deny_c ? fetch_next_pc : fetch_out_pc),
+      .push_ctl   (dbuf_ctl_new),
+      .push_len   (fetch_out_len),
+      .push_bits  (fetch_out_bits),
+      .push_ready (dbuf_room),
+      .pop_count  (dbuf_pop_count),
+      .out0_valid (dbuf_valid[0]),
+      .out0_pc    (dbuf_pc[0]),
+      .out0_ctl   (dbuf_ctl[0]),
+      .out0_len   (dbuf_len[0]),
+      .out0_bits  (dbuf_bits[0]),
+      .out1_valid (dbuf_valid[1]),
+      .out1_pc    (dbuf_pc[1]),
+      .out1_ctl   (dbuf_ctl[1]),
+      .out1_len   (dbuf_len[1]),
+      .out1_bits  (dbuf_bits[1]),
+      .purge      (dbuf_purge),
+      .hold       (dbuf_hold),
+      .count      (dbuf_occupancy),
+      .full       ()
+  );
 
   // ==========================================================================
   // 3. Rename
@@ -2920,15 +2947,20 @@ module mosaic_core #(
       .alloc_old_valid  (),
       .alloc_old_tag    (),
       .alloc_old_gen    (),
-      .alloc2_req       (1'b0),
-      .alloc2_rd        (5'd0),
-      .alloc2_accepted  (),
-      .alloc2_exhausted (),
-      .alloc2_squashed  (),
-      .alloc2_is_x0     (),
-      .alloc2_new_valid (),
-      .alloc2_new_tag   (),
-      .alloc2_new_gen   (),
+      // The two-wide group (I-014): lane 1's allocation port, driven by dispatch
+      // only when both decoded lanes are cluster-class macros. `alloc2_accepted`
+      // is the same decision as `alloc_accepted` when `alloc2_req` is high --
+      // rename accepts the group whole or refuses it whole.
+      .alloc2_req       (ren_alloc2_req),
+      .alloc2_rd        (alloc_rd2_w),
+      .alloc2_is_fp     (ren_alloc2_is_fp),
+      .alloc2_accepted  (ren_alloc2_accepted),
+      .alloc2_exhausted (ren_alloc2_exhausted),
+      .alloc2_squashed  (ren_alloc2_squashed),
+      .alloc2_is_x0     (ren_alloc2_is_x0),
+      .alloc2_new_valid (ren_alloc2_new_valid),
+      .alloc2_new_tag   (ren_new2_tag),
+      .alloc2_new_gen   (ren_new2_gen),
       .alloc2_old_valid (),
       .alloc2_old_tag   (),
       .alloc2_old_gen   (),
@@ -2953,18 +2985,20 @@ module mosaic_core #(
       .rs2_tag          (ren_rs2_tag),
       .rs1_gen          (ren_rs1_gen),
       .rs2_gen          (ren_rs2_gen),
-      .rs3_addr         (5'd0),
-      .rs4_addr         (5'd0),
-      .rs3_is_x0        (),
-      .rs4_is_x0        (),
+      .rs3_addr         (ren_rs3_addr),
+      .rs4_addr         (ren_rs4_addr),
+      .rs3_is_fp        (ren_rs3_is_fp),
+      .rs4_is_fp        (ren_rs4_is_fp),
+      .rs3_is_x0        (ren_rs3_is_x0),
+      .rs4_is_x0        (ren_rs4_is_x0),
       .rs3_ready        (),
       .rs4_ready        (),
-      .rs3_bypass       (),
-      .rs4_bypass       (),
-      .rs3_tag          (),
-      .rs4_tag          (),
-      .rs3_gen          (),
-      .rs4_gen          (),
+      .rs3_bypass       (ren_rs3_bypass),
+      .rs4_bypass       (ren_rs4_bypass),
+      .rs3_tag          (ren_rs3_tag),
+      .rs4_tag          (ren_rs4_tag),
+      .rs3_gen          (ren_rs3_gen),
+      .rs4_gen          (ren_rs4_gen),
       .wb_valid         (ren_wb_valid),
       .wb_tag           (ren_wb_tag),
       .wb_gen           (ren_wb_gen),
@@ -3040,15 +3074,15 @@ module mosaic_core #(
   mosaic_macro_desc u_desc (
       .clk             (clk),
       .rst             (rst),
-      .wr_valid        ({1'b0, desc_wr_valid}),
-      .wr_index        ({{CORE_IDX_W{1'b0}}, desc_wr_index}),
-      .wr_tag          ({{CORE_TAG_W{1'b0}}, desc_wr_tag}),
-      .wr_gen          ({{CORE_PGEN_W{1'b0}}, desc_wr_gen}),
-      .wr_rd           ({5'd0, desc_wr_rd}),
-      .wr_reg_we       ({1'b0, desc_wr_reg_we}),
-      .wr_is_store     ({1'b0, desc_wr_is_store}),
-      .wr_len          ({3'd0, desc_wr_len}),
-      .wr_insn         ({32'd0, desc_wr_insn}),
+      .wr_valid        ({desc_wr2_valid, desc_wr_valid}),
+      .wr_index        ({desc_wr2_index, desc_wr_index}),
+      .wr_tag          ({desc_wr2_tag, desc_wr_tag}),
+      .wr_gen          ({desc_wr2_gen, desc_wr_gen}),
+      .wr_rd           ({desc_wr2_rd, desc_wr_rd}),
+      .wr_reg_we       ({desc_wr2_reg_we, desc_wr_reg_we}),
+      .wr_is_store     ({desc_wr2_is_store, desc_wr_is_store}),
+      .wr_len          ({desc_wr2_len, desc_wr_len}),
+      .wr_insn         ({desc_wr2_insn, desc_wr_insn}),
       .rd_index0       (rob_head_index),
       .rd_index1       (rob_head1_index),
       .rd_valid0       (),
@@ -3092,6 +3126,17 @@ module mosaic_core #(
       .alloc_bad_uops  (),
       .alloc_index     (rob_alloc_index),
       .alloc_gen       (rob_alloc_gen),
+      .alloc2_valid    (rob_alloc2_valid),
+      .alloc2_tag      (rob_alloc2_tag),
+      .alloc2_pc       (rob_alloc2_pc),
+      .alloc2_num_uops (rob_alloc2_num_uops),
+      .alloc2_exc      (rob_alloc2_exc),
+      .alloc2_open     (rob_alloc2_open),
+      .alloc2_ok       (rob_alloc2_ok),
+      .alloc2_refused  (),
+      .alloc2_bad_uops (),
+      .alloc2_index    (rob_alloc2_index),
+      .alloc2_gen      (rob_alloc2_gen),
       .close_valid     (1'b0),
       .close_index     ({CORE_IDX_W{1'b0}}),
       .close_gen       ({CORE_RGEN_W{1'b0}}),
@@ -3556,6 +3601,11 @@ module mosaic_core #(
         fp_flag_v_mem[desc_wr_index]   <= 1'b0;
         fp_state_wr_mem[desc_wr_index] <= dbuf_ctl[0].fp_modifies_state;
         fp_dst_mem[desc_wr_index]      <= dbuf_ctl[0].fp_dst_fp && dbuf_ctl[0].reg_write;
+      end
+      if (desc_wr2_valid) begin
+        fp_flag_v_mem[desc_wr2_index]   <= 1'b0;
+        fp_state_wr_mem[desc_wr2_index] <= dbuf_ctl[1].fp_modifies_state;
+        fp_dst_mem[desc_wr2_index]      <= dbuf_ctl[1].fp_dst_fp && dbuf_ctl[1].reg_write;
       end
       if (fp_wb_valid && fp_wb_ready) begin
         fp_flag_v_mem[fp_wb_ev.id.rob_index]   <= 1'b1;
@@ -4705,6 +4755,10 @@ module mosaic_core #(
         vec_state_wr_mem[desc_wr_index] <= dbuf_ctl[0].is_vec &&
                                             (dbuf_ctl[0].vec_kind != 3'd3);
       end
+      if (desc_wr2_valid) begin
+        vec_state_wr_mem[desc_wr2_index] <= dbuf_ctl[1].is_vec &&
+                                             (dbuf_ctl[1].vec_kind != 3'd3);
+      end
       if (rob_flush_pulse) begin
         for (vec_i = 0; vec_i < CORE_ROB_N; vec_i++) vec_state_wr_mem[vec_i] <= 1'b0;
       end
@@ -4859,14 +4913,16 @@ module mosaic_core #(
       .clk              (clk),
       .rst              (rst),
       .fab_dyn          (fab_dyn_steer),
-      .dec_valid        ({1'b0, dbuf_valid[0]}),
+      .dec_valid        ({dbuf_valid[1], dbuf_valid[0]}),
       .dec_ctl0         (dbuf_ctl[0]),
       .dec_ctl1         (dbuf_ctl[1]),
       .dec_pc0          (dbuf_pc[0]),
       .dec_pc1          (dbuf_pc[1]),
-      // I-041: the oldest buffered instruction's own length and bits.
+      // I-041: each buffered instruction's own length and bits, both lanes.
       .dec_len0         (dbuf_len[0]),
       .dec_bits0        (dbuf_bits[0]),
+      .dec_len1         (dbuf_len[1]),
+      .dec_bits1        (dbuf_bits[1]),
       .alloc_req        (ren_alloc_req),
       .alloc_rd         (alloc_rd_w),
       .alloc_is_fp      (ren_alloc_is_fp),
@@ -4877,6 +4933,30 @@ module mosaic_core #(
       .alloc_new_valid  (ren_alloc_new_valid),
       .alloc_new_tag    (ren_new_tag),
       .alloc_new_gen    (ren_new_gen),
+      // lane 1's rename port
+      .alloc2_req       (ren_alloc2_req),
+      .alloc2_rd        (alloc_rd2_w),
+      .alloc2_is_fp     (ren_alloc2_is_fp),
+      .alloc2_accepted  (ren_alloc2_accepted),
+      .alloc2_exhausted (ren_alloc2_exhausted),
+      .alloc2_squashed  (ren_alloc2_squashed),
+      .alloc2_is_x0     (ren_alloc2_is_x0),
+      .alloc2_new_valid (ren_alloc2_new_valid),
+      .alloc2_new_tag   (ren_new2_tag),
+      .alloc2_new_gen   (ren_new2_gen),
+      // lane 1's source reads
+      .rs3_addr         (ren_rs3_addr),
+      .rs4_addr         (ren_rs4_addr),
+      .rs3_is_fp        (ren_rs3_is_fp),
+      .rs4_is_fp        (ren_rs4_is_fp),
+      .rs3_is_x0        (ren_rs3_is_x0),
+      .rs4_is_x0        (ren_rs4_is_x0),
+      .rs3_bypass       (ren_rs3_bypass),
+      .rs4_bypass       (ren_rs4_bypass),
+      .rs3_tag          (ren_rs3_tag),
+      .rs3_gen          (ren_rs3_gen),
+      .rs4_tag          (ren_rs4_tag),
+      .rs4_gen          (ren_rs4_gen),
       .rs1_addr         (ren_rs1_addr),
       .rs2_addr         (ren_rs2_addr),
       .rs1_is_fp        (ren_rs1_is_fp),
@@ -4889,6 +4969,7 @@ module mosaic_core #(
       .rs2_gen          (ren_rs2_gen),
       .gen_valid        (ren_gen_valid),
       .rob_free_any     (rob_free_rob != {CORE_OCC_W{1'b0}}),
+      .rob_free_two     (rob_free_two),
       .rob_alloc_valid  (rob_alloc_valid),
       .rob_alloc_tag    (rob_alloc_tag),
       .rob_alloc_pc     (rob_alloc_pc),
@@ -4899,6 +4980,16 @@ module mosaic_core #(
       .rob_alloc_refused(rob_alloc_refused),
       .rob_alloc_index  (rob_alloc_index),
       .rob_alloc_gen    (rob_alloc_gen),
+      .rob_alloc2_valid (rob_alloc2_valid),
+      .rob_alloc2_tag   (rob_alloc2_tag),
+      .rob_alloc2_pc    (rob_alloc2_pc),
+      .rob_alloc2_num_uops (rob_alloc2_num_uops),
+      .rob_alloc2_exc   (rob_alloc2_exc),
+      .rob_alloc2_open  (rob_alloc2_open),
+      .rob_alloc2_ok    (rob_alloc2_ok),
+      .rob_alloc2_refused (),
+      .rob_alloc2_index (rob_alloc2_index),
+      .rob_alloc2_gen   (rob_alloc2_gen),
       .desc_wr_valid    (desc_wr_valid),
       .desc_wr_index    (desc_wr_index),
       .desc_wr_tag      (desc_wr_tag),
@@ -4908,6 +4999,15 @@ module mosaic_core #(
       .desc_wr_is_store (desc_wr_is_store),
       .desc_wr_len      (desc_wr_len),
       .desc_wr_insn     (desc_wr_insn),
+      .desc_wr2_valid   (desc_wr2_valid),
+      .desc_wr2_index   (desc_wr2_index),
+      .desc_wr2_tag     (desc_wr2_tag),
+      .desc_wr2_gen     (desc_wr2_gen),
+      .desc_wr2_rd      (desc_wr2_rd),
+      .desc_wr2_reg_we  (desc_wr2_reg_we),
+      .desc_wr2_is_store(desc_wr2_is_store),
+      .desc_wr2_len     (desc_wr2_len),
+      .desc_wr2_insn    (desc_wr2_insn),
       // ---------------------------------------------------------- memory insert
       .mem_ins_valid    (disp_mem_valid),
       .mem_ins_ready    (disp_mem_ready),
@@ -5010,9 +5110,15 @@ module mosaic_core #(
       // macro then reaches the head with the machine behind it empty.
       .vec_block_i      (vec_block),
       .trap_vector_armed_i(trap_vector_armed),
+      .rob_empty_i      (rob_empty),
       .stop             (disp_unsupported),
-      .o_take           (disp_take),
+      .o_pop_count      (dbuf_pop_count),
       .o_alloc_ctr      (disp_alloc_ctr),
+      .o_alloc2_ctr     (disp_alloc2_ctr),
+      .o_pair_ctr       (disp_pair_ctr),
+      .o_occ_sum        (disp_occ_sum),
+      .o_pair_offer_ctr (disp_pair_offer_ctr),
+      .o_l1_elig_ctr    (disp_l1_elig_ctr),
       .o_ins_ctr        (disp_ins_ctr),
       .o_unsupported_ctr(o_unsupported_ctr),
       .o_illegal_ctr    (o_illegal_ctr),
@@ -5042,6 +5148,11 @@ module mosaic_core #(
 
   assign core_stop = disp_unsupported;
 
+  // "The ROB has room for two more entries": the front end's two-wide group is
+  // offered only then, so a pair the ROB could not take is refused before rename
+  // allocates rather than half-allocated.
+  assign rob_free_two = (rob_free_rob >= CORE_OCC_W'(2));
+
   // ==========================================================================
   // 10a. The CSR file and the interrupt decision (I-019, I-020)
   // ==========================================================================
@@ -5058,6 +5169,11 @@ module mosaic_core #(
   // p0's mtvec resets to 0, and a machine with no handler installed stops at a
   // trap-raising system instruction instead of vectoring into address 0.
   assign trap_vector_armed = (o_csr_mtvec != {CORE_XLEN{1'b0}});
+  // "Nothing older is in flight": the ROB's own occupancy. A macro in the
+  // dispatch queue always owns a ROB entry, so an empty ROB means the dispatch
+  // queue is empty too, and the decoded instruction at dispatch's input is the
+  // architectural next instruction.
+  assign rob_empty = (rob_occupied == {CORE_OCC_W{1'b0}});
 
   assign csr_addr = sys_csr_addr_q;
   // The write is strobed exactly when a system macro's completion is accepted by
@@ -6646,7 +6762,9 @@ module mosaic_core #(
   mosaic_l1_cache_path #(
       .IS_FETCH      (1'b0),
       .LINE_BYTES    (CORE_CACHE_LINE_BYTES),
-      .SETS          (CORE_CACHE_SETS),
+      .SETS          (CORE_L1D_SETS),
+      .WAYS          (CORE_L1D_WAYS),
+      .MSHR_ENTRIES  (CORE_MSHR_ENTRIES),
       .ADDR_WIDTH    (64),
       .CPU_DATA_WIDTH(64),
       .ID_W          (1),
@@ -6657,6 +6775,8 @@ module mosaic_core #(
       .en_i            (cache_en_i),
       .flush_i         (dcache_flush),
       .flush_done      (dcache_flush_done),
+      .inv_valid_i     (dcache_inv_valid),
+      .inv_pa_i        (dcache_inv_addr),
       .cpu_req_valid_i (dc_cpu_req_valid),
       .cpu_req_ready_o (dc_cpu_req_ready),
       .cpu_req_i       (dc_cpu_req),
@@ -6722,7 +6842,7 @@ module mosaic_core #(
       .o_loc_pf_fill              (o_loc_pf_fill),
       .o_loc_pf_fill_refused      (o_loc_pf_fill_refused),
       .o_loc_pf_mem               (o_loc_pf_mem),
-      .dbg_index_i     (3'b0),
+      .dbg_index_i     ('0),
       .dbg_valid_o     (),
       .dbg_dirty_o     ()
   );
@@ -6753,6 +6873,16 @@ module mosaic_core #(
   assign dc_cpu_req_valid = ep_mem_req_valid;
   assign dc_cpu_req       = ep_mem_req;
   assign ep_mem_req_ready = dc_cpu_req_ready;
+  // The one coherence act a non-coherent L1D owes: an atomic read-modify-write
+  // is *bypassed* (its read-modify-write cannot be split across a cache), so it
+  // changes memory behind the cache's back. If the cache still holds that line
+  // -- clean, from an earlier load -- a later load would hit the value from
+  // before the atomic. The pulse invalidates the line (writing it back first if
+  // dirty) on the atomic's own beat. A store through the cache is not bypassed
+  // and needs no pulse.
+  assign dcache_inv_valid = ep_mem_req_valid && ep_mem_req_ready && ep_mem_req.amo &&
+                            mosaic_cfg_pkg::mosaic_pa_cacheable(ep_mem_req.addr);
+  assign dcache_inv_addr  = ep_mem_req.addr;
   assign ep_mem_rsp_valid = dc_cpu_rsp_valid;
   assign ep_mem_rsp       = dc_cpu_rsp;
   assign dc_cpu_rsp_ready = ep_mem_rsp_ready;
@@ -7993,6 +8123,25 @@ module mosaic_core #(
   // ==========================================================================
 
   assign o_c0_count     = c0_count;
+
+  always_ff @(posedge clk) begin
+    if (rst) begin
+      iq_occ_sum      <= 32'd0;
+      iqueue_occ_sum  <= 32'd0;
+      barrier_ctr     <= 32'd0;
+      fetch_rsp_ctr   <= 32'd0;
+      fetch_req_ctr   <= 32'd0;
+      recover_ctr     <= 32'd0;
+    end else begin
+      iq_occ_sum     <= iq_occ_sum + c0_count + c1_count;
+      iqueue_occ_sum <= iqueue_occ_sum +
+                        {{(32-CORE_DBUF_CNT_W){1'b0}}, dbuf_occupancy};
+      if (br_inflight | wfi_halt) barrier_ctr <= barrier_ctr + 32'd1;
+      if (fetch_rsp_live)   fetch_rsp_ctr <= fetch_rsp_ctr + 32'd1;
+      if (ic_cpu_req_valid) fetch_req_ctr <= fetch_req_ctr + 32'd1;
+      if (recovering)       recover_ctr   <= recover_ctr + 32'd1;
+    end
+  end
   assign o_c1_count     = c1_count;
   assign o_c0_grant_valid = c0_grant_valid;
   assign o_c1_grant_valid = c1_grant_valid;
@@ -8095,6 +8244,17 @@ module mosaic_core #(
   assign o_dbg_desc_rd0      = desc_rd0;
   assign o_dbg_desc_rd1      = desc_rd1;
   assign o_dbg_alloc_ctr     = disp_alloc_ctr;
+  assign o_dbg_alloc2_ctr    = disp_alloc2_ctr;
+  assign o_dbg_pair_ctr      = disp_pair_ctr;
+  assign o_dbg_disp_occ_sum  = disp_occ_sum;
+  assign o_dbg_iq_occ_sum    = iq_occ_sum;
+  assign o_dbg_iqueue_occ_sum = iqueue_occ_sum;
+  assign o_dbg_barrier_ctr   = barrier_ctr;
+  assign o_dbg_pair_offer_ctr = disp_pair_offer_ctr;
+  assign o_dbg_l1_elig_ctr    = disp_l1_elig_ctr;
+  assign o_dbg_fetch_rsp_ctr  = fetch_rsp_ctr;
+  assign o_dbg_fetch_req_ctr  = fetch_req_ctr;
+  assign o_dbg_recover_ctr    = recover_ctr;
   assign o_dbg_ins_ctr       = disp_ins_ctr;
   // The readiness state the stall diagnosis reads: rename's map, its per-tag
   // allocation validity (the same vector dispatch folds from) and its per-tag

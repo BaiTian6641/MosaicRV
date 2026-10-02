@@ -216,6 +216,27 @@ module mosaic_rob #(
     output logic [ROB_INDEX_W-1:0]   alloc_index,     // identity of the new macro
     output logic [GEN_W-1:0]         alloc_gen,
 
+    // ------------------------------------------------ allocate, lane 1 (I-084)
+    // The second allocation port. It is the other half of a two-wide rename
+    // group: the front end offers both lanes in the same cycle or neither, and
+    // the ROB takes both or reports that it cannot, so a pair is never half
+    // allocated. `alloc2_ok` additionally requires lane 0 to be taken in this
+    // cycle -- lane 1 is the entry behind lane 0 in program order -- and one
+    // entry of room to remain after lane 0 has taken its slot. An allocation
+    // the capacity cannot take is *refused* here, not dropped: the front end
+    // keeps that macro in its queue and offers it as next cycle's lane 0.
+    input  logic                     alloc2_valid = 1'b0,
+    input  logic [TAG_W-1:0]         alloc2_tag = {TAG_W{1'b0}},
+    input  logic [XLEN-1:0]          alloc2_pc = {XLEN{1'b0}},
+    input  logic [CNT_W-1:0]         alloc2_num_uops = CNT_W'(1),
+    input  logic                     alloc2_exc = 1'b0,
+    input  logic                     alloc2_open = 1'b0,
+    output logic                     alloc2_ok,
+    output logic                     alloc2_refused,
+    output logic                     alloc2_bad_uops,
+    output logic [ROB_INDEX_W-1:0]   alloc2_index,
+    output logic [GEN_W-1:0]         alloc2_gen,
+
     // ----------------------------------------------------------------- close
     input  logic                     close_valid,
     input  logic [ROB_INDEX_W-1:0]   close_index,
@@ -415,6 +436,8 @@ module mosaic_rob #(
   assign alloc_full     = (occ_cnt == OCC_W'(ROB_ENTRIES));
   assign alloc_bad_uops = (alloc_num_uops == {CNT_W{1'b0}}) ||
                           (alloc_num_uops > CNT_W'(MAX_UOPS));
+  assign alloc2_bad_uops = (alloc2_num_uops == {CNT_W{1'b0}}) ||
+                           (alloc2_num_uops > CNT_W'(MAX_UOPS));
 
   // A flush has priority over an allocation offered in the same cycle: that
   // macro was speculative and the flush decides its fate, so admitting it would
@@ -432,8 +455,36 @@ module mosaic_rob #(
   // avoided, and counting it as a refusal would make the port's credit
   // accounting describe events that never happened.
   assign alloc_refused = alloc_valid && !flush_valid && (alloc_full || alloc_bad_uops);
-  assign alloc_index   = alloc_ptr;
   assign alloc_gen     = gen_counter[GEN_W-1:0];
+
+  // Lane 1 needs one entry of room *after* lane 0 has taken its slot, so the
+  // live occupancy must be at most ROB_ENTRIES-2. The two lanes are one group:
+  // lane 1 is refused if lane 0 was refused for any reason (capacity, format or
+  // flush), which is why the format tests are in the conjunction rather than a
+  // second independent capacity test.
+  logic [GEN_W-1:0]     gen_counter_p1;
+  assign gen_counter_p1  = gen_counter[GEN_W-1:0] + GEN_W'(1);
+  assign alloc2_ok       = alloc_valid && alloc2_valid && !flush_valid &&
+                           !alloc_bad_uops && !alloc2_bad_uops &&
+                           (occ_cnt <= OCC_W'(ROB_ENTRIES - 2));
+  assign alloc2_refused  = alloc2_valid && !flush_valid &&
+                           (alloc_bad_uops || alloc2_bad_uops ||
+                            (occ_cnt > OCC_W'(ROB_ENTRIES - 2)));
+`ifdef MOSAIC_ROB_MUTANT_SWAP_PAIR_ORDER
+  // NEGATIVE CONTROL (two-wide front end): the two lanes of a group are placed
+  // in the wrong slots -- lane 0 in the slot *behind* lane 1 -- so the younger
+  // macro of a pair sits at the head and retires first. Program order is
+  // inverted for the pair, and the front end's pair path (which fires only on a
+  // workload that backs the dispatch queue up: `alu_burst` in
+  // perf.equal_resource_compare) is what it breaks. The absolute program-order
+  // check on that workload's retire stream must fail.
+  assign alloc_index     = alloc2_ok ? NextIdx(alloc_ptr) : alloc_ptr;
+  assign alloc2_index    = alloc_ptr;
+`else
+  assign alloc_index     = alloc_ptr;
+  assign alloc2_index    = NextIdx(alloc_ptr);
+`endif
+  assign alloc2_gen      = gen_counter_p1;
 
   // ------------------------------------------------------------------ close
   assign close_ok    = close_valid && !flush_valid && slot_valid[close_idx] &&
@@ -623,6 +674,7 @@ module mosaic_rob #(
     end else begin
       occ_cnt_next = occ_cnt;
       if (alloc_ok)         occ_cnt_next = occ_cnt_next + OCC_W'(1);
+      if (alloc2_ok)        occ_cnt_next = occ_cnt_next + OCC_W'(1);
       // Lane 1's acknowledgement is a second, separate pop and is counted as
       // one: a two-wide retire consumes two slots and must decrement twice, or
       // the occupancy drifts up by one per two-wide retirement and the buffer
@@ -651,6 +703,7 @@ module mosaic_rob #(
       if (retire_ack)      head_ptr_next = NextIdx(head_ptr_next);
       if (retire_ack_next) head_ptr_next = NextIdx(head_ptr_next);
       alloc_ptr_next = alloc_ok   ? NextIdx(alloc_ptr) : alloc_ptr;
+      if (alloc2_ok) alloc_ptr_next = NextIdx(alloc_ptr_next);
     end
   end
 
@@ -686,6 +739,17 @@ module mosaic_rob #(
           slot_closed[alloc_index] <= !alloc_open;
         end
 
+        if (alloc2_ok) begin
+          slot_valid[alloc2_index]  <= 1'b1;
+          slot_gen[alloc2_index]    <= alloc2_gen;
+          slot_tag[alloc2_index]    <= alloc2_tag;
+          slot_pc[alloc2_index]     <= alloc2_pc;
+          slot_count[alloc2_index]  <= alloc2_num_uops;
+          slot_done[alloc2_index]   <= {MAX_UOPS{1'b0}};
+          slot_exc[alloc2_index]    <= alloc2_exc;
+          slot_closed[alloc2_index] <= !alloc2_open;
+        end
+
         if (close_ok) begin
           slot_closed[close_idx] <= 1'b1;
         end
@@ -710,10 +774,8 @@ module mosaic_rob #(
       alloc_ptr <= alloc_ptr_next;
       occ_cnt   <= occ_cnt_next;
 
-      if (alloc_ok) begin
-        alloc_total <= alloc_total + 32'd1;
-        gen_counter <= gen_counter + 32'd1;
-      end
+      alloc_total <= alloc_total + {31'd0, alloc_ok} + {31'd0, alloc2_ok};
+      gen_counter <= gen_counter + {31'd0, alloc_ok} + {31'd0, alloc2_ok};
       // Two acks, two retirements: the conservation identity
       // `alloc == retired + squashed + occupied` is only meaningful if the
       // retirement counter and the occupancy move together, and lane 1 moves

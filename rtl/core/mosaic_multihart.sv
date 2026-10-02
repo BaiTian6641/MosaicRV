@@ -394,6 +394,23 @@ module mosaic_multihart #(
       .o_mem_dmem_dev       (),
       .o_mem_dmem_id        (h0_dmem_id),
       .o_dbg_mmio           (),
+      // The per-core measurement counters (front-end width, queue occupancy and
+      // the redirect/pair counters added for the two-wide allocation study) are
+      // tapped by the single-core testbench. This wrapper is a two-hart container
+      // and does not surface them, so they are named-and-unconnected here rather
+      // than left missing -- an unnamed pin is a lint failure, and a lint failure
+      // that is "just the wrapper" is how a real port mistake gets ignored.
+      .o_dbg_alloc2_ctr     (),
+      .o_dbg_barrier_ctr    (),
+      .o_dbg_disp_occ_sum   (),
+      .o_dbg_fetch_req_ctr  (),
+      .o_dbg_fetch_rsp_ctr  (),
+      .o_dbg_iq_occ_sum     (),
+      .o_dbg_iqueue_occ_sum (),
+      .o_dbg_l1_elig_ctr    (),
+      .o_dbg_pair_ctr       (),
+      .o_dbg_pair_offer_ctr (),
+      .o_dbg_recover_ctr    (),
       .o_commit_ctr         (h0_commit_ctr),
       .o_unsupported_ctr    (),
       .o_illegal_ctr        (),
@@ -710,6 +727,23 @@ module mosaic_multihart #(
       .o_mem_dmem_dev       (),
       .o_mem_dmem_id        (h1_dmem_id),
       .o_dbg_mmio           (),
+      // The per-core measurement counters (front-end width, queue occupancy and
+      // the redirect/pair counters added for the two-wide allocation study) are
+      // tapped by the single-core testbench. This wrapper is a two-hart container
+      // and does not surface them, so they are named-and-unconnected here rather
+      // than left missing -- an unnamed pin is a lint failure, and a lint failure
+      // that is "just the wrapper" is how a real port mistake gets ignored.
+      .o_dbg_alloc2_ctr     (),
+      .o_dbg_barrier_ctr    (),
+      .o_dbg_disp_occ_sum   (),
+      .o_dbg_fetch_req_ctr  (),
+      .o_dbg_fetch_rsp_ctr  (),
+      .o_dbg_iq_occ_sum     (),
+      .o_dbg_iqueue_occ_sum (),
+      .o_dbg_l1_elig_ctr    (),
+      .o_dbg_pair_ctr       (),
+      .o_dbg_pair_offer_ctr (),
+      .o_dbg_recover_ctr    (),
       .o_commit_ctr         (h1_commit_ctr),
       .o_unsupported_ctr    (),
       .o_illegal_ctr        (),

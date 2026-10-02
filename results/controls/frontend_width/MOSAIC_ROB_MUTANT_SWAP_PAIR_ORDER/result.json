@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "case": "perf.equal_resource_compare",
+  "verdict": "PASS",
+  "detail": "workloads=4 configs=7 baseline_cycles=3373/3458/1436/2777 resources=rob=64 iq=8 prf=96 banks=4 clusters=2 l1=64B/32sets/4way lanes=8 reset=8 vlenb=16 arch_identical=yes",
+  "seed": 1,
+  "max_cycles": 4000000,
+  "checks": 188,
+  "failures": 0,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-02T23:35:12Z",
+  "first_mismatch": ""
+}

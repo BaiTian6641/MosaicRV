@@ -233,6 +233,21 @@ module mosaic_rob_tb (
       .alloc_bad_uops   (alloc_bad_uops_o),
       .alloc_index      (alloc_index_o[INDEX_W-1:0]),
       .alloc_gen        (alloc_gen_o[GEN_W-1:0]),
+      // The second allocation port (added with the two-wide front end). This
+      // wrapper drives one allocation at a time, so lane 1 is tied off; the port
+      // is connected rather than left dangling so the module's full interface is
+      // visible here.
+      .alloc2_valid    (1'b0),
+      .alloc2_tag      ({TAG_W{1'b0}}),
+      .alloc2_pc       (64'd0),
+      .alloc2_num_uops (CNT_W'(1)),
+      .alloc2_exc      (1'b0),
+      .alloc2_open     (1'b0),
+      .alloc2_ok       (),
+      .alloc2_refused  (),
+      .alloc2_bad_uops (),
+      .alloc2_index    (),
+      .alloc2_gen      (),
 
       .close_valid      (close_valid_i),
       .close_index      (close_index),

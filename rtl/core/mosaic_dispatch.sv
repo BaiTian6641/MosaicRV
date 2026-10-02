@@ -1,24 +1,57 @@
 // ============================================================================
 // mosaic_dispatch -- the front of the machine (work package I-023).
 //
-// One decoded macro per cycle is allocated -- a rename group of one, a ROB
-// entry of one -- and then inserted into its cluster's issue queue when that
-// queue can take it. The two steps are decoupled, because the allocation is
+// One or two decoded macros per cycle are allocated -- a rename group, a ROB
+// entry each -- and then inserted into their cluster's issue queue when that
+// queue can take them. The two steps are decoupled, because the allocation is
 // irrevocable (rename's free list, the ROB occupancy and the descriptor store
-// all move) while the insert may have to wait for issue-queue space. The macro
-// waits in a small dispatch queue whose depth is argued below.
+// all move) while the insert may have to wait for issue-queue space. The macros
+// wait in a small dispatch queue whose depth is argued below.
 //
-// ------------------------------------------------------------ why one, not two
+// ------------------------------------------------------- two-wide allocation
 //
-// The task's shape is a two-wide group. `mosaic_rob` has a **single** allocation
-// port, so at most one ROB entry can be created per cycle, and an allocation
-// that is half in rename and half in the ROB is exactly the atomicity the
-// two-wide rename group exists to prevent. The core therefore presents rename
-// with groups of one and allocates one entry per cycle, and the two-cluster
-// affinity is applied across the cycle pair: the first macro of a fetched pair
-// goes to cluster 0 and the second to cluster 1 (see `target_cluster` below).
-// Reaching two macro allocations per cycle needs a second ROB allocation port
-// from I-016; it is reported rather than worked around.
+// Up to two macros are allocated and renamed per cycle. The group is presented
+// to `mosaic_rename` on its two-wide port (I-014) and to `mosaic_rob` on the
+// second allocation port this package added, and both take the pair atomically:
+// a group rename refuses is not offered to the ROB, and a group the ROB has no
+// room for is not offered to rename. The pair is presented only when both
+// decoded lanes are **cluster-class** macros (an ALU, branch, MUL/DIV or FP
+// macro, all of which enter a cluster's issue queue) and neither is a control
+// transfer.
+//
+// The same-cycle second **insert** is held: only the dispatch queue's head
+// leaves per cycle, so the two allocated macros are inserted in program order,
+// one per cycle. It is held because it triggers a retirement-order defect in
+// `retire.width_and_order` (V-013) that the retire-side lane-1 path exposes;
+// the classification experiment and the full evidence are in
+// results/reports/held-insert.md. Two-wide allocation and the depth-8 decoded
+// queue are kept -- neither breaks V-013, and the insert's own identity is
+// sound (the classification says so). The diagnostics that used to bisect the
+// insert are kept inert at the point where it lived.
+//
+// What is deliberately one-wide, and why:
+//
+//   * a **memory** macro (load/store/AMO/LR/SC) leaves through the single memory
+//     insert port into the load or store queue. It captures its operands into
+//     the queue at insert, so it needs a value the issue-queue path does not; a
+//     second one in the same cycle would need a second operand-capture path and
+//     a second queue port, neither of which exists.
+//   * a **system or vector** macro is resolved at the architectural boundary and
+//     is single-issue by construction (the vector engine is held to one macro in
+//     flight for real, I-059).
+//   * a **control transfer** allocates alone. The barrier that holds younger
+//     work is one bit with one recovery point; two transfers in one group would
+//     need two, and a machine that half-widened there would be worse than a
+//     narrow one.
+//
+// A macro the machine has no path for (`l0_unsupported`) is still refused before
+// anything is allocated, and still takes exactly the one lane-0 entry it always
+// did.
+//
+// The two-cluster affinity alternates per macro, so successive macros are spread
+// across the two clusters (or, under the dynamic strategy, the steering chooses
+// instead). Each cluster accepts one insert per cycle; a macro whose unit is
+// reached only through cluster 0's queue -- a MUL/DIV or FP macro -- goes there.
 //
 // ------------------------------------------------------- unsupported macros
 //
@@ -102,9 +135,9 @@
 // the same head is re-offered next cycle. The ROB entry and the rename
 // allocation are not rolled back, so a macro waiting to insert can delay the
 // retirement of *itself and everything younger* -- never of anything older.
-// Depth 4 cannot deadlock: insertion is strictly in allocation order, so a
-// consumer is never in an issue queue before its producer. Every source of a
-// not-ready entry therefore names a producer that is either already inserted or
+// The queue's depth cannot deadlock: insertion is strictly in allocation order,
+// so a consumer is never in an issue queue before its producer. Every source of
+// a not-ready entry therefore names a producer that is either already inserted or
 // already written, and the induction bottoms out at the oldest queued macro,
 // whose sources are by construction already durable. A full dispatch queue
 // stalls allocation; it cannot stall the drain of work that is already in the
@@ -138,19 +171,25 @@ localparam int unsigned DSP_UOP_W  = 3;
 localparam int unsigned DSP_UOP_ID_W = DSP_IDX_W + DSP_RGEN_W + DSP_UOP_W;
 localparam int unsigned DSP_BANKS  = mosaic_cfg_pkg::MOSAIC_PRF_BANKS;
 localparam int unsigned DSP_ENTRIES = mosaic_cfg_pkg::MOSAIC_INT_PRF_ENTRIES;
-// Depth 4: one allocation in flight plus the insert latencies of two clusters
-// and the few cycles a bank conflict on the operand read can add. The argument
-// that the depth cannot deadlock is in the header.
-localparam int unsigned DSP_DEPTH  = 4;
+// Depth 8: the depth the wider window wanted -- two allocations in flight per
+// cycle, plus the insert latencies of two clusters, plus the few cycles a bank
+// conflict on the operand read can add, plus the run-ahead the deeper
+// instruction queue is there to create. With the same-cycle insert held the
+// queue is deeper than it strictly needs, and it is kept: the depth half of the
+// package is proven safe and is what it is for. The argument that the depth
+// cannot deadlock is in the header.
+localparam int unsigned DSP_DEPTH  = 8;
 localparam int unsigned DSP_CNT_W  = $clog2(DSP_DEPTH + 1);
 localparam int unsigned DSP_QW     = (DSP_DEPTH <= 1) ? 1 : $clog2(DSP_DEPTH);
+// The reduced vector decode's own width, so a lane-1 entry can zero it without
+// an assignment pattern (this project's RTL style forbids them).
+localparam int unsigned DSP_VEC_W  = $bits(mosaic_pkg::vec_payload_t);
 
-// The two-wide input interface is kept and the CSR/memory control bits of
-// `decode_ctl_t` are not read here: this package services ALU, branch and
-// MUL/DIV macros only, and the second lane cannot be allocated until
-// mosaic_rob offers a second allocation port (see the header). Both are stated
-// rather than silently narrowed, so the day the ROB widens, the interface is
-// already there.
+// The CSR/memory control bits of `decode_ctl_t` are not read here: this package
+// services ALU, branch and MUL/DIV macros only, and a memory or system macro
+// leaves through its own insert port (see the header). The two-wide decoded
+// input is read in full: lane 1 is allocated and renamed on the second
+// allocation port this package added to mosaic_rob.
 /* verilator lint_off UNUSEDSIGNAL */
 module mosaic_dispatch (
     input  logic                        clk,
@@ -172,8 +211,9 @@ module mosaic_dispatch (
     input  logic                        fab_dyn,
 
     // ------------------------------------------------------ decoded macros in
-    // Lane 0 is the older macro. Lane 1 is offered in the same cycle but is
-    // allocated on a later cycle, because the ROB has one allocation port.
+    // Lane 0 is the older macro. Lane 1 is offered in the same cycle and is
+    // allocated on the second allocation port in that same cycle when the pair
+    // is cluster-class (see the header).
     input  logic [1:0]                  dec_valid,
     input  mosaic_pkg::decode_ctl_t     dec_ctl0,
     input  mosaic_pkg::decode_ctl_t     dec_ctl1,
@@ -185,6 +225,12 @@ module mosaic_dispatch (
     // from the fetch unit through the decode buffer and neither is re-derived.
     input  logic [2:0]                  dec_len0,
     input  logic [31:0]                 dec_bits0,
+    // Lane 1's own length and bits, for the same reason lane 0's are here: a
+    // second macro allocated in the same cycle must carry its own instruction
+    // identity into the descriptor store, or the retire event for it would
+    // report lane 0's instruction.
+    input  logic [2:0]                  dec_len1,
+    input  logic [31:0]                 dec_bits1,
 
     // ----------------------------------------------------- rename allocation
     output logic                        alloc_req,
@@ -204,6 +250,22 @@ module mosaic_dispatch (
     input  logic [DSP_TAG_W-1:0]        alloc_new_tag,
     input  logic [DSP_IGEN_W-1:0]       alloc_new_gen,
 
+    // ------------------------------------------------- lane 1 rename (I-014)
+    // The second allocation port. It is driven only when *both* decoded lanes
+    // are cluster-class macros and the queue and the ROB each have room for two,
+    // so the machine never presents a group rename must refuse half of. See the
+    // "two-wide allocation" section below for what is deliberately one-wide.
+    output logic                        alloc2_req,
+    output logic [4:0]                  alloc2_rd,
+    output logic                        alloc2_is_fp,
+    input  logic                        alloc2_accepted,
+    input  logic                        alloc2_exhausted,
+    input  logic                        alloc2_squashed,
+    input  logic                        alloc2_is_x0,
+    input  logic                        alloc2_new_valid,
+    input  logic [DSP_TAG_W-1:0]        alloc2_new_tag,
+    input  logic [DSP_IGEN_W-1:0]       alloc2_new_gen,
+
     // -------------------------------------------------- rename source reads
     output logic [4:0]                  rs1_addr,
     output logic [4:0]                  rs2_addr,
@@ -220,11 +282,37 @@ module mosaic_dispatch (
     // rename exposes it on its `dbg_gen_valid` read-out.
     input  logic [DSP_ENTRIES-1:0]      gen_valid,
 
+    // ------------------------------------------------- lane 1 source reads
+    // rename's second pair of source ports (rs3/rs4), for the second macro of a
+    // two-wide group. `rs3_bypass`/`rs4_bypass` say the source names lane 0's
+    // destination and rename has resolved it to lane 0's new (tag, generation);
+    // the entry records that identity either way, so the flag is observation
+    // only and the insert never needs to wait for lane 0's value.
+    output logic [4:0]                  rs3_addr,
+    output logic [4:0]                  rs4_addr,
+    output logic                        rs3_is_fp,
+    output logic                        rs4_is_fp,
+    input  logic                        rs3_is_x0,
+    input  logic                        rs4_is_x0,
+    input  logic                        rs3_bypass,
+    input  logic                        rs4_bypass,
+    input  logic [DSP_TAG_W-1:0]        rs3_tag,
+    input  logic [DSP_IGEN_W-1:0]       rs3_gen,
+    input  logic [DSP_TAG_W-1:0]        rs4_tag,
+    input  logic [DSP_IGEN_W-1:0]       rs4_gen,
+
     // ---------------------------------------------------------- ROB allocate
     // "the ROB has room for one more entry". A single bit, not the occupancy
     // count: the request is gated on it, and the ROB's own `alloc_ok` is the
     // answer that matters.
     input  logic                        rob_free_any,
+    // "the ROB has room for two more entries". A two-wide group is presented to
+    // the ROB only when this is high, so the ROB's own second-lane refusal is a
+    // resource statement the front end acts on *before* rename allocates: a pair
+    // whose second entry the ROB could not take would be a renamed instruction
+    // with no ROB slot. The second lane is refused, not dropped -- it stays in
+    // the queue and is the next cycle's lane 0.
+    input  logic                        rob_free_two,
     output logic                        rob_alloc_valid,
     output logic [DSP_TAG_W-1:0]        rob_alloc_tag,
     output logic [DSP_XLEN-1:0]         rob_alloc_pc,
@@ -235,6 +323,21 @@ module mosaic_dispatch (
     input  logic                        rob_alloc_refused,
     input  logic [DSP_IDX_W-1:0]        rob_alloc_index,
     input  logic [DSP_RGEN_W-1:0]       rob_alloc_gen,
+
+    // ------------------------------------------------- lane 1 ROB allocate
+    // The ROB's second allocation port (added by this package). It is offered
+    // only in a cycle `rob_free_two` says there is room, so `rob_alloc2_ok` is
+    // the ROB's acknowledgement and never a surprise refusal.
+    output logic                        rob_alloc2_valid,
+    output logic [DSP_TAG_W-1:0]        rob_alloc2_tag,
+    output logic [DSP_XLEN-1:0]         rob_alloc2_pc,
+    output logic [3:0]                  rob_alloc2_num_uops,
+    output logic                        rob_alloc2_exc,
+    output logic                        rob_alloc2_open,
+    input  logic                        rob_alloc2_ok,
+    input  logic                        rob_alloc2_refused,
+    input  logic [DSP_IDX_W-1:0]        rob_alloc2_index,
+    input  logic [DSP_RGEN_W-1:0]       rob_alloc2_gen,
 
     // ----------------------------------------------------- descriptor store
     output logic                        desc_wr_valid,
@@ -251,6 +354,18 @@ module mosaic_dispatch (
     // event stream can report what retired rather than only where.
     output logic [2:0]                  desc_wr_len,
     output logic [31:0]                 desc_wr_insn,
+    // Lane 1's descriptor write. `mosaic_macro_desc` already carries two write
+    // lanes (they were added with the two-wide retire lane); this package is what
+    // first drives the second one.
+    output logic                        desc_wr2_valid,
+    output logic [DSP_IDX_W-1:0]        desc_wr2_index,
+    output logic [DSP_TAG_W-1:0]        desc_wr2_tag,
+    output logic [DSP_PGEN_W-1:0]       desc_wr2_gen,
+    output logic [4:0]                  desc_wr2_rd,
+    output logic                        desc_wr2_reg_we,
+    output logic                        desc_wr2_is_store,
+    output logic [2:0]                  desc_wr2_len,
+    output logic [31:0]                 desc_wr2_insn,
 
     // ------------------------------------------- ready table query (arbiter)
     output logic [1:0]                  rq_valid,
@@ -447,14 +562,35 @@ module mosaic_dispatch (
     // it can trap -- ECALL and EBREAK are dispatched and trapped normally. See
     // the refusal rule below.
     input  logic                        trap_vector_armed_i,
+    // "Nothing older is still in flight": the ROB is empty, so the macro at the
+    // decode input is the architectural next instruction and every architectural
+    // state it is judged against -- mtvec, in particular -- is committed. This
+    // is what makes the unarmed-trap refusal below a statement about the
+    // architectural stream and not about how far the front end happens to have
+    // run ahead. A deeper queue or a wider allocator must not be able to change
+    // whether an instruction traps.
+    input  logic                        rob_empty_i,
     output logic                        stop,           // unsupported macro seen
-    // The lane-0 macro left the input this cycle: it was allocated, or it was
-    // refused as unsupported and the machine is stopping at it. The decode
-    // buffer pops on this, so a refused macro is consumed exactly once.
-    output logic                        o_take,
+    // How many decoded macros left the input this cycle (0, 1 or 2). The
+    // instruction queue pops on this, so a macro that was refused as unsupported
+    // is consumed exactly once and a pair that both allocated is consumed in the
+    // one cycle they did. It is never 2 with a refusal, and never 2 unless both
+    // lanes were allocated: the two facts are the same decision.
+    output logic [1:0]                  o_pop_count,
 
     // ------------------------------------------------------------ counters
     output logic [31:0]                 o_alloc_ctr,
+    // Cycles in which the pair decision allocated two macros, and cycles in
+    // which the second macro of a pair was inserted in the same cycle as the
+    // first. These are what make "two-wide" a measurement rather than a claim:
+    // a front end that never fires them is single-wide whatever its ports say.
+    output logic [31:0]                 o_alloc2_ctr,
+    output logic [31:0]                 o_pair_ctr,
+    // The dispatch queue's occupancy summed over cycles, so the case can report
+    // a mean depth rather than only a rate.
+    output logic [31:0]                 o_occ_sum,
+    output logic [31:0]                 o_pair_offer_ctr,
+    output logic [31:0]                 o_l1_elig_ctr,
     output logic [31:0]                 o_ins_ctr,
     output logic [31:0]                 o_unsupported_ctr,
     output logic [31:0]                 o_illegal_ctr,
@@ -562,9 +698,25 @@ module mosaic_dispatch (
   logic                 l0_illegal;
   logic                 alloc_now;
   logic                 alloc_ok;
+  logic                 alloc2_ok;
+  logic                 queue_has_room2;
+  logic [DSP_CNT_W-1:0] queue_room_after_pop;
+  // The lane class facts and the pair decision.
+  logic                 l0_is_mem, l0_is_sys, l0_is_ctrl;
+  logic                 l1_is_mem, l1_is_sys, l1_is_ctrl;
+  logic                 l1_eligible, wide_pair;
+  logic                 target_cluster, target_cluster1;
+  // Lane 1's source identities, latched from rename's second read port pair.
+  logic [DSP_TAG_W-1:0] rs3_tag_v, rs4_tag_v;
+  logic [DSP_IGEN_W-1:0] rs3_gen_v, rs4_gen_v;
+  logic                 s3_init_fold, s4_init_fold;
+  mosaic_uop_pkg::uop_meta_t new_meta1;
+  // The quantum of work dispatched this cycle.
+  logic [DSP_CNT_W-1:0] pop_n;
+  logic [DSP_QW-1:0]    push_at1;
+  disp_ent_t            e0_new, e1_new;
   logic                 stop_q;
   logic                 aff_toggle;
-  logic                 target_cluster;
   logic [DSP_TAG_W-1:0] rs1_tag_v, rs2_tag_v;
   logic [DSP_IGEN_W-1:0] rs1_gen_v, rs2_gen_v;
   logic                 s1_needs_read, s2_needs_read;
@@ -598,7 +750,7 @@ module mosaic_dispatch (
   logic [DSP_IGEN_W-1:0] ins_dst_gen_v;
   mosaic_uop_pkg::uop_meta_t new_meta;
 
-  logic [31:0] alloc_ctr, ins_ctr, unsup_ctr, illegal_ctr, exhausted_ctr, squashed_ctr;
+  logic [31:0] alloc_ctr, alloc2_ctr, pair_ctr, pair_offer_ctr, l1_elig_ctr, ins_ctr, occ_sum, unsup_ctr, illegal_ctr, exhausted_ctr, squashed_ctr;
   logic [31:0] stall_ctr, src_read_ctr, src_conflict_ctr, src_bad_ctr;
   logic [31:0] rob_full_ctr, queue_stall_ctr;
 
@@ -665,14 +817,71 @@ module mosaic_dispatch (
   // unconditional jump delivers one, and the jump's own redirect is what has to
   // discard it (CASE=core.mem_program, and the fetch.redirect_late_response
   // contract for late responses behind a transfer).
-  assign l0_refused = l0_unsupported && !branch_in_flight;
-  assign o_take = alloc_ok || l0_refused;
+  // The invalid-decode refusal is a property of the instruction alone, so it is
+  // taken as soon as the macro is the oldest thing the front end can see (a
+  // transfer in flight may still squash it). The unarmed-trap refusal is *not*:
+  // it asks whether mtvec is zero, and mtvec is written at retirement, so the
+  // question is only meaningful once every older macro has retired. Refusing it
+  // earlier stops the machine on an instruction whose trap vector a still-
+  // in-flight `csrw mtvec` was about to install -- which is exactly what a
+  // front end that runs further ahead than the old two-entry buffer made
+  // possible. `rob_empty_i` restores the rule the header states: refuse only
+  // when it is the architectural next instruction.
+  assign l0_refused = l0_unsupported && !branch_in_flight &&
+                      (!l0_trap_unarmed || rob_empty_i);
+  // The decode input is consumed exactly once per instruction. A pair that both
+  // allocated is consumed in one cycle; a refusal consumes the one macro the
+  // machine is stopping at; nothing else consumes anything.
+`ifdef MOSAIC_DISPATCH_MUTANT_DROP_PAIR_TAIL
+  // NEGATIVE CONTROL (two-wide front end): when lane 1 was eligible but was not
+  // allocated -- the ROB or the dispatch queue was nearly full and *refused* the
+  // group, which is the correct behaviour -- the decode input is popped by two
+  // anyway. The second macro is consumed and never allocated: an instruction the
+  // machine silently drops. The absolute checks on the `alu_burst` workload of
+  // perf.equal_resource_compare (all 96 adds executed; retire PCs strictly
+  // increasing) must fail.
+  assign o_pop_count = {1'b0, alloc_ok} + {1'b0, alloc2_ok} + {1'b0, l0_refused} +
+                       {1'b0, (alloc_now && l1_eligible && !alloc2_ok && !l0_refused)};
+`else
+  assign o_pop_count = {1'b0, alloc_ok} + {1'b0, alloc2_ok} + {1'b0, l0_refused};
+`endif
 
   logic l0_trap_unarmed;
 
   assign l0_trap_unarmed = dec_valid[0] && dec_ctl0.is_system &&
                            (dec_ctl0.is_ecall || dec_ctl0.is_ebreak) &&
                            !trap_vector_armed_i;
+
+  // ----------------------------------------------------------- lane classes
+  // Which insert path each decoded lane needs. Only a cluster-class pair is
+  // allocated two wide: a memory macro captures operands into a queue, a system
+  // or vector macro is resolved at the architectural boundary, and a control
+  // transfer allocates alone so the one in-flight-branch barrier stays one bit
+  // (see the header).
+  assign l0_is_mem  = dec_ctl0.mem_kind != mosaic_pkg::MEM_NONE;
+  assign l0_is_sys  = dec_ctl0.is_system || dec_ctl0.is_miscmem || dec_ctl0.is_vec;
+  assign l0_is_ctrl = dec_ctl0.is_branch || dec_ctl0.is_jal || dec_ctl0.is_jalr;
+  assign l1_is_mem  = dec_ctl1.mem_kind != mosaic_pkg::MEM_NONE;
+  assign l1_is_sys  = dec_ctl1.is_system || dec_ctl1.is_miscmem || dec_ctl1.is_vec;
+  assign l1_is_ctrl = dec_ctl1.is_branch || dec_ctl1.is_jal || dec_ctl1.is_jalr;
+  assign l1_eligible = dec_valid[1] && dec_ctl1.valid &&
+                       !l1_is_mem && !l1_is_sys && !l1_is_ctrl;
+  // The pair is offered to rename only when lane 0 is cluster-class too and is
+  // not a control transfer, and only when both the dispatch queue and the ROB
+  // can take two. `rob_free_two` is what makes the second lane a refusal rather
+  // than a drop: the ROB's own answer arrives in the same cycle, before rename
+  // has allocated anything.
+`ifdef MOSAIC_DISPATCH_MUTANT_NO_PAIR
+  // DIAGNOSTIC/CONTROL: two-wide *allocation* is disabled (the deeper
+  // instruction queue stays). Used to attribute a behaviour change between the
+  // two halves of this package -- the width and the depth. (The same-cycle
+  // second insert is held unconditionally; see the header, so this control now
+  // isolates the allocation half alone.)
+  assign wide_pair = 1'b0;
+`else
+  assign wide_pair = alloc_now && l1_eligible && !l0_is_ctrl && !l0_is_mem &&
+                     !l0_is_sys && queue_has_room2 && rob_free_two;
+`endif
 
   always_comb begin
     l0_illegal     = dec_valid[0] && !dec_ctl0.valid;
@@ -692,7 +901,14 @@ module mosaic_dispatch (
   // --------------------------------------------------------------------------
   // Allocation
   // --------------------------------------------------------------------------
-  assign queue_has_room = (q_cnt < DSP_CNT_W'(DSP_DEPTH));
+  // Two pushes need two free positions *after* this cycle's pops: the pair lands
+  // in the slots the head (and, when it fires, the second entry) are leaving.
+  // Counting the pop is what lets a pair allocate on the cycles a backed-up
+  // queue is actually draining -- which, on the workload that exercises the
+  // width, is most of the cycles the width could fire.
+  assign queue_room_after_pop = q_cnt - pop_n;
+  assign queue_has_room2 = (queue_room_after_pop <= DSP_CNT_W'(DSP_DEPTH - 2));
+  assign queue_has_room  = (queue_room_after_pop < DSP_CNT_W'(DSP_DEPTH));
 `ifdef MOSAIC_CORE_MUTANT_MEM_BEHIND_BRANCH
   // NEGATIVE CONTROL: the branch barrier does not hold a *memory* macro, so the
   // instructions after an unresolved branch are dispatched and their loads and
@@ -711,9 +927,33 @@ module mosaic_dispatch (
                           !barrier && !vec_block_i && queue_has_room && rob_free_any;
 `endif
   assign alloc_ok       = alloc_now && alloc_accepted && rob_alloc_ok;
+  // Lane 1 is allocated only when the pair decision said two, rename accepted
+  // the group (which it does as a group: `alloc_accepted` and `alloc2_accepted`
+  // are the same decision) and the ROB's second port took it.
+  assign alloc2_ok      = wide_pair && alloc2_accepted && rob_alloc2_ok;
 
   assign alloc_req = alloc_now;
   assign alloc_rd  = dec_ctl0.rd;
+
+  // ------------------------------------------------------ lane 1 allocation
+  assign alloc2_req   = wide_pair;
+  assign alloc2_rd    = dec_ctl1.rd;
+  assign alloc2_is_fp = dec_ctl1.fp_dst_fp && dec_ctl1.reg_write;
+
+  // Lane 1's four source addresses. A source the instruction does not use is
+  // addressed as x0, exactly as lane 0's are, so rename reports it ready with
+  // value zero and the queue entry needs no second rule.
+  assign rs3_addr  = dec_ctl1.uses_rs1 ? dec_ctl1.rs1 : 5'd0;
+  assign rs4_addr  = dec_ctl1.uses_rs2 ? dec_ctl1.rs2 : 5'd0;
+  assign rs3_is_fp = dec_ctl1.uses_rs1 && dec_ctl1.fp_src1_fp;
+  assign rs4_is_fp = dec_ctl1.uses_rs2 && dec_ctl1.fp_src2_fp;
+
+  assign rob_alloc2_valid    = wide_pair && alloc2_accepted;
+  assign rob_alloc2_tag      = alloc2_is_x0 ? {DSP_TAG_W{1'b0}} : alloc2_new_tag;
+  assign rob_alloc2_pc       = dec_pc1;
+  assign rob_alloc2_num_uops = 4'd1;
+  assign rob_alloc2_exc      = 1'b0;
+  assign rob_alloc2_open     = 1'b0;
 
   // F/D (I-050): which architectural map each renamed operand selects. A
   // destination is an f-register only for the FP instructions that write one
@@ -750,6 +990,21 @@ module mosaic_dispatch (
   // descriptor the retire event reads them back from.
   assign desc_wr_len  = dec_len0;
   assign desc_wr_insn = dec_bits0;
+
+  // Lane 1's descriptor, written in the cycle it allocated. It is not gated on
+  // `alloc2_ok` for the store/rd fields -- a stale slot must not keep an old
+  // "is a store" bit -- but the store bit is a constant 0 for lane 1 by
+  // construction, because a memory macro is never lane 1.
+  assign desc_wr2_valid   = alloc2_ok;
+  assign desc_wr2_index   = rob_alloc2_index;
+  assign desc_wr2_tag     = alloc2_is_x0 ? {DSP_TAG_W{1'b0}} : alloc2_new_tag;
+  assign desc_wr2_gen     = {{(DSP_PGEN_W - DSP_IGEN_W){1'b0}}, alloc2_new_gen};
+  assign desc_wr2_rd      = dec_ctl1.rd;
+  assign desc_wr2_reg_we  = alloc2_ok && alloc2_new_valid && dec_ctl1.reg_write &&
+                            !alloc2_is_x0;
+  assign desc_wr2_is_store = (dec_ctl1.mem_kind == mosaic_pkg::MEM_STORE);
+  assign desc_wr2_len     = dec_len1;
+  assign desc_wr2_insn    = dec_bits1;
 
   // --------------------------------------------------------------------------
   // The meta
@@ -826,6 +1081,54 @@ module mosaic_dispatch (
     new_meta.fp_is       = dec_ctl0.fp_is;
   end
 
+  // Lane 1's meta. It is built with the same rules from lane 1's own control
+  // word: the two lanes are different instructions and must not be allowed to
+  // share a decode. A memory or system class cannot reach here (the pair is only
+  // offered for cluster-class lanes), but the mem/vec tests are kept so the
+  // builder does not quietly assume it.
+  always_comb begin
+    new_meta1.class_ = mosaic_uop_pkg::UOP_ALU;
+    if (dec_ctl1.is_fp) begin
+      new_meta1.class_ = mosaic_uop_pkg::UOP_FP;
+    end else if (dec_ctl1.is_muldiv) begin
+      new_meta1.class_ = mosaic_uop_pkg::UOP_MULDIV;
+    end else if (dec_ctl1.mem_kind != mosaic_pkg::MEM_NONE) begin
+      new_meta1.class_ = (dec_ctl1.mem_kind == mosaic_pkg::MEM_STORE)
+                         ? mosaic_uop_pkg::UOP_STORE : mosaic_uop_pkg::UOP_LOAD;
+    end else if (dec_ctl1.is_branch || dec_ctl1.is_jal || dec_ctl1.is_jalr) begin
+      new_meta1.class_ = mosaic_uop_pkg::UOP_BRANCH;
+    end else if (dec_ctl1.is_system || dec_ctl1.is_miscmem || dec_ctl1.is_vec) begin
+      new_meta1.class_ = mosaic_uop_pkg::UOP_SYSTEM;
+    end
+    new_meta1.pc          = dec_pc1;
+    new_meta1.insn_len    = dec_len1;
+    new_meta1.alu_op      = dec_ctl1.alu_op;
+    new_meta1.md_op       = dec_ctl1.md_op;
+    new_meta1.md_w        = dec_ctl1.md_w;
+    new_meta1.br_funct    = dec_ctl1.branch_funct;
+    new_meta1.is_jal      = dec_ctl1.is_jal;
+    new_meta1.is_jalr     = dec_ctl1.is_jalr;
+    new_meta1.writes_link = dec_ctl1.writes_link;
+    new_meta1.mem_size    = dec_ctl1.mem_size;
+    new_meta1.mem_signed  = dec_ctl1.mem_signed;
+    new_meta1.is_amo      = (dec_ctl1.mem_kind == mosaic_pkg::MEM_AMO);
+    new_meta1.amo_op      = dec_ctl1.amo_op;
+    new_meta1.amo_aq      = dec_ctl1.amo_aq;
+    new_meta1.amo_rl      = dec_ctl1.amo_rl;
+    new_meta1.is_lr       = (dec_ctl1.mem_kind == mosaic_pkg::MEM_LR);
+    new_meta1.is_sc       = (dec_ctl1.mem_kind == mosaic_pkg::MEM_SC);
+    new_meta1.is_fence    = dec_ctl1.is_miscmem && !dec_ctl1.is_fence_i;
+    new_meta1.is_fence_i  = dec_ctl1.is_fence_i;
+    new_meta1.fp_op       = dec_ctl1.fp_op;
+    new_meta1.fp_fmt      = dec_ctl1.fp_fmt;
+    new_meta1.fp_rm       = dec_ctl1.fp_rm;
+    new_meta1.fp_dst_fp   = dec_ctl1.fp_dst_fp;
+    new_meta1.fp_src1_fp  = dec_ctl1.fp_src1_fp;
+    new_meta1.fp_src2_fp  = dec_ctl1.fp_src2_fp;
+    new_meta1.fp_iw       = dec_ctl1.fp_iw;
+    new_meta1.fp_is       = dec_ctl1.fp_is;
+  end
+
   // --------------------------------------------------------------------------
   // Operands at allocation
   // --------------------------------------------------------------------------
@@ -875,6 +1178,29 @@ module mosaic_dispatch (
   assign s2_init_fold = !rs2_is_x0 && !gen_valid[rs2_tag];
 `endif
 
+  // Lane 1's source identity, taken from rename's second pair of ports. The
+  // `*_bypass` flags are observation only: a bypassed source is reported by
+  // rename as lane 0's new (tag, generation), which the entry records like any
+  // other identity, and the issue queue's own wakeup fills the value when lane 0
+  // writes back. `rs3_tag_v`/`rs4_tag_v` therefore already carry the bypass
+  // result and the insert path does not need to know which it was.
+  assign rs3_tag_v = rs3_tag;
+  assign rs4_tag_v = rs4_tag;
+  assign rs3_gen_v = rs3_gen;
+  assign rs4_gen_v = rs4_gen;
+
+  // Lane 1's initial-mapping fold: the same rule as lane 0's, applied to lane
+  // 1's own mapping. It has to exist -- a lane-1 source that names a register
+  // the program has not written is a source with no producer, and inserting it
+  // not-ready would wait for a wakeup that can never arrive.
+  // `rs3_bypass`/`rs4_bypass` suppresses the fold: a bypassed source is lane 0's
+  // destination, whose tag was allocated *this cycle*, so `gen_valid` for it is
+  // still clear at this edge and the fold would wrongly turn a real
+  // same-cycle-dependent operand into a constant zero. The bypass is a real
+  // producer; only a source with no producer at all is folded.
+  assign s3_init_fold = !rs3_is_x0 && !rs3_bypass && !gen_valid[rs3_tag];
+  assign s4_init_fold = !rs4_is_x0 && !rs4_bypass && !gen_valid[rs4_tag];
+
   // ------------------------------------------------------- cluster affinity
   // Fixed, deterministic, and stated rather than emergent: the first macro of a
   // fetched pair goes to cluster 0 and the second to cluster 1, and a MUL/DIV
@@ -882,8 +1208,15 @@ module mosaic_dispatch (
   // one routed to the shared unit. An FP macro goes to cluster 0 for the same
   // reason: cluster 0's queue is the one whose grant is routed to the shared
   // floating-point unit (I-050).
+  //
+  // Lane 1 takes the *other* alternation slot, so a pair that both allocate
+  // lands one macro in each cluster's queue. The toggle advances once per macro,
+  // which is why the pair's two allocations cancel: lane 0 keeps this cycle's
+  // value and lane 1 takes its complement, so the next pair starts where this
+  // one did.
   always_comb begin
-    target_cluster = (dec_ctl0.is_muldiv || dec_ctl0.is_fp) ? 1'b0 : aff_toggle;
+    target_cluster  = (dec_ctl0.is_muldiv || dec_ctl0.is_fp) ? 1'b0 : aff_toggle;
+    target_cluster1 = (dec_ctl1.is_muldiv || dec_ctl1.is_fp) ? 1'b0 : ~aff_toggle;
   end
 
   assign o_target_cluster = target_cluster;
@@ -1047,12 +1380,136 @@ module mosaic_dispatch (
   // --------------------------------------------------------------------------
   // Queue next state
   // --------------------------------------------------------------------------
-  assign push_at = DSP_QW'(head_fire ? (q_cnt - DSP_CNT_W'(1)) : q_cnt);
+  // The head leaves, and the two newly allocated macros land at the tail the pop
+  // left. `pop_n` counts the *insert* pop, which is what the shift is: pushing
+  // is not a pop. (The same-cycle second insert is held; see the header.)
+  assign pop_n     = DSP_CNT_W'(head_fire);
+  assign push_at   = DSP_QW'(q_cnt - pop_n);
+  assign push_at1  = DSP_QW'(q_cnt - pop_n + DSP_CNT_W'(1));
 
   always_comb begin
-    q_cnt_next = q_cnt;
-    if (head_fire) q_cnt_next = q_cnt_next - DSP_CNT_W'(1);
+    q_cnt_next = q_cnt - pop_n;
     if (alloc_ok)  q_cnt_next = q_cnt_next + DSP_CNT_W'(1);
+    if (alloc2_ok) q_cnt_next = q_cnt_next + DSP_CNT_W'(1);
+  end
+
+  // ---------------------------------------------------- the lane-0 entry build
+  always_comb begin
+    e0_new.id       = {rob_alloc_index, rob_alloc_gen, {DSP_UOP_W{1'b0}}};
+    e0_new.age      = alloc_ctr[15:0];
+    e0_new.meta     = new_meta;
+    e0_new.imm      = dec_ctl0.imm;
+    e0_new.cluster  = target_cluster;
+    e0_new.dst_tag  = alloc_is_x0 ? {DSP_TAG_W{1'b0}} : alloc_new_tag;
+    e0_new.dst_gen  = alloc_new_gen;
+    e0_new.dst_x0   = alloc_is_x0;
+    e0_new.s1_tag   = rs1_is_x0 ? {DSP_TAG_W{1'b0}} : rs1_tag_v;
+    e0_new.s1_gen   = rs1_is_x0 ? {DSP_IGEN_W{1'b0}} : rs1_gen_v;
+    e0_new.s1_x0    = rs1_is_x0;
+    // The initial mapping is folded into the same ready-constant slot the AUIPC
+    // PC uses. `s1_init_fold` and `is_auipc` are mutually exclusive (AUIPC reads
+    // no rs1, so its rs1_addr is x0 and rename reports `rs1_is_x0`, which clears
+    // the fold), so the constant is unambiguous.
+    e0_new.s1_const = dec_ctl0.is_auipc || s1_init_fold || sys_imm_form;
+    e0_new.s1_cval  = sys_imm_form ? {59'd0, dec_ctl0.rs1}
+                      : (s1_init_fold ? {DSP_XLEN{1'b0}} : dec_pc0);
+    e0_new.s2_tag   = rs2_is_x0 ? {DSP_TAG_W{1'b0}} : rs2_tag_v;
+    e0_new.s2_gen   = rs2_is_x0 ? {DSP_IGEN_W{1'b0}} : rs2_gen_v;
+    e0_new.s2_x0    = rs2_is_x0;
+    // `alu_b = uses_rs2 ? rs2_val : imm`, as mosaic_bringup_core.sv states it for
+    // the ISA reference.
+    e0_new.s2_const = !dec_ctl0.uses_rs2 || s2_init_fold;
+    e0_new.s2_cval  = s2_init_fold ? {DSP_XLEN{1'b0}} : dec_ctl0.imm;
+    e0_new.sys          = dec_ctl0.is_system || dec_ctl0.is_miscmem;
+    e0_new.sys_csr_addr = dec_ctl0.csr_addr;
+    e0_new.sys_csr_op   = dec_ctl0.csr_op;
+    e0_new.sys_csr_reads = dec_ctl0.csr_reads;
+    e0_new.sys_csr_writes = dec_ctl0.csr_writes;
+    e0_new.sys_ecall    = dec_ctl0.is_ecall;
+    e0_new.sys_ebreak   = dec_ctl0.is_ebreak;
+    e0_new.sys_mret     = dec_ctl0.is_mret;
+    e0_new.sys_sret     = dec_ctl0.is_sret;
+    e0_new.sys_wfi      = dec_ctl0.is_wfi;
+    e0_new.sys_fetch_fault = dec_ctl0.is_fetch_fault;
+    e0_new.sys_fence    = dec_ctl0.is_miscmem && !dec_ctl0.is_fence_i;
+    e0_new.sys_fence_i  = dec_ctl0.is_fence_i;
+    e0_new.sys_sfence_vma     = dec_ctl0.is_sfence_vma;
+    e0_new.sys_sfence_has_va  = dec_ctl0.sfence_has_va;
+    e0_new.sys_sfence_has_asid = dec_ctl0.sfence_has_asid;
+    // V (I-059). The reduced decode, assembled once here from the control word
+    // the front end produced, so the engine does not re-decode.
+    e0_new.vec     = dec_ctl0.is_vec;
+    e0_new.vec_pay.op_class      = dec_ctl0.vec_class;
+    e0_new.vec_pay.kind          = dec_ctl0.vec_kind;
+    e0_new.vec_pay.vset_kind     = dec_ctl0.vec_vset_kind;
+    e0_new.vec_pay.vset_uimm     = dec_ctl0.vec_vset_uimm;
+    e0_new.vec_pay.vtypei        = dec_ctl0.vec_vtypei;
+    e0_new.vec_pay.vd            = dec_ctl0.vec_vd;
+    e0_new.vec_pay.vs1           = dec_ctl0.vec_vs1;
+    e0_new.vec_pay.vs2           = dec_ctl0.vec_vs2;
+    e0_new.vec_pay.data          = dec_ctl0.vec_vd;
+    e0_new.vec_pay.index         = dec_ctl0.vec_vs2;
+    e0_new.vec_pay.family        = dec_ctl0.vec_family;
+    e0_new.vec_pay.op            = dec_ctl0.vec_op;
+    e0_new.vec_pay.form          = dec_ctl0.vec_form;
+    e0_new.vec_pay.lsu_mode      = dec_ctl0.vec_lsu_mode;
+    e0_new.vec_pay.idx_sew       = dec_ctl0.vec_idx_sew;
+    e0_new.vec_pay.eew_sew       = dec_ctl0.vec_eew_sew;
+    e0_new.vec_pay.nf            = dec_ctl0.vec_nf;
+    e0_new.vec_pay.mask_en       = dec_ctl0.vec_mask_en;
+    e0_new.vec_pay.lsu_we        = dec_ctl0.vec_lsu_we;
+    e0_new.vec_pay.lsu_ordered   = dec_ctl0.vec_lsu_ordered;
+    e0_new.vec_pay.lsu_fof       = dec_ctl0.vec_lsu_fof;
+    e0_new.vec_pay.scalar_from_imm =
+        (dec_ctl0.vec_form == 2'd2) || (dec_ctl0.vec_kind == 3'd0);
+    e0_new.vec_pay.imm           = dec_ctl0.vec_imm;
+  end
+
+  // ---------------------------------------------------- the lane-1 entry build
+  // Lane 1 is a cluster-class macro by construction, so its system and vector
+  // payload fields are zero: no consumer can read them for a lane-1 entry, and
+  // driving them from lane 0's decode would be exactly the kind of cross-lane
+  // leak this package exists to avoid.
+  always_comb begin
+    e1_new.id       = {rob_alloc2_index, rob_alloc2_gen, {DSP_UOP_W{1'b0}}};
+    // Strictly greater than lane 0's age in the same cycle, and strictly less
+    // than the next cycle's: the age is the allocation counter before this
+    // allocation's increment, plus one for the second macro of the pair.
+    e1_new.age      = alloc_ctr[15:0] + 16'd1;
+    e1_new.meta     = new_meta1;
+    e1_new.imm      = dec_ctl1.imm;
+    e1_new.cluster  = target_cluster1;
+    e1_new.dst_tag  = alloc2_is_x0 ? {DSP_TAG_W{1'b0}} : alloc2_new_tag;
+    e1_new.dst_gen  = alloc2_new_gen;
+    e1_new.dst_x0   = alloc2_is_x0;
+    e1_new.s1_tag   = rs3_is_x0 ? {DSP_TAG_W{1'b0}} : rs3_tag_v;
+    e1_new.s1_gen   = rs3_is_x0 ? {DSP_IGEN_W{1'b0}} : rs3_gen_v;
+    e1_new.s1_x0    = rs3_is_x0;
+    e1_new.s1_const = dec_ctl1.is_auipc || s3_init_fold;
+    e1_new.s1_cval  = s3_init_fold ? {DSP_XLEN{1'b0}} : dec_pc1;
+    e1_new.s2_tag   = rs4_is_x0 ? {DSP_TAG_W{1'b0}} : rs4_tag_v;
+    e1_new.s2_gen   = rs4_is_x0 ? {DSP_IGEN_W{1'b0}} : rs4_gen_v;
+    e1_new.s2_x0    = rs4_is_x0;
+    e1_new.s2_const = !dec_ctl1.uses_rs2 || s4_init_fold;
+    e1_new.s2_cval  = s4_init_fold ? {DSP_XLEN{1'b0}} : dec_ctl1.imm;
+    e1_new.sys      = 1'b0;
+    e1_new.sys_csr_addr   = 12'd0;
+    e1_new.sys_csr_op     = mosaic_pkg::CSR_NONE;
+    e1_new.sys_csr_reads  = 1'b0;
+    e1_new.sys_csr_writes = 1'b0;
+    e1_new.sys_ecall      = 1'b0;
+    e1_new.sys_ebreak     = 1'b0;
+    e1_new.sys_mret       = 1'b0;
+    e1_new.sys_sret       = 1'b0;
+    e1_new.sys_wfi        = 1'b0;
+    e1_new.sys_fetch_fault = 1'b0;
+    e1_new.sys_fence      = 1'b0;
+    e1_new.sys_fence_i    = 1'b0;
+    e1_new.sys_sfence_vma     = 1'b0;
+    e1_new.sys_sfence_has_va  = 1'b0;
+    e1_new.sys_sfence_has_asid = 1'b0;
+    e1_new.vec            = 1'b0;
+    e1_new.vec_pay        = {DSP_VEC_W{1'b0}};
   end
 
   always_ff @(posedge clk) begin
@@ -1082,85 +1539,17 @@ module mosaic_dispatch (
       q_cnt <= {DSP_CNT_W{1'b0}};
     end else begin
       q_cnt <= q_cnt_next;
-      // Shift down on a pop, then place the new entry at the tail.
+      // Shift down on a pop, then place the new entries at the tail.
       if (head_fire) begin
         for (int unsigned i = 0; i < DSP_DEPTH-1; i++) begin
           q_mem[i] <= q_mem[i+1];
         end
       end
       if (alloc_ok) begin
-        q_mem[push_at].id       <= {rob_alloc_index, rob_alloc_gen, {DSP_UOP_W{1'b0}}};
-        // The macro's program-order age: the allocation counter *before* this
-        // allocation's increment, so it is strictly increasing in program order
-        // and two macros in the machine never share it. The steering's age
-        // tie-break compares these; see the field's note.
-        q_mem[push_at].age      <= alloc_ctr[15:0];
-        q_mem[push_at].meta     <= new_meta;
-        q_mem[push_at].imm      <= dec_ctl0.imm;
-        q_mem[push_at].cluster  <= target_cluster;
-        q_mem[push_at].dst_tag  <= alloc_is_x0 ? {DSP_TAG_W{1'b0}} : alloc_new_tag;
-        q_mem[push_at].dst_gen  <= alloc_new_gen;
-        q_mem[push_at].dst_x0   <= alloc_is_x0;
-        q_mem[push_at].s1_tag   <= rs1_is_x0 ? {DSP_TAG_W{1'b0}} : rs1_tag_v;
-        q_mem[push_at].s1_gen   <= rs1_is_x0 ? {DSP_IGEN_W{1'b0}} : rs1_gen_v;
-        q_mem[push_at].s1_x0    <= rs1_is_x0;
-        // The initial mapping is folded into the same ready-constant slot the
-        // AUIPC PC uses. `s1_init_fold` and `is_auipc` are mutually exclusive
-        // (AUIPC reads no rs1, so its rs1_addr is x0 and rename reports
-        // `rs1_is_x0`, which clears the fold), so the constant is unambiguous.
-        q_mem[push_at].s1_const <= dec_ctl0.is_auipc || s1_init_fold || sys_imm_form;
-        q_mem[push_at].s1_cval  <= sys_imm_form ? {59'd0, dec_ctl0.rs1}
-                                  : (s1_init_fold ? {DSP_XLEN{1'b0}} : dec_pc0);
-        q_mem[push_at].s2_tag   <= rs2_is_x0 ? {DSP_TAG_W{1'b0}} : rs2_tag_v;
-        q_mem[push_at].s2_gen   <= rs2_is_x0 ? {DSP_IGEN_W{1'b0}} : rs2_gen_v;
-        q_mem[push_at].s2_x0    <= rs2_is_x0;
-        // `alu_b = uses_rs2 ? rs2_val : imm`, as mosaic_bringup_core.sv states
-        // it for the ISA reference.
-        q_mem[push_at].s2_const <= !dec_ctl0.uses_rs2 || s2_init_fold;
-        q_mem[push_at].s2_cval  <= s2_init_fold ? {DSP_XLEN{1'b0}} : dec_ctl0.imm;
-        q_mem[push_at].sys          <= dec_ctl0.is_system || dec_ctl0.is_miscmem;
-        q_mem[push_at].sys_csr_addr <= dec_ctl0.csr_addr;
-        q_mem[push_at].sys_csr_op   <= dec_ctl0.csr_op;
-        q_mem[push_at].sys_csr_reads <= dec_ctl0.csr_reads;
-        q_mem[push_at].sys_csr_writes <= dec_ctl0.csr_writes;
-        q_mem[push_at].sys_ecall    <= dec_ctl0.is_ecall;
-        q_mem[push_at].sys_ebreak   <= dec_ctl0.is_ebreak;
-        q_mem[push_at].sys_mret     <= dec_ctl0.is_mret;
-        q_mem[push_at].sys_sret     <= dec_ctl0.is_sret;
-        q_mem[push_at].sys_wfi      <= dec_ctl0.is_wfi;
-        q_mem[push_at].sys_fetch_fault <= dec_ctl0.is_fetch_fault;
-        q_mem[push_at].sys_fence    <= dec_ctl0.is_miscmem && !dec_ctl0.is_fence_i;
-        q_mem[push_at].sys_fence_i  <= dec_ctl0.is_fence_i;
-        q_mem[push_at].sys_sfence_vma     <= dec_ctl0.is_sfence_vma;
-        q_mem[push_at].sys_sfence_has_va  <= dec_ctl0.sfence_has_va;
-        q_mem[push_at].sys_sfence_has_asid<= dec_ctl0.sfence_has_asid;
-        // V (I-059). The reduced decode, assembled once here from the control
-        // word the front end produced, so the engine does not re-decode.
-        q_mem[push_at].vec     <= dec_ctl0.is_vec;
-        q_mem[push_at].vec_pay.op_class      <= dec_ctl0.vec_class;
-        q_mem[push_at].vec_pay.kind          <= dec_ctl0.vec_kind;
-        q_mem[push_at].vec_pay.vset_kind     <= dec_ctl0.vec_vset_kind;
-        q_mem[push_at].vec_pay.vset_uimm     <= dec_ctl0.vec_vset_uimm;
-        q_mem[push_at].vec_pay.vtypei        <= dec_ctl0.vec_vtypei;
-        q_mem[push_at].vec_pay.vd            <= dec_ctl0.vec_vd;
-        q_mem[push_at].vec_pay.vs1           <= dec_ctl0.vec_vs1;
-        q_mem[push_at].vec_pay.vs2           <= dec_ctl0.vec_vs2;
-        q_mem[push_at].vec_pay.data          <= dec_ctl0.vec_vd;
-        q_mem[push_at].vec_pay.index         <= dec_ctl0.vec_vs2;
-        q_mem[push_at].vec_pay.family        <= dec_ctl0.vec_family;
-        q_mem[push_at].vec_pay.op            <= dec_ctl0.vec_op;
-        q_mem[push_at].vec_pay.form          <= dec_ctl0.vec_form;
-        q_mem[push_at].vec_pay.lsu_mode      <= dec_ctl0.vec_lsu_mode;
-        q_mem[push_at].vec_pay.idx_sew       <= dec_ctl0.vec_idx_sew;
-        q_mem[push_at].vec_pay.eew_sew       <= dec_ctl0.vec_eew_sew;
-        q_mem[push_at].vec_pay.nf            <= dec_ctl0.vec_nf;
-        q_mem[push_at].vec_pay.mask_en       <= dec_ctl0.vec_mask_en;
-        q_mem[push_at].vec_pay.lsu_we        <= dec_ctl0.vec_lsu_we;
-        q_mem[push_at].vec_pay.lsu_ordered   <= dec_ctl0.vec_lsu_ordered;
-        q_mem[push_at].vec_pay.lsu_fof       <= dec_ctl0.vec_lsu_fof;
-        q_mem[push_at].vec_pay.scalar_from_imm <=
-            (dec_ctl0.vec_form == 2'd2) || (dec_ctl0.vec_kind == 3'd0);
-        q_mem[push_at].vec_pay.imm           <= dec_ctl0.vec_imm;
+        q_mem[push_at] <= e0_new;
+      end
+      if (alloc2_ok) begin
+        q_mem[push_at1] <= e1_new;
       end
     end
   end
@@ -1303,6 +1692,31 @@ module mosaic_dispatch (
                    prf_rsp_never_written[bank_of_src[1]]);
   end
 
+  // --------------------------------------------------------------------------
+  // The same-cycle second insert is held
+  // --------------------------------------------------------------------------
+  // This package shipped a same-cycle second insert: the second entry of the
+  // dispatch queue left for the other cluster in the same cycle as the head,
+  // through a per-lane operand mux and a lane-1 best-effort PRF read. It is
+  // held -- the code is deleted, not ifdef'd out -- because it triggers a
+  // retirement-order defect in `retire.width_and_order` (V-013) that the
+  // retire-side lane-1 path exposes. The classification experiment and the
+  // full evidence are in results/reports/held-insert.md. Two-wide *allocation*
+  // and the depth-8 decoded queue stay: neither breaks V-013.
+  //
+  // The diagnostics that used to bisect the insert are kept, inert, below, so
+  // the isolation builds recorded in held-insert.md are still nameable. They
+  // have no subject left: a build that names one is byte-identical to shipping.
+`ifdef MOSAIC_DISPATCH_MUTANT_NO_INSERT
+  // Inert: the same-cycle second insert is held unconditionally in this build.
+`endif
+`ifdef MOSAIC_DISPATCH_MUTANT_H1_NO_CTRL
+  // Inert: the lane-1 insert this control restricted no longer exists.
+`endif
+`ifdef MOSAIC_DISPATCH_MUTANT_H1_ALWAYS_NOTREADY
+  // Inert: the lane-1 operand read this control forced no longer exists.
+`endif
+
   always_comb begin
     ins_ready_sel = fab_cluster_eff ? c1_ins_ready : c0_ins_ready;
   end
@@ -1401,6 +1815,8 @@ module mosaic_dispatch (
     ins_dst_gen_v = head.dst_x0 ? {DSP_IGEN_W{1'b0}} : head.dst_gen;
   end
 
+  // The two cluster insert buses carry the head this cycle. Only one of them is
+  // driven, by the head's affinity; a macro leaves for exactly one cluster.
   always_comb begin
     c0_ins_valid     = ins_ok_cluster && !fab_cluster_eff;
     c0_ins_uop       = ins_uop_v;
@@ -1509,7 +1925,7 @@ module mosaic_dispatch (
   always_ff @(posedge clk) begin
     if (rst) begin
       aff_toggle <= 1'b0;
-    end else if (alloc_ok) begin
+    end else if (alloc_ok || alloc2_ok) begin
 `ifdef MOSAIC_DISPATCH_MUTANT_SINGLE_CLUSTER
       // NEGATIVE CONTROL: the affinity never alternates, so every macro is
       // inserted into cluster 0's queue and the second cluster is never used.
@@ -1522,7 +1938,11 @@ module mosaic_dispatch (
       // results/reports/I-023-core.md.
       aff_toggle <= 1'b0;
 `else
-      aff_toggle <= ~aff_toggle;
+      // One flip per *macro*, so a pair's two allocations cancel and the next
+      // pair starts on the same cluster as this one did. XOR-ing the two
+      // allocation bits is that statement: 0 macros -> no flip, 1 -> flip,
+      // 2 -> no flip.
+      aff_toggle <= aff_toggle ^ (alloc_ok ^ alloc2_ok);
 `endif
     end
   end
@@ -1530,6 +1950,11 @@ module mosaic_dispatch (
   always_ff @(posedge clk) begin
     if (rst) begin
       alloc_ctr        <= 32'd0;
+      alloc2_ctr       <= 32'd0;
+      pair_ctr         <= 32'd0;
+      occ_sum          <= 32'd0;
+      pair_offer_ctr   <= 32'd0;
+      l1_elig_ctr      <= 32'd0;
       ins_ctr          <= 32'd0;
       unsup_ctr        <= 32'd0;
       illegal_ctr      <= 32'd0;
@@ -1543,8 +1968,16 @@ module mosaic_dispatch (
       queue_stall_ctr  <= 32'd0;
       stop_q           <= 1'b0;
     end else begin
-      if (alloc_ok) alloc_ctr <= alloc_ctr + 32'd1;
-      if (head_fire) ins_ctr <= ins_ctr + 32'd1;
+      // The allocation counter counts two macros in one cycle as two
+      // allocations. The insert counter counts one: the same-cycle second
+      // insert is held (see the header), so `pair_ctr` -- the cycles in which
+      // two macros left the dispatch queue together -- stays zero.
+      alloc_ctr <= alloc_ctr + {31'd0, alloc_ok} + {31'd0, alloc2_ok};
+      ins_ctr   <= ins_ctr   + {31'd0, head_fire};
+      if (alloc2_ok) alloc2_ctr <= alloc2_ctr + 32'd1;
+      if (wide_pair) pair_offer_ctr <= pair_offer_ctr + 32'd1;
+      if (l1_eligible) l1_elig_ctr <= l1_elig_ctr + 32'd1;
+      occ_sum <= occ_sum + {{(32-DSP_CNT_W){1'b0}}, q_cnt};
       if (l0_refused) begin
         unsup_ctr <= unsup_ctr + 32'd1;
         stop_q    <= 1'b1;
@@ -1568,6 +2001,11 @@ module mosaic_dispatch (
   end
 
   assign o_alloc_ctr       = alloc_ctr;
+  assign o_alloc2_ctr      = alloc2_ctr;
+  assign o_pair_ctr        = pair_ctr;
+  assign o_occ_sum         = occ_sum;
+  assign o_pair_offer_ctr  = pair_offer_ctr;
+  assign o_l1_elig_ctr     = l1_elig_ctr;
   assign o_ins_ctr         = ins_ctr;
   assign o_unsupported_ctr = unsup_ctr;
   assign o_illegal_ctr     = illegal_ctr;

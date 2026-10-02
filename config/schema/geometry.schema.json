@@ -28,7 +28,19 @@
         "btb_entries": { "type": "integer", "minimum": 1, "maximum": 4096 },
         "bpu_entries": { "type": "integer", "minimum": 1, "maximum": 65536 },
         "ras_entries": { "type": "integer", "minimum": 1, "maximum": 256 },
-        "target_quantum": { "type": "integer", "enum": [16, 32] }
+        "target_quantum": { "type": "integer", "enum": [16, 32] },
+        "decode_width": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 16,
+          "description": "Declared, not yet consumed by the RTL (docs/scalability-plan.md S-1). The decoder (mosaic_decoder) produces one control word per cycle today, so an absent key means a decode width of 1, the RTL's literal -- not zero. When present it must be >= 1 and >= rename.rename_width: you cannot rename what you cannot decode, and a rename wider than the decode leaves its ports permanently starved."
+        },
+        "idec_queue_entries": {
+          "type": "integer",
+          "minimum": 2,
+          "maximum": 64,
+          "description": "Declared, not yet consumed by the RTL (docs/scalability-plan.md S-2). The decoded-instruction queue (mosaic_idec_queue) depth is the literal 8 in mosaic_core.sv today, so an absent key means depth 8 -- the RTL's literal, not zero. No cross-field constraint names it yet; it is declared here so S-2 has one place to look."
+        }
       }
     },
     "rename": {
@@ -46,7 +58,13 @@
       "required": ["entries", "max_uops_per_macro"],
       "properties": {
         "entries": { "type": "integer", "minimum": 8, "maximum": 4096 },
-        "max_uops_per_macro": { "type": "integer", "minimum": 1, "maximum": 64 }
+        "max_uops_per_macro": { "type": "integer", "minimum": 1, "maximum": 64 },
+        "commit_width": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 256,
+          "description": "Declared, not yet consumed as a key by the RTL (docs/scalability-plan.md S-3). The generated MOSAIC_RETIRE_WIDTH is rename.dispatch_width today (tools/gen_manifest.py), so an absent key means that literal -- not zero. When present it must be >= 1 and <= 2 * rob.max_uops_per_macro: a retire width of zero never retires, and one wider than twice the largest macro retires beyond anything the front end can ever present."
+        }
       }
     },
     "int_prf": {
@@ -69,6 +87,18 @@
         "alu_per_cluster": { "type": "integer", "minimum": 1, "maximum": 4 },
         "mul_div_units": { "type": "integer", "minimum": 1, "maximum": 4 },
         "result_fifo_per_cluster": { "type": "integer", "minimum": 1, "maximum": 16 },
+        "fp_units": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 16,
+          "description": "Declared, not yet consumed by the RTL (docs/scalability-plan.md S-3). The machine instantiates one mosaic_fp_unit and one FP issue pipe today, so an absent key means one FP unit -- the RTL's literal, not zero. Counted across the fabric (the FP unit is shared, not per cluster)."
+        },
+        "vec_units": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 16,
+          "description": "Declared, not yet consumed by the RTL (docs/scalability-plan.md S-3). The machine instantiates one vector engine today and the lane broker treats lanes as an attribution rather than parallel datapaths, so an absent key means one vector unit -- the RTL's literal, not zero. Counted across the fabric."
+        },
         "remote_link_latency": {
           "type": "integer",
           "minimum": 1,

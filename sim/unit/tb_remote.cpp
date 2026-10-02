@@ -715,6 +715,7 @@ class Harness {
   struct Seen {
     bool req_ready = false;
     bool rem_req_valid = false;
+    bool rem_req_ready = false;
     LinkReq rem_req{};
     // The response port facing the remote unit: an input of the link, read back
     // so a check can name what the far side offered.
@@ -800,21 +801,14 @@ class Harness {
 
     ReadState();
 
-    if (!rst) {
-      // The remote unit is clocked by the same edge. `now` is the index of the
-      // cycle the transfer happened in, so a request taken at the end of cycle
-      // N is offered back with delay D during cycle N+D -- "D cycles after the
-      // far side consumed it" is then the literal meaning of the injected
-      // delay, and the phase assertions are statements about the hardware
-      // rather than about this file's arithmetic.
-      if (seen_.rem_req_valid && s.rem_req_ready) remote_.Accept(this_cycle, seen_.rem_req);
-      // The unit gives up the result it was holding when the *link* took it,
-      // which is the remote response handshake -- not the home delivery, which
-      // happens several cycles later and may never happen at all for a stale
-      // response that the link consumes and drops.
-      if (seen_.rem_rsp_valid && seen_.rem_rsp_ready) remote_.Emitted();
-      remote_.Advance(this_cycle + 1);
+    // The remote model's edge. The reset-traffic rule lives in one place
+    // (mosaic::BusResetGate): a request the DUT presents while reset is
+    // asserted is refused, and no response is given up or advanced across a
+    // reset. Outside reset the gate is transparent, so this is the pre-rule
+    // behaviour statement for statement.
+    ServiceRemote(rst, this_cycle);
 
+    if (!rst) {
       // The order decides which check names a defect first. The invariants run
       // before the state comparison because they are the directed statements --
       // "an unmatched response was not written anywhere" -- and a mismatch
@@ -831,10 +825,43 @@ class Harness {
 
   uint64_t comparisons() const { return comparisons_; }
 
+  // ---- reset-traffic control (V-010) --------------------------------------
+  // Presents one remote request with reset asserted, through the same
+  // ServiceRemote the cycle loop runs, and returns true iff the model accepted
+  // it. The shipping configuration must refuse; the control must accept, which
+  // is what proves the rule check can fail.
+  bool PresentDuringReset() {
+    remote_.Reset();
+    const Seen saved = seen_;
+    seen_.rem_req_valid = true;
+    seen_.rem_req_ready = true;
+    seen_.rem_req = LinkReq{};
+    seen_.rem_rsp_valid = false;
+    seen_.rem_rsp_ready = false;
+    ServiceRemote(/*rst=*/true, /*now=*/0);
+    seen_ = saved;
+    return remote_.accepted() > 0;
+  }
+  void SetAcceptDuringResetControl(bool on) { bus_gate_.SetAcceptDuringResetControl(on); }
+
  private:
+  // The one place the remote model takes a request, gives one up, or advances
+  // its timers, so the reset-traffic control below exercises the real path
+  // (V-010). `now` is the index of the cycle the transfer happened in.
+  void ServiceRemote(bool rst, uint64_t now) {
+    if (bus_gate_.MayAccept(rst, seen_.rem_req_valid && seen_.rem_req_ready)) {
+      remote_.Accept(now, seen_.rem_req);
+    }
+    if (bus_gate_.MayDeliver(rst) && seen_.rem_rsp_valid && seen_.rem_rsp_ready) {
+      remote_.Emitted();
+    }
+    if (bus_gate_.MayDeliver(rst)) remote_.Advance(now + 1);
+  }
+
   void ReadSeen() {
     seen_.req_ready = dut_->req_ready != 0;
     seen_.rem_req_valid = dut_->rem_req_valid != 0;
+    seen_.rem_req_ready = dut_->rem_req_ready != 0;
     seen_.rem_req = UnpackReq(ReadWide(dut_->rem_req_payload, (kReqW + 31) / 32));
     seen_.rem_rsp_valid = dut_->rem_rsp_valid != 0;
     seen_.rem_rsp = UnpackRsp(ReadWide(dut_->rem_rsp_payload, (kRspW + 31) / 32));
@@ -1050,6 +1077,7 @@ class Harness {
   uint64_t max_cycles_;
   Shadow shadow_;
   Remote remote_;
+  mosaic::BusResetGate bus_gate_;  // V-010 reset-traffic rule
   Coverage coverage_;
   Seen seen_;
   bool prev_req_stalled_ = false;
@@ -1151,6 +1179,24 @@ void PhaseResetState(Harness* h, mosaic::Reporter* reporter) {
   }
   reporter->Check(h->dut_issued() == 0 && h->dut_delivered() == 0,
                   "an idle link issued or delivered something");
+}
+
+// Phase 1b: the reset-traffic rule (V-010). The remote link is a request /
+// response channel to the far side, so it is a bus model: a request the DUT
+// presents while reset is asserted is refused, and the guard has been seen to
+// fire.
+void PhaseResetTraffic(Harness* h, mosaic::Reporter* reporter) {
+  Fresh(h, "reset-traffic");
+  Require(!h->PresentDuringReset(), "reset-traffic",
+          "the remote model accepted a request while reset was asserted");
+  h->SetAcceptDuringResetControl(true);
+  const bool control_accepted = h->PresentDuringReset();
+  h->SetAcceptDuringResetControl(false);
+  Require(control_accepted, "reset-traffic",
+          "the accept-during-reset control did not fire: the guard is untested");
+  Require(!h->PresentDuringReset(), "reset-traffic",
+          "the accept-during-reset control was left engaged");
+  reporter->Check(true, "reset-traffic: the rule holds and the guard fires");
 }
 
 // Phase 2: one round trip at each injected delay.
@@ -1873,6 +1919,7 @@ int main(int argc, char** argv) {
   try {
     PhaseGeometry(&harness, &reporter);
     PhaseResetState(&harness, &reporter);
+    PhaseResetTraffic(&harness, &reporter);
     PhaseRoundTrip(&harness, &reporter);
     PhaseOutOfOrder(&harness, &reporter);
     PhaseKillLateResponse(&harness, &reporter);

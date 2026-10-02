@@ -74,7 +74,15 @@ namespace {
 
 constexpr int kResetCycles = 8;
 constexpr int kMaxRunCycles = 400000;
-constexpr int kDrainCycles = 64;
+// The exit word is a *cacheable* store, so with the cache on the harness sees
+// it when the line is written back, not when the store retires: the drain must
+// be long enough for both runs to reach the program's park loop from whatever
+// point the exit word became visible. 64 cycles was enough for the original
+// 32-byte direct-mapped L1; the enlarged, non-blocking L1 can reach the exit
+// point with a longer refill still in flight, so the window is widened. The
+// comparison itself is unchanged: the park must be reached at the same
+// retirement index and the streams through it must agree.
+constexpr int kDrainCycles = 512;
 
 constexpr uint64_t kRamBase = 0x80000000ull;
 

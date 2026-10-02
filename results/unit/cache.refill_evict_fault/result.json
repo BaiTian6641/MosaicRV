@@ -2,14 +2,14 @@
   "schema_version": 1,
   "case": "cache.refill_evict_fault",
   "verdict": "PASS",
-  "detail": "trace equivalent: d(hit=14 miss=15 refill=13 wb=4 fault=2) i(hit=2 miss=1 refill=1 fault=0) cycles=167",
+  "detail": "trace equivalent: d(hit=14 miss=15 refill=13 wb=4 fault=2) i(hit=1 miss=1 refill=1 fault=0) cycles=198",
   "seed": 1,
   "max_cycles": 200000,
-  "checks": 42,
+  "checks": 45,
   "failures": 0,
   "image": "",
   "expect": "",
   "tool": "Verilator 5.052 2026-09-05",
-  "timestamp": "2026-10-02T19:48:19Z",
+  "timestamp": "2026-10-02T23:07:05Z",
   "first_mismatch": ""
 }

@@ -64,7 +64,7 @@ class NegativeControls(object):
         self.failures = []
         self.total = 0
 
-    def case(self, name: str, mutate) -> None:
+    def case(self, name: str, mutate, expect=()) -> None:
         self.total += 1
         workdir = tempfile.mkdtemp(prefix="mosaic-negative-")
         try:
@@ -76,13 +76,44 @@ class NegativeControls(object):
                 self.failures.append(name)
                 print("  NOT REJECTED : %s" % name, file=sys.stderr)
             else:
-                print("  rejected: %-46s %s" % (name, bundle.problems[0]))
+                # "Rejected" is not enough on its own: the rejection has to be the
+                # rule this control is about, so the expected key names (and, for
+                # rules the schema also happens to cover, a distinctive phrase from
+                # the semantic message) must appear somewhere in the problems.
+                rendered = [str(problem) for problem in bundle.problems]
+                blob = "\n".join(rendered)
+                missing = [token for token in expect if token not in blob]
+                if missing:
+                    self.failures.append(name)
+                    print(
+                        "  WRONG REASON : %s (no problem names %s)"
+                        % (name, ", ".join(repr(m) for m in missing)),
+                        file=sys.stderr,
+                    )
+                    for line in rendered:
+                        print("      %s" % line, file=sys.stderr)
+                else:
+                    print("  rejected: %-46s %s" % (name, rendered[0]))
         finally:
             shutil.rmtree(workdir, ignore_errors=True)
 
     # -- mutators ---------------------------------------------------------
     def _profile_path(self, sandbox: str) -> str:
         return os.path.join(sandbox, "profiles", "%s.json" % self.profile)
+
+    def geometry(self, config_root=None) -> dict:
+        root = config_root or self.config_root
+        profile = _read_json(os.path.join(root, "profiles", "%s.json" % self.profile))
+        return _read_json(os.path.join(root, profile["geometry_file"]))
+
+    def patch_geometry(self, edit):
+        def mutate(sandbox: str) -> None:
+            profile = _read_json(self._profile_path(sandbox))
+            path = os.path.join(sandbox, profile["geometry_file"])
+            document = _read_json(path)
+            edit(document)
+            _write_json(path, document)
+        return mutate
 
     def add_extension(self, ext: str):
         def mutate(sandbox: str) -> None:
@@ -360,6 +391,113 @@ class NegativeControls(object):
             self.case("mstatus.VS made read-only zero while V is claimed",
                       self.patch_first_csr(lambda t: move_field(t, "10:9", True)))
 
+        # ---- scalable-axis constraint rules (docs/scalability-plan.md section 3) ----
+        # One control per rule added by S-4. The expected key names are checked
+        # against *all* the problems the mutated bundle produced, so a rule that
+        # stopped firing cannot hide behind a rejection for some other reason.
+        geom = self.geometry()
+
+        self.case(
+            "rename width below one",
+            self.patch_geometry(lambda d: d["rename"].update({"rename_width": 0})),
+            ("rename.rename_width", "is not at least 1"),
+        )
+        self.case(
+            "decode width narrower than the rename width",
+            self.patch_geometry(
+                lambda d: d["frontend"].update(
+                    {"decode_width": max(0, d["rename"]["rename_width"] - 1)}
+                )
+            ),
+            ("frontend.decode_width", "rename.rename_width"),
+        )
+        self.case(
+            "ROB smaller than one macro",
+            self.patch_geometry(
+                lambda d: d["rob"].update({"entries": 8, "max_uops_per_macro": 9})
+            ),
+            ("rob.entries", "rob.max_uops_per_macro"),
+        )
+        self.case(
+            "ROB smaller than two allocation cycles",
+            self.patch_geometry(lambda d: d["rob"].update({"entries": 2})),
+            ("two allocation cycles",),
+        )
+        self.case(
+            "commit width below one",
+            self.patch_geometry(lambda d: d["rob"].update({"commit_width": 0})),
+            ("rob.commit_width",),
+        )
+        self.case(
+            "commit width beyond twice the macro width",
+            self.patch_geometry(
+                lambda d: d["rob"].update(
+                    {"commit_width": 2 * d["rob"]["max_uops_per_macro"] + 1}
+                )
+            ),
+            ("rob.commit_width",),
+        )
+        self.case(
+            "PRF cannot cover the ROB window",
+            self.patch_geometry(
+                lambda d: d["int_prf"].update(
+                    {"entries": config_check.ARCH_INT_REGS + d["rob"]["entries"] - 1}
+                )
+            ),
+            ("int_prf.entries", "rob.entries"),
+        )
+        self.case(
+            "load queue smaller than the load units",
+            self.patch_geometry(lambda d: d["lsu"].update({"units": 4, "lq_entries": 2})),
+            ("lsu.lq_entries", "lsu.units"),
+        )
+        self.case(
+            "store queue smaller than the store units",
+            self.patch_geometry(lambda d: d["lsu"].update({"units": 4, "sq_entries": 2})),
+            ("lsu.sq_entries", "lsu.units"),
+        )
+        self.case(
+            "zero clusters",
+            self.patch_geometry(lambda d: d["fabric"].update({"clusters": 0})),
+            ("fabric.clusters", "is zero"),
+        )
+        self.case(
+            "no integer execution unit in the fabric",
+            self.patch_geometry(
+                lambda d: d["fabric"].update({"alu_per_cluster": 0, "mul_div_units": 0})
+            ),
+            ("fabric.alu_per_cluster", "fabric.mul_div_units", "no integer execution unit"),
+        )
+
+        # The cache rules only apply to a geometry that declares caches; p0
+        # deliberately has none, and mutating a block that is not there would be
+        # a control that passes for the wrong reason.
+        if "caches" in geom:
+            self.case(
+                "cache line narrower than eight bytes",
+                self.patch_geometry(lambda d: d["caches"].update({"line_bytes": 4})),
+                ("caches.line_bytes", "smaller than 8"),
+            )
+            self.case(
+                "cache line is not a power of two",
+                self.patch_geometry(lambda d: d["caches"].update({"line_bytes": 24})),
+                ("caches.line_bytes", "not a power of two"),
+            )
+            self.case(
+                "L1I has more ways than sets",
+                self.patch_geometry(
+                    lambda d: d["caches"].update({"l1i_sets": 4, "l1i_ways": 8})
+                ),
+                ("caches.l1i_ways", "caches.l1i_sets"),
+            )
+            self.case(
+                "L1D has more ways than sets",
+                self.patch_geometry(
+                    lambda d: d["caches"].update({"l1d_sets": 4, "l1d_ways": 8})
+                ),
+                ("caches.l1d_ways", "caches.l1d_sets"),
+            )
+
         if self.failures:
             print(
                 "negative controls: %d of %d wrongly accepted: %s"
@@ -383,13 +521,16 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    if not args.profile and not args.all:
+    if not args.profile and not args.all and not args.negative:
         parser.error("one of --profile or --all is required")
 
     status = 0
 
     if args.negative:
-        targets = [args.profile] if args.profile else config_check.PROFILE_ORDER[:1]
+        # Without a named profile, the controls cover every profile: a control is
+        # only evidence when the rule it names is exercised, and the cache rules
+        # have no control on p0 because p0 declares no caches at all.
+        targets = [args.profile] if args.profile else config_check.PROFILE_ORDER
         for name in targets:
             print("negative controls for %s:" % name)
             status |= NegativeControls(name, config_check.CONFIG_ROOT).run()
@@ -400,7 +541,8 @@ def main() -> int:
         else:
             print("  rejected: %-46s %s" % ("unknown profile name", unknown.problems[0]))
 
-    for name in (config_check.PROFILE_ORDER if args.all else [args.profile]):
+    report_targets = config_check.PROFILE_ORDER if args.all else ([args.profile] if args.profile else [])
+    for name in report_targets:
         status |= _report(config_check.load(name))
 
     return status

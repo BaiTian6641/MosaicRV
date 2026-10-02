@@ -752,6 +752,21 @@ module mosaic_retire_tb (
       .alloc_bad_uops   (rob_alloc_bad_o),
       .alloc_index      (rob_alloc_index_n),
       .alloc_gen        (rob_alloc_gen_n),
+      // The second allocation port (added with the two-wide front end). This
+      // wrapper drives one allocation at a time, so lane 1 is tied off; the port
+      // is connected rather than left dangling so the module's full interface is
+      // visible here.
+      .alloc2_valid    (1'b0),
+      .alloc2_tag      ({TB_ROB_TAG_W{1'b0}}),
+      .alloc2_pc       ({TB_RET_XLEN{1'b0}}),
+      .alloc2_num_uops (TB_ROB_CNT_W'(1)),
+      .alloc2_exc      (1'b0),
+      .alloc2_open     (1'b0),
+      .alloc2_ok       (),
+      .alloc2_refused  (),
+      .alloc2_bad_uops (),
+      .alloc2_index    (),
+      .alloc2_gen      (),
 
       .close_valid      (close_valid_i),
       .close_index      (rob_close_index),

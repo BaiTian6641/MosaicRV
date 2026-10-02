@@ -895,6 +895,29 @@ class Requester {
     held = Respond(p);
   }
 
+  // ---- the reset-traffic rule (V-010) -------------------------------------
+  // The requester is the driver's bus model: it accepts the requests the fetch
+  // unit issues and holds the responses. `Accept` is the one place a request
+  // enters it, so the reset-traffic control below exercises the real path. A
+  // request presented while reset is asserted is refused.
+  bool Accept(bool rst, const Pending& p) {
+    if (!gate_.MayAccept(rst, /*request_presented=*/true)) return false;
+    pending.push_back(p);
+    return true;
+  }
+
+  // Presents one request with reset asserted and returns true iff the model
+  // accepted it. The shipping configuration must refuse; the control must
+  // accept, which is what proves the rule check can fail.
+  bool PresentDuringReset() {
+    const size_t before = pending.size();
+    Accept(/*rst=*/true, Make(0, 0, 0x80000000ull, 0, 0));
+    const bool grew = pending.size() != before;
+    if (grew) pending.pop_back();
+    return grew;
+  }
+  void SetAcceptDuringResetControl(bool on) { gate_.SetAcceptDuringResetControl(on); }
+
   // Put the response being held on this cycle's stimulus, if there is one.
   void Apply(Stim* s) const {
     if (!holding) return;
@@ -961,6 +984,10 @@ class Requester {
     p.issued_cycle = cycle;
     return p;
   }
+
+ private:
+  // V-010: the one reset-traffic gate this bus model routes through.
+  mosaic::BusResetGate gate_;
 };
 
 }  // namespace
@@ -991,6 +1018,24 @@ void PhaseResetState(Harness* h, mosaic::Reporter* reporter) {
   reporter->Check(true, "reset-state: the documented cold state");
 }
 
+// V-010: the reset-traffic rule. The requester is the driver's bus model: a
+// request presented while reset is asserted is refused, and the guard has been
+// seen to fire.
+void PhaseResetTraffic(Harness* h, mosaic::Reporter* reporter, Requester* req) {
+  h->Phase("reset-traffic");
+  h->Reset(4);
+  Require(!req->PresentDuringReset(), h->phase(),
+          "the requester accepted a request while reset was asserted");
+  req->SetAcceptDuringResetControl(true);
+  const bool control_accepted = req->PresentDuringReset();
+  req->SetAcceptDuringResetControl(false);
+  Require(control_accepted, h->phase(),
+          "the accept-during-reset control did not fire: the guard is untested");
+  Require(!req->PresentDuringReset(), h->phase(),
+          "the accept-during-reset control was left engaged");
+  reporter->Check(true, "reset-traffic: the rule holds and the guard fires");
+}
+
 void PhaseRedirectLateResponse(Harness* h, mosaic::Reporter* reporter,
                                Requester* req) {
   h->Phase("redirect-late-response");
@@ -1008,7 +1053,7 @@ void PhaseRedirectLateResponse(Harness* h, mosaic::Reporter* reporter,
     const Expect e = h->Cycle(s);
     Require(e.req_fire, h->phase(),
             "request " + std::to_string(i) + " was refused while the table was empty");
-    req->pending.push_back(Requester::Make(e.req_id, e.req_epoch, s.req_pc, 0, 0));
+    req->Accept(/*rst=*/false, Requester::Make(e.req_id, e.req_epoch, s.req_pc, 0, 0));
   }
 
   // --- the redirect -------------------------------------------------------
@@ -1076,7 +1121,7 @@ void PhaseRedirectLateResponse(Harness* h, mosaic::Reporter* reporter,
             "the table did not accept a request after the late responses drained");
     Require(e.req_epoch == 1, h->phase(),
             "a request was issued under the pre-redirect epoch");
-    req->pending.push_back(Requester::Make(e.req_id, e.req_epoch, s.req_pc, 0, 0));
+    req->Accept(/*rst=*/false, Requester::Make(e.req_id, e.req_epoch, s.req_pc, 0, 0));
     new_epoch_requests++;
   }
   for (uint32_t i = 0; i < new_epoch_requests; i++) {
@@ -1125,7 +1170,8 @@ void PhaseLateButLive(Harness* h, mosaic::Reporter* reporter, Requester* req) {
   issue.req_pc = kBasePc;
   const Expect issued = h->Cycle(issue);
   Require(issued.req_fire, h->phase(), "the first request was refused");
-  req->pending.push_back(Requester::Make(issued.req_id, issued.req_epoch, issue.req_pc, 0, 0));
+  req->Accept(/*rst=*/false,
+              Requester::Make(issued.req_id, issued.req_epoch, issue.req_pc, 0, 0));
 
   // Sixteen idle cycles. Latency is not a timeout: a response for a request that
   // is still outstanding is live however late it is. Only a *stale epoch* is
@@ -1985,6 +2031,7 @@ int main(int argc, char** argv) {
     mosaic::Rng rng(options.seed);
 
     PhaseResetState(&harness, &reporter);
+    PhaseResetTraffic(&harness, &reporter, &requester);
     PhaseRedirectLateResponse(&harness, &reporter, &requester);
     PhaseLateButLive(&harness, &reporter, &requester);
     PhaseCreditExactlyOnce(&harness, &reporter, &rng, &requester);

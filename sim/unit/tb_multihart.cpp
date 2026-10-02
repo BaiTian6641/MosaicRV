@@ -664,8 +664,12 @@ class Runner {
 
       Observe(&obs, p0.park_pc, p1.park_pc);
 
-      // The request side: the DUT offers at most one hart-tagged request.
-      if (dut_->mem_req_valid && dut_->mem_req_ready) {
+      // The request side: the DUT offers at most one hart-tagged request. The
+      // reset-traffic rule lives in one place (mosaic::BusResetGate): a request
+      // presented while reset is asserted is refused. Outside reset the gate is
+      // transparent, so this is the pre-rule behaviour statement for statement.
+      if (bus_gate_.MayAccept(/*reset_asserted=*/false,
+                              dut_->mem_req_valid && dut_->mem_req_ready)) {
         const unsigned hart = unsigned(dut_->mem_req_hart);
         const unsigned src = dut_->mem_req_src ? 1u : 0u;
         bus.Accept(dut_->mem_req_we != 0, dut_->mem_req_addr, unsigned(dut_->mem_req_size),
@@ -674,7 +678,10 @@ class Runner {
                    uint32_t(dut_->mem_req_id), uint32_t(dut_->mem_req_epoch));
         if (src == 0 && hart < 2) obs.daddr[hart][uint64_t(dut_->mem_req_addr)]++;
       }
-      if (dut_->mem_rsp_valid && dut_->mem_rsp_ready) bus.Pop();
+      if (bus_gate_.MayDeliver(/*reset_asserted=*/false) && dut_->mem_rsp_valid &&
+          dut_->mem_rsp_ready) {
+        bus.Pop();
+      }
       bus.Advance();
 
       const uint64_t commits = uint64_t(dut_->h0_commit_ctr) + uint64_t(dut_->h1_commit_ctr);
@@ -726,6 +733,31 @@ class Runner {
     if (MemRead8(&mem, kH1Trap, &v)) obs.trap_cause[1] = v;
     if (MemRead8(&mem, kH1Trap + 8, &v)) obs.trap_tval[1] = v;
     return obs;
+  }
+
+  // ---- reset-traffic control (V-010) --------------------------------------
+  // Presents one request to a fresh shared bus with reset asserted, through the
+  // same gate the run loop uses, and reports whether the model accepted it. The
+  // shipping configuration must refuse; the control must accept, which is what
+  // proves the rule check can fail.
+  void CheckResetTraffic(mosaic::Reporter* rep) {
+    MemoryModel mem;
+    SharedBus bus(&mem);
+    bus_gate_.SetAcceptDuringResetControl(false);
+    if (bus_gate_.MayAccept(/*reset_asserted=*/true, /*presented=*/true)) {
+      bus.Accept(false, kH0Data, 3, 0, 0xFF, false, 0, 0, 0, 0);
+    }
+    rep->Check(bus.accepted() == 0,
+               "reset-traffic: the shared bus accepted a request while reset was asserted");
+    bus_gate_.SetAcceptDuringResetControl(true);
+    if (bus_gate_.MayAccept(/*reset_asserted=*/true, /*presented=*/true)) {
+      bus.Accept(false, kH0Data, 3, 0, 0xFF, false, 0, 0, 0, 0);
+    }
+    bus_gate_.SetAcceptDuringResetControl(false);
+    rep->Check(bus.accepted() == 1,
+               "reset-traffic: the accept-during-reset control did not fire: the guard is untested");
+    rep->Check(!bus_gate_.MayAccept(true, true),
+               "reset-traffic: the accept-during-reset control was left engaged");
   }
 
  private:
@@ -841,6 +873,7 @@ class Runner {
 
   Vmosaic_multihart_tb* dut_;
   uint64_t cycles_ = 0;
+  mosaic::BusResetGate bus_gate_;  // V-010 reset-traffic rule
 };
 
 // ============================================================================
@@ -904,6 +937,7 @@ int main(int argc, char** argv) {
     const Program p0 = BuildHart0();
     const Program p1 = BuildHart1();
     Runner runner(&dut);
+    runner.CheckResetTraffic(&reporter);
 
     // ---------------------------------------------------------- the three runs
     const PhaseObs solo0 = runner.Run(0b01, p0, p1, options.max_cycles);

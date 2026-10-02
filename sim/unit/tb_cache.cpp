@@ -213,6 +213,39 @@ class Harness {
     Tick(/*rst=*/false);
   }
 
+  // ---- reset-traffic control (V-010) --------------------------------------
+  // Drives one instruction-side memory request into the DUT and runs the same
+  // ServiceMem the cycle loop runs, with reset asserted. Returns true iff the
+  // model accepted it. The shipping configuration must refuse; the control must
+  // accept, which is what proves the rule check can fail.
+  bool PresentDuringReset() {
+    const uint64_t before = i_mem_reads_;
+    const std::set<uint32_t> saved_poison = poison_;
+    const auto saved_valid = dut_->im_req_valid;
+    const auto saved_we = dut_->im_req_we;
+    const auto saved_addr = dut_->im_req_addr;
+    const auto saved_ready = dut_->im_req_ready;
+    dut_->im_req_valid = 1;
+    dut_->im_req_we = 0;
+    dut_->im_req_addr = 0x1000;  // a line inside mem_
+    dut_->im_req_ready = 1;
+    dut_->eval();
+    ServiceMem(/*ic=*/true, /*rst=*/true);
+    dut_->im_req_valid = saved_valid;
+    dut_->im_req_we = saved_we;
+    dut_->im_req_addr = saved_addr;
+    dut_->im_req_ready = saved_ready;
+    dut_->eval();
+    const bool accepted = i_mem_reads_ != before;
+    // The control must not perturb the model's tallies or its fault policy:
+    // later checks compare them against the expected counts.
+    i_mem_reads_ = before;
+    i_pend_ = false;
+    poison_ = saved_poison;
+    return accepted;
+  }
+  void SetAcceptDuringResetControl(bool on) { bus_gate_.SetAcceptDuringResetControl(on); }
+
   // -------------------------------------------------------- cache access
   Result Access(bool ic, bool we, uint32_t addr, uint64_t wdata = 0,
                 uint8_t wmask = 0xff) {
@@ -257,6 +290,23 @@ class Harness {
   Result Load(bool ic, uint32_t addr, const char* ctx = "load") {
     return Do(ic, false, addr, 0, 0, ctx);
   }
+
+  // ------------------------------------- non-blocking campaign primitives
+  // `Access`/`Do` are strictly sequential: they wait for each response before
+  // offering the next request. The non-blocking campaign needs to have more
+  // than one request in flight, so these expose the handshake one cycle at a
+  // time. `Offer` leaves the request asserted; `Withdraw` drops it.
+  void Offer(bool ic, bool we, uint32_t addr, uint64_t wdata = 0, uint8_t wmask = 0xff) {
+    SetRequest(ic, true, we, addr, wdata, wmask);
+  }
+  void Withdraw(bool ic) { SetRequest(ic, false, false, 0, 0, 0); }
+  void TickNow() { Tick(false); }
+  bool TickAccepted(bool ic) { Tick(false); return Accepted(ic); }
+  bool RespValidNow(bool ic) const { return ic ? i_resp_valid_ : d_resp_valid_; }
+  bool RespFaultNow(bool ic) const { return ic ? i_resp_fault_ : d_resp_fault_; }
+  uint64_t RespDataNow(bool ic) const { return ic ? i_resp_rdata_ : d_resp_rdata_; }
+  uint32_t OutstandingNow() { dut_->eval(); return dut_->dev_outstanding; }
+  uint64_t DcCoalesce() const { return d_coalesce_; }
 
   // ------------------------------------------------------------- flush
   void Flush(bool ic) {
@@ -383,7 +433,10 @@ class Harness {
     const bool ready     = ic ? (dut_->im_req_ready != 0) : (dut_->dm_req_ready != 0);
 
     bool next_pend = false;
-    if (!rst && req_valid && ready) {
+    // The reset-traffic rule lives in one place (mosaic::BusResetGate): a request
+    // presented while reset is asserted is refused. This was an ad-hoc `!rst`
+    // guard; the gate is strictly equivalent here and is the shared mechanism.
+    if (bus_gate_.MayAccept(rst, req_valid && ready)) {
       if (req_we) {
         uint8_t line_data[kLineBytes];
         if (ic) ExtractLine(dut_->im_req_wdata, line_data);
@@ -435,11 +488,13 @@ class Harness {
     dut_->idbg_index = i_dbg_index_m_;
     QuietMshr(dut_);
 
-    // Memory-side response, one cycle after a read was accepted.
-    dut_->dm_resp_valid = d_pend_ ? 1 : 0;
+    // Memory-side response, one cycle after a read was accepted. Delivery goes
+    // through the same gate: no response crosses a reset.
+    const bool deliver = bus_gate_.MayDeliver(rst);
+    dut_->dm_resp_valid = (deliver && d_pend_) ? 1 : 0;
     dut_->dm_resp_fault = d_pend_fault_ ? 1 : 0;
     AssignLine(&dut_->dm_resp_rdata, d_pend_data_);
-    dut_->im_resp_valid = i_pend_ ? 1 : 0;
+    dut_->im_resp_valid = (deliver && i_pend_) ? 1 : 0;
     dut_->im_resp_fault = i_pend_fault_ ? 1 : 0;
     AssignLine(&dut_->im_resp_rdata, i_pend_data_);
 
@@ -471,6 +526,7 @@ class Harness {
     d_ev_.refill    += dut_->dev_refill != 0;
     d_ev_.writeback += dut_->dev_writeback != 0;
     d_ev_.fault     += dut_->dev_fault != 0;
+    d_coalesce_     += dut_->dev_coalesce != 0;
     i_ev_.hit       += dut_->iev_hit != 0;
     i_ev_.miss      += dut_->iev_miss != 0;
     i_ev_.refill    += dut_->iev_refill != 0;
@@ -497,6 +553,7 @@ class Harness {
 
   std::vector<uint8_t> mem_;       // DUT backing store
   std::vector<uint8_t> ref_mem_;   // reference backing store
+  mosaic::BusResetGate bus_gate_;  // V-010 reset-traffic rule
   std::set<uint32_t> poison_;      // DUT-side first-touch fault policy
   std::set<uint32_t> ref_poison_;  // reference-side first-touch fault policy
 
@@ -523,6 +580,7 @@ class Harness {
   int mem_stall_ = 0;
 
   Counters d_ev_, i_ev_;
+  uint64_t d_coalesce_ = 0;
   uint64_t d_mem_reads_ = 0, d_mem_writes_ = 0;
   uint64_t i_mem_reads_ = 0, i_mem_writes_ = 0;
 };
@@ -535,6 +593,7 @@ class Campaign {
 
   std::string Run() {
     ColdReset();
+    ResetTraffic();
     RefillAndHit();
     Conflict();
     DirtyEviction();
@@ -548,6 +607,22 @@ class Campaign {
 
  private:
   void Check(bool passed, const std::string& what) { rep_->Check(passed, what); }
+
+  // V-010: the bus model refuses a request presented while reset is asserted,
+  // and the guard has been seen to fire.
+  void ResetTraffic() {
+    h_->Phase("reset-traffic");
+    h_->Reset(2);
+    Check(!h_->PresentDuringReset(),
+          "reset-traffic: the memory model accepted a request while reset was asserted");
+    h_->SetAcceptDuringResetControl(true);
+    const bool control_accepted = h_->PresentDuringReset();
+    h_->SetAcceptDuringResetControl(false);
+    Check(control_accepted,
+          "reset-traffic: the accept-during-reset control did not fire: the guard is untested");
+    Check(!h_->PresentDuringReset(),
+          "reset-traffic: the accept-during-reset control was left engaged");
+  }
 
   void ColdReset() {
     h_->Phase("cold-reset");
@@ -816,6 +891,59 @@ class MshrHarness {
     Tick(/*rst=*/false);
   }
 
+  // The one place a memory read is accepted, so the reset-traffic control below
+  // exercises the real accept path. The rule lives in mosaic::BusResetGate: a
+  // request presented while reset is asserted is refused. This was an ad-hoc
+  // `!rst` guard; the gate is strictly equivalent here and is the shared
+  // mechanism.
+  void AcceptMemRead(bool rst) {
+    if (!bus_gate_.MayAccept(rst, (dut_->nb_mem_req_valid != 0) &&
+                                     (dut_->nb_mem_req_ready != 0))) {
+      return;
+    }
+    PendingRead r;
+    r.addr = dut_->nb_mem_req_addr;
+    const uint32_t line = LineOf(r.addr);
+    r.fault = poison_.count(line) != 0;
+    if (r.fault) poison_.erase(line);
+    for (int i = 0; i < kLineBytes; ++i) {
+      r.data[i] = r.fault ? 0 : mem_[line + i];
+    }
+    pending_reads_.push_back(r);
+    ++mem_reads_;
+  }
+
+  // ---- reset-traffic control (V-010) --------------------------------------
+  // Drives one memory request into the DUT and runs the same AcceptMemRead the
+  // cycle loop runs, with reset asserted. Returns true iff the model accepted
+  // it. The shipping configuration must refuse; the control must accept, which
+  // is what proves the rule check can fail.
+  bool PresentDuringReset() {
+    const size_t before = pending_reads_.size();
+    const uint64_t reads_before = mem_reads_;
+    const std::set<uint32_t> saved_poison = poison_;
+    const auto saved_valid = dut_->nb_mem_req_valid;
+    const auto saved_addr = dut_->nb_mem_req_addr;
+    const auto saved_ready = dut_->nb_mem_req_ready;
+    dut_->nb_mem_req_valid = 1;
+    dut_->nb_mem_req_addr = 0x1000;  // a line inside mem_
+    dut_->nb_mem_req_ready = 1;
+    dut_->eval();
+    AcceptMemRead(/*rst=*/true);
+    dut_->nb_mem_req_valid = saved_valid;
+    dut_->nb_mem_req_addr = saved_addr;
+    dut_->nb_mem_req_ready = saved_ready;
+    dut_->eval();
+    const bool accepted = pending_reads_.size() != before;
+    // The control must not perturb the model's tallies or its fault policy:
+    // later checks compare them against the expected counts.
+    if (accepted) pending_reads_.pop_back();
+    mem_reads_ = reads_before;
+    poison_ = saved_poison;
+    return accepted;
+  }
+  void SetAcceptDuringResetControl(bool on) { bus_gate_.SetAcceptDuringResetControl(on); }
+
   // ------------------------------------------------------------- stimulus
   void Issue(uint32_t addr, uint32_t id, bool expect_fault, const char* ctx) {
     if (exp_.count(id) != 0 || cancelled_.count(id) != 0) {
@@ -997,20 +1125,7 @@ class MshrHarness {
 
     // --- sample ------------------------------------------------------------
     req_accept_ = req_valid_m_ && (dut_->nb_req_ready != 0);
-    const bool mem_read = !rst && (dut_->nb_mem_req_valid != 0) &&
-                          (dut_->nb_mem_req_ready != 0);
-    if (mem_read) {
-      PendingRead r;
-      r.addr = dut_->nb_mem_req_addr;
-      const uint32_t line = LineOf(r.addr);
-      r.fault = poison_.count(line) != 0;
-      if (r.fault) poison_.erase(line);
-      for (int i = 0; i < kLineBytes; ++i) {
-        r.data[i] = r.fault ? 0 : mem_[line + i];
-      }
-      pending_reads_.push_back(r);
-      ++mem_reads_;
-    }
+    AcceptMemRead(rst);
 
     const bool resp_valid = !rst && (dut_->nb_resp_valid != 0);
     const uint32_t resp_id = dut_->nb_resp_id;
@@ -1102,6 +1217,7 @@ class MshrHarness {
 
   std::vector<uint8_t> mem_;
   std::vector<uint8_t> ref_mem_;
+  mosaic::BusResetGate bus_gate_;  // V-010 reset-traffic rule
   std::set<uint32_t>   poison_;
   std::vector<PendingRead> pending_reads_;
   std::map<uint32_t, Expectation> exp_;
@@ -1138,6 +1254,7 @@ class MshrCampaign {
 
   std::string Run() {
     ColdReset();
+    ResetTraffic();
     RefillAndHit();
     DuplicateMiss();
     DifferentLines();
@@ -1153,6 +1270,22 @@ class MshrCampaign {
 
  private:
   void Check(bool passed, const std::string& what) { rep_->Check(passed, what); }
+
+  // V-010: the bus model refuses a request presented while reset is asserted,
+  // and the guard has been seen to fire.
+  void ResetTraffic() {
+    h_->Phase("reset-traffic");
+    h_->Reset(2);
+    Check(!h_->PresentDuringReset(),
+          "reset-traffic: the memory model accepted a request while reset was asserted");
+    h_->SetAcceptDuringResetControl(true);
+    const bool control_accepted = h_->PresentDuringReset();
+    h_->SetAcceptDuringResetControl(false);
+    Check(control_accepted,
+          "reset-traffic: the accept-during-reset control did not fire: the guard is untested");
+    Check(!h_->PresentDuringReset(),
+          "reset-traffic: the accept-during-reset control was left engaged");
+  }
 
   void ColdReset() {
     h_->Phase("cold-reset");
@@ -1426,6 +1559,175 @@ class MshrCampaign {
   mosaic::Reporter* rep_;
 };
 
+// ===========================================================================
+// The non-blocking L1D campaign (this deliverable). The write-back L1 is now
+// non-blocking: a demand that HITS is answered while a miss is outstanding, a
+// demand that misses a line already in flight COALESCES onto it, and the
+// outstanding-miss table holds more than one entry. The four controls in
+// tools/run_memscale_controls.py each break one clause and must be caught here.
+class NbCacheCampaign {
+ public:
+  NbCacheCampaign(Harness* h, mosaic::Reporter* rep) : h_(h), rep_(rep) {}
+  void Check(bool ok, const std::string& what) { rep_->Check(ok, what); }
+
+  std::string Run() {
+    h_->Reset(4);
+    ColdReset();
+    RefillFault();
+    DirtyEvict();
+    HitDuringMiss();
+    CoalesceWords();
+    MultiEntry();
+    return Final();
+  }
+
+ private:
+  void ColdReset() {
+    h_->Phase("nb-cold-reset");
+    h_->CheckAllInvalid(false, "nb-cold-reset");
+  }
+
+  void RefillFault() {
+    h_->Phase("nb-refill-fault");
+    const uint32_t a = Addr(20, 1, 0);
+    h_->Poison(LineOf(a));
+    const Counters before = h_->Dc();
+    const Result first = h_->Load(false, a, "poisoned");
+    Check(first.fault, "nb-refill-fault: a failed refill answers with a fault");
+    Check(!h_->DebugValid(false, a),
+          "nb-refill-fault: a faulted refill never marks a line valid");
+    Check(h_->Dc().fault == before.fault + 1, "nb-refill-fault: ev_fault pulsed");
+    const Result second = h_->Load(false, a, "retry");
+    Check(!second.fault, "nb-refill-fault: the retry succeeds");
+    Check(h_->DebugValid(false, a), "nb-refill-fault: the retried refill installs the line");
+  }
+
+  void DirtyEvict() {
+    h_->Phase("nb-dirty-evict");
+    const uint32_t a = Addr(21, 2, 0);
+    const uint32_t b = Addr(22, 2, 0);   // same set, different tag
+    const uint64_t v = 0x1122334455667788ull;
+    h_->Store(false, a, v, 0xff, "store");
+    const Counters before = h_->Dc();
+    (void)h_->Load(false, b, "evict");
+    Check(h_->Dc().writeback == before.writeback + 1,
+          "nb-dirty-evict: the dirty victim was written back");
+    Check(h_->MemWord(a) == v, "nb-dirty-evict: the victim lost no byte on eviction");
+  }
+
+  void HitDuringMiss() {
+    h_->Phase("nb-hit-during-miss");
+    const uint32_t hot  = Addr(23, 3, 0);
+    const uint32_t cold = Addr(24, 5, 0);
+    const uint64_t hot_data = h_->MemWord(hot);
+    (void)h_->Load(false, hot, "warm");
+    // Start a miss on `cold` and hold the memory port so it stays outstanding.
+    h_->StallMemory(16);
+    h_->Offer(false, false, cold);
+    Check(h_->TickAccepted(false), "nb-hit-during-miss: the miss is accepted");
+    h_->Withdraw(false);
+    Check(h_->OutstandingNow() > 0, "nb-hit-during-miss: a miss is outstanding");
+    // A hit must be accepted and answered now, before the miss completes.
+    h_->Offer(false, false, hot);
+    const bool accepted = h_->TickAccepted(false);
+    h_->Withdraw(false);
+    Check(accepted, "nb-hit-during-miss: a hit is accepted while a miss is outstanding");
+    bool got = false;
+    for (int i = 0; i < 64 && !got; ++i) { h_->TickNow(); got = h_->RespValidNow(false); }
+    Check(got, "nb-hit-during-miss: the hit is answered while the miss is still outstanding");
+    Check(!h_->RespFaultNow(false) && h_->RespDataNow(false) == hot_data,
+          "nb-hit-during-miss: the hit returns the resident line");
+    Check(h_->OutstandingNow() > 0, "nb-hit-during-miss: an unrelated miss was still in flight");
+    h_->StallMemory(0);
+    bool done = false;
+    for (int i = 0; i < 200 && !done; ++i) { h_->TickNow(); done = h_->RespValidNow(false); }
+    Check(done, "nb-hit-during-miss: the miss eventually completes");
+    Check(h_->OutstandingNow() == 0, "nb-hit-during-miss: the table is empty at rest");
+  }
+
+  void CoalesceWords() {
+    h_->Phase("nb-coalesce-words");
+    const uint32_t base = Addr(25, 6, 0);
+    const uint64_t w0 = h_->MemWord(base + 0);
+    const uint64_t w1 = h_->MemWord(base + 8);
+    const uint64_t w2 = h_->MemWord(base + 16);
+    h_->StallMemory(32);
+    const uint64_t reads_before = h_->DcMemReads();
+    h_->Offer(false, false, base + 0);
+    Check(h_->TickAccepted(false), "nb-coalesce-words: first miss accepted");
+    h_->Offer(false, false, base + 8);
+    Check(h_->TickAccepted(false), "nb-coalesce-words: second request coalesces onto the entry");
+    h_->Offer(false, false, base + 16);
+    Check(h_->TickAccepted(false), "nb-coalesce-words: third request coalesces onto the entry");
+    h_->Withdraw(false);
+    Check(h_->OutstandingNow() == 1, "nb-coalesce-words: one line, one entry");
+    h_->StallMemory(0);
+    uint64_t seen[3] = {0, 0, 0};
+    int n = 0;
+    for (int i = 0; i < 400 && n < 3; ++i) {
+      h_->TickNow();
+      if (h_->RespValidNow(false)) seen[n++] = h_->RespDataNow(false);
+    }
+    Check(n == 3, "nb-coalesce-words: one response per coalesced request");
+    Check(seen[0] == w0 && seen[1] == w1 && seen[2] == w2,
+          "nb-coalesce-words: every coalesced waiter gets its own word");
+    Check(h_->DcMemReads() == reads_before + 1,
+          "nb-coalesce-words: a coalesced miss issues exactly one memory read");
+  }
+
+  void MultiEntry() {
+    h_->Phase("nb-multi-entry");
+    const uint32_t a[4] = {Addr(26, 0, 0), Addr(27, 1, 0), Addr(28, 4, 0), Addr(29, 7, 0)};
+    h_->StallMemory(48);
+    for (int i = 0; i < 4; ++i) {
+      h_->Offer(false, false, a[i]);
+      Check(h_->TickAccepted(false), "nb-multi-entry: each miss is accepted");
+    }
+    h_->Withdraw(false);
+    Check(h_->OutstandingNow() == 4, "nb-multi-entry: four misses are outstanding at once");
+    h_->StallMemory(0);
+    uint64_t seen[4] = {0, 0, 0, 0};
+    int n = 0;
+    for (int i = 0; i < 800 && n < 4; ++i) {
+      h_->TickNow();
+      if (h_->RespValidNow(false)) seen[n++] = h_->RespDataNow(false);
+    }
+    Check(n == 4, "nb-multi-entry: four responses");
+    bool ok = true;
+    for (int i = 0; i < 4; ++i) {
+      std::fprintf(stderr, "DBG multi[%d] seen=%016llx exp=%016llx addr=%08x\n",
+                   i, (unsigned long long)seen[i], (unsigned long long)h_->MemWord(a[i]), a[i]);
+      ok = ok && (seen[i] == h_->MemWord(a[i]));
+    }
+    Check(ok, "nb-multi-entry: each line returns its own word");
+    Check(h_->OutstandingNow() == 0, "nb-multi-entry: the table drains");
+  }
+
+  std::string Final() {
+    h_->Phase("nb-final");
+    Check(h_->OutstandingNow() == 0, "nb-final: no outstanding entries at rest");
+    const Counters d = h_->Dc();
+    Check(h_->DcMemReads() == d.refill + d.fault,
+          "nb-final: every memory read is a refill or a fault");
+    Check(d.hit > 0 && d.miss > 0 && d.refill > 0 && d.fault > 0 && d.writeback > 0,
+          "coverage: the non-blocking L1D exercised hit/miss/refill/fault/writeback");
+    Check(h_->DcCoalesce() > 0, "coverage: at least one miss coalesced");
+    char detail[256];
+    std::snprintf(detail, sizeof(detail),
+                  "nb-l1d: hit=%llu miss=%llu coalesce=%llu refill=%llu fault=%llu "
+                  "wb=%llu reads=%llu cycles=%llu",
+                  (unsigned long long)d.hit, (unsigned long long)d.miss,
+                  (unsigned long long)h_->DcCoalesce(), (unsigned long long)d.refill,
+                  (unsigned long long)d.fault, (unsigned long long)d.writeback,
+                  (unsigned long long)h_->DcMemReads(),
+                  (unsigned long long)h_->cycles());
+    return std::string(detail);
+  }
+
+  Harness* h_;
+  mosaic::Reporter* rep_;
+};
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -1457,6 +1759,11 @@ int main(int argc, char** argv) {
       MshrCampaign campaign(&harness, &reporter);
       detail = campaign.Run();
       reporter.Check(passed, "every accepted request is answered or cancelled exactly once");
+      // The same case also carries the non-blocking L1D campaign: the wrapper's
+      // data cache is the write-back L1 this deliverable made non-blocking.
+      Harness nb_harness(&dut, &clk, &reporter, options.max_cycles);
+      NbCacheCampaign nb_campaign(&nb_harness, &reporter);
+      detail += " | " + nb_campaign.Run();
     } else {
       Harness harness(&dut, &clk, &reporter, options.max_cycles);
       Campaign campaign(&harness, &reporter);

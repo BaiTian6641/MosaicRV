@@ -167,6 +167,34 @@ def render_sv_package(bundle: config_check.Bundle, advertised) -> str:
     add("  localparam int unsigned MOSAIC_SQ_ENTRIES = %d;" % geometry["lsu"]["sq_entries"])
     add("")
 
+    # The L1s. A profile with a `caches` block declares the geometry the RTL
+    # must build; a profile without one (p0) implements no cache at all, but the
+    # RTL still has to *elaborate* a cache module, so the historical
+    # direct-mapped 32-byte/8-set stand-in is emitted. That keeps a cache-off
+    # profile byte-identical to the machine it built before this block existed,
+    # while a profile that declares caches gets exactly what it declared --
+    # `line_bytes`, `sets` and `ways` are all consumed by the cache and MSHR,
+    # not merely written down.
+    caches = geometry.get("caches")
+    if caches:
+        line_bytes = int(caches["line_bytes"])
+        l1i_sets   = int(caches["l1i_sets"])
+        l1i_ways   = int(caches["l1i_ways"])
+        l1d_sets   = int(caches["l1d_sets"])
+        l1d_ways   = int(caches["l1d_ways"])
+        mshrs      = int(caches["mshrs"])
+    else:
+        line_bytes, l1i_sets, l1i_ways, l1d_sets, l1d_ways, mshrs = 32, 8, 1, 8, 1, 4
+    add("  // L1 caches. Size = sets * ways * line_bytes; a profile with no `caches`")
+    add("  // block gets the historical direct-mapped 32-byte stand-in above.")
+    add("  localparam int unsigned MOSAIC_CACHE_LINE_BYTES = %d;" % line_bytes)
+    add("  localparam int unsigned MOSAIC_L1I_SETS         = %d;" % l1i_sets)
+    add("  localparam int unsigned MOSAIC_L1I_WAYS         = %d;" % l1i_ways)
+    add("  localparam int unsigned MOSAIC_L1D_SETS         = %d;" % l1d_sets)
+    add("  localparam int unsigned MOSAIC_L1D_WAYS         = %d;" % l1d_ways)
+    add("  localparam int unsigned MOSAIC_MSHR_ENTRIES     = %d;" % mshrs)
+    add("")
+
     if "V" in advertised:
         vector = geometry["vector"]
         add("  // Vector (advertised: V is in the advertised capability list)")

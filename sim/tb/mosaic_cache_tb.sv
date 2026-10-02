@@ -54,6 +54,8 @@ module mosaic_cache_tb (
 
   output logic         dev_hit,
   output logic         dev_miss,
+  output logic         dev_coalesce,
+  output logic [2:0]   dev_outstanding,
   output logic         dev_refill,
   output logic         dev_writeback,
   output logic         dev_fault,
@@ -91,6 +93,8 @@ module mosaic_cache_tb (
 
   output logic         iev_hit,
   output logic         iev_miss,
+  output logic         iev_coalesce,
+  output logic [2:0]   iev_outstanding,
   output logic         iev_refill,
   output logic         iev_writeback,
   output logic         iev_fault,
@@ -167,10 +171,12 @@ module mosaic_cache_tb (
     .mem_resp_fault (dm_resp_fault),
     .flush_valid (dfl_valid), .flush_ready (dfl_ready), .flush_done (dfl_done),
     .flush_busy (dfl_busy),
-    .dbg_index (ddbg_index), .dbg_valid (ddbg_valid), .dbg_dirty (ddbg_dirty),
-    .dbg_tag (ddbg_tag), .dbg_data (ddbg_data),
-    .ev_hit (dev_hit), .ev_miss (dev_miss), .ev_refill (dev_refill),
-    .ev_writeback (dev_writeback), .ev_fault (dev_fault)
+    .inv_valid (1'b0), .inv_addr (32'd0),
+    .dbg_index (ddbg_index), .dbg_way (1'b0), .dbg_valid (ddbg_valid),
+    .dbg_dirty (ddbg_dirty), .dbg_tag (ddbg_tag), .dbg_data (ddbg_data),
+    .ev_hit (dev_hit), .ev_miss (dev_miss), .ev_coalesce (dev_coalesce),
+    .ev_refill (dev_refill), .ev_writeback (dev_writeback), .ev_fault (dev_fault),
+    .o_outstanding (dev_outstanding)
   );
 
   mosaic_cache #(
@@ -191,10 +197,12 @@ module mosaic_cache_tb (
     .mem_resp_fault (im_resp_fault),
     .flush_valid (ifl_valid), .flush_ready (ifl_ready), .flush_done (ifl_done),
     .flush_busy (ifl_busy),
-    .dbg_index (idbg_index), .dbg_valid (idbg_valid), .dbg_dirty (idbg_dirty),
-    .dbg_tag (idbg_tag), .dbg_data (idbg_data),
-    .ev_hit (iev_hit), .ev_miss (iev_miss), .ev_refill (iev_refill),
-    .ev_writeback (iev_writeback), .ev_fault (iev_fault)
+    .inv_valid (1'b0), .inv_addr (32'd0),
+    .dbg_index (idbg_index), .dbg_way (1'b0), .dbg_valid (idbg_valid),
+    .dbg_dirty (idbg_dirty), .dbg_tag (idbg_tag), .dbg_data (idbg_data),
+    .ev_hit (iev_hit), .ev_miss (iev_miss), .ev_coalesce (iev_coalesce),
+    .ev_refill (iev_refill), .ev_writeback (iev_writeback), .ev_fault (iev_fault),
+    .o_outstanding (iev_outstanding)
   );
 
   mosaic_mshr #(
@@ -215,7 +223,9 @@ module mosaic_cache_tb (
     .mem_req_ready (nb_mem_req_ready),
     .mem_resp_valid (nb_mem_resp_valid), .mem_resp_addr (nb_mem_resp_addr),
     .mem_resp_rdata (nb_mem_resp_rdata), .mem_resp_fault (nb_mem_resp_fault),
-    .dbg_index (nb_dbg_index), .dbg_valid (nb_dbg_valid), .dbg_tag (nb_dbg_tag),
+    .flush_valid (1'b0), .flush_ready (), .flush_done (), .flush_busy (),
+    .dbg_index (nb_dbg_index), .dbg_way (1'b0), .dbg_valid (nb_dbg_valid),
+    .dbg_tag (nb_dbg_tag),
     .dbg_data (nb_dbg_data), .dbg_outstanding (nb_dbg_outstanding),
     .dbg_waiters (nb_dbg_waiters),
     .ev_hit (nb_ev_hit), .ev_miss (nb_ev_miss), .ev_coalesce (nb_ev_coalesce),

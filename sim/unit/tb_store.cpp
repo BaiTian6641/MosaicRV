@@ -1251,6 +1251,20 @@ class Bench {
     }
   }
 
+  // ------------------------------------------- the one bus-model advance (V-010)
+  // The reset-traffic rule lives in one place (`mosaic::BusResetGate`): while
+  // reset is asserted the memory model accepts nothing and delivers nothing. The
+  // shipping cycle loop and the reset-traffic control both come through here, so
+  // the control exercises the real accept path. With the gate in its shipping
+  // state this is statement-for-statement the pre-rule behaviour.
+  MemoryModel::EdgeResult StepMemory(bool rst, bool mem_valid, bool program_ready, bool we,
+                                     uint64_t addr, uint32_t size_bytes, uint64_t wdata,
+                                     bool rsp_ready) {
+    if (!bus_gate_.MayDeliver(rst)) return MemoryModel::EdgeResult{};
+    const bool accept = bus_gate_.MayAccept(rst, mem_valid && program_ready);
+    return mem_.Edge(cycle_, accept, program_ready, we, addr, size_bytes, wdata, rsp_ready);
+  }
+
   // ------------------------------------------------------- shadow/edge update
   void Commit(const DutOut& o, const Stim& s, bool rst) {
     if (rst) {
@@ -1307,8 +1321,8 @@ class Bench {
     // non-zero lane would land in the wrong bytes.
     const uint32_t size_bytes = o.mem_req_valid ? SizeBytes(uint32_t(o.mem_req_size)) : 0;
     MemoryModel::EdgeResult edge =
-        mem_.Edge(cycle_, o.mem_req_valid, s.mem_req_ready, o.mem_req_we, o.mem_req_addr,
-                  size_bytes, o.mem_req_wdata, o.mem_rsp_ready);
+        StepMemory(rst, o.mem_req_valid, s.mem_req_ready, o.mem_req_we, o.mem_req_addr,
+                   size_bytes, o.mem_req_wdata, o.mem_rsp_ready);
     Require(!edge.accepted || !sent_.empty(), "memory-accept",
             "the memory accepted a transaction the queue never offered");
     if (edge.accepted && !sent_.empty()) {
@@ -1410,6 +1424,7 @@ class Bench {
   Codec codec_ = Codec(Geom());
   Shadow shadow_;
   MemoryModel mem_;
+  mosaic::BusResetGate bus_gate_;
   DutOut last_;
 
   // The stores the queue offered, in order. The front is the one the endpoint is
@@ -1454,6 +1469,23 @@ class Bench {
   std::vector<uint8_t> exp_mem_;
 
  public:
+  // ---- reset-traffic control (V-010) --------------------------------------
+  // Offers one request to the memory model with reset asserted, through the
+  // same gate the cycle loop uses, and returns true iff the model accepted it.
+  // In the shipping configuration it must refuse; with the accept-during-reset
+  // control engaged the same path must accept, which is what proves the rule
+  // check can fail rather than passing because nothing was ever offered.
+  bool PresentDuringReset() {
+    mem_.FlushPending();
+    const uint64_t before = mem_.accepted();
+    StepMemory(/*rst=*/true, /*mem_valid=*/true, /*program_ready=*/true, /*we=*/true,
+               kShadowBase, 8, 0x1122334455667788ull, /*rsp_ready=*/false);
+    return mem_.accepted() != before;
+  }
+  void SetAcceptDuringResetControl(bool on) {
+    bus_gate_.SetAcceptDuringResetControl(on);
+  }
+
   uint64_t run_allocs() const { return run_allocs_; }
   uint64_t run_drains() const { return run_drains_; }
   uint64_t run_squashes() const { return run_squashes_; }
@@ -1511,6 +1543,28 @@ void PhaseResetState(Bench* b) {
   b->RunIdle(4);
   b->Require(b->mem().accepted() == 0, "reset", "the memory saw a transaction after reset");
   b->CheckMemory();
+  b->EndPhase();
+}
+
+// ------------------------------------------------------- 1b. the reset rule (V-010)
+// The bus model refuses a request presented while reset is asserted, and the
+// guard has been seen to fire. The model is flushed at reset for a reason the
+// gate does not subsume -- the DUT's transaction state is cleared by the reset
+// and the model must resynchronise with it -- so the flush stays and the gate is
+// added on the accept/deliver decision.
+void PhaseResetTraffic(Bench* b) {
+  b->Phase("reset-traffic");
+  b->Fresh();
+  b->Require(!b->PresentDuringReset(), "reset-traffic",
+             "the memory model accepted a request while reset was asserted");
+  b->SetAcceptDuringResetControl(true);
+  const bool control_accepted = b->PresentDuringReset();
+  b->SetAcceptDuringResetControl(false);
+  b->Require(control_accepted, "reset-traffic",
+             "the accept-during-reset control did not fire: the reset-traffic "
+             "guard is untested");
+  b->Require(!b->PresentDuringReset(), "reset-traffic",
+             "the accept-during-reset control was left engaged");
   b->EndPhase();
 }
 
@@ -2139,6 +2193,7 @@ int main(int argc, char** argv) {
     bench.ReadGeometry();
 
     PhaseResetState(&bench);
+    PhaseResetTraffic(&bench);
     PhaseWrongPath(&bench);
     PhaseFlushSafety(&bench);
     PhaseInOrder(&bench);

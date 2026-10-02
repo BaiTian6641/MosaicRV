@@ -1056,6 +1056,131 @@ def _check_geometry(bundle: Bundle, profile_name: str) -> None:
             % (bundle.profile.get("clusters"), fabric["clusters"]),
         )
 
+    # -- the scalable-axis constraint rules (docs/scalability-plan.md section 3) --
+    #
+    # S-4: every combination below is impossible for a reason that is stated in
+    # the message, and it is rejected here by the key names it involves rather
+    # than discovered later as a simulation symptom. A key that is *absent*
+    # means the RTL's literal for that axis (the schema descriptions say which),
+    # not zero; where the gate can model that literal it does, and where it
+    # cannot (decode width, before S-1) the rule is decided only once the axis
+    # is actually declared.
+    if rename["rename_width"] < 1:
+        bundle.fail(
+            "geometry",
+            "rename.rename_width=%d is not at least 1; a rename stage of width zero "
+            "allocates no physical register and is not a pipeline stage" % rename["rename_width"],
+        )
+
+    if "decode_width" in frontend:
+        decode_width = frontend["decode_width"]
+        if decode_width < 1:
+            bundle.fail(
+                "geometry",
+                "frontend.decode_width=%d is not at least 1; a decoder that produces no "
+                "control word per cycle cannot feed the queue" % decode_width,
+            )
+        if decode_width < rename["rename_width"]:
+            bundle.fail(
+                "geometry",
+                "frontend.decode_width=%d is narrower than rename.rename_width=%d; you "
+                "cannot rename more uops than the decoder delivers, and the extra rename "
+                "ports would be starved every cycle"
+                % (decode_width, rename["rename_width"]),
+            )
+
+    if rob["entries"] < rob["max_uops_per_macro"]:
+        bundle.fail(
+            "geometry",
+            "rob.entries=%d cannot hold one macro of rob.max_uops_per_macro=%d uops; the "
+            "largest macro the front end can present would never fit, so allocation of it "
+            "could never complete" % (rob["entries"], rob["max_uops_per_macro"]),
+        )
+
+    if rob["entries"] < 2 * rename["rename_width"]:
+        bundle.fail(
+            "geometry",
+            "rob.entries=%d is less than two allocation cycles (2 * rename.rename_width=%d); "
+            "the window would be smaller than the allocator fills in two cycles, so the "
+            "second allocation port never has room and the width is nominal"
+            % (rob["entries"], 2 * rename["rename_width"]),
+        )
+
+    commit_width = rob.get("commit_width", rename["dispatch_width"])
+    if commit_width < 1:
+        bundle.fail(
+            "geometry",
+            "rob.commit_width=%d is not at least 1; a machine that can never retire an "
+            "instruction makes no forward progress" % commit_width,
+        )
+    if commit_width > 2 * rob["max_uops_per_macro"]:
+        bundle.fail(
+            "geometry",
+            "rob.commit_width=%d exceeds 2 * rob.max_uops_per_macro=%d; retire bandwidth "
+            "beyond twice the largest macro retires more uops than the front end can ever "
+            "present in a window, so the extra lanes are unexercisable"
+            % (commit_width, 2 * rob["max_uops_per_macro"]),
+        )
+
+    if lsu["lq_entries"] < lsu["units"]:
+        bundle.fail(
+            "geometry",
+            "lsu.lq_entries=%d is smaller than lsu.units=%d; a load unit with no queue entry "
+            "can never be occupied, so it is dead hardware"
+            % (lsu["lq_entries"], lsu["units"]),
+        )
+    if lsu["sq_entries"] < lsu["units"]:
+        bundle.fail(
+            "geometry",
+            "lsu.sq_entries=%d is smaller than lsu.units=%d; a store unit with no queue entry "
+            "can never be occupied, so it is dead hardware"
+            % (lsu["sq_entries"], lsu["units"]),
+        )
+
+    if fabric["clusters"] < 1:
+        bundle.fail(
+            "geometry",
+            "fabric.clusters=%d is zero; there is no issue fabric to schedule onto"
+            % fabric["clusters"],
+        )
+    if fabric["alu_per_cluster"] < 1 and fabric["mul_div_units"] < 1:
+        bundle.fail(
+            "geometry",
+            "fabric.alu_per_cluster=%d and fabric.mul_div_units=%d are both zero; a fabric "
+            "with no integer execution unit can never issue or complete a uop"
+            % (fabric["alu_per_cluster"], fabric["mul_div_units"]),
+        )
+
+    if geometry.get("caches"):
+        caches = geometry["caches"]
+        line_bytes = caches["line_bytes"]
+        if line_bytes < 8:
+            bundle.fail(
+                "geometry",
+                "caches.line_bytes=%d is smaller than 8, the narrowest RISC-V access width "
+                "a line must hold" % line_bytes,
+            )
+        if not power_of_two(line_bytes):
+            bundle.fail(
+                "geometry",
+                "caches.line_bytes=%d is not a power of two; set indexing and refill beating "
+                "would need a divide or an explicit mask" % line_bytes,
+            )
+        if caches["l1i_ways"] > caches["l1i_sets"]:
+            bundle.fail(
+                "geometry",
+                "caches.l1i_ways=%d exceeds caches.l1i_sets=%d; more ways than sets leaves "
+                "part of the tag array unreachable by any index"
+                % (caches["l1i_ways"], caches["l1i_sets"]),
+            )
+        if caches["l1d_ways"] > caches["l1d_sets"]:
+            bundle.fail(
+                "geometry",
+                "caches.l1d_ways=%d exceeds caches.l1d_sets=%d; more ways than sets leaves "
+                "part of the tag array unreachable by any index"
+                % (caches["l1d_ways"], caches["l1d_sets"]),
+            )
+
     if "V" in bundle.profile["isa_target"]["extensions"]:
         vector = geometry.get("vector")
         if vector is None:

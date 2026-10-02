@@ -292,8 +292,11 @@ module mosaic_prefetch #(
 
   assign dem_idx_c  = dem_pc_i[TIDX_W+1:2];
   assign dem_tag_c  = dem_pc_i[31:TIDX_W+2];
-  assign dem_line_c = {5'b0, dem_pa_i[ADDR_WIDTH-1:OFFSET_BITS]};
-  assign rel_line_c = {5'b0, pf_release_line_i[ADDR_WIDTH-1:OFFSET_BITS]};
+  // The line number is a 32-bit window: ADDR_WIDTH here is the prefetcher's
+  // own 32-bit PA window (the platform's RAM lives in it), and the pad makes
+  // the slice up to it for any line size.
+  assign dem_line_c = {{(32-ADDR_WIDTH+OFFSET_BITS){1'b0}}, dem_pa_i[ADDR_WIDTH-1:OFFSET_BITS]};
+  assign rel_line_c = {{(32-ADDR_WIDTH+OFFSET_BITS){1'b0}}, pf_release_line_i[ADDR_WIDTH-1:OFFSET_BITS]};
 
   assign dem_tbl_hit_c = tbl_valid_q[dem_idx_c] && (tbl_tag_q[dem_idx_c] == dem_tag_c);
   assign tbl_stride_c  = tbl_stride_q[dem_idx_c];

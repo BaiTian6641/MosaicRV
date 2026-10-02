@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "case": "remote.kill_with_delayed_response",
+  "verdict": "PASS",
+  "detail": "remote link contract holds: 20257 shadow comparisons over 20317 cycles, 8 credits, latency 4, seed 1; coverage: accepts=7354 matches=5982 kills=34 flushes=213 stale responses=1364 alias refusals=661 deliveries=5982 kill misses=763 request stalls=12748 response stalls=9204 table full=6160 response path full=9204 out-of-order delivery=1 kill vs response race=6 ",
+  "seed": 1,
+  "max_cycles": 200000,
+  "checks": 32,
+  "failures": 0,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-02T23:06:42Z",
+  "first_mismatch": ""
+}

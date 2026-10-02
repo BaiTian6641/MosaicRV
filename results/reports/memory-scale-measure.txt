@@ -1,0 +1,19 @@
+CASE=perf.equal_resource_compare, profile p1, seed 1
+stream workload, baseline configuration (all policy switches off)
+
+arm      L1         cycles    insns     IPC     dmem   imem
+before   256 B        4232      370   0.087      394     36
+size     8 KB         3458      363   0.104      230     40
+mshr     256 B        4232      370   0.087      394     36
+both     8 KB         3458      363   0.104      230     40
+
+alu_chain workload, baseline configuration (must be unchanged:
+no memory change may move an ALU-only chain)
+
+arm        cycles    insns     IPC     dmem   imem
+before       3349      545   0.162       20     20
+size         3373      538   0.159       40     24
+mshr         3349      545   0.162       20     20
+both         3373      538   0.159       40     24
+
+non-blocking read path: before=no, size=no, mshr=yes, both=yes

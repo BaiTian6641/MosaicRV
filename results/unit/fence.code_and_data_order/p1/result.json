@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "case": "fence.code_and_data_order",
+  "verdict": "PASS",
+  "detail": "checks=15 retires=33 fence_i_redirects=1 store_txns=5 res_d=1 res_s=0x0000000000000022 cycles=149 seed=1",
+  "seed": 1,
+  "max_cycles": 4000000,
+  "checks": 16,
+  "failures": 0,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-02T22:51:59Z",
+  "first_mismatch": ""
+}

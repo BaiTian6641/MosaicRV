@@ -111,7 +111,11 @@ using mosaic::Reporter;
 namespace {
 
 constexpr int kResetCycles = 8;
-constexpr int kDrainCycles = 64;
+// The exit word is a cacheable store, so with the cache on the harness sees it
+// only when the data cache is written back (the programs end with a FENCE.I).
+// The drain must cover that flush for every configuration; 64 cycles covered
+// the original 8-set direct-mapped L1, the enlarged L1's flush needs more.
+constexpr int kDrainCycles = 1024;
 constexpr int kStallCycles = 60000;
 constexpr uint64_t kRamBase = 0x80000000ull;
 
@@ -178,6 +182,7 @@ class Asm {
   void Ori(int rd, int rs1, int imm) { Emit(EncI(imm, rs1, 6, rd, kOpImm)); }
   void Add(int rd, int rs1, int rs2) { Emit(EncR(0, rs2, rs1, kF3Add, rd, kOpOp)); }
   void Sub(int rd, int rs1, int rs2) { Emit(EncR(0x20, rs2, rs1, 0, rd, kOpOp)); }
+  void Mul(int rd, int rs1, int rs2) { Emit(EncR(1, rs2, rs1, 0, rd, kOpOp)); }
   void Xor(int rd, int rs1, int rs2) { Emit(EncR(0, rs2, rs1, 4, rd, kOpOp)); }
   void Ld(int rd, int rs1, int imm) { Emit(EncI(imm, rs1, kF3Ld, rd, kOpLoad)); }
   void Lw(int rd, int rs1, int imm) { Emit(EncI(imm, rs1, kF3Lw, rd, kOpLoad)); }
@@ -631,7 +636,60 @@ struct Config {
   int primary;        // the workload index that exercises the feature
 };
 
-constexpr int kWorkloads = 3;
+// W4: the two-wide workload. The point is to make dispatch *stall* while fetch
+// keeps delivering, so that two decoded instructions are waiting in the queue
+// when a slot frees -- which is the only situation in which a two-wide allocator
+// can do anything at all. It uses the one long-latency resource the front end
+// has that is not the memory path: the iterative MUL/DIV unit, reached only
+// through cluster 0's issue queue (see mosaic_core.sv). A stream of dependent
+// `mul`/`add` pairs therefore backs cluster 0's queue up; dispatch's head (a
+// `mul`) cannot insert, the decoded-instruction queue fills behind it, and when
+// cluster 0 frees a slot both macros of a pair go in the same cycle -- the `mul`
+// to cluster 0 and the `add` to the other cluster (lane 1 takes the complement
+// of lane 0's alternating affinity).
+//
+// The program is straight-line and branch-free on purpose: its retire PCs are
+// absolutely checkable (strictly increasing) and its signature is an absolute
+// value that depends on every one of the 24 `mul`/`add` pairs having executed in
+// order. Those are the checks a baseline-relative comparison cannot make, and
+// they are what catch a front end that reorders, drops or mis-reads the second
+// macro of a pair -- a mutant changes every configuration alike.
+constexpr int kPairBurstPairs = 24;
+uint64_t PairBurstExpected() {
+  uint64_t v = 1;
+  for (int i = 0; i < kPairBurstPairs; i++) {
+    v *= 3;      // mul t2, t2, t1   (t1 = 3)
+    v += 3;      // add t2, t2, t1
+  }
+  return v;
+}
+Workload BuildPairBurst() {
+  Workload w;
+  w.name = "pair_burst";
+  const int x0 = 0, t1 = 6, t2 = 7, t3 = 28;
+  Asm a(kRamBase);
+  a.Addi(t1, x0, 3);
+  a.Addi(t2, x0, 1);
+  for (int i = 0; i < kPairBurstPairs; i++) {
+    a.Mul(t2, t2, t1);                  // lane 0: cluster 0 (the shared unit)
+    a.Add(t2, t2, t1);                  // lane 1: the other cluster, depends on lane 0
+  }
+  a.LaAbs(t3, MOSAIC_SIGNATURE_ADDR);
+  a.Sd(t2, t3, 0);
+  a.LaAbs(t3, MOSAIC_TOHOST);
+  a.Addi(t1, x0, 1);
+  a.Sd(t1, t3, 0);
+  a.FenceI();
+  const int park = a.Label();
+  a.Bind(park);
+  w.park_pc = a.AddrOf(a.off());
+  a.JalSelf();
+
+  w.image = a.Bytes();
+  return w;
+}
+
+constexpr int kWorkloads = 4;
 const Config kConfigs[] = {
     {"baseline", Feature::kNone, false, false, false, false, false, -1},
     {"+steering", Feature::kSteering, true, false, false, false, false, 0},
@@ -794,6 +852,13 @@ struct RunRec {
   uint32_t lane_quota = 0, lane_publish = 0, lane_ack = 0, lane_gen = 0;
   uint32_t lane_elem[8] = {0, 0, 0, 0, 0, 0, 0, 0};
   uint32_t c0_alu = 0, c1_alu = 0, c0_br = 0, c1_br = 0, muldiv = 0;
+  // Front-end width and the occupancy of the queue and the issue queues: what
+  // the two-wide change is measured by, and which resource binds if it does not
+  // pay off.
+  uint32_t alloc_ctr = 0, alloc2_ctr = 0, pair_ctr = 0, ins_ctr = 0;
+  uint32_t disp_occ_sum = 0, iq_occ_sum = 0;
+  uint32_t iqueue_occ_sum = 0, barrier_ctr = 0, pair_offer_ctr = 0, l1_elig_ctr = 0;
+  uint32_t fetch_rsp_ctr = 0, fetch_req_ctr = 0, recover_ctr = 0;
 
   uint64_t lane_elem_total() const {
     uint64_t t = 0;
@@ -929,6 +994,19 @@ class Runner {
     rec.c0_br = dut_->o_c0_br_o;
     rec.c1_br = dut_->o_c1_br_o;
     rec.muldiv = dut_->o_muldiv_o;
+    rec.alloc_ctr     = dut_->o_dbg_alloc_ctr_o;
+    rec.alloc2_ctr    = dut_->o_dbg_alloc2_ctr_o;
+    rec.pair_ctr      = dut_->o_dbg_pair_ctr_o;
+    rec.ins_ctr       = dut_->o_dbg_ins_ctr_o;
+    rec.disp_occ_sum  = dut_->o_dbg_disp_occ_sum_o;
+    rec.iq_occ_sum    = dut_->o_dbg_iq_occ_sum_o;
+    rec.iqueue_occ_sum = dut_->o_dbg_iqueue_occ_sum_o;
+    rec.barrier_ctr    = dut_->o_dbg_barrier_ctr_o;
+    rec.pair_offer_ctr = dut_->o_dbg_pair_offer_ctr_o;
+    rec.l1_elig_ctr    = dut_->o_dbg_l1_elig_ctr_o;
+    rec.fetch_rsp_ctr  = dut_->o_dbg_fetch_rsp_ctr_o;
+    rec.fetch_req_ctr  = dut_->o_dbg_fetch_req_ctr_o;
+    rec.recover_ctr    = dut_->o_dbg_recover_ctr_o;
 
     if (!rec.finished) {
       std::string why = "the run did not reach the exit protocol";
@@ -1233,7 +1311,8 @@ int main(int argc, char** argv) {
       Fail("setup", "the wrapper published no geometry");
     }
 
-    std::vector<Workload> workloads = {BuildAluChain(), BuildStream(), BuildVecStream()};
+    std::vector<Workload> workloads = {BuildAluChain(), BuildStream(), BuildVecStream(),
+                                       BuildPairBurst()};
 
     std::printf("perf.equal_resource_compare: retire_width=%u rob=%u workloads=%d "
                 "configurations=%d\n",
@@ -1263,6 +1342,64 @@ int main(int argc, char** argv) {
                     (unsigned long long)r.dmem_beats, (unsigned long long)r.imem_beats,
                     r.vec_elem, r.vec_lsu_merge);
       }
+      // Dispatch and issue occupancy. These are rates against the same cycle
+      // count the table reports: `alloc/cyc` is how many macros dispatch
+      // allocated per cycle (the two-wide ceiling is 2), `pair%` is the share of
+      // cycles that ceiling was actually reached, `occ` is the mean depth of the
+      // dispatch queue (of 8) and the mean issue-queue occupancy summed over the
+      // two clusters (each of 8, so 16 total), and `issue/cyc` is the mean uops
+      // issued per cycle across the two clusters (ceiling 2).
+      for (int ci = 0; ci < kConfigCount; ci++) {
+        const RunRec& r = runs[wi][ci];
+        std::printf("    %-12s %10s %8s %7s   alloc/cyc=%.3f pair%%=%.0f ins/cyc=%.3f"
+                    " occ=%.2f/8 iq=%.2f/16 iq_q=%.2f/8 bar%%=%.0f off%%=%.0f l1%%=%.0f frsp%%=%.0f freq%%=%.0f rec%%=%.0f issue/cyc=%.3f\n",
+                    kConfigs[ci].name, "", "", "",
+                    (double)r.alloc_ctr / (double)r.cycles,
+                    100.0 * (double)r.alloc2_ctr / (double)r.cycles,
+                    (double)r.ins_ctr / (double)r.cycles,
+                    (double)r.disp_occ_sum / (double)r.cycles,
+                    (double)r.iq_occ_sum / (double)r.cycles,
+                    (double)r.iqueue_occ_sum / (double)r.cycles,
+                    100.0 * (double)r.barrier_ctr / (double)r.cycles,
+                    100.0 * (double)r.pair_offer_ctr / (double)r.cycles,
+                    100.0 * (double)r.l1_elig_ctr / (double)r.cycles,
+                    100.0 * (double)r.fetch_rsp_ctr / (double)r.cycles,
+                    100.0 * (double)r.fetch_req_ctr / (double)r.cycles,
+                    100.0 * (double)r.recover_ctr / (double)r.cycles,
+                    (double)(r.c0_alu + r.c1_alu + r.c0_br + r.c1_br + r.muldiv) /
+                        (double)r.cycles);
+      }
+    }
+
+    // The two-wide path's engagement over the whole run, summed over every
+    // workload and configuration. It is printed here -- before the checks, so it
+    // appears in the log even when a check fails -- because the front-end
+    // control suite reads it to tell "the pair-order mutant is inert in this
+    // configuration" from "the pair-order mutant was not caught". `alloc2_total`
+    // counts two-wide *allocations*; `pairs_total` counts the same-cycle second
+    // *inserts*, which is the pair path the front end's width added and the
+    // signal that tracks whether the pair-order mutant has a subject: with the
+    // insert held pending V-013 (results/reports/held-insert.md) pairs_total is
+    // 0 even when allocations happen, and the mutant is then inert.
+    {
+      unsigned long long alloc2_total = 0, pairs_total = 0;
+      std::string per_workload;
+      for (int wi = 0; wi < kWorkloads; wi++) {
+        unsigned long long a = 0, p = 0;
+        for (int ci = 0; ci < kConfigCount; ci++) {
+          a += runs[wi][ci].alloc2_ctr;
+          p += runs[wi][ci].pair_ctr;
+        }
+        alloc2_total += a;
+        pairs_total += p;
+        per_workload += (wi ? " " : "") + std::string(workloads[wi].name) + "=" +
+                        Dec(a) + "/" + Dec(p);
+      }
+      std::printf("\ntwo-wide engagement over the whole run: alloc2_total=%llu "
+                  "pairs_total=%llu (pairs_total>0 means the same-cycle second "
+                  "insert -- the pair path -- was exercised)\n"
+                  "  per workload alloc2/pairs: %s\n",
+                  alloc2_total, pairs_total, per_workload.c_str());
     }
 
     // ----------------------------------------------- the per-config features
@@ -1388,6 +1525,65 @@ int main(int argc, char** argv) {
                          "prefetches, no merges");
     }
 
+    // ----------------------- check 3b: the front end's width, absolutely
+    // `pair_burst` is branch-free and straight-line, so its retire stream has an
+    // *absolute* program order and its signature an *absolute* value. These are
+    // the checks a baseline-relative comparison cannot make, and they are what
+    // catch a front end that reorders, drops or mis-reads the second macro of a
+    // pair: such a mutant changes every configuration alike, so comparing
+    // configurations to each other would see nothing. Run for every
+    // configuration, including the baseline.
+    {
+      const int wi = 3;   // pair_burst
+      const Workload& w = workloads[wi];
+      for (int ci = 0; ci < kConfigCount; ci++) {
+        const RunRec& r = runs[wi][ci];
+        const std::string where =
+            std::string(kConfigs[ci].name) + " on " + w.name;
+        // (a) the two-wide insert path: two decoded macros leaving the dispatch
+        // queue into the two clusters in one cycle. The same-cycle insert is
+        // HELD pending V-013 -- it triggers a retirement-order defect in
+        // `retire.width_and_order` that the retire-side lane-1 path exposes (see
+        // results/reports/held-insert.md) -- so this counter is legitimately 0.
+        // It is REPORTED, not required: requiring it would fail every
+        // configuration of this case on a correct machine. Two-wide *allocation*
+        // -- both macros allocated in one cycle -- is still implemented and is
+        // reported alongside it.
+        std::printf("    %-12s same-cycle two-wide insert: pairs=%s alloc2=%s "
+                    "(insert held pending V-013; reported, not required)\n",
+                    kConfigs[ci].name, Dec(r.pair_ctr).c_str(),
+                    Dec(r.alloc2_ctr).c_str());
+        // (b) program order: the retire PCs strictly increase.
+        // The architectural window ends at the park instruction (the self-loop
+        // the program halts on), exactly as the cross-configuration comparison's
+        // does.
+        bool ordered = r.retires.size() > 1;
+        size_t bad = 0;
+        for (size_t i = 1; i < r.retires.size(); i++) {
+          if (r.retires[i - 1].pc == w.park_pc) break;
+          if (r.retires[i].pc <= r.retires[i - 1].pc) { ordered = false; bad = i; break; }
+        }
+        if (!ordered) {
+          reporter.Mismatch(where + " program order",
+                            "retired PC strictly increasing",
+                            "retirement " + Dec(bad) + " PC " + U64(r.retires[bad].pc) +
+                                " does not follow " + U64(r.retires[bad - 1].pc));
+        }
+        reporter.Check(ordered, where + ": retires in program order (absolute)");
+        // (c) every one of the 24 mul/add pairs executed, in order: the
+        // signature is the value the straight-line program must leave.
+        const uint64_t expect = PairBurstExpected();
+        const bool sig_ok = r.sig_readable && r.sig[0] == expect;
+        if (!sig_ok) {
+          reporter.Mismatch(where + " burst signature",
+                            "signature word 0 == " + U64(expect),
+                            r.sig_readable ? U64(r.sig[0]) : std::string("<not readable>"));
+        }
+        reporter.Check(sig_ok, where + ": all 24 dependent mul/add pairs executed "
+                                 "(signature as written by the program)");
+      }
+    }
+
     // ------------------------------------------- check 4: the machine's invariants
     for (int wi = 0; wi < kWorkloads; wi++) {
       for (int ci = 0; ci < kConfigCount; ci++) {
@@ -1476,8 +1672,9 @@ int main(int argc, char** argv) {
     }
 
     passed = (reporter.failures() == 0);
-    detail = "workloads=3 configs=7 baseline_cycles=" + Dec(runs[0][0].cycles) + "/" +
-             Dec(runs[1][0].cycles) + "/" + Dec(runs[2][0].cycles) +
+    detail = "workloads=" + Dec(kWorkloads) + " configs=7 baseline_cycles=" + Dec(runs[0][0].cycles) + "/" +
+             Dec(runs[1][0].cycles) + "/" + Dec(runs[2][0].cycles) + "/" +
+             Dec(runs[3][0].cycles) +
              " resources=" + DescribeResources(base_res) +
              " arch_identical=yes";
   } catch (const Failure& f) {

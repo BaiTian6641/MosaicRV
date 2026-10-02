@@ -354,7 +354,9 @@ class Harness {
   // read to an unmapped address or a device is the mutant the controls inject,
   // and it is named here, at the read.
   void AcceptRead(const Obs& o) {
-    if (!o.mem_req_valid || !mem_ready_) return;
+    // The reset-traffic rule lives in one place (mosaic::BusResetGate): a
+    // prefetch read the DUT presents while reset is asserted is refused.
+    if (!bus_gate_.MayAccept(rst_, o.mem_req_valid && mem_ready_)) return;
     const uint32_t pa = static_cast<uint32_t>(o.mem_req_pa);
     prefetch_reads_++;
     if (!IsMapped(pa)) {
@@ -378,6 +380,36 @@ class Harness {
     r.pa = pa;
     accepted_.push_back(r);
   }
+
+  // ---- reset-traffic control (V-010) --------------------------------------
+  // Presents one prefetch read with reset asserted, through the same AcceptRead
+  // the cycle loop runs, and returns true iff the model accepted it. The
+  // shipping configuration must refuse; the control must accept, which is what
+  // proves the rule check can fail.
+  bool PresentDuringReset() {
+    const std::vector<PfReq> saved_accepted = accepted_;
+    const uint64_t saved_reads = prefetch_reads_;
+    const uint64_t saved_ram_reads = prefetch_ram_reads_;
+    Obs o;
+    o.mem_req_valid = true;
+    o.mem_req_pa = kRamBase;  // mapped and idempotent
+    o.mem_req_id = 0;
+    const bool was_rst = rst_;
+    const bool was_ready = mem_ready_;
+    rst_ = true;
+    mem_ready_ = true;
+    AcceptRead(o);
+    rst_ = was_rst;
+    mem_ready_ = was_ready;
+    const bool accepted = accepted_.size() != saved_accepted.size();
+    // The control must not perturb the model's tallies: the coverage checks
+    // compare them against the expected counts.
+    accepted_ = saved_accepted;
+    prefetch_reads_ = saved_reads;
+    prefetch_ram_reads_ = saved_ram_reads;
+    return accepted;
+  }
+  void SetAcceptDuringResetControl(bool on) { bus_gate_.SetAcceptDuringResetControl(on); }
 
   // ------------------------------------------------------- host memory oracle
   uint64_t ReadWord(uint32_t addr) {
@@ -669,6 +701,7 @@ class Harness {
 
   std::map<uint32_t, uint64_t> mem_;
   std::vector<PfReq> accepted_;
+  mosaic::BusResetGate bus_gate_;  // V-010 reset-traffic rule
   std::vector<uint32_t> last_lines_;
 
   uint64_t prefetch_reads_ = 0;
@@ -685,6 +718,23 @@ class Harness {
 // ============================================================================
 
 constexpr uint16_t kAsid = 7;
+
+// ---- 0b. the reset-traffic rule (V-010) ------------------------------------
+// The prefetcher presents memory reads to the driver's model memory, so the
+// model is a bus model: a request presented while reset is asserted is refused,
+// and the guard has been seen to fire.
+void PhaseResetTraffic(Harness* h, mosaic::Reporter* rep) {
+  h->ResetDut();
+  rep->Check(!h->PresentDuringReset(),
+             "reset-traffic: the memory model accepted a prefetch read while reset was asserted");
+  h->SetAcceptDuringResetControl(true);
+  const bool control_accepted = h->PresentDuringReset();
+  h->SetAcceptDuringResetControl(false);
+  rep->Check(control_accepted,
+             "reset-traffic: the accept-during-reset control did not fire: the guard is untested");
+  rep->Check(!h->PresentDuringReset(),
+             "reset-traffic: the accept-during-reset control was left engaged");
+}
 
 // ---- 0. geometry ----------------------------------------------------------
 void PhaseGeometry(Harness* h, mosaic::Reporter* rep) {
@@ -1075,6 +1125,7 @@ int main(int argc, char** argv) {
     reporter.Check(true, "profile: RAM cacheable = " + Dec(kRamCacheable ? 1 : 0));
 
     PhaseGeometry(&h, &reporter);
+    PhaseResetTraffic(&h, &reporter);
     PhaseCharacteristics(&h, &reporter, base_line);   // record BEFORE enabling
     PhaseUseful(&h, &reporter, base_line);
     PhasePollution(&h, &reporter, base_line);

@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "case": "multihart.isolation",
+  "verdict": "FAIL",
+  "detail": "h0=18 h1=27 retires, shared_requests=56 contend=42 seed=1",
+  "seed": 1,
+  "max_cycles": 4000000,
+  "checks": 26,
+  "failures": 12,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-02T22:06:20Z",
+  "first_mismatch": "stream/h0: expected seq=18 pc=0x0000000080002220 insn=0x0000000034102473 len=4 we=1 rd=8 val=0x0000000080002024 store=0 sa=0x0000000000000000 sd=0x0000000000000000 csrwe=0 csra=0x0000000000000000 csrv=0x0000000000000000 trap=0 cause=0 tval=0x0000000000000000, got <end>",
+  "failed_checks": ["hart 0 retired its program and parked", "hart 1 retired its program and parked", "hart 1 did not stop on an unsupported instruction", "the two harts hold different ASIDs (0 and 0)", "the two satp values differ", "the same VA (0x4000_0000) translated to hart 0's page and hart 1's page", "hart 0's concurrent stream equals its own reference (18 retires)", "hart 0's signature equals the independently computed value", "hart 1's signature equals the independently computed value", "the solo references carry the same independently computed signatures", "hart 0's trap is the load page fault on the unmapped VA", "hart 1 took no trap"]
+}
