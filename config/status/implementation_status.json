@@ -37,7 +37,8 @@
     "V-012",
     "I-035",
     "V-010",
-    "I-037"
+    "I-037",
+    "V-013"
   ],
   "evidence": {
     "I-001": {
@@ -451,6 +452,17 @@
       "verdict": "PASS",
       "notes": "FENCE and FENCE.I in the out-of-order core. Case PASS from a clean build (checks=15, retires=33, one FENCE.I redirect, 5 store transactions, the data-ordering results matching the expectation). The rule implemented is stated as a rule and is conservative as the card demands: a fence completes only when the memory path is idle -- store queue empty, load queue empty, and the LSU endpoint neither holding nor expecting a transaction -- and while a fence is staged the single memory insert port is refused so no younger memory macro can be handed to a queue. FENCE.I adds a system redirect to its own pc+4, which advances the fetch epoch and cancels outstanding fetch slots, purges the decode buffer and ROB, flushes both memory queues and restores rename to the committed map; retire lane 1 is suppressed while a FENCE.I is at the head so the following instruction cannot retire before the redirect flushes it. FENCE explicitly does not touch the fetch view, is not a cache flush, and is not a cross-hart synchronisation. Four mutants, each failing by name and each matching a card fail mode: FENCE_EARLY (a fence completing while an older access is still outstanding), FENCEI_NO_INVALIDATE (stale instruction bytes executed -- the card's first fail mode), FENCEI_SKIP, and FENCE_ACCESS_PAST (a younger access proceeding past the fence). The case exercises self-modifying code for real and detects a stale fetch. A pre-existing defect was found and fixed while doing this: a memory macro inserted in the same cycle as a redirect survived the queue squash, so the core now refuses the insert while rob_flush_pulse is high. All eight other core and memory cases still pass. Gaps stated by the lane: cross-hart ordering cannot be exercised at all in p0 (one hart), so 'FENCE is not an automatic cross-hart I-cache sync' is confirmed by construction only; fence.tso is not distinguished from a full fence (stronger, never weaker, but not tested); the fetch unit's outstanding-request table is exercised only indirectly -- the invalidation reuses the same redirect/epoch path as fetch.redirect_late_response and the case does not read the fetch cancellation counters, so 'a slot was outstanding' is marked [INFERENCE] rather than claimed; and the load-queue conjunct of the drain rule is checked for emptiness but its ordering effect is not independently stressed, because the single in-order endpoint already forces an older load to complete before a younger store.",
       "report": "results/reports/I-037-fence.md"
+    },
+    "V-013": {
+      "cases": [
+        "retire.width_and_order"
+      ],
+      "commands": [
+        "python3 tools/run_unit.py --profile p0 --case retire.width_and_order"
+      ],
+      "verdict": "PASS",
+      "notes": "Two-wide retirement and slot ordering compared per slot against an independent program-order model. Case PASS from a clean build: checks=1187, 119 events, 118 retires, 28 dual-retire cycles, 63 single, one same-rd configuration, one slot-0-trap-blocking-slot-1 configuration, one adjacent store/load pair, 573 cycles. Five controls (rebuilt from deleted build directories, each exiting 1 naming the check it breaks) plus three invisibility probes; the trace-gap and duplicate-identity detector is built in, and x0 is asserted unwritable in both slots under every write form the decoder accepts. The five situations the card names are produced and the case asserts its own coverage of them. NOT covered, stated by the lane: interrupt-driven retirement ordering (no interrupt is taken while a dual retire is in flight), and the 1-wide configuration is not exercised independently of the 2-wide one. The lane also reports three defects it found and deliberately did not fix, all recorded in its report section 6 and now tracked as their own package: (1) LWU (opcode 0000011, funct3 110) is refused by the decoder although RV64I requires it and the reference model implements it -- the source comment claiming 110/111 are reserved is wrong for 110, and a program containing lwu stops the machine; (2) the core ties the retire instance's store and CSR payload inputs to constant zero, so the architectural event stream carries no store or CSR identity (ev_store/ev_store_size/ev_csr_* are always 0), which is exactly the F-4 gap the V-008 interface freeze declared pending; (3) a system-instruction trap (ECALL) publishes no event at all -- the trap port asserts but no lane-0 event is emitted, so a consumer of the event stream sees the PC jump to the handler with nothing explaining it, contradicting the retire module's own header that a trap is an event in its own right. The lane ran no RTL edits, so the corpus sweep's revision hashes stay valid.",
+      "report": "results/reports/V-013-retire.md"
     }
   }
 }

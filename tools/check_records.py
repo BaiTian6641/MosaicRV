@@ -21,8 +21,11 @@ Checks, each of which is a hard failure:
  1. every case a delivered package lists as its evidence exists in the registry;
  2. that case's declared task is the package claiming it;
  3. every registered case whose task is delivered is listed in that task's
-    evidence (a package cannot be delivered while one of its own cases is
-    unaccounted for);
+    evidence -- unless the case declares itself `"pending": true`, which is how a
+    case that was registered *before* its driver exists (the project's deliberate
+    order: the case is fixed before the thing it tests is built) says "not yet
+    evidence". A pending case that a delivered package *does* claim is the mirror
+    error and also fails: the marker is then stale.
  4. every report path a delivered package names exists on disk;
  5. case names are unique and every entry carries a task, a top and a driver.
 
@@ -91,11 +94,19 @@ def main() -> int:
                 failures.append(
                     "status: %s claims case %s, but the registry assigns it to %s"
                     % (task, name, owner))
-        for name in seen.get(task, []):
-            if name not in claimed:
+            if cases[name].get("pending"):
                 failures.append(
-                    "registry: case %s belongs to delivered package %s, which does "
-                    "not list it as evidence" % (name, task))
+                    "registry: case %s is marked pending but %s claims it as "
+                    "evidence -- the marker is stale" % (name, task))
+        for name in seen.get(task, []):
+            if name in claimed:
+                continue
+            if cases[name].get("pending"):
+                continue
+            failures.append(
+                "registry: case %s belongs to delivered package %s, which does "
+                "not list it as evidence (mark it \"pending\": true if it is not "
+                "yet the package's evidence)" % (name, task))
         report = record.get("report", "")
         if report:
             path = report.split(",")[0].split(" ")[0].strip()
