@@ -2204,3 +2204,46 @@ gate green, lint 55/55 on both profiles. Remaining for the goal: the rest of the
 the LLB, multi-hart/cohort/pod (I-064..I-075), the measurement and release gates (I-076..I-086), the
 RVA23S64 matrix (I-092..I-098), wiring the vector unit into the core, and the harness-wide
 reset-traffic rule.
+
+---
+
+## 2026-10-01 — the vector chain reaches seven packages, and two lanes corrected the lead (71 delivered)
+
+Seven of the vector block's packages are delivered and green: descriptor (I-051), configuration
+(I-052), VRF (I-053), integer datapath (I-054), FP datapath (I-055), memory packetizer (I-056) and
+the partial-trap restart (I-057). Two of this stretch's most valuable outputs were **corrections to
+the instructions I gave**:
+
+* **Fault-only-first does not shorten `vl` for a first-element fault.** My brief said it does, twice.
+  The lane checked the specification, found that element 0 *takes a trap with `vl` unmodified* while
+  an element k>0 is absorbed with `vl` reduced to k, cited the pinned tag and line numbers, confirmed
+  it against the ratified manual, implemented the specification, and said in its report that the brief
+  was wrong. That is the behaviour the project wants from a lane: the integration lead is not a
+  specification.
+* **The `vtype.vsew` field position** was found by one vector lane reading another's descriptor and
+  noticing that the layout did not match the ratified format — a conformance bug that no test in the
+  repository would have raised, because every test agreed with the code.
+
+**The two newest packages are the strongest evidence the vector work is real rather than nominal.**
+I-057 proves the store side-effect rule by **counting memory writes per byte** across a fault, the
+restart and the completion, requiring every byte written exactly once and the request stream to be
+exactly `0..k` then `k..vl-1` — the card's "a restart must not duplicate an irreversible side effect"
+made into a number rather than an argument. I-055 implements a **determinism table** instead of a
+tolerance: results are compared with `==` for everything deterministic including the *ordered*
+reductions, and by membership in an enumerated permitted set for the unordered ones, with the ordered
+test vector `1.0, 2^24, 1.0, -2^24` chosen so that a left fold gives 0 and a reassociated fold gives 1
+— a machine that reassociates an ordered reduction fails instead of passing within an epsilon.
+
+Two rules are now recorded rather than lost, both reported independently by two lanes: the
+**mask-prefix operations with a non-zero `vstart` must raise illegal-instruction** and neither I-054
+nor I-057 implements that; and the **harness reset-traffic hazard** (every core driver currently
+accepts bus requests while reset is asserted, and the corpus is immune only because its entry
+instruction happens to redirect). Neither is a failing test today; both are the kind of thing that
+becomes a mystery later.
+
+**State**: 71 packages delivered, 16 capabilities advertised, ACT4 127/127, `make check` and every
+gate green, lint 57/57 on both profiles. Remaining for the goal: the rest of the vector block
+(I-058..I-063: chaining, lane quotas, and the arithmetic restart), **wiring the vector unit into the
+core** (no decoded vector instruction reaches any of these seven units yet), the LLB and locality
+work, multi-hart/cohort/pod (I-064..I-075), the measurement and release gates (I-076..I-086) and the
+RVA23S64 mandatory matrix (I-092..I-098).
