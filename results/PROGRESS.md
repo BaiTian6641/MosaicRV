@@ -2107,3 +2107,52 @@ passes **from a deleted build directory** with controls that fail, and the recor
 the tool printed, not the number the lane's summary remembered; (3) when a lane fails, its
 hypotheses are the asset — two of the three retries in this session succeeded because the failed
 attempt had written down what it suspected and why.
+
+---
+
+## 2026-10-01 — the fabric is in the machine, and the dynamic-versus-fixed comparison is measured (67 packages)
+
+The goal's central requirement — *the dynamic-versus-fixed comparison measured on equal resources, never
+inherited from documents* — is now met by measurement. Three of the five fabric modules are part of
+the live core: the **bank-aware allocation** (I-032) driven from the routing decision, the **local
+bypass** (I-027) instantiated in the cluster with its registered slot exposed as an earlier
+value-visible wakeup, and the **steering policy** (I-029) replacing the alternating toggle for every
+cluster-bound macro, with the fixed baseline selectable through one input bit.
+
+**The measurement, on equal resources** — same ELF (`p02_branch.i0`), same seed, one toggle:
+
+| | fixed | dynamic |
+|---|---|---|
+| cycles | 448 406 | 448 468 (**+62, +0.014%**) |
+| retired events | 71 123 | 71 123 (**identical**) |
+| integer-ALU issues per cluster | 214 / 17 624 | 8 498 / 9 340 |
+| branch issues per cluster | 17 767 / 17 769 | 18 790 / 16 746 |
+| router grants | 0 | 57 281 (age 57 267, load 14) |
+| bypass captures | 0 | 17 849 (33 early-resolved) |
+
+The **architectural result is identical field for field** — the whole retire stream and all four
+signature words — and the dynamic configuration is **0.014% slower** on this program. That is
+reported as a finding, not hidden, and the per-step table (`tools/run_fabric_steps.py`) isolates
+each contribution: steering alone is cycle-neutral while balancing the clusters, the bank preference
+costs about 80 cycles, the bypass recovers about 18. A steering policy that helps on one program and
+hurts on another is exactly what the plan's "measured, not inherited" requirement exists to expose —
+and a project that had reported only the cluster balance would have called this a win.
+
+**Two modules are deliberately not wired in**, with reasons rather than silence: the bounded-service
+arbiter (I-030), because its request/queue model does not compose with the writeback arbiter's
+per-producer pending registers and its write/rename/ROB completion decision — inserting it is a
+redesign of the durable completion path, not a wiring change — and the ownership FSM (I-031), because
+it exists for reconfiguration, which p0 and p1 never perform, so wiring it in would be dead logic in
+a machine whose counters and valid bits are the evidence.
+
+**One control deserves naming**: `NO_DELTA` holds the strategy input low, so the "dynamic" run *is*
+the fixed machine and no measurable difference exists. It is a control on the *measurement*, which is
+what makes the comparison falsifiable — the same discipline the project applies to mutants, applied
+to the number the project most wants to believe.
+
+**State**: 67 packages delivered, 16 capabilities advertised, ACT4 127/127, `make check` and the
+records/coverage/exclusion gates green, lint 51/51 on both profiles. Remaining for the goal: the
+vector datapath (I-054..I-063), locality and the LLB, multi-hart/cohort/pod (I-064..I-075), the
+measurement and release gates (I-076..I-086), the RVA23S64 mandatory matrix (I-092..I-098), F/D's
+advertisement (gated on V-060/V-061, which are vector and LLB verification), wiring the caches into
+the fetch and memory paths, and the integrated full comparison suite of I-084.
