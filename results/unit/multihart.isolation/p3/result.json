@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "case": "multihart.isolation",
+  "verdict": "PASS",
+  "detail": "h0=102 h1=99 retires, shared_requests=305 contend=217 seed=1",
+  "seed": 1,
+  "max_cycles": 4000000,
+  "checks": 26,
+  "failures": 0,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-02T21:50:11Z",
+  "first_mismatch": ""
+}

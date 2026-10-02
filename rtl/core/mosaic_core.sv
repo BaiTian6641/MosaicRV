@@ -146,8 +146,23 @@ localparam int unsigned CORE_SQ_OFF_IMM        = CORE_SQ_OFF_SIZE + 3;
 localparam int unsigned CORE_SQ_OFF_BASE       = CORE_SQ_OFF_IMM + CORE_XLEN;
 localparam int unsigned CORE_SQ_OFF_ID         = CORE_SQ_OFF_BASE + CORE_XLEN;
 localparam int unsigned CORE_SQ_ENTRY_W        = CORE_SQ_OFF_ID + CORE_MEM_ID_W;
+// I-064: the hart identity every packet this core emits carries. p0/p1/p2 are
+// single-hart and the default keeps them bit-for-bit: the field is zero, which
+// is exactly what the producers hardcoded before this package. The identity is
+// the `hart` field of `mosaic_id_pkg::macro_id_t` (I-002's frozen field), so a
+// multi-hart build changes one field's *meaning* rather than every interface --
+// which is what mosaic_uop_pkg's header anticipated.
+localparam int unsigned CORE_HART_W = mosaic_id_pkg::MOSAIC_ID_W_HART;
 
-module mosaic_core (
+module mosaic_core #(
+    // The hart this core is (I-064). Default 0: every existing instantiation,
+    // every existing case and ACT4 build the machine they always built.
+    parameter int unsigned HART_ID = 0,
+    // The PC this hart resets to. Default is the platform's reset vector, so a
+    // driver that does not override it boots where it always did; the two-hart
+    // wrapper gives each hart its own so they can run different programs.
+    parameter logic [63:0] RESET_PC = mosaic_cfg_pkg::MOSAIC_RESET_VECTOR
+) (
     input  logic                        clk,
     input  logic                        rst,
 
@@ -663,6 +678,12 @@ module mosaic_core (
     output logic [31:0]                 o_fab_bp_unauth_ctr,
     output logic [31:0]                 o_fab_bp_flush_ctr
 );
+
+  // I-064: the hart identity as a 2-bit field, from the parameter. Declared
+  // here (inside the module) because it reads the parameter, and used by every
+  // producer of a `macro_id_t` in this file so the hart the packets carry and
+  // the hart this core is cannot drift.
+  localparam logic [CORE_HART_W-1:0] CORE_HART_ID = CORE_HART_W'(HART_ID);
 
   // ==========================================================================
   // Interconnect declarations (hoisted: a port connection must see its net)
@@ -1836,7 +1857,7 @@ module mosaic_core (
 
   always_ff @(posedge clk) begin
     if (rst) begin
-      fetch_pc_q <= mosaic_cfg_pkg::MOSAIC_RESET_VECTOR;
+      fetch_pc_q <= RESET_PC;
     end else if (fetch_redir_valid) begin
 `ifdef MOSAIC_CORE_MUTANT_REDIRECT_NEXT
       // NEGATIVE CONTROL: the front end resumes one instruction past the
@@ -3145,7 +3166,9 @@ module mosaic_core (
   // ==========================================================================
   // 6. Clusters
   // ==========================================================================
-  mosaic_cluster u_c0 (
+  mosaic_cluster #(
+      .HART_ID (HART_ID)
+  ) u_c0 (
       .clk             (clk),
       .rst             (rst),
       .ins_valid       (c0_ins_valid),
@@ -3229,7 +3252,9 @@ module mosaic_core (
       .o_bp_flush_ctr  (c0_bp_flush)
   );
 
-  mosaic_cluster u_c1 (
+  mosaic_cluster #(
+      .HART_ID (HART_ID)
+  ) u_c1 (
       .clk             (clk),
       .rst             (rst),
       .ins_valid       (c1_ins_valid),
@@ -3373,7 +3398,7 @@ module mosaic_core (
   // The shared unit's result becomes a completion. Its destination comes from
   // the latch; the identity comes from the unit itself.
   always_comb begin
-    md_wb_ev.id.hart      = 1'b0;
+    md_wb_ev.id.hart      = CORE_HART_ID;
     md_wb_ev.id.rob_index = md_res_rob_index;
     md_wb_ev.id.rob_gen   = md_res_rob_gen;
     md_wb_ev.id.uop_index = md_res_uop_index;
@@ -3401,7 +3426,9 @@ module mosaic_core (
   // ordinary writeback event. It is speculative -- the operation runs as soon as
   // its sources are ready -- which is what makes "an executed but squashed FP
   // operation" a real state for the precise-fflags rule to handle.
-  mosaic_fp_unit u_fp (
+  mosaic_fp_unit #(
+      .HART_ID (HART_ID)
+  ) u_fp (
       .clk             (clk),
       .rst             (rst),
       .req_valid       (fp_req_valid),
@@ -4336,7 +4363,7 @@ module mosaic_core (
 
   // The completion the arbiter publishes on port 3.
   always_comb begin
-    vec_wb_ev.id.hart      = 1'b0;
+    vec_wb_ev.id.hart      = CORE_HART_ID;
     vec_wb_ev.id.rob_index = vec_index_q;
     vec_wb_ev.id.rob_gen   = vec_gen_q;
     vec_wb_ev.id.uop_index = vec_uop_q;
@@ -5400,7 +5427,7 @@ module mosaic_core (
   // in turn waits for the port to be free (`wb_ready3`), so a retry never
   // re-applies a CSR write that the first attempt already made.
   always_comb begin
-    sys_wb_ev.id.hart      = 1'b0;
+    sys_wb_ev.id.hart      = CORE_HART_ID;
     sys_wb_ev.id.rob_index = sys_index_q;
     sys_wb_ev.id.rob_gen   = sys_gen_q;
     sys_wb_ev.id.uop_index = sys_uop_q;
@@ -7085,7 +7112,7 @@ module mosaic_core (
   // The identity of the ROB head, built exactly as every other identity in this
   // file is (one uop per macro, one hart), so the comparison below is a whole
   // identity and not a wrapping index.
-  assign rob_head_id = {1'b0, rob_head_index, rob_head_gen, {CORE_UOP_W{1'b0}}};
+  assign rob_head_id = {CORE_HART_ID, rob_head_index, rob_head_gen, {CORE_UOP_W{1'b0}}};
 
   // A device is non-speculative when it cannot be squashed. `rob_boundary_ok` is
   // the same legal-boundary conjunction the system unit uses: not a redirect in
@@ -7655,7 +7682,7 @@ module mosaic_core (
   // (the uop id without the hart field); p0 has one hart, so the full identity
   // is that field zero-extended -- the same rule every other producer in this
   // file uses.
-  assign disp_mem_full_id = {1'b0, disp_mem_id};
+  assign disp_mem_full_id = {CORE_HART_ID, disp_mem_id};
 
   // ------------------------------------------------------ the store fault check
   //
@@ -7864,9 +7891,9 @@ module mosaic_core (
   // uop per macro (mosaic_dispatch).
 `ifndef MOSAIC_CORE_MUTANT_STORE_PRECOMMIT
   assign sq_commit_valid  = rob_retire_ack      && desc_is_store0;
-  assign sq_commit_id     = {1'b0, rob_head_index,  rob_head_gen,  {CORE_UOP_W{1'b0}}};
+  assign sq_commit_id     = {CORE_HART_ID, rob_head_index,  rob_head_gen,  {CORE_UOP_W{1'b0}}};
   assign sq_commit2_valid = rob_retire_ack_next && desc_is_store1 && rob_retire_ack;
-  assign sq_commit2_id    = {1'b0, rob_head1_index, rob_head1_gen, {CORE_UOP_W{1'b0}}};
+  assign sq_commit2_id    = {CORE_HART_ID, rob_head1_index, rob_head1_gen, {CORE_UOP_W{1'b0}}};
 `else
   // NEGATIVE CONTROL: a store is also authorised the moment it is *allocated*,
   // whenever the queue holds nothing else unauthorised -- the tempting "its
@@ -7888,9 +7915,9 @@ module mosaic_core (
   assign sq_commit_valid  = (rob_retire_ack && desc_is_store0) || precommit_c;
   assign sq_commit_id     = precommit_c
                             ? sq_first_unauth_id
-                            : {1'b0, rob_head_index, rob_head_gen, {CORE_UOP_W{1'b0}}};
+                            : {CORE_HART_ID, rob_head_index, rob_head_gen, {CORE_UOP_W{1'b0}}};
   assign sq_commit2_valid = rob_retire_ack_next && desc_is_store1 && rob_retire_ack;
-  assign sq_commit2_id    = {1'b0, rob_head1_index, rob_head1_gen, {CORE_UOP_W{1'b0}}};
+  assign sq_commit2_id    = {CORE_HART_ID, rob_head1_index, rob_head1_gen, {CORE_UOP_W{1'b0}}};
 `endif
 
   // A redirect withdraws everything the recovery decided is dead. The whole

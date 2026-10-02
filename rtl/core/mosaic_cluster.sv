@@ -63,8 +63,16 @@ localparam int unsigned CL_IGEN_W  = mosaic_cfg_pkg::MOSAIC_INT_PRF_TAG_W;
 localparam int unsigned CL_UOP_W   = 3;
 localparam int unsigned CL_UOP_ID_W = CL_IDX_W + CL_RGEN_W + CL_UOP_W;
 localparam int unsigned CL_IDX_L    = (CL_DEPTH <= 1) ? 1 : $clog2(CL_DEPTH);
+// I-064: the hart field width of the completion identity, from the frozen
+// identity package rather than re-derived.
+localparam int unsigned CL_HART_W   = mosaic_id_pkg::MOSAIC_ID_W_HART;
 
-module mosaic_cluster (
+module mosaic_cluster #(
+    // The hart this cluster belongs to (I-064). The completion it produces
+    // carries the hart in its identity so a two-hart machine's packets are
+    // attributable; default 0 keeps the single-hart machine bit-for-bit.
+    parameter int unsigned HART_ID = 0
+) (
     input  logic                        clk,
     input  logic                        rst,
 
@@ -466,7 +474,7 @@ module mosaic_cluster (
         wb_ev_q.exc.tval  <= {CL_XLEN{1'b0}};
         wb_ev_q.is_store  <= 1'b0;
         wb_ev_q.is_load   <= 1'b0;
-        wb_ev_q.id.hart      <= 1'b0;
+        wb_ev_q.id.hart      <= CL_HART_W'(HART_ID);
         wb_ev_q.id.rob_index <= iq_grant_uop[CL_UOP_ID_W-1 -: CL_IDX_W];
         wb_ev_q.id.rob_gen   <= iq_grant_uop[CL_IGEN_W + CL_UOP_W - 1 -: CL_RGEN_W];
         wb_ev_q.id.uop_index <= iq_grant_uop[CL_UOP_W-1:0];

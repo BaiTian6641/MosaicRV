@@ -71,11 +71,16 @@ localparam int unsigned FPU_TAG_W   = mosaic_id_pkg::MOSAIC_ID_W_PRF_TAG;
 localparam int unsigned FPU_PGEN_W  = mosaic_id_pkg::MOSAIC_ID_W_PRF_GEN;
 localparam int unsigned FPU_IGEN_W  = mosaic_cfg_pkg::MOSAIC_INT_PRF_TAG_W;
 localparam int unsigned FPU_XLEN    = mosaic_cfg_pkg::MOSAIC_XLEN;
+// I-064: the hart field width of the completion identity.
+localparam int unsigned FPU_HART_W  = mosaic_id_pkg::MOSAIC_ID_W_HART;
 
 // The canonical single-precision quiet NaN, in the low half of the register.
 localparam logic [31:0] FPU_CANON_NAN_S = 32'h7FC0_0000;
 
-module mosaic_fp_unit (
+module mosaic_fp_unit #(
+    // The hart this unit belongs to (I-064), carried in the completion identity.
+    parameter int unsigned HART_ID = 0
+) (
     input  logic                            clk,
     input  logic                            rst,
 
@@ -285,7 +290,7 @@ module mosaic_fp_unit (
   // destination. `value_valid` is low for a destination-less operation, which
   // still owes the ROB an answer.
   always_comb begin
-    wb_ev.id.hart      = 1'b0;
+    wb_ev.id.hart      = FPU_HART_W'(HART_ID);
     wb_ev.id.rob_index = fpu_res_idx;
     wb_ev.id.rob_gen   = fpu_res_gen;
     wb_ev.id.uop_index = fpu_res_uop;

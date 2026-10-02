@@ -2640,3 +2640,46 @@ aggregation benefit and give the comparison a dynamic-ownership dimension to mea
 (I-064..I-075), the measurement and release gates (I-076..I-086), the RVA23S64 mandatory matrix
 (I-092..I-098), the core-level `vstart` routing test plus the mask-prefix capability advertisement (the
 unit supports what the core refuses), and the `tb_vec.cpp` reset-traffic follow-up.
+
+---
+
+## 2026-10-01 — the user's architecture direction: widen the front end, scale and unblock the memory path
+
+The user reviewed the measured numbers and directed a batch of architecture changes, with reasons that the
+reconnaissance supports:
+
+* **"0.209 IPC, and even lower on memory."** The measurement says why, and it is not the out-of-order
+  machinery: the machine is **2-wide retire but 1-wide allocate** (`MOSAIC_RETIRE_WIDTH=2` against dispatch's
+  "one macro per cycle"), so the hard ceiling is ~1.0 IPC; there is **one ALU per cluster**; and the memory
+  path is **blocking and single-outstanding**.
+* **"Check the plan for multi-outstanding allocations."** The plan sequences exactly this: I-042 delivers a
+  *blocking* L1 and I-043 adds the MSHR/non-blocking path. I-043's module is delivered and verified — four
+  entries, coalescing, response identity, clean cancellation — and **instantiates nowhere**:
+  `grep -c mosaic_mshr rtl/core/mosaic_core.sv` = 0. The batch is the plan's own next step, not an
+  improvisation.
+* **"The two-entry decode buffer is pretty shallow."** It is: a 2-entry buffer and 4 outstanding fetch
+  requests, with dispatch one wide.
+* **"L1I 8 KB, L1D 8 KB."** The *config already declares a much larger cache than the RTL implements*:
+  `config/geometry/p1.json` has `line_bytes: 64`, 256 sets and 4 ways per side (≈64 KB) while the hardware is
+  a 32-byte, 8-set, 1-way 256-byte stand-in. The RTL is the thing that was small.
+
+**Three lanes are live, with explicit and mostly disjoint ownership** — `MultiHart` finishing I-064 in the
+core's domain structure, and two new ones:
+* **WideFrontend** — two-wide allocation/rename and a deeper instruction queue, owning `mosaic_dispatch.sv`,
+  `mosaic_rename.sv`, `mosaic_iq.sv`; must keep the machine green and report which paths stay one-wide and why.
+* **MemorySubsystem** — the declared geometry made real with the test profile at 8 KB per side, the MSHR
+  wired so a hit completes during an outstanding miss with duplicate-miss coalescing, and the endpoint's
+  outstanding capability raised if that is what limits it (or a measurement proving it is not), owning the
+  cache and memory modules and their share of the core.
+
+`mosaic_core.sv` is the one shared file, so every lane is instructed to read it immediately before each edit,
+keep changes in its own sections, and **message the other lane rather than overwriting a line**; I re-read
+every diff before committing. That rule is written into both briefs because this project has paid for
+uncoordinated edits five times.
+
+**What I expect, and what I will check.** The ALU-dependent chain should improve from the front-end change
+alone (its ceiling was allocation width); the streaming workload should improve from the memory change alone
+(394 transactions in 3088 cycles is 7.8 cycles per transaction); and the ALU chain must be **unchanged** by
+the memory work — if a memory change moves a compute-bound workload, something is wrong and that is a
+finding rather than a win. The stand-in geometry being replaced also removes a modelling lie: the cache the
+machine has was 250× smaller than the one its own configuration declares.
