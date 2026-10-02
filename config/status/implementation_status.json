@@ -51,7 +51,8 @@
     "I-040",
     "V-016",
     "I-032",
-    "I-049"
+    "I-049",
+    "I-042"
   ],
   "evidence": {
     "I-001": {
@@ -625,6 +626,17 @@
       "verdict": "PASS",
       "notes": "F/D implementation selected and packaged. The decision, written down before the code: SELF-IMPLEMENTED in rtl/core/mosaic_fpu.sv. No third-party FPU is vendored because this workstation has no network access, so no candidate could be fetched and its licence reviewed, and the only widely used reference (Berkeley SoftFloat, BSD-3-Clause) is C++ software -- an oracle, never a hardware datapath, which the card explicitly forbids as a substitute. Case PASS from a clean build: 19904 checks over 4735 operations in 56524 cycles (4735 accepted, 4733 completed, 2 cancelled by the case's own kill test), lint 42 sources clean. IMPLEMENTED, each with an independent oracle: fadd/fsub/fmul/fdiv for both formats with all FIVE rounding modes (RNE, RTZ, RDN, RUP, RMM) and correct rounding; fsgnj/fsgnjn/fsgnjx; fmin/fmax; feq/flt/fle; fclass; fmv between integer and FP in both formats; fcvt in both directions including the RISC-V saturation rule and its NV flag; and fcvt.s.d / fcvt.d.s. DECLARED ABSENT rather than faked: fsqrt.s/d (which returns canonical qNaN plus NV -- a named marker, never a plausible number) and the fmadd family, both named so the list is not assumed complete by omission. The oracle is independent per operation class: arithmetic from the host's own FPU through fesetround/fetestexcept with volatile operands; integer conversions from the host's conversion; FP-to-integer (which has no C equivalent for the saturation rule) from a spec-written model cross-checked against the host in range; comparisons, fmin/fmax, fclass, fsgnj and fmv from bit-level ISA models; and RMM -- which this host cannot round -- from a directed tie table whose expectation is DERIVED from the host and whose every vector is PROVEN to be an exact tie by exact dyadic arithmetic, with a checked claim that binary division cannot produce a tie. The fflags contract is checked per operation (NV/DZ/OF/UF/NX). Latency is measured and compared against the unit's own declaration on every issue: one cycle for everything except fdiv, which measures 66 cycles and is shown operand-independent; a held result keeps value, flags and tag across the case's 100-cycle stall test. Four mutants each exit 1 with a named first failure: RM_TIE_AWAY (a tie rounded away from the oracle), DROP_NX (NX omitted), NONCANONICAL_NAN, and FLUSH_SUBNORMAL (flush-to-zero where the policy is gradual underflow). The no-software-fallback rule is verified structurally rather than by grep: the unit has no memory interface, no instruction store, no control transfer and no architectural FP state, so there is nowhere for a software path to live. NOT covered: fsqrt and the fmadd family are absent, not implemented; RMM has no host oracle on this platform; subnormal coverage is of the rules rather than all 2^52 bit patterns; the comparison/fclass and FP-to-integer models are written in the driver and are the weakest link in the oracle story (the FP-to-integer one is at least cross-checked against the host in range); no synthesis, PnR, area or Fmax claim, because tools/synth_check.py is already blocked before this file by Yosys 0.69 and by a sibling's file; and there is no integration evidence -- decode/rename/commit of FP instructions is I-050/V-050, which this entry does not claim.",
       "report": "results/reports/I-049-fpu.md"
+    },
+    "I-042": {
+      "cases": [
+        "cache.refill_evict_fault"
+      ],
+      "commands": [
+        "python3 tools/run_unit.py --profile p0 --case cache.refill_evict_fault"
+      ],
+      "verdict": "PASS",
+      "notes": "Blocking L1 instruction and data caches. Case PASS from a clean build: 42 checks, trace equivalence between cache-on and cache-off, 167 cycles, with the observed activity recorded (data: 14 hits, 15 misses, 13 refills, 4 writebacks, 2 faults; instruction: 2 hits, 1 miss, 1 refill, 0 faults). Geometry is declared rather than implied: direct-mapped, 8 sets x 32-byte line = 256 bytes, 64-bit words, 32-bit addresses, 24-bit tags; the instruction cache is read-only and the data cache is write-back with write allocation. The card's two fail modes are the two things proven: a dirty eviction preserves every byte (dirty_eviction_preserved) and a faulted refill is never marked valid (fault_refill_invalid), each with its own mutant -- FAULT_VALID, DIRTY_DROP and WRONG_REFILL, all rebuilt from deleted build directories with their -D in the build command and exiting 1 with a named first failure. The valid-bit rule the card asks for is implemented as stated: valid bits are initialised without resetting the data RAM. NOT covered, stated by the lane: the non-blocking/MSHR path is deferred to I-043; coherence between the instruction and data caches after a store (self-modifying code, FENCE.I visibility) is not claimed -- self-modification within one data cache is exercised and V-016 owns the fence.i side; there is no PMA/cacheability input yet (that is I-039/I-093's address-source work); the memory port is line-wide one-beat; and the case is deterministic rather than a random soak. The caches are NOT integrated into the core: they are verified as modules, and wiring them into the fetch and memory paths is outstanding work, recorded here rather than implied.",
+      "report": "results/reports/I-042-cache.md"
     }
   }
 }

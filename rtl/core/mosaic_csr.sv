@@ -502,9 +502,17 @@ module mosaic_csr (
   // address rather than from a second table here, and the generated package
   // carries the same decoding as a constant so the testbench model and this file
   // cannot disagree about it.
+  //
+  // The two gates are separate, and that separation is the whole content of the
+  // read-only encoding: `csr[11:10] == 11` says "no write is legal", not "this
+  // register needs M-mode to *read*". Folding them into one comparison refused a
+  // U-mode read of the `cycle` counter that mcounteren and scounteren both
+  // permit -- CASE=privilege.permission_matrix found exactly that, as cause 2
+  // where the ISA's rule allows the read.
   logic [1:0] csr_min_priv_r;
   logic [1:0] csr_min_priv_w;
-  logic       csr_priv_ok;
+  logic       csr_priv_ok_r;
+  logic       csr_priv_ok_w;
   logic       csr_counter_ok;
   logic [5:0] csr_counter_bit;
   logic       csr_is_counter;
@@ -560,11 +568,14 @@ module mosaic_csr (
     assign satp_tvm_illegal = 1'b0;
   `endif
 
-  assign csr_priv_ok = (priv_q >= csr_min_priv_r) && (priv_q >= csr_min_priv_w);
+  assign csr_priv_ok_r = (priv_q >= csr_min_priv_r);
+  assign csr_priv_ok_w = (priv_q >= csr_min_priv_w);
 
-  assign csr_illegal_o    = ~addr_impl | ~csr_priv_ok | ~csr_counter_ok | satp_tvm_illegal;
-  assign csr_wr_illegal_o = csr_we_i & (~addr_impl | ~wr_legal | ~csr_priv_ok |
-                                        ~csr_counter_ok | satp_tvm_illegal);
+  assign csr_illegal_o    = ~addr_impl | ~csr_priv_ok_r | ~csr_counter_ok |
+                            satp_tvm_illegal;
+  assign csr_wr_illegal_o = csr_we_i & (~addr_impl | ~wr_legal | ~csr_priv_ok_r |
+                                        ~csr_priv_ok_w | ~csr_counter_ok |
+                                        satp_tvm_illegal);
 
   // A write that is accepted by the ports and not pre-empted by the boundary.
   // The trap/mret terms are what make a trap outrank a retiring CSR instruction.
@@ -1060,7 +1071,7 @@ module mosaic_csr (
       // qualifier, so the count is of *writes*; a read refused for privilege is
       // visible in the trap it raises and in `o_illegal_wr_ctr` is not counted
       // here.
-      if (csr_we_i && addr_impl && !csr_priv_ok)
+      if (csr_we_i && addr_impl && (!csr_priv_ok_r || !csr_priv_ok_w))
         o_priv_illegal_ctr <= o_priv_illegal_ctr + 32'd1;
       if (priv_d != priv_q) o_priv_change_ctr <= o_priv_change_ctr + 32'd1;
     end

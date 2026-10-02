@@ -238,12 +238,20 @@ module mosaic_pmp (
             2'b11: begin                                                 // NAPOT
               ones = trailing_ones(addr_q[i]);
               // n trailing ones -> a 2^(n+3)-byte region: the address bits at
-              // and below bit n are free, everything above must agree. The
-              // all-ones entry shifts a 64-bit vector by 64, which SystemVerilog
-              // defines as zero, so it matches the whole space with no special
-              // case.
+              // and below bit n are free, everything above must agree. `mask`
+              // holds exactly the bits that must agree, so the comparison is
+              // against `mask` and not against its complement: comparing the
+              // *free* bits would match only addresses whose low bits happened
+              // to equal the entry's trailing-ones pattern -- one word of the
+              // region -- and CASE=privilege.permission_matrix found exactly
+              // that, as an S-mode fetch inside the code region being refused.
+              //
+              // The all-ones entry shifts a 64-bit vector by 64, which
+              // SystemVerilog defines as zero, so `mask` is zero, every address
+              // agrees on no bits at all, and the entry matches the whole space
+              // with no special case.
               mask = (~64'd0) << (ones + 7'd1);
-              byte_match = ((y & ~mask) == (addr_q[i] & ~mask));
+              byte_match = ((y & mask) == (addr_q[i] & mask));
             end
             default: begin                                               // TOR
               byte_match = (y >= ((i == 0) ? 64'd0 : addr_q[i-1])) && (y < addr_q[i]);

@@ -194,8 +194,11 @@ class PmpModel {
       case kANapot: {
         unsigned n = 0;
         while (n < 63 && ((e_[i].addr >> n) & 1ull) != 0) n++;
+        // `mask` is the set of bits that must agree -- everything above bit n.
+        // An all-ones entry has n >= 63 and agrees on nothing, so it covers the
+        // whole space.
         const uint64_t mask = (n >= 63) ? 0ull : (~0ull << (n + 1));
-        return (y & ~mask) == (e_[i].addr & ~mask);
+        return (y & mask) == (e_[i].addr & mask);
       }
       default: {
         const uint64_t lo = (i == 0) ? 0ull : e_[i - 1].addr;
@@ -715,6 +718,28 @@ std::vector<Scenario> BuildScenarios() {
   // `ecall`, whose cause identifies the mode the machine resumed in.
   {
     Scenario s;
+    s.name = "csr-pmpcfg0-read-late";
+    s.mode = Mod::kM; s.cls = Cls::kCsr; s.cat = Cat::kNoEntry;
+    s.rule = "the code-region entry is still installed just before the first "
+             "S-mode row";
+    s.skip_without_pmp = true;
+    s.csr_ops.push_back(CsrOp{false, CSR_PMPCFG0, 0});
+    s.exp = Expect{false, 0};
+    add(s);
+  }
+  {
+    Scenario s;
+    s.name = "csr-pmpaddr0-read-late";
+    s.mode = Mod::kM; s.cls = Cls::kCsr; s.cat = Cat::kNoEntry;
+    s.rule = "the code-region address is still installed just before the first "
+             "S-mode row";
+    s.skip_without_pmp = true;
+    s.csr_ops.push_back(CsrOp{false, CSR_PMPADDR0, 0});
+    s.exp = Expect{false, 0};
+    add(s);
+  }
+  {
+    Scenario s;
     s.name = "boot-mret-mpp-s";
     s.mode = Mod::kS; s.cls = Cls::kNop; s.cat = Cat::kSret;
     s.rule = "MRET sets the privilege mode from mstatus.MPP";
@@ -768,7 +793,7 @@ std::vector<Scenario> BuildScenarios() {
        false, 0,
        "R=1 and the load is S-mode -> the access succeeds"},
       {"s-load-deny-r", Mod::kS, Cls::kLoad, Cat::kNapot, a0,
-       {{1, Cfg(false, kANapot, false, true, false), NapotAddr(kDataA, 0x8000)}},
+       {{1, Cfg(false, kANapot, false, false, true), NapotAddr(kDataA, 0x8000)}},
        true, kExcLoadAccess,
        "a load with no read permission raises a load access fault (cause 5)"},
       {"s-store-allow", Mod::kS, Cls::kStore, Cat::kNapot, a0 + 8,
@@ -802,10 +827,10 @@ std::vector<Scenario> BuildScenarios() {
        false, 0,
        "a load-reserved is a load: R=1 -> it succeeds"},
       {"s-lr-deny-r", Mod::kS, Cls::kLr, Cat::kNapot, a0 + 24,
-       {{1, Cfg(false, kANapot, false, true, false), NapotAddr(kDataA, 0x8000)}},
+       {{1, Cfg(false, kANapot, false, false, true), NapotAddr(kDataA, 0x8000)}},
        true, kExcLoadAccess,
        "a load-reserved with no read permission raises cause 5, not 7"},
-      {"s-sc-deny-w", Mod::kS, Cls::kSc, Cat::kNapot, a0 + 32,
+      {"s-sc-deny-w", Mod::kS, Cls::kSc, Cat::kNapot, a0 + 0x30,
        {{1, Cfg(false, kANapot, true, false, false), NapotAddr(kDataA, 0x8000)}},
        true, kExcStoreAccess,
        "a store-conditional is a store class access: no W raises cause 7"},
@@ -1164,7 +1189,7 @@ std::vector<Scenario> BuildScenarios() {
     s.skip_without_su = true;
     s.addr = kDataA + 0x2800;
     s.rule = "with MPRV=1 an M-mode load is checked as though the mode were MPP";
-    s.entries.push_back(Ent{1, Cfg(false, kANapot, false, true, false), NapotAddr(kDataA, 0x8000)});
+    s.entries.push_back(Ent{1, Cfg(false, kANapot, false, false, true), NapotAddr(kDataA, 0x8000)});
     s.pre_csr.push_back(CsrOp{true, CSR_MSTATUS, 0x21800});   // MPRV=1, MPP=S
     s.exp = Expect{true, kExcLoadAccess};
     add(s);
@@ -1191,7 +1216,7 @@ std::vector<Scenario> BuildScenarios() {
     s.addr = kDataA + 0x2810;
     s.rule = "the same entry with MPRV=0 leaves the access an M-mode one, which "
              "an unlocked entry never refuses";
-    s.entries.push_back(Ent{1, Cfg(false, kANapot, false, true, false), NapotAddr(kDataA, 0x8000)});
+    s.entries.push_back(Ent{1, Cfg(false, kANapot, false, false, true), NapotAddr(kDataA, 0x8000)});
     s.exp = Expect{false, 0};
     add(s);
   }
@@ -1664,6 +1689,31 @@ class Harness {
  private:
   void Observe() {
     priv_mask_ |= (1u << (dut_->o_priv_o & 3u));
+    if (Debug()) {
+      const uint32_t dd = dut_->o_pmp_deny_ctr_o;
+      if (dd != last_data_deny_) {
+        std::printf("    [ddeny] cycle=%llu ctr=%u priv=%u matched=%u locked=%u "
+                    "access_faults=%u\n",
+                    static_cast<unsigned long long>(cycles_), dd,
+                    static_cast<unsigned>(dut_->o_priv_o),
+                    static_cast<unsigned>(dut_->o_pmp_data_matched_o),
+                    static_cast<unsigned>(dut_->o_pmp_data_locked_o),
+                    dut_->o_mem_lsu_access_fault_o);
+        last_data_deny_ = dd;
+      }
+      const uint32_t fd = dut_->o_pmp_fetch_deny_ctr_o;
+      if (fd != last_fetch_deny_) {
+        std::printf("    [fdeny] cycle=%llu ctr=%u fetch_pc=%s priv=%u matched=%u "
+                    "locked=%u cfg0=%u\n",
+                    static_cast<unsigned long long>(cycles_), fd,
+                    U64(dut_->o_fetch_pc_o).c_str(),
+                    static_cast<unsigned>(dut_->o_priv_o),
+                    static_cast<unsigned>(dut_->o_pmp_fetch_matched_o),
+                    static_cast<unsigned>(dut_->o_pmp_fetch_locked_o),
+                    static_cast<unsigned>(dut_->o_csr_pmp_sel_o));
+        last_fetch_deny_ = fd;
+      }
+    }
     const uint32_t mask =
         (g_retire_width_ >= 32) ? 0xFFFFFFFFu : ((1u << g_retire_width_) - 1u);
     const uint32_t got_mask = static_cast<uint32_t>(dut_->ev_valid_o) & mask;
@@ -1671,6 +1721,14 @@ class Harness {
       if ((got_mask & (1u << lane)) == 0) continue;
       if (PackedLane(dut_->ev_trap_o, lane, 1) != 0) continue;
       retires_++;
+      if (Debug()) {
+        const bool st = PackedLane(dut_->ev_store_o, lane, 1) != 0;
+        std::printf("    [ret] cycle=%llu pc=%s%s%s\n",
+                    static_cast<unsigned long long>(cycles_),
+                    U64(PayloadLane(dut_->ev_pc_o, lane)).c_str(),
+                    st ? " store_addr=" : "",
+                    st ? U64(PayloadLane(dut_->ev_store_addr_o, lane)).c_str() : "");
+      }
     }
     if (dut_->o_trap_valid_o != 0) {
       TrapObs t;
@@ -1717,6 +1775,8 @@ class Harness {
   uint64_t retires_ = 0;
   uint64_t mtime_ = 0;
   uint32_t priv_mask_ = 0;
+  uint32_t last_fetch_deny_ = 0;
+  uint32_t last_data_deny_ = 0;
   uint32_t last_commit_ = 0, last_alloc_ = 0;
   uint64_t last_progress_ = 0;
   uint32_t g_retire_width_ = 2;
@@ -1820,6 +1880,33 @@ void RunCase(Vmosaic_core_tb* dut, mosaic::Reporter* reporter, const Geometry& g
                 "finished=" + Dec(dut_mem.finished() ? 1 : 0) + " passed=" +
                     Dec(dut_mem.passed() ? 1 : 0) + " tohost=" +
                     U64(dut_mem.exit_code()));
+
+  // ------------------------------------------------------------- evidence
+  // Printed before the checks so a failing cell still shows the whole run.
+  for (const Scenario& s : run) {
+    Frame f;
+    std::string detail;
+    if (!ReadFrame(&dut_mem, s.frame, &f, &detail)) Fail(phase, detail);
+    Expect e = s.exp;
+    if (s.alt_without_pmp && !pmp) e = s.alt;
+    if (s.alt_without_su && !su) e = s.alt;
+    if (s.alt_without_u && !g.has_u) e = s.alt;
+    const unsigned trapped = f.valid ? static_cast<unsigned>((f.mstatus >> 11) & 3u) : 0xFFu;
+    std::string word = "";
+    if (IsStoreLike(s.cls)) {
+      uint64_t now = 0;
+      if (dut_mem.Read(s.addr, s.width, &now) == mosaic::AccessStatus::kOk) {
+        word = " word=" + U64(now) + (now == s.pre ? "(unwritten)" : "(written)");
+      }
+    }
+    std::printf("  [obs] %-32s %s/%-6s/%-11s trap=%u cause=%-2llu tval=%s "
+                "from=%s expect=%s%s\n",
+                s.name.c_str(), ModName(s.mode), ClsName(s.cls), CatName(s.cat),
+                f.valid ? 1u : 0u,
+                static_cast<unsigned long long>(f.cause), U64(f.tval).c_str(),
+                f.valid ? ModName(static_cast<Mod>(trapped & 3u)) : "-",
+                e.fault ? "refuse" : "allow", word.c_str());
+  }
 
   // ------------------------------------------------------------- the matrix
   Coverage cov;
@@ -2011,6 +2098,14 @@ void RunCase(Vmosaic_core_tb* dut, mosaic::Reporter* reporter, const Geometry& g
                       seen == NapotAddr(kCodeLo, kCodeHi - kCodeLo),
                       "pmpaddr0=" + U64(seen) + " expected " +
                           U64(NapotAddr(kCodeLo, kCodeHi - kCodeLo)));
+      } else if (s.name == "csr-pmpcfg0-read-late") {
+        harness.Check(tag + ": the code-region configuration byte is still there",
+                      seen == 0x1Dull, "pmpcfg0=" + U64(seen) + " expected 0x1d");
+      } else if (s.name == "csr-pmpaddr0-read-late") {
+        harness.Check(tag + ": the code-region address is still there",
+                      seen == NapotAddr(kCodeLo, kCodeHi - kCodeLo),
+                      "pmpaddr0=" + U64(seen) + " expected " +
+                          U64(NapotAddr(kCodeLo, kCodeHi - kCodeLo)));
       } else if (s.name == "lock-cfg-write-ignored") {
         harness.Check(tag + ": a locked configuration byte survives a write of zero",
                       seen == 0x0000000091909090ull,
@@ -2124,24 +2219,6 @@ void RunCase(Vmosaic_core_tb* dut, mosaic::Reporter* reporter, const Geometry& g
                   "priv illegal counter=" + Dec(dut->o_csr_priv_illegal_ctr_o));
   }
 
-  // ------------------------------------------------------------- evidence
-  for (const Scenario& s : run) {
-    Frame f;
-    std::string detail;
-    if (!ReadFrame(&dut_mem, s.frame, &f, &detail)) Fail(phase, detail);
-    Expect e = s.exp;
-    if (s.alt_without_pmp && !pmp) e = s.alt;
-    if (s.alt_without_su && !su) e = s.alt;
-    if (s.alt_without_u && !g.has_u) e = s.alt;
-    const unsigned trapped = f.valid ? static_cast<unsigned>((f.mstatus >> 11) & 3u) : 0xFFu;
-    std::printf("  [obs] %-32s %s/%-6s/%-11s trap=%u cause=%-2llu tval=%s "
-                "from=%s expect=%s\n",
-                s.name.c_str(), ModName(s.mode), ClsName(s.cls), CatName(s.cat),
-                f.valid ? 1u : 0u,
-                static_cast<unsigned long long>(f.cause), U64(f.tval).c_str(),
-                f.valid ? ModName(static_cast<Mod>(trapped & 3u)) : "-",
-                e.fault ? "refuse" : "allow");
-  }
   std::printf("  coverage:");
   for (const auto& kv : cov.cells) {
     std::printf(" %s=%d", kv.first.c_str(), kv.second);

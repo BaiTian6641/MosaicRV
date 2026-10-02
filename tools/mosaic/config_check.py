@@ -90,6 +90,7 @@ class Bundle(object):
         self.memory: Optional[Dict[str, Any]] = None
         self.geometry: Optional[Dict[str, Any]] = None
         self.csr_tables: List[Dict[str, Any]] = []
+        self.csr_rules: Optional[Dict[str, Any]] = None
         self.status: Optional[Dict[str, Any]] = None
         self.input_hashes: Dict[str, str] = {}
 
@@ -180,10 +181,24 @@ def load(name: str, config_root: Optional[str] = None) -> Bundle:
     if os.path.exists(status_path):
         bundle.status = _load_json(status_path, bundle, "implementation status")
 
+    # The CSR legality-relationship rule ledger (V-017). It is additive to the
+    # implementation table: the table says which bits are writable, the ledger
+    # says which *relationship* each bit obeys, which clause licenses it, and the
+    # positive and negative example the comparator is checked by. The case
+    # csr.rule_ledger is generated from this file and must visit every rule, so a
+    # rule with no reachable stimulus is a failure rather than a skip.
+    ledger_path = os.path.join(root, "csr", "rule_ledger.json")
+    if os.path.exists(ledger_path):
+        ledger = _load_json(ledger_path, bundle, "csr rule ledger")
+        if ledger is not None:
+            bundle.csr_rules = ledger
+            _validate(bundle, ledger, "csr_rules.schema.json", "csr rule ledger")
+
     _check_capabilities(bundle)
     _check_memory(bundle, name)
     _check_geometry(bundle, name)
     _check_csr(bundle, name)
+    _check_csr_rules(bundle, name)
     _check_cross_references(bundle)
     return bundle
 
@@ -532,6 +547,185 @@ def _check_csr(bundle: Bundle, profile_name: str) -> None:
                             "address 0x%03x lies inside a range this profile declares "
                             "unimplemented (%s)" % (address, reason),
                         )
+
+
+# ---------------------------------------------------------------------------
+# CSR rule ledger (V-017)
+# ---------------------------------------------------------------------------
+
+
+_RULE_KINDS = frozenset(["strict", "warl_allowed", "read_only", "alias", "permission"])
+_EXAMPLE_OPS = frozenset(["csrrw", "csrrs", "csrrc", "csrr"])
+
+
+def _ledger_bits_mask(spec: str, width: int, where: str, bundle: Bundle) -> Optional[int]:
+    """Parse a ledger `bits` string ("3", "14:13", "63,35:32") into a mask."""
+    mask = 0
+    for item in spec.split(","):
+        if ":" in item:
+            hi_text, lo_text = item.split(":", 1)
+        else:
+            hi_text = lo_text = item
+        try:
+            hi, lo = int(hi_text, 10), int(lo_text, 10)
+        except ValueError:
+            bundle.fail(where, "bit spec %r is not numeric" % item)
+            return None
+        if hi < lo:
+            hi, lo = lo, hi
+        if lo < 0 or hi >= width:
+            bundle.fail(where, "bit spec %r lies outside the %d-bit register" % (item, width))
+            return None
+        mask |= ((1 << (hi - lo + 1)) - 1) << lo
+    return mask
+
+
+def _check_csr_rules(bundle: Bundle, profile_name: str) -> None:
+    """Cross-check the V-017 rule ledger against the profile's implementation table.
+
+    The schema says the ledger is well-formed. This says it is *about this
+    profile*: every rule names a CSR the table implements (or is explicitly about
+    an address it does not), every implemented CSR carries at least one rule, the
+    example's target addresses exist and are writable where a write is expected,
+    every rule states the adjacent illegal result it rejects, and the address
+    encoded permission of every implemented CSR agrees with the profile's mode
+    list -- the part of the permission rule that no M-only stimulus can reach.
+    """
+    ledger = bundle.csr_rules
+    if ledger is None:
+        return
+    if ledger.get("profile") != profile_name:
+        # The ledger is written against one profile's implementation table; it is
+        # loaded (and schema-checked) for every profile so a malformed file cannot
+        # hide, but its addresses are only cross-checked against the table it names.
+        return
+
+    where = "csr rule ledger"
+    merged: Dict[str, Dict[str, Any]] = {}
+    by_address: Dict[int, str] = {}
+    for table in bundle.csr_tables:
+        for block in table.get("modes", []):
+            for csr in block["csrs"]:
+                merged.setdefault(csr["name"], csr)
+                by_address[csr["address"]] = csr["name"]
+
+    # The address-encoded permission rule: csr[9:8] is the lowest privilege level
+    # that may access the register and csr[11:10] == 3 marks a read-only register,
+    # so a write needs csr[9:8] (or M when the address is read-only). No
+    # implemented CSR may require a privilege the profile does not implement.
+    claimed = set(bundle.profile["privilege_modes"]) if bundle.profile else set()
+    least = min(({ "U": 0, "S": 1, "H": 2, "M": 3 }[m] for m in claimed), default=3)
+    for name, csr in sorted(merged.items()):
+        address = csr["address"]
+        min_r = (address >> 8) & 0x3
+        min_w = 3 if ((address >> 10) & 0x3) == 0x3 else min_r
+        if min_r > least:
+            bundle.fail(
+                "csr %s" % name,
+                "address 0x%03x encodes a minimum privilege %d above the least mode "
+                "profile %s implements (%d); the permission precondition is unmet"
+                % (address, min_r, profile_name, least),
+            )
+        if csr["access"] != "ro" and min_w > least:
+            bundle.fail(
+                "csr %s" % name,
+                "address 0x%03x requires privilege %d to write but profile %s implements "
+                "only down to %d" % (address, min_w, profile_name, least),
+            )
+
+    seen_ids = set()
+    covered: Dict[str, int] = {}
+    for index, rule in enumerate(ledger["rules"]):
+        rid = rule["id"]
+        rule_where = "%s rule %s" % (where, rid)
+        if rid in seen_ids:
+            bundle.fail(rule_where, "duplicate rule id")
+        seen_ids.add(rid)
+
+        kind = rule["kind"]
+        if kind not in _RULE_KINDS:
+            bundle.fail(rule_where, "unknown rule kind %r" % kind)
+
+        csr_name = rule["csr"]
+        csr = merged.get(csr_name)
+        if csr_name == "unimplemented":
+            if rule["address"] in by_address:
+                bundle.fail(
+                    rule_where,
+                    "declared 'unimplemented' but address 0x%03x implements %s"
+                    % (rule["address"], by_address[rule["address"]]),
+                )
+            width = 64
+        else:
+            if csr is None:
+                bundle.fail(rule_where, "names CSR %r which profile %s does not implement"
+                            % (csr_name, profile_name))
+                continue
+            if csr["address"] != rule["address"]:
+                bundle.fail(
+                    rule_where,
+                    "address 0x%03x disagrees with the table's 0x%03x for %s"
+                    % (rule["address"], csr["address"], csr_name),
+                )
+            width = csr["width"]
+            covered[csr_name] = covered.get(csr_name, 0) + 1
+
+        mask = _ledger_bits_mask(rule["bits"], width, rule_where, bundle)
+
+        for tag in ("positive", "negative"):
+            example = rule[tag]
+            ex_where = "%s %s" % (rule_where, tag)
+            if example["op"] not in _EXAMPLE_OPS:
+                bundle.fail(ex_where, "unknown op %r" % example["op"])
+            target = int(example.get("target", "0x%03x" % rule["address"]), 16)
+            write_target = int(example.get("write_target", "0x%03x" % target), 16)
+            if example["op"] != "csrr":
+                if write_target not in by_address:
+                    bundle.fail(
+                        ex_where,
+                        "write target 0x%03x is not an implemented CSR" % write_target,
+                    )
+                else:
+                    written = merged[by_address[write_target]]
+                    if written["access"] == "ro" and example["traps"] < 1:
+                        bundle.fail(
+                            ex_where,
+                            "writes read-only CSR %s without expecting a trap"
+                            % written["name"],
+                        )
+                    if csr is not None and written["name"] != csr_name and kind != "alias":
+                        bundle.fail(
+                            ex_where,
+                            "writes %s but the rule is about %s (only an alias rule may "
+                            "write a different register)" % (written["name"], csr_name),
+                        )
+            if target not in by_address:
+                # Only a permission rule may aim at an address the table does not
+                # implement, and it must expect the access to trap.
+                if kind != "permission" or example["traps"] < 1:
+                    bundle.fail(
+                        ex_where,
+                        "read target 0x%03x is not implemented and the rule does not "
+                        "expect a trap" % target,
+                    )
+
+        # The card's central requirement: every rule carries the adjacent illegal
+        # result it rejects, or it is not a rule the comparator can be wrong about.
+        if "forbid" not in rule["positive"] and "forbid" not in rule["negative"]:
+            bundle.fail(
+                rule_where,
+                "neither example names the adjacent illegal result (no `forbid`); the "
+                "comparator would accept every difference, which is the auto-waiver "
+                "fail mode",
+            )
+
+    for name in sorted(merged):
+        if name not in covered:
+            bundle.fail(
+                where,
+                "implemented CSR %s has no rule; the ledger must cover every implemented "
+                "CSR, not only the interesting ones" % name,
+            )
 
 
 # ---------------------------------------------------------------------------
