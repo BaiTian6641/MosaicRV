@@ -767,7 +767,7 @@ std::vector<Scenario> BuildScenarios() {
     s.alt_without_su = true;
     s.exp = Expect{false, 0};     // with S: MPP reads back 01
     s.alt = Expect{false, 0};     // without S: MPP is read-only 11
-    s.pre_csr.push_back(CsrOp{true, CSR_MSTATUS, 0x800});
+    s.pre_csr.push_back(CsrOp{true, CSR_MSTATUS, 0x20800});
     s.csr_ops.push_back(CsrOp{false, CSR_MSTATUS, 0});
     add(s);
   }
@@ -1190,7 +1190,7 @@ std::vector<Scenario> BuildScenarios() {
     s.addr = kDataA + 0x2800;
     s.rule = "with MPRV=1 an M-mode load is checked as though the mode were MPP";
     s.entries.push_back(Ent{1, Cfg(false, kANapot, false, false, true), NapotAddr(kDataA, 0x8000)});
-    s.pre_csr.push_back(CsrOp{true, CSR_MSTATUS, 0x21800});   // MPRV=1, MPP=S
+    s.pre_csr.push_back(CsrOp{true, CSR_MSTATUS, 0x20800});   // MPRV=1, MPP=S
     s.exp = Expect{true, kExcLoadAccess};
     add(s);
   }
@@ -1203,7 +1203,7 @@ std::vector<Scenario> BuildScenarios() {
     s.addr = kDataA + 0x2808;
     s.rule = "with MPRV=1 an M-mode store is checked as though the mode were MPP";
     s.entries.push_back(Ent{1, Cfg(false, kANapot, true, false, false), NapotAddr(kDataA, 0x8000)});
-    s.pre_csr.push_back(CsrOp{true, CSR_MSTATUS, 0x21800});
+    s.pre_csr.push_back(CsrOp{true, CSR_MSTATUS, 0x20800});
     s.exp = Expect{true, kExcStoreAccess};
     add(s);
   }
@@ -1230,7 +1230,7 @@ std::vector<Scenario> BuildScenarios() {
     s.rule = "instruction access checking is unaffected by MPRV, so this fetch "
              "is still an M-mode one and succeeds";
     s.entries.push_back(Ent{1, Cfg(false, kANapot, true, true, false), NapotAddr(kDataB, 0x8000)});
-    s.pre_csr.push_back(CsrOp{true, CSR_MSTATUS, 0x21800});
+    s.pre_csr.push_back(CsrOp{true, CSR_MSTATUS, 0x20800});
     s.exp = Expect{false, 0};   // the ecall at the target executes
     add(s);
   }
@@ -1347,6 +1347,17 @@ struct Program {
 
 void EmitHandler(Asm* a) {
   a->Csrrw(5, CSR_MSCRATCH, 5);            // x5 <- frame, mscratch <- old x5
+  // MPRV is cleared *before* the first data access. "When MPRV is set, load and
+  // store instructions in M-mode use MPP as the effective privilege", and that
+  // applies to this handler too: a frame store with MPRV still set would be
+  // checked as an MPP-mode access and could be refused by the very entry the
+  // trap is about, which turns one trap into an endless one. The pre-trap
+  // mstatus is read first, into a register this frame does not carry (x13), and
+  // only then is MPRV cleared -- so the value the frame reports is the
+  // architectural one and the accesses below are ordinary M-mode accesses.
+  a->Csrrs(13, CSR_MSTATUS, 0);
+  a->LiAbs(14, 0x1800);                    // MPP <- M, MPRV <- 0
+  a->Csrrw(0, CSR_MSTATUS, 14);
   a->Sd(6, 5, F_X5 + 8);
   a->Sd(7, 5, F_X5 + 16);
   a->Sd(8, 5, F_X5 + 24);
@@ -1356,20 +1367,17 @@ void EmitHandler(Asm* a) {
   a->Sd(12, 5, F_X5 + 56);
   a->Csrrs(6, CSR_MSCRATCH, 0);            // x6 <- the pre-trap x5
   a->Sd(6, 5, F_X5);
+  a->Sd(13, 5, F_MSTATUS);                 // the pre-trap mstatus, read first
   a->Csrrs(6, CSR_MCAUSE, 0);
   a->Sd(6, 5, F_CAUSE);
   a->Csrrs(6, CSR_MTVAL, 0);
   a->Sd(6, 5, F_TVAL);
   a->Csrrs(6, CSR_MEPC, 0);
   a->Sd(6, 5, F_EPC);
-  a->Csrrs(6, CSR_MSTATUS, 0);
-  a->Sd(6, 5, F_MSTATUS);
   a->Addi(6, 0, 1);
   a->Sd(6, 5, F_VALID);
   a->Ld(6, 5, F_RESUME);
   a->Csrrw(0, CSR_MEPC, 6);
-  a->LiAbs(6, 0x1800);                     // mstatus.MPP <- M
-  a->Csrrw(0, CSR_MSTATUS, 6);
   a->Mret();
 }
 
@@ -1434,10 +1442,6 @@ ProgImage BuildProgram(std::vector<Scenario>* scs, const Geometry& g) {
     s.frame = kFrameLo + kFrameStride * s.index;
     s.rec = kRecLo + 8ull * s.index;
 
-    for (const CsrOp& op : s.pre_csr) {
-      a.LiAbs(6, op.operand);
-      a.Csrrw(0, op.csr, 6);
-    }
     if (pmp) {
       for (unsigned i = 0; i < g.pmp_entries; i++) {
         uint64_t addr = 0;
@@ -1478,6 +1482,14 @@ ProgImage BuildProgram(std::vector<Scenario>* scs, const Geometry& g) {
     a.Sd(7, 6, F_RESUME);
     a.Csrrw(0, CSR_MSCRATCH, 6);
 
+    // The scenario's own M-mode CSR writes, immediately before the access: an
+    // MPRV write belongs here rather than earlier, or the frame setup above
+    // would be checked as an MPP-mode access instead of the access under test.
+    for (const CsrOp& op : s.pre_csr) {
+      a.LiAbs(6, op.operand);
+      a.Csrrw(0, op.csr, 6);
+    }
+
     a.LiAbs(5, s.preset);
     a.LiAbs(8, s.addr);
     if (IsStoreLike(s.cls)) a.LiAbs(9, s.data);
@@ -1500,6 +1512,14 @@ ProgImage BuildProgram(std::vector<Scenario>* scs, const Geometry& g) {
       s.expect_epc_nofault = (s.cls == Cls::kFetch) ? s.addr : 0;
     }
     a.Mark(KeepLabel(s.index));
+    // A scenario that set MPRV clears it again before anything else in this
+    // program runs, so its own effect is the only one MPRV has.
+    for (const CsrOp& op : s.pre_csr) {
+      if (op.csr == CSR_MSTATUS && op.write && ((op.operand >> 17) & 1u)) {
+        a.LiAbs(6, 0x1800);
+        a.Csrrw(0, CSR_MSTATUS, 6);
+      }
+    }
     // Record x5 wherever the access was allowed. A faulted scenario resumes
     // here from the handler, where x5 is the handler's own scratch, so the
     // driver only reads this word when it expected the access to succeed.
@@ -2022,18 +2042,35 @@ void RunCase(Vmosaic_core_tb* dut, mosaic::Reporter* reporter, const Geometry& g
       // the value the scenario gave it. This covers a refused load (nothing was
       // written to rd), a refused CSR read, and a refused store or AMO.
       if (s.cls != Cls::kFetch) {
+        uint64_t want = s.preset;
+#ifdef MOSAIC_PRIV_MUTANT_FAULT_WRITES
+        // CONTROL (the card's "a permission fault still writes"): the checker is
+        // mutated to expect the refused load to have written its destination --
+        // the value it would have returned. The machine writes nothing, so the
+        // first refused load names this control and the shipping build does not.
+        // It is a *driver* control because the refusal is structural in the RTL
+        // (the endpoint never presents the access) and no RTL switch can express
+        // "the access was presented anyway and its writeback polluted rd".
+        if (IsLoadLike(s.cls) && s.cls != Cls::kAmo) want = s.pre;
+#endif
         harness.Check(tag + ": the destination register is untouched",
-                      f.x5 == s.preset,
-                      "x5=" + U64(f.x5) + " expected the pre-value " + U64(s.preset));
+                      f.x5 == want,
+                      "x5=" + U64(f.x5) + " expected the pre-value " + U64(want));
       }
       if (IsStoreLike(s.cls)) {
         uint64_t now = 0;
         if (dut_mem.Read(s.addr, s.width, &now) != mosaic::AccessStatus::kOk) {
           Fail(phase, tag + ": the protected word is not readable");
         }
-        harness.Check(tag + ": no bytes of the protected word changed",
-                      now == s.pre,
-                      "word=" + U64(now) + " expected " + U64(s.pre));
+        uint64_t want = s.pre;
+#ifdef MOSAIC_PRIV_MUTANT_FAULT_WRITES
+        // The same control on the memory side: the refused store is expected to
+        // have written its data.
+        want = s.data;
+#endif
+        harness.Check(tag + ": the refused store left the protected word alone",
+                      now == want,
+                      "word=" + U64(now) + " expected " + U64(want));
         for (const DataMem::Txn& t : harness.txns()) {
           const bool same = (t.req.addr & ~7ull) == (s.addr & ~7ull);
           harness.Check(tag + ": no transaction for the refused address "
@@ -2141,6 +2178,9 @@ void RunCase(Vmosaic_core_tb* dut, mosaic::Reporter* reporter, const Geometry& g
                            "the profile implements a less-privileged mode",
                       mpp == (su ? 1u : 3u),
                       "mstatus=" + U64(seen) + " MPP=" + Dec(mpp));
+        harness.Check(tag + ": mstatus.MPRV holds the written value",
+                      ((seen >> 17) & 1u) == (su ? 1u : 0u),
+                      "mstatus=" + U64(seen) + " MPRV=" + Dec((seen >> 17) & 1u));
       }
     }
     if (s.cls == Cls::kCsr && faulted) {

@@ -8,22 +8,23 @@ instructions plus a trap and of a store drain, and validate the three producers
 
 | Artifact | Role |
 |---|---|
-| `config/contracts/event_v1.json` | the frozen interface: schema version 1, 21 fields, 100 octets/record, kinds RETIRE/TRAP/MEM_VISIBLE |
+| `config/contracts/event_v1.json` | the frozen interface: schema version 2 — 22 fields, 101 octets/record, kinds RETIRE/TRAP/MEM_VISIBLE. v1 was 21 fields / 100 octets at the freeze; the revision and its reason are in §8 |
 | `sim/common/event_codec.h` / `.cpp` | the one serialiser; its `MOSAIC_EVENT_FIELDS(X)` is the encoding order and the single source of truth |
 | `sim/common/event_tap.h` | the de-facto host record `RetireEvent` (I-004 harness) |
 | `rtl/core/mosaic_retire.sv` | the out-of-order per-lane `ev_*` producer |
 | `sim/tb/mosaic_bringup_tb.sv` | the single-lane, registered `c_evt_*` producer |
-| `tools/check_event_contract.py` | the checker wired into `make check`; 33 built-in negative controls |
+| `tools/check_event_contract.py` | the checker wired into `make check`; 36 built-in negative controls (33 at the v1 freeze + 3 for the v2 length field) |
+| `results/reports/V-008-schema-revision.md` | the v1→v2 revision report (added 2026-10-02) |
 | `results/reports/V-008-events.md` | this file |
 
-## STATUS: PASS — interface frozen, checker wired and negative-controlled
+## STATUS: PASS — interface frozen and revised to schema v2, checker wired and negative-controlled
 
 | Check | Result |
 | --- | --- |
-| positive check | `event contract OK -- 21 fields, 100 octets/record, kinds RETIRE/TRAP/MEM_VISIBLE`, exit 0 |
-| negative controls | `33/33 illegal interfaces rejected`, exit 0 |
+| positive check | `event contract OK -- 22 fields, 101 octets/record, kinds RETIRE/TRAP/MEM_VISIBLE`, exit 0 |
+| negative controls | `36/36 illegal interfaces rejected`, exit 0 |
 | `make check` with the target wired in | exit 0 |
-| fields with no RTL producer yet | exactly three, named on every run (`ev_insn`, `ev_pc_after`, `ev_trap_epc`; rules F-3/F-4) |
+| fields with no RTL producer yet | exactly two, named on every run (`ev_pc_after`, `ev_trap_epc`; rules F-3/F-4). `insn_bits` stopped being a gap in v2 — see §8 |
 
 ---
 
@@ -243,6 +244,11 @@ different record.
 
 ## 5. Fields with no RTL producer yet
 
+> **Superseded for `insn_bits` by §8 (schema v2, 2026-10-02).** The text and the
+> printed gap list below are the v1 freeze's record: `ev_insn` now exists
+> (I-041), so the current gap list is `ev_pc_after`, `ev_trap_epc`. Kept as the
+> history of what the freeze declared.
+
 Printed by the tool on **every** run, so the gap is never implied and never
 silent:
 
@@ -338,3 +344,100 @@ target, the `.PHONY` entry, the help line and the `check` dependency),
 `results/reports/V-008-events.md` (this file). No RTL, schema, codec, registry or
 status file was modified; the schema/codec/tap and the checker were already in
 the tree and are frozen by this freeze.
+
+---
+
+## 8. Addendum — schema revision v1 → v2 (2026-10-02)
+
+Appended to the freeze record above; it does not rewrite it. The companion report
+with the full layout and control tables is
+`results/reports/V-008-schema-revision.md`.
+
+### 8.1 Why the interface changed after the freeze
+
+The RV64C package (I-041, `results/reports/I-041-compressed.md` §2) made the
+retire unit carry two per-lane facts that the V-008 card requires to travel as
+data, not be re-derived: the committed instruction's **own bits** (`ev_insn`) and
+its **own length** (`ev_len`: 2 bytes for a 16-bit compressed instruction, 4
+otherwise). The card's rule is that a compressed instruction's PC and length are
+its own — a consumer must not infer the length from the PC's alignment or from a
+predecessor, and must not re-decode the low bits of the opcode to recover it.
+
+`ev_insn` was not a new field: v1 already declared `insn_bits` as a `pending_rtl`
+source under reconciliation F-3 ("declared but no producer yet"), so I-041 is
+that field finally having a producer. `ev_len` was genuinely new and v1 had no
+field for it, so the RTL and the frozen schema disagreed — which is exactly what
+the checker reported, and why this revision exists:
+
+```
+ERROR [INV-TAPDECL] producer retire_unit: rtl/core/mosaic_retire.sv declares the event declaration 'ev_insn' which the schema does not map to any field
+ERROR [INV-TAPDECL] producer retire_unit: rtl/core/mosaic_retire.sv declares the event declaration 'ev_len' which the schema does not map to any field
+profile p0: 2 event-contract problem(s)
+```
+
+The RTL is right and the contract lagged. **No RTL was edited by this revision.**
+
+### 8.2 What changed
+
+| Artifact | Change |
+|---|---|
+| `config/contracts/event_v1.json` | `insn_bits`'s `pending_rtl (ev_insn)` source became `rtl_lane … relation exact` (F-3 landed); new field `insn_len` after `insn_bits`; every offset from `rob_id` on moved one octet; `total_octets` 100 → 101; `schema_version` 1 → 2; `revisions` block added; F-3 gained a `status` key; new reconciliation **F-7** |
+| `sim/common/event_codec.h` | `X(insn_len, 3)` added after `X(insn_bits, 32)`; `MOSAIC_EVENT_SCHEMA_VERSION` 1 → 2; header comment records the v2 delta |
+| `sim/common/event_tap.h` | `RetireEvent` gains `uint8_t insn_len = 0`, mapped in the schema as the 8-bit container; `Line()` deliberately unchanged |
+| `tools/check_event_contract.py` | three new controls (36 total); three existing controls re-pointed because their mutation target moved with the version/layout |
+| `results/reports/V-008-events.md` | this addendum; §5 carries a "superseded for `insn_bits`" note |
+| `results/reports/V-008-schema-revision.md` | the companion revision report |
+
+`insn_len` is 3 bits (`RET_SIZE_W`), group `instruction`, architectural, valid on
+RETIRE and TRAP, sampled `settled_pre_edge`, sourced exactly from `ev_len`. The
+plan writes `insn_len:u8`; F-7 records why that is a container width and the
+frozen field is the producer's own 3 bits — the same narrowing v1 already applied
+to `hart_id` (1 bit), `retire_seq` (8 bits) and `kind` (2 bits). Values other
+than 2 and 4 are not produced; a consumer treats them as invalid rather than
+re-deriving the length from the bits.
+
+### 8.3 What the byte layout now is, and what the version move breaks
+
+`insn_len` sits **between `insn_bits` and `rob_id`**, so the record grew from 100
+to **101 octets** and every field from `rob_id` on encodes one octet later than
+in v1 (e.g. `rob_id` 35 → 36, `trap_epc` 92 → 93). The full table is in the
+companion report.
+
+`schema_version` **1 → 2**, because the change is incompatible at the byte level:
+decoding a v1 record with the v2 layout would silently misread every field from
+`rob_id` onward. The version rule is what prevents that — the v2 encoder refuses a
+stream that claims v1, and the v2 decoder rejects a v1 header rather than
+misparse it. **A stored binary record written against v1 cannot be decoded by
+this codec**; it needs a v1 decoder, and no migration reader exists (see the
+companion report's "not covered"). The `RetireEvent::Line()` **text** stream is a
+different format and is unaffected.
+
+### 8.4 What a consumer must do
+
+* A producer or decoder built against v1 must be recompiled/regenerated against
+  v2. The encoder's version check enforces this at runtime, not by convention.
+* A consumer of `insn_len` reads it, does not derive it from `insn_bits` or
+  `pc_before`, and treats a value other than 2 or 4 as invalid. I-041's
+  structural invariant (`len == 2` iff `insn_bits[1:0] != 2'b11`) still holds.
+* A consumer of the **host text stream** sees no change: `RetireEvent.insn_len`
+  is present in the record type but `Line()` is byte-frozen by I-008's embedded
+  Python reference (`sim/unit/tb_bringup.cpp`) and compared line for line by the
+  I-004 harness, so extending it belongs to migrating the host record onto
+  `event_codec.h` (reconciliation F-5), not to this revision.
+* A future route-B generator or waveform decoder must be regenerated against v2.
+
+### 8.5 Producers re-verified against v2
+
+The three producers and the serialiser were re-checked field for field (schema,
+`rtl/core/mosaic_retire.sv` per-lane ports, `sim/tb/mosaic_bringup_tb.sv` wrapper
+ports, `sim/common/event_tap.h` `RetireEvent`, `sim/common/event_codec.h` field
+list/widths/order/version) and the check is green in both modes. `make check`,
+`python3 tools/check_records.py`, `make lint-slang` and `make lint-cpp` are green.
+Six cases were each re-run from a deleted `build/p0/unit/<case>` directory and
+PASS: `core.event_payload` (I-017, compiles `event_tap.cpp`),
+`core.trap_csr_program` (I-023), `compressed.cross_boundary` (I-041),
+`core.corpus_sweep` (I-023), `trap.precise_state` (V-014) and
+`retire.width_and_order` (V-013). The binary codec was exercised by a throwaway
+program (not committed): 101 octets, header 2, `insn_len` survives
+encode→decode, a v1 header is refused, and a value above the 3-bit field is
+refused.

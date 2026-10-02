@@ -2286,7 +2286,7 @@ module mosaic_core (
       .irq_timer_pending_o(),
       .o_irq_soft_pending (),
       .o_irq_ext_pending  (),
-      .wfi_valid_i        (sys_wb_valid && sys_wfi_q),
+      .wfi_valid_i        (sys_wb_valid && sys_wfi_q && !sys_exc),
       .wfi_halt_o         (wfi_halt),
       .o_irq_ctr          (irq_ctr),
       .o_halt_cycles      (halt_cycles),
@@ -2533,12 +2533,20 @@ module mosaic_core (
   assign sys_priv_wr_q = sys_valid_q && sys_csr_writes_q &&
                          (sys_csr_addr_q == mosaic_csr_pkg::MOSAIC_CSR_ADDR_MSTATUS);
 
-  assign csr_mret_valid = sys_wb_valid && sys_mret_q;
+  assign csr_mret_valid = sys_wb_valid && sys_mret_q && !sys_exc;
   // SRET is strobed exactly like MRET: the CSR file performs the supervisor
   // return in the cycle the instruction's completion is accepted by the
   // writeback arbiter, and the redirect that follows restarts the front end at
   // sepc.
-  assign csr_sret_valid = sys_wb_valid && sys_sret_q;
+  assign csr_sret_valid = sys_wb_valid && sys_sret_q && !sys_exc;
+  // `!sys_exc` is what makes an *illegal* xRET an exception rather than an
+  // effect. The macro's completion is still offered -- that is what latches
+  // `sys_trap_q` and takes the trap -- but the return itself must not happen:
+  // without this term an MRET executed below M-mode changed the privilege and
+  // redirected to mepc in the same cycle its exception was recorded, so the trap
+  // was then taken from the mode the illegal return had just entered.
+  // CASE=privilege.permission_matrix found exactly that, as `mret` executed in
+  // S-mode trapping with mstatus.MPP = U.
 
   // ------------------------------------------------------- the trap controller
   // Two things can trap from the head, and they are the same event as far as

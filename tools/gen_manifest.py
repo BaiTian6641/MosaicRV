@@ -736,6 +736,125 @@ def render_csr_header(bundle: config_check.Bundle) -> str:
     return "\n".join(lines)
 
 
+def render_csr_rules_header(bundle: config_check.Bundle) -> str:
+    """Emit the V-017 rule ledger as a C++ table for CASE=csr.rule_ledger.
+
+    The case is *generated* from the ledger: the driver walks this table, emits
+    one stimulus per example, and asserts at the end that every rule was visited.
+    A rule therefore cannot be silently skipped -- it would leave the coverage
+    count short and fail the case -- and the ledger, not the driver, is the one
+    place that says what each relationship is.
+    """
+    ledger = bundle.csr_rules
+    lines = []
+    add = lines.append
+    add("// GENERATED FILE - do not edit.")
+    add("// Produced by tools/gen_manifest.py --profile %s from config/csr/rule_ledger.json." % bundle.name)
+    add("//")
+    add("// One rule per legality relationship and two examples per rule (positive and")
+    add("// negative). The driver builds its program from MOSAIC_CSR_EXAMPLES and its")
+    add("// coverage assertion from MOSAIC_CSR_RULE_IDS, so a rule that is added to the")
+    add("// ledger without a reachable example fails the case.")
+    add("")
+    add("#ifndef MOSAIC_CSR_RULES_H_")
+    add("#define MOSAIC_CSR_RULES_H_")
+    add("")
+    add("#include <stdint.h>")
+    add("")
+
+    rules = []
+    examples = []
+    if ledger is not None and ledger.get("profile") == bundle.name:
+        rules = ledger["rules"]
+        for rindex, rule in enumerate(rules):
+            for negative, tag in ((0, "positive"), (1, "negative")):
+                examples.append((rindex, negative, rule, rule[tag]))
+
+    add("#define MOSAIC_CSR_RULE_COUNT %d" % len(rules))
+    add("#define MOSAIC_CSR_EXAMPLE_COUNT %d" % len(examples))
+    add("")
+    add("enum { MOSAIC_RULE_STRICT = 0, MOSAIC_RULE_WARL_ALLOWED = 1,")
+    add("       MOSAIC_RULE_READ_ONLY = 2, MOSAIC_RULE_ALIAS = 3,")
+    add("       MOSAIC_RULE_PERMISSION = 4 };")
+    add("enum { MOSAIC_EX_CSRRW = 0, MOSAIC_EX_CSRRS = 1, MOSAIC_EX_CSRRC = 2,")
+    add("       MOSAIC_EX_CSRR = 3 };")
+    add("enum { MOSAIC_EXP_READ = 0, MOSAIC_EXP_RANGE = 1, MOSAIC_EXP_ADVANCE = 2,")
+    add("       MOSAIC_EXP_CANARY = 3 };")
+    add("")
+    add("typedef struct {")
+    add("  uint16_t address;")
+    add("  uint8_t  kind;")
+    add("  const char *field;")
+    add("  const char *clause;")
+    add("} mosaic_csr_rule_desc_t;")
+    add("")
+    add("typedef struct {")
+    add("  uint16_t rule;          /* index into MOSAIC_CSR_RULE_IDS */")
+    add("  uint8_t  negative;      /* 0 = positive example, 1 = negative */")
+    add("  uint8_t  op;            /* MOSAIC_EX_* */")
+    add("  uint8_t  traps;         /* illegal-instruction exceptions required */")
+    add("  uint8_t  expect_mode;   /* MOSAIC_EXP_* */")
+    add("  uint8_t  pre_read;")
+    add("  uint8_t  has_forbid;")
+    add("  uint16_t target;        /* the CSR the read is aimed at */")
+    add("  uint16_t write_target;  /* the CSR the write is aimed at */")
+    add("  uint64_t write;")
+    add("  uint64_t expect_lo;     /* read/range-min/canary, or advance min_delta */")
+    add("  uint64_t expect_hi;     /* range max */")
+    add("  uint16_t advance_gap;   /* instructions between the two advance reads */")
+    add("  uint64_t forbid;")
+    add("} mosaic_csr_example_t;")
+    add("")
+    if rules:
+        add("static const char *const MOSAIC_CSR_RULE_IDS[MOSAIC_CSR_RULE_COUNT] = {")
+        for rule in rules:
+            add('  "%s",' % rule["id"])
+        add("};")
+        add("")
+        add("static const mosaic_csr_rule_desc_t MOSAIC_CSR_RULES[MOSAIC_CSR_RULE_COUNT] = {")
+        kind_index = {"strict": 0, "warl_allowed": 1, "read_only": 2, "alias": 3,
+                      "permission": 4}
+        for rule in rules:
+            add('  { 0x%03x, %d, "%s",'
+                % (rule["address"], kind_index[rule["kind"]], rule["field"]))
+            add('    "%s" },' % rule["clause"].replace("\\", "\\\\").replace('"', '\\"'))
+        add("};")
+        add("")
+        add("static const mosaic_csr_example_t MOSAIC_CSR_EXAMPLES[MOSAIC_CSR_EXAMPLE_COUNT] = {")
+        op_index = {"csrrw": 0, "csrrs": 1, "csrrc": 2, "csrr": 3}
+        for rindex, negative, rule, example in examples:
+            target = int(example.get("target", "0x%03x" % rule["address"]), 16)
+            write_target = int(example.get("write_target", "0x%03x" % target), 16)
+            exp = example["expect"]
+            if "read" in exp:
+                mode, lo, hi, gap = 0, int(exp["read"], 16), 0, 0
+            elif "range" in exp:
+                mode, lo, hi, gap = 1, int(exp["range"][0], 16), int(exp["range"][1], 16), 0
+            elif "advance" in exp:
+                mode, lo, hi, gap = 2, int(exp["advance"]["min_delta"]), 0, int(exp["advance"]["gap"])
+            else:
+                mode, lo, hi, gap = 3, int(exp["canary"], 16), 0, 0
+            forbid = int(example["forbid"], 16) if "forbid" in example else 0
+            add("  { %d, %d, %d, %d, %d, %d, %d, 0x%03x, 0x%03x,"
+                % (rindex, negative, op_index[example["op"]], example["traps"], mode,
+                   1 if example.get("pre_read") else 0, 1 if "forbid" in example else 0,
+                   target, write_target))
+            add("    UINT64_C(0x%016x), UINT64_C(0x%016x), UINT64_C(0x%016x), %d, UINT64_C(0x%016x) },"
+                % (int(example["write"], 16), lo, hi, gap, forbid))
+        add("};")
+    else:
+        # No ledger for this profile: the case must fail rather than pass
+        # vacuously, so the tables exist but the counts are zero.
+        add("static const char *const MOSAIC_CSR_RULE_IDS[1] = { \"(no ledger)\" };")
+        add("static const mosaic_csr_rule_desc_t MOSAIC_CSR_RULES[1] = { { 0, 0, \"\", \"\" } };")
+        add("static const mosaic_csr_example_t MOSAIC_CSR_EXAMPLES[1] = { { 0, 0, 0, 0, 0, 0, 0, 0, 0,")
+        add("  UINT64_C(0), UINT64_C(0), UINT64_C(0), 0, UINT64_C(0) } };")
+    add("")
+    add("#endif  // MOSAIC_CSR_RULES_H_")
+    add("")
+    return "\n".join(lines)
+
+
 def render_platform_header(bundle: config_check.Bundle) -> str:
     """Emit the C-visible platform contract for the simulation harness.
 
@@ -879,6 +998,9 @@ def main() -> int:
 
     with open(os.path.join(sim_out, "mosaic_csr_table.h"), "w") as handle:
         handle.write(render_csr_header(bundle))
+
+    with open(os.path.join(sim_out, "mosaic_csr_rules.h"), "w") as handle:
+        handle.write(render_csr_rules_header(bundle))
 
     sources = _collect_filelist()
     list_path = os.path.join(rtl_out, "filelist.f")

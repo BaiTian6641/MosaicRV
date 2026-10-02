@@ -924,6 +924,13 @@ class NegativeControls(object):
         self.case("retire ev_seq widened past the schema",
                   lambda w: self._edit(w, RETIRE_REL, "$clog2(2 * RET_ROB + 1);",
                                        "$clog2(2 * RET_ROB + 1) + 4;"))
+        # The v2 length field: renaming the declaration leaves the schema's
+        # mapping pointing at a port that no longer exists, so INV-TAPDECL must
+        # name both the unmapped declaration and the field whose source it was.
+        self.case("retire ev_len renamed",
+                  lambda w: self._edit(w, RETIRE_REL,
+                                       "[RET_WIDTH*RET_SIZE_W-1:0] ev_len,",
+                                       "[RET_WIDTH*RET_SIZE_W-1:0] ev_ilen,"))
         # -- the bring-up tap --------------------------------------------------
         self.case("bringup c_evt_pc narrowed to 32 bits",
                   lambda w: self._edit(w, TAP_SV_REL, "output wire  [63:0] c_evt_pc,",
@@ -937,9 +944,18 @@ class NegativeControls(object):
         self.case("host record rd widened to 16 bits",
                   lambda w: self._edit(w, TAP_H_REL, "  uint8_t rd = 0;",
                                        "  uint16_t rd = 0;"))
+        # The v2 length field's host container: renaming it without renaming the
+        # schema's source leaves the mapping stale, which INV-TAPDECL rejects.
+        self.case("host record insn_len renamed",
+                  lambda w: self._edit(w, TAP_H_REL, "  uint8_t insn_len = 0;",
+                                       "  uint8_t insn_bytes = 0;"))
         # -- the serialiser ----------------------------------------------------
         self.case("codec pc_before encoded 32 bits wide",
                   lambda w: self._edit(w, CODEC_REL, "X(pc_before, 64)", "X(pc_before, 32)"))
+        # The v2 length field: the codec encoding a different width than the
+        # schema is the exact drift INV-CPPFIELDS exists to catch.
+        self.case("codec insn_len encoded 4 bits wide",
+                  lambda w: self._edit(w, CODEC_REL, "X(insn_len, 3)", "X(insn_len, 4)"))
         self.case("codec trap_epc dropped from the field list",
                   lambda w: self._edit(w, CODEC_REL, "  X(trap_epc, 64)", ""))
         self.case("codec field order changed", swap_codec_fields)
@@ -947,8 +963,8 @@ class NegativeControls(object):
                   lambda w: self._edit(w, CODEC_REL, "X(rd_value,", "X(rdval,"))
         self.case("codec schema version bumped alone",
                   lambda w: self._edit(w, CODEC_REL,
-                                       "MOSAIC_EVENT_SCHEMA_VERSION 1",
-                                       "MOSAIC_EVENT_SCHEMA_VERSION 2"))
+                                       "MOSAIC_EVENT_SCHEMA_VERSION 2",
+                                       "MOSAIC_EVENT_SCHEMA_VERSION 3"))
         self.case("codec MEM_VISIBLE value changed",
                   lambda w: self._edit(w, CODEC_REL, "K(MEM_VISIBLE, 3)", "K(MEM_VISIBLE, 9)"))
         # -- the schema's own completeness -------------------------------------
@@ -970,7 +986,7 @@ class NegativeControls(object):
                       w, lambda d: self._field(d, "csr_value").update({"sources": []})))
         self.case("pending source with no reason recorded",
                   lambda w: self._edit_schema(
-                      w, lambda d: self._field(d, "insn_bits")["sources"][-1].pop("why")))
+                      w, lambda d: self._field(d, "pc_after")["sources"][-1].pop("why")))
         # -- identity and the locating clause ----------------------------------
         self.case("second field claiming the retirement order",
                   lambda w: self._edit_schema(
@@ -1009,7 +1025,7 @@ class NegativeControls(object):
         self.case("encoding offset drifted by one byte",
                   lambda w: self._edit_schema(
                       w, lambda d: self._field(d, "mem_data").update(
-                          {"encoding_offset_bytes": 68})))
+                          {"encoding_offset_bytes": 69})))
         self.case("record size disagrees with the field layout",
                   lambda w: self._edit_schema(
                       w, lambda d: d["encoding"].update({"total_octets": 104})))

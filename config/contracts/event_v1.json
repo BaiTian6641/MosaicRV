@@ -1,8 +1,20 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "id": "mosaicrv.event.v1",
   "reference_profile": "p0",
   "frozen": "2026-10-01",
+  "revisions": [
+    {
+      "version": 1,
+      "date": "2026-10-01",
+      "note": "the freeze: 21 fields, 100 octets/record; insn_bits was declared with no RTL producer (reconciliation F-3) and no instruction-length field was listed."
+    },
+    {
+      "version": 2,
+      "date": "2026-10-02",
+      "note": "I-041 landed: ev_insn becomes the RTL producer of insn_bits (F-3 partially landed) and the new per-lane instruction length insn_len is added from ev_len. The record grows to 22 fields and 101 octets and every field from rob_id onward moves one octet later, so a v1 record is not decodable as v2: the version moves 1 -> 2 rather than silently reinterpreting the same header."
+    }
+  ],
   "spec": [
     "docs/validation-plan.md#3 (Architectural Event v1 field groups, two integration routes)",
     "docs/validation-plan.md#5 V-008 (freeze the architectural event interface)"
@@ -26,7 +38,7 @@
       "meaning": "the schema this record was encoded against; the encoder refuses to write a record whose caller-declared version differs from the version it was compiled against, and a decoder rejects a stream whose header differs"
     },
     "field_bytes": "ceil(width_bits / 8), value little-endian in the low bytes, high bits zero",
-    "total_octets": 100,
+    "total_octets": 101,
     "text_line": "fields in declaration order as name=value, each value right-justified hexadecimal with 2*ceil(width_bits/8) digits, one line per record; the text form and the binary form carry the same fields in the same order"
   },
 
@@ -44,9 +56,9 @@
       "presentation": "combinational from the buffer's head view and the execution payload; the record for each acknowledged lane is presented in the same cycle the pop is acknowledged, gated on ev_valid",
       "presentation_latency_cycles": 0,
       "sampled": "settled_pre_edge",
-      "fields_unavailable": ["pc_after", "insn_bits", "trap_epc"],
+      "fields_unavailable": ["pc_after", "trap_epc"],
       "kinds_emitted": ["RETIRE", "TRAP"],
-      "note": "the retire unit is the only writer of committed state, so it is the authority for retire_seq, rob_id, the register/CSR/store payloads and the trap cause/tval; it carries no instruction bits, no architectural next-PC and no epc port (see reconciliation F-3)"
+      "note": "the retire unit is the only writer of committed state, so it is the authority for retire_seq, rob_id, the register/CSR/store payloads and the trap cause/tval; since I-041 it also carries the committed instruction bits (ev_insn) and their length (ev_len), so only the architectural next-PC and the per-lane epc remain ports it must grow (see reconciliation F-3)"
     },
     {
       "id": "bringup_tap",
@@ -221,7 +233,25 @@
       "sources": [
         {"kind": "tap", "file": "sim/tb/mosaic_bringup_tb.sv", "decl": "c_evt_insn", "relation": "exact", "declared_bits": 32},
         {"kind": "tap", "file": "sim/common/event_tap.h", "decl": "insn", "relation": "container", "declared_bits": 32, "why": "host uint32_t names the same 32-bit field one for one"},
-        {"kind": "pending_rtl", "file": "rtl/core/mosaic_retire.sv", "decl": "ev_insn", "why": "the out-of-order retire path carries the PC but not the instruction bits; the freeze declares the port it must grow (reconciliation F-3)"}
+        {"kind": "rtl_lane", "file": "rtl/core/mosaic_retire.sv", "decl": "ev_insn", "relation": "exact"}
+      ]
+    },
+    {
+      "name": "insn_len",
+      "group": "instruction",
+      "width_bits": 3,
+      "width_expr": "3",
+      "encoding_offset_bytes": 35,
+      "encoding_octets": 1,
+      "class": "architectural",
+      "identity_role": "none",
+      "valid_kinds": ["RETIRE", "TRAP"],
+      "valid_when": "the record is about an instruction and its length is known; an instruction whose fetch faulted has no complete encoding and must not have a length invented, so this field is zero and the TRAP record's trap_cause says why",
+      "sampled_at": "settled_pre_edge",
+      "meaning": "the length in bytes of the instruction that retired in this lane: 2 for a 16-bit compressed instruction, 4 for a 32-bit instruction. It is the instruction's own length as committed, not a fetch size and not derived by the consumer from the opcode's low bits, so a consumer proves a compressed instruction's boundary from the record instead of re-decoding it (docs/validation-plan.md#3 Instruction lists insn_len; reconciliation F-7).",
+      "sources": [
+        {"kind": "rtl_lane", "file": "rtl/core/mosaic_retire.sv", "decl": "ev_len", "relation": "exact"},
+        {"kind": "tap", "file": "sim/common/event_tap.h", "decl": "insn_len", "relation": "container", "declared_bits": 8, "why": "host uint8_t is a one-byte container for the 3-bit length (2 or 4) the retire unit produces; see reconciliation F-7 for why the plan's u8 is a container width, not the frozen field width"}
       ]
     },
     {
@@ -229,7 +259,7 @@
       "group": "microarch_identity",
       "width_bits": 14,
       "width_expr": "2*clog2(int_prf_entries)",
-      "encoding_offset_bytes": 35,
+      "encoding_offset_bytes": 36,
       "encoding_octets": 2,
       "class": "observed",
       "identity_role": "microarch_identity",
@@ -246,7 +276,7 @@
       "group": "gpr",
       "width_bits": 1,
       "width_expr": "1",
-      "encoding_offset_bytes": 37,
+      "encoding_offset_bytes": 38,
       "encoding_octets": 1,
       "class": "architectural",
       "identity_role": "none",
@@ -265,7 +295,7 @@
       "group": "gpr",
       "width_bits": 5,
       "width_expr": "5",
-      "encoding_offset_bytes": 38,
+      "encoding_offset_bytes": 39,
       "encoding_octets": 1,
       "class": "architectural",
       "identity_role": "none",
@@ -284,7 +314,7 @@
       "group": "gpr",
       "width_bits": 64,
       "width_expr": "xlen",
-      "encoding_offset_bytes": 39,
+      "encoding_offset_bytes": 40,
       "encoding_octets": 8,
       "class": "architectural",
       "identity_role": "none",
@@ -303,7 +333,7 @@
       "group": "csr",
       "width_bits": 1,
       "width_expr": "1",
-      "encoding_offset_bytes": 47,
+      "encoding_offset_bytes": 48,
       "encoding_octets": 1,
       "class": "architectural",
       "identity_role": "none",
@@ -320,7 +350,7 @@
       "group": "csr",
       "width_bits": 12,
       "width_expr": "12",
-      "encoding_offset_bytes": 48,
+      "encoding_offset_bytes": 49,
       "encoding_octets": 2,
       "class": "architectural",
       "identity_role": "none",
@@ -337,7 +367,7 @@
       "group": "csr",
       "width_bits": 64,
       "width_expr": "xlen",
-      "encoding_offset_bytes": 50,
+      "encoding_offset_bytes": 51,
       "encoding_octets": 8,
       "class": "architectural",
       "identity_role": "none",
@@ -354,7 +384,7 @@
       "group": "memory",
       "width_bits": 1,
       "width_expr": "1",
-      "encoding_offset_bytes": 58,
+      "encoding_offset_bytes": 59,
       "encoding_octets": 1,
       "class": "architectural",
       "identity_role": "none",
@@ -373,7 +403,7 @@
       "group": "memory",
       "width_bits": 64,
       "width_expr": "xlen",
-      "encoding_offset_bytes": 59,
+      "encoding_offset_bytes": 60,
       "encoding_octets": 8,
       "class": "architectural",
       "identity_role": "none",
@@ -392,7 +422,7 @@
       "group": "memory",
       "width_bits": 64,
       "width_expr": "xlen",
-      "encoding_offset_bytes": 67,
+      "encoding_offset_bytes": 68,
       "encoding_octets": 8,
       "class": "architectural",
       "identity_role": "none",
@@ -411,7 +441,7 @@
       "group": "memory",
       "width_bits": 3,
       "width_expr": "3",
-      "encoding_offset_bytes": 75,
+      "encoding_offset_bytes": 76,
       "encoding_octets": 1,
       "class": "architectural",
       "identity_role": "none",
@@ -430,7 +460,7 @@
       "group": "trap",
       "width_bits": 64,
       "width_expr": "xlen",
-      "encoding_offset_bytes": 76,
+      "encoding_offset_bytes": 77,
       "encoding_octets": 8,
       "class": "architectural",
       "identity_role": "none",
@@ -449,7 +479,7 @@
       "group": "trap",
       "width_bits": 64,
       "width_expr": "xlen",
-      "encoding_offset_bytes": 84,
+      "encoding_offset_bytes": 85,
       "encoding_octets": 8,
       "class": "architectural",
       "identity_role": "none",
@@ -468,7 +498,7 @@
       "group": "trap",
       "width_bits": 64,
       "width_expr": "xlen",
-      "encoding_offset_bytes": 92,
+      "encoding_offset_bytes": 93,
       "encoding_octets": 8,
       "class": "architectural",
       "identity_role": "none",
@@ -600,7 +630,8 @@
       "source": "rtl/core/mosaic_retire.sv ev_* ports",
       "finding": "the out-of-order retire stream is complete for the architectural effects it owns (register, CSR, store, trap cause/tval, identity) but carries no architectural next PC, no instruction bits and no per-lane epc. Only the bring-up tap exports those, and it is a single-lane in-order core with no identity.",
       "decided_by": "docs/validation-plan.md#3 Instruction: 'pc_before, pc_after, insn_bits, ... 禁止 blanket PC mask、压缩指令低位丢失或把 fetch PC 当 commit PC' -- the canonical event requires the committed instruction's bits and next PC, and deriving them from pc_before is the forbidden shortcut.",
-      "verdict": "the schema is right and the out-of-order retire path is incomplete: the freeze declares the three ports it must grow (ev_insn, ev_pc_after, ev_trap_epc). Until they exist, the unit proof drives those fields from the scenario and they are listed as NOT verified against the retire unit."
+      "verdict": "the schema is right and the out-of-order retire path is incomplete: the freeze declares the three ports it must grow (ev_insn, ev_pc_after, ev_trap_epc). Until they exist, the unit proof drives those fields from the scenario and they are listed as NOT verified against the retire unit.",
+      "status": "2026-10-02, schema v2: LANDED for insn_bits. I-041 added ev_insn to rtl/core/mosaic_retire.sv, so insn_bits now has its rtl_lane producer, is no longer a pending_rtl source, and is no longer printed as a gap; its validity rule (a faulted instruction's bits are zero) is unchanged and holds on the RTL path. ev_pc_after and ev_trap_epc remain declared gaps and are still printed on every run."
     },
     {
       "id": "F-4",
@@ -625,6 +656,14 @@
       "finding": "the retire unit declares and drives every one of these per-lane fields, but the integrated core tied pay_is_store, pay_store_addr, pay_store_data, pay_store_size, pay_csr_we, pay_csr_addr and pay_csr_value to constant zero, so through the integrated path ev_store, ev_store_size and ev_csr_* were always zero even though the frozen schema declares them: the fields had a producer in the RTL and no producer in the machine. Found and reported by V-013 (results/reports/V-013-retire.md section 6.2), which measured 0 of 11 retiring stores carrying the flag while the store queue authorised exactly those 11.",
       "decided_by": "docs/validation-plan.md#3 Memory operation and CSR groups: a committed store's address, data and size and a retiring CSR write's address and value are architectural effects of that instruction, so an event that cannot name them cannot be compared against a reference model that applies them.",
       "verdict": "the schema is right and the integration was incomplete: the payload is now wired from the store queue (the entry the queue authorises, address = base + imm, the sum the endpoint's adder forms) and from the CSR file's own read-back in the retirement cycle, and CASE=core.event_payload compares the fields one by one against a second implementation of the ISA's addressing and Zicsr rules. F-4 is unaffected: a store's *retirement* (kind RETIRE, mem_is_store 1) is now produced, and the separate MEM_VISIBLE record still has no DUT-side producer."
+    },
+    {
+      "id": "F-7",
+      "field": "insn_len",
+      "source": "rtl/core/mosaic_retire.sv ev_len (per-lane RET_SIZE_W = 3), tap source sim/common/event_tap.h RetireEvent.insn_len",
+      "finding": "the RV64C package (I-041) made the retire unit carry a per-lane instruction length so that a compressed instruction's own length travels to the architectural record, but the frozen v1 schema listed no length field at all: ev_len was a declaration the schema did not map, which is exactly the drift tools/check_event_contract.py reports as INV-TAPDECL (and the reason this revision exists).",
+      "decided_by": "docs/validation-plan.md#3 Instruction: 'pc_before, pc_after, insn_bits, insn_len, priv_before/after' and the V-008 card's rule that a compressed instruction's PC and length are its own, not the fetch unit's -- so the length is a field of the record and a consumer must not re-derive it from the opcode's low bits.",
+      "verdict": "the RTL is right and the frozen schema lagged: schema v2 adds insn_len, 3 bits (RET_SIZE_W), sourced exactly from ev_len as an rtl_lane producer, valid on RETIRE and TRAP, sampled settled_pre_edge, with the host record carrying it as an 8-bit container. The plan writes insn_len:u8, but that is a container width for a future interface: an RV64 instruction is 2 or 4 bytes, and the freeze narrows to the producer's own width exactly as it already narrowed hart_id (1 bit, not u32), retire_seq (8 bits, not u64) and kind (2 bits, not a full enum). Values other than 2 and 4 are not produced; a consumer treats them as invalid rather than re-deriving the length. The schema version moves 1 -> 2 because the record's byte layout changed."
     }
   ]
 }

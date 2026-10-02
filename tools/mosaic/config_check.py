@@ -681,10 +681,14 @@ def _check_csr_rules(bundle: Bundle, profile_name: str) -> None:
             write_target = int(example.get("write_target", "0x%03x" % target), 16)
             if example["op"] != "csrr":
                 if write_target not in by_address:
-                    bundle.fail(
-                        ex_where,
-                        "write target 0x%03x is not an implemented CSR" % write_target,
-                    )
+                    # Only a permission rule may write an address the table does
+                    # not implement, and it must expect the write to trap.
+                    if kind != "permission" or example["traps"] < 1:
+                        bundle.fail(
+                            ex_where,
+                            "write target 0x%03x is not an implemented CSR and the rule "
+                            "does not expect a trap" % write_target,
+                        )
                 else:
                     written = merged[by_address[write_target]]
                     if written["access"] == "ro" and example["traps"] < 1:

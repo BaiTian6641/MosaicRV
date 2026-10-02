@@ -21,6 +21,12 @@
 //   width expression against the profile geometry and against the RTL's own
 //   derived widths, so a geometry change that would truncate a field fails the
 //   check instead of silently narrowing the record.
+// * Schema v2 (2026-10-02): `insn_len` (3 bits -- the committed instruction's own
+//   length in bytes, 2 or 4) was inserted between `insn_bits` and `rob_id`, and
+//   `MOSAIC_EVENT_SCHEMA_VERSION` moved to 2. Every field from `rob_id` onward
+//   therefore encodes one octet later than in v1, so a v1 stream is rejected by
+//   the header instead of being misread; see reconciliation F-7 and
+//   results/reports/V-008-schema-revision.md.
 //
 // ------------------------------------------------------------ the version rule
 //
@@ -64,6 +70,7 @@ namespace mosaic {
   X(pc_before, 64)             \
   X(pc_after, 64)              \
   X(insn_bits, 32)             \
+  X(insn_len, 3)               \
   X(rob_id, 14)                \
   X(gpr_write_valid, 1)        \
   X(rd, 5)                     \
@@ -81,7 +88,7 @@ namespace mosaic {
 
 // The version this codec was compiled against. tools/check_event_contract.py
 // requires it to equal config/contracts/event_v1.json's `schema_version`.
-#define MOSAIC_EVENT_SCHEMA_VERSION 1
+#define MOSAIC_EVENT_SCHEMA_VERSION 2
 
 // One C++ type per field width. The primary template is deliberately undefined:
 // a width that has no representation here is a compile error, not a silent

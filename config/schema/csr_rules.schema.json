@@ -5,36 +5,88 @@
   "description": "One entry per rule of the CSR legality comparator: the CSR, the bit field, the rule kind, the specification clause, the applicability preconditions, and the positive and negative example the rule is checked by. The ledger is data: the case csr.rule_ledger is generated from it and must visit every rule, so a rule that no stimulus reaches fails the case instead of being skipped.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "profile", "spec", "kind_semantics", "rules"],
+  "required": [
+    "schema_version",
+    "profile",
+    "spec",
+    "kind_semantics",
+    "rules"
+  ],
   "properties": {
-    "schema_version": { "type": "integer", "const": 1 },
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
     "profile": {
       "type": "string",
-      "enum": ["p0", "p1", "p2", "p3"],
+      "enum": [
+        "p0",
+        "p1",
+        "p2",
+        "p3"
+      ],
       "description": "The profile whose implementation table the ledger's addresses and preconditions are written against."
     },
     "spec": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["name", "version", "tag", "commit"],
+      "required": [
+        "name",
+        "version",
+        "tag",
+        "commit"
+      ],
       "properties": {
-        "name": { "type": "string", "minLength": 1 },
-        "version": { "type": "string", "minLength": 1 },
-        "tag": { "type": "string", "minLength": 1 },
-        "commit": { "type": "string", "minLength": 1 }
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tag": {
+          "type": "string",
+          "minLength": 1
+        },
+        "commit": {
+          "type": "string",
+          "minLength": 1
+        }
       }
     },
     "kind_semantics": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["strict", "warl_allowed", "read_only", "alias", "permission"],
+      "required": [
+        "strict",
+        "warl_allowed",
+        "read_only",
+        "alias",
+        "permission"
+      ],
       "description": "What each rule kind means and how the comparator decides accept/reject. Stated once here so the ledger is self-describing.",
       "properties": {
-        "strict": { "type": "string", "minLength": 1 },
-        "warl_allowed": { "type": "string", "minLength": 1 },
-        "read_only": { "type": "string", "minLength": 1 },
-        "alias": { "type": "string", "minLength": 1 },
-        "permission": { "type": "string", "minLength": 1 }
+        "strict": {
+          "type": "string",
+          "minLength": 1
+        },
+        "warl_allowed": {
+          "type": "string",
+          "minLength": 1
+        },
+        "read_only": {
+          "type": "string",
+          "minLength": 1
+        },
+        "alias": {
+          "type": "string",
+          "minLength": 1
+        },
+        "permission": {
+          "type": "string",
+          "minLength": 1
+        }
       }
     },
     "rules": {
@@ -43,8 +95,18 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "csr", "address", "field", "bits", "kind", "clause",
-                     "preconditions", "positive", "negative"],
+        "required": [
+          "id",
+          "csr",
+          "address",
+          "field",
+          "bits",
+          "kind",
+          "clause",
+          "preconditions",
+          "positive",
+          "negative"
+        ],
         "properties": {
           "id": {
             "type": "string",
@@ -56,8 +118,15 @@
             "pattern": "^[a-z][a-z0-9_]*$",
             "description": "The CSR name from the implementation table, or the pseudo-name 'unimplemented' for a rule about an address the table does not name."
           },
-          "address": { "type": "integer", "minimum": 0, "maximum": 4095 },
-          "field": { "type": "string", "minLength": 1 },
+          "address": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4095
+          },
+          "field": {
+            "type": "string",
+            "minLength": 1
+          },
           "bits": {
             "type": "string",
             "pattern": "^[0-9]+(:[0-9]+)?(,[0-9]+(:[0-9]+)?)*$",
@@ -65,97 +134,265 @@
           },
           "kind": {
             "type": "string",
-            "enum": ["strict", "warl_allowed", "read_only", "alias", "permission"]
+            "enum": [
+              "strict",
+              "warl_allowed",
+              "read_only",
+              "alias",
+              "permission"
+            ]
           },
-          "clause": { "type": "string", "minLength": 1 },
+          "clause": {
+            "type": "string",
+            "minLength": 1
+          },
           "preconditions": {
             "type": "array",
             "minItems": 1,
-            "items": { "type": "string", "minLength": 1 },
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
             "description": "Conditions under which the rule applies; the comparator only evaluates a rule whose preconditions hold."
           },
-          "positive": { "$ref": "#/definitions/example" },
-          "negative": { "$ref": "#/definitions/example" }
-        }
-      }
-    }
-  },
-  "definitions": {
-    "example": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["op", "write", "traps", "expect"],
-      "properties": {
-        "op": {
-          "type": "string",
-          "enum": ["csrrw", "csrrs", "csrrc", "csrr"],
-          "description": "csrrw/csrrs/csrrc write then read back; csrr is the read itself."
-        },
-        "write": {
-          "type": "string",
-          "pattern": "^0x[0-9a-f]{16}$",
-          "description": "The write operand (ignored by csrr)."
-        },
-        "traps": {
-          "type": "integer",
-          "minimum": 0,
-          "maximum": 2,
-          "description": "How many illegal-instruction exceptions this example must raise: 0 = accepted, 1 = the write/read is denied, 2 = write and read-back both denied."
-        },
-        "target": {
-          "type": "string",
-          "pattern": "^0x[0-9a-f]{3}$",
-          "description": "The CSR address the read is aimed at; defaults to the rule's address."
-        },
-        "write_target": {
-          "type": "string",
-          "pattern": "^0x[0-9a-f]{3}$",
-          "description": "The CSR address the write is aimed at; defaults to target. Used by alias rules whose canonical register differs from the alias."
-        },
-        "expect": { "$ref": "#/definitions/expectation" },
-        "forbid": {
-          "type": "string",
-          "pattern": "^0x[0-9a-f]{16}$",
-          "description": "The adjacent illegal result: the read must never equal this value."
-        },
-        "pre_read": {
-          "type": "boolean",
-          "description": "Read the CSR before the operation and require it to equal the expectation, proving the denied write left the state unchanged."
-        }
-      }
-    },
-    "expectation": {
-      "type": "object",
-      "additionalProperties": false,
-      "minProperties": 1,
-      "maxProperties": 1,
-      "properties": {
-        "read": {
-          "type": "string",
-          "pattern": "^0x[0-9a-f]{16}$",
-          "description": "Exact required read-back."
-        },
-        "range": {
-          "type": "array",
-          "minItems": 2,
-          "maxItems": 2,
-          "items": { "type": "string", "pattern": "^0x[0-9a-f]{16}$" },
-          "description": "Inclusive legal range, for a value the tick or pipeline skew makes non-deterministic."
-        },
-        "advance": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["min_delta", "gap"],
-          "properties": {
-            "min_delta": { "type": "integer", "minimum": 0 },
-            "gap": { "type": "integer", "minimum": 1 }
+          "positive": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "op",
+              "write",
+              "traps",
+              "expect"
+            ],
+            "properties": {
+              "op": {
+                "type": "string",
+                "enum": [
+                  "csrrw",
+                  "csrrs",
+                  "csrrc",
+                  "csrr"
+                ],
+                "description": "csrrw/csrrs/csrrc write then read back; csrr is the read itself."
+              },
+              "write": {
+                "type": "string",
+                "pattern": "^0x[0-9a-f]{16}$",
+                "description": "The write operand (ignored by csrr)."
+              },
+              "traps": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 2,
+                "description": "How many illegal-instruction exceptions this example must raise: 0 = accepted, 1 = the write/read is denied, 2 = write and read-back both denied."
+              },
+              "target": {
+                "type": "string",
+                "pattern": "^0x[0-9a-f]{3}$",
+                "description": "The CSR address the read is aimed at; defaults to the rule's address."
+              },
+              "write_target": {
+                "type": "string",
+                "pattern": "^0x[0-9a-f]{3}$",
+                "description": "The CSR address the write is aimed at; defaults to target. Used by alias rules whose canonical register differs from the alias."
+              },
+              "expect": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "read": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{16}$",
+                    "description": "Exact required read-back."
+                  },
+                  "range": {
+                    "type": "array",
+                    "minItems": 2,
+                    "maxItems": 2,
+                    "items": {
+                      "type": "string",
+                      "pattern": "^0x[0-9a-f]{16}$"
+                    },
+                    "description": "Inclusive legal range, for a value the tick or pipeline skew makes non-deterministic."
+                  },
+                  "advance": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "min_delta",
+                      "gap"
+                    ],
+                    "properties": {
+                      "min_delta": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "gap": {
+                        "type": "integer",
+                        "minimum": 1
+                      }
+                    },
+                    "description": "Two reads `gap` instructions apart; the second minus the first must be at least min_delta."
+                  },
+                  "canary": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{16}$",
+                    "description": "The destination register is pre-loaded with this value and must still hold it after a denied access, proving the access wrote nothing (in particular not zero)."
+                  }
+                },
+                "oneOf": [
+                  {
+                    "required": [
+                      "read"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "range"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "advance"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "canary"
+                    ]
+                  }
+                ]
+              },
+              "forbid": {
+                "type": "string",
+                "pattern": "^0x[0-9a-f]{16}$",
+                "description": "The adjacent illegal result: the read must never equal this value."
+              },
+              "pre_read": {
+                "type": "boolean",
+                "description": "Read the CSR before the operation and require it to equal the expectation, proving the denied write left the state unchanged."
+              }
+            }
           },
-          "description": "Two reads `gap` instructions apart; the second minus the first must be at least min_delta."
-        },
-        "canary": {
-          "type": "string",
-          "pattern": "^0x[0-9a-f]{16}$",
-          "description": "The destination register is pre-loaded with this value and must still hold it after a denied access, proving the access wrote nothing (in particular not zero)."
+          "negative": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "op",
+              "write",
+              "traps",
+              "expect"
+            ],
+            "properties": {
+              "op": {
+                "type": "string",
+                "enum": [
+                  "csrrw",
+                  "csrrs",
+                  "csrrc",
+                  "csrr"
+                ],
+                "description": "csrrw/csrrs/csrrc write then read back; csrr is the read itself."
+              },
+              "write": {
+                "type": "string",
+                "pattern": "^0x[0-9a-f]{16}$",
+                "description": "The write operand (ignored by csrr)."
+              },
+              "traps": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 2,
+                "description": "How many illegal-instruction exceptions this example must raise: 0 = accepted, 1 = the write/read is denied, 2 = write and read-back both denied."
+              },
+              "target": {
+                "type": "string",
+                "pattern": "^0x[0-9a-f]{3}$",
+                "description": "The CSR address the read is aimed at; defaults to the rule's address."
+              },
+              "write_target": {
+                "type": "string",
+                "pattern": "^0x[0-9a-f]{3}$",
+                "description": "The CSR address the write is aimed at; defaults to target. Used by alias rules whose canonical register differs from the alias."
+              },
+              "expect": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "read": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{16}$",
+                    "description": "Exact required read-back."
+                  },
+                  "range": {
+                    "type": "array",
+                    "minItems": 2,
+                    "maxItems": 2,
+                    "items": {
+                      "type": "string",
+                      "pattern": "^0x[0-9a-f]{16}$"
+                    },
+                    "description": "Inclusive legal range, for a value the tick or pipeline skew makes non-deterministic."
+                  },
+                  "advance": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "min_delta",
+                      "gap"
+                    ],
+                    "properties": {
+                      "min_delta": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "gap": {
+                        "type": "integer",
+                        "minimum": 1
+                      }
+                    },
+                    "description": "Two reads `gap` instructions apart; the second minus the first must be at least min_delta."
+                  },
+                  "canary": {
+                    "type": "string",
+                    "pattern": "^0x[0-9a-f]{16}$",
+                    "description": "The destination register is pre-loaded with this value and must still hold it after a denied access, proving the access wrote nothing (in particular not zero)."
+                  }
+                },
+                "oneOf": [
+                  {
+                    "required": [
+                      "read"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "range"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "advance"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "canary"
+                    ]
+                  }
+                ]
+              },
+              "forbid": {
+                "type": "string",
+                "pattern": "^0x[0-9a-f]{16}$",
+                "description": "The adjacent illegal result: the read must never equal this value."
+              },
+              "pre_read": {
+                "type": "boolean",
+                "description": "Read the CSR before the operation and require it to equal the expectation, proving the denied write left the state unchanged."
+              }
+            }
+          }
         }
       }
     }

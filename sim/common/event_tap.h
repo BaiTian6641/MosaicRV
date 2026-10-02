@@ -25,6 +25,16 @@ struct RetireEvent {
   uint64_t pc = 0;
   uint64_t next_pc = 0;
   uint32_t insn = 0;
+  // The committed instruction's own length in bytes: 2 for a 16-bit compressed
+  // instruction, 4 for a 32-bit one. This is schema v2's `insn_len`
+  // (config/contracts/event_v1.json, reconciliation F-7), a container for the
+  // 3-bit per-lane field the retire unit produces. It is deliberately not
+  // emitted by Line() below: that text format is byte-frozen by the I-008
+  // reference model's emit() and is compared line for line by the I-004 harness,
+  // so extending it is part of migrating this record onto
+  // sim/common/event_codec.h (reconciliation F-5), not part of the schema
+  // revision. The schema maps the member so it cannot drift from the field.
+  uint8_t insn_len = 0;
 
   bool has_rd = false;
   uint8_t rd = 0;

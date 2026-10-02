@@ -950,7 +950,7 @@
       "csr": "mvendorid",
       "address": 3857,
       "field": "value",
-      "bits": "63:0",
+      "bits": "31:0",
       "kind": "read_only",
       "clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033, src/machine.tex: section 'Machine Vendor ID Register (mvendorid)' L190, 'The mvendorid CSR is a 32-bit read-only register providing the JEDEC manufacturer ID of the provider of the core. This register must be readable in any implementation, but a value of 0 can be returned to indicate the field is not implemented or that this is a non-commercial implementation' L192-L196; Fig. mvendorreg L198-L214 (Bank 31:7, Offset 6:0). Address and privilege: src/priv-csrs.tex L295 '0xF11 & MRO & mvendorid'. MosaicRV is not a JEDEC-registered commercial vendor, so it returns 0, which the spec explicitly permits.",
       "preconditions": [
@@ -958,21 +958,22 @@
         "the hart runs in M-mode (p0 privilege_modes == [M]); every implemented CSR is M-accessible"
       ],
       "positive": {
-        "op": "csrrw",
-        "write": "0xffffffffffffffff",
-        "traps": 0,
-        "expect": {
-          "read": "0x0000000000000000"
-        },
-        "forbid": "0xffffffffffffffff"
-      },
-      "negative": {
-        "op": "csrrw",
+        "op": "csrr",
         "write": "0x0000000000000000",
         "traps": 0,
         "expect": {
           "read": "0x0000000000000000"
-        }
+        },
+        "forbid": "0x0000000000000001"
+      },
+      "negative": {
+        "op": "csrr",
+        "write": "0x0000000000000000",
+        "traps": 0,
+        "expect": {
+          "read": "0x0000000000000000"
+        },
+        "forbid": "0x0000000000000001"
       }
     },
     {
@@ -980,7 +981,7 @@
       "csr": "mvendorid",
       "address": 3857,
       "field": "write_denied",
-      "bits": "63:0",
+      "bits": "31:0",
       "kind": "permission",
       "clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033, src/machine.tex: section 'Machine Vendor ID Register (mvendorid)' L190, 'The mvendorid CSR is a 32-bit read-only register providing the JEDEC manufacturer ID of the provider of the core. This register must be readable in any implementation, but a value of 0 can be returned to indicate the field is not implemented or that this is a non-commercial implementation' L192-L196; Fig. mvendorreg L198-L214 (Bank 31:7, Offset 6:0). Address and privilege: src/priv-csrs.tex L295 '0xF11 & MRO & mvendorid'. MosaicRV is not a JEDEC-registered commercial vendor, so it returns 0, which the spec explicitly permits.",
       "preconditions": [
@@ -1018,21 +1019,22 @@
         "the hart runs in M-mode (p0 privilege_modes == [M]); every implemented CSR is M-accessible"
       ],
       "positive": {
-        "op": "csrrw",
-        "write": "0xffffffffffffffff",
-        "traps": 0,
-        "expect": {
-          "read": "0x0000000000000000"
-        },
-        "forbid": "0xffffffffffffffff"
-      },
-      "negative": {
-        "op": "csrrw",
+        "op": "csrr",
         "write": "0x0000000000000000",
         "traps": 0,
         "expect": {
           "read": "0x0000000000000000"
-        }
+        },
+        "forbid": "0x0000000000000001"
+      },
+      "negative": {
+        "op": "csrr",
+        "write": "0x0000000000000000",
+        "traps": 0,
+        "expect": {
+          "read": "0x0000000000000000"
+        },
+        "forbid": "0x0000000000000001"
       }
     },
     {
@@ -1078,21 +1080,22 @@
         "the hart runs in M-mode (p0 privilege_modes == [M]); every implemented CSR is M-accessible"
       ],
       "positive": {
-        "op": "csrrw",
-        "write": "0xffffffffffffffff",
-        "traps": 0,
-        "expect": {
-          "read": "0x0000000000000000"
-        },
-        "forbid": "0xffffffffffffffff"
-      },
-      "negative": {
-        "op": "csrrw",
+        "op": "csrr",
         "write": "0x0000000000000000",
         "traps": 0,
         "expect": {
           "read": "0x0000000000000000"
-        }
+        },
+        "forbid": "0x0000000000000001"
+      },
+      "negative": {
+        "op": "csrr",
+        "write": "0x0000000000000000",
+        "traps": 0,
+        "expect": {
+          "read": "0x0000000000000000"
+        },
+        "forbid": "0x0000000000000001"
       }
     },
     {
@@ -1138,21 +1141,22 @@
         "the hart runs in M-mode (p0 privilege_modes == [M]); every implemented CSR is M-accessible"
       ],
       "positive": {
-        "op": "csrrw",
-        "write": "0xffffffffffffffff",
-        "traps": 0,
-        "expect": {
-          "read": "0x0000000000000000"
-        },
-        "forbid": "0xffffffffffffffff"
-      },
-      "negative": {
-        "op": "csrrw",
+        "op": "csrr",
         "write": "0x0000000000000000",
         "traps": 0,
         "expect": {
           "read": "0x0000000000000000"
-        }
+        },
+        "forbid": "0x0000000000000001"
+      },
+      "negative": {
+        "op": "csrr",
+        "write": "0x0000000000000000",
+        "traps": 0,
+        "expect": {
+          "read": "0x0000000000000000"
+        },
+        "forbid": "0x0000000000000001"
       }
     },
     {
@@ -1638,7 +1642,7 @@
     {
       "id": "unimplemented.read_0x7ff",
       "csr": "unimplemented",
-      "address": null,
+      "address": 2047,
       "field": "read_0x7ff",
       "bits": "11:0",
       "kind": "permission",
@@ -1671,7 +1675,7 @@
     {
       "id": "unimplemented.read_0xb03",
       "csr": "unimplemented",
-      "address": null,
+      "address": 2819,
       "field": "read_0xb03",
       "bits": "11:0",
       "kind": "permission",
@@ -1704,7 +1708,7 @@
     {
       "id": "unimplemented.write_0x7ff",
       "csr": "unimplemented",
-      "address": null,
+      "address": 2047,
       "field": "write_0x7ff",
       "bits": "11:0",
       "kind": "permission",
