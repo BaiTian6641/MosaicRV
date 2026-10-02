@@ -68,30 +68,58 @@
 // must keep the set semantics to stay compatible with this interface.
 //
 // The restore itself is an **undo journal**: one entry per allocation, holding
-// the tag and whether that tag had a valid generation before the allocation. A
-// squash walks the journal back to the checkpoint, returning each tag to the
-// free set and stepping its generation back down. One bit per entry is the whole
-// undo state, because the generation step is exactly invertible; see the undo
-// block for why that is true for *any* interleaving inside the window.
+// the tag, the generation the allocation produced (the entry's identity, used to
+// recognise its owner's commit), and whether that tag had a valid generation
+// before the allocation. A squash walks the journal back to the checkpoint,
+// returning each tag to the free set and stepping its generation back down. One
+// bit per entry is the whole undo state, because the generation step is exactly
+// invertible; see the undo block for why that is true for *any* interleaving
+// inside the window.
+//
+// ------------------------------------ what the window holds, and when it drains
+//
+// The window is **the set of allocations that have not committed**, and that is
+// the whole contract. A checkpoint empties it, the trap path's full restore
+// empties it, and -- the part the window was missing, and the defect
+// CASE=rename.journal_window pins down -- a **commit removes the entry of the
+// instruction that committed**. The entry removed is the oldest live one, and it
+// is recognised by matching the commit's destination identity (tag and
+// generation) against the entry, never by assuming that "a commit happened, so
+// one entry must be due": an x0 commit journals nothing, and a commit of an
+// instruction allocated before a checkpoint has no entry at all. Matching makes
+// both drop nothing, which is the correct answer.
 //
 // Why only allocations are journalled, and not frees:
 //
 //   * every free in this design is *caused by a commit* (the superseded
 //     committed mapping) or is an explicit release of a mapping that is no
-//     longer referenced. A commit is permanent: retire is in-order, so a commit
-//     that happens after a checkpoint belongs to an instruction *older* than
-//     the checkpointing branch, and undoing it would resurrect a mapping the
-//     ISA has already committed.
-//   * every allocation after a checkpoint belongs to an instruction *younger*
-//     than the checkpoint, and a younger instruction cannot have committed --
-//     if it had, the checkpointing branch would have committed too and there
-//     would be nothing to squash to.
+//     longer referenced. A commit is permanent -- undoing it would resurrect a
+//     mapping the ISA has already published -- so a committed allocation's entry
+//     leaves the window at its commit, and the tag that allocation took stays
+//     owned by the committed map: the undo must *not* return it to the free set,
+//     which is exactly why the entry is removed rather than left to be undone.
+//   * an allocation is journalled the moment it is made, so every allocation
+//     that has not committed is in the window and every entry in the window is
+//     an allocation that has not committed. That equality is the conservation
+//     identity the unit case checks on every cycle.
 //
-// So the journal is exactly the set of events that can be undone, and it is
-// bounded by the ROB: at most `MOSAIC_ROB_ENTRIES` instructions can be younger
-// than a given checkpoint, so at most that many allocations can be outstanding
-// in the journal. `journal_overflow` reports the bound being violated rather
-// than silently restoring less than the truth.
+// So the journal is exactly the set of events that can be undone. It is bounded
+// by the ROB for a reason that is now a consequence rather than an assumption:
+// one *uncommitted* instruction holds at most one allocatable tag, so the number
+// of uncommitted allocations cannot exceed the number of instructions the ROB
+// can hold -- `MOSAIC_ROB_ENTRIES`, which the profile rule keeps equal to the
+// count of allocatable tags (`int_prf.entries - arch_int_regs`). Reaching the
+// bound exactly is legal and is the expected state of a full queue with every
+// tag taken; exceeding it cannot happen for a correctly sized profile, and the
+// module reports it rather than silently restoring less than the truth.
+//
+// `journal_overflow` therefore means exactly one thing: an allocation was made
+// that could not be journalled, so the window in flight is **clamped** and a
+// squash to a checkpoint inside it would restore less than the truth. It
+// describes the window *currently in flight*, not history: it is raised by the
+// clamp and cleared wherever the condition no longer holds -- a checkpoint, a
+// flush, a squash, or the drain that empties the window -- so a caller that sees
+// it can never be looking at a clamp from a window that no longer exists.
 //
 // -------------------------------------------------- bank decoding, 96 / 4
 //
@@ -184,10 +212,11 @@
 // tag returns to the pool through the normal path rather than being special.
 //
 // It also makes the geometry add up: ARCH_REGS owned + (ENTRIES - ARCH_REGS)
-// free = 96, and 96 - 32 = 64 = MOSAIC_ROB_ENTRIES, which is precisely the
-// number of in-flight instructions the undo journal is sized for. The free
-// count at reset is therefore 64, not 96, and a program that has dispatched as
-// many instructions as the ROB can hold is genuinely out of tags.
+// free = 96, and 96 - 32 = 64 = MOSAIC_ROB_ENTRIES, which is exactly the number
+// of uncommitted instructions the undo journal can ever hold (see "what the
+// window holds" above). The free count at reset is therefore 64, not 96, and a
+// program that has dispatched as many instructions as the ROB can hold is
+// genuinely out of tags.
 //
 // The two maps *are* reset, and that is a deliberate departure from the
 // "no full-array reset" rule: a 32-entry file with two combinational read ports
@@ -362,6 +391,15 @@
 //                    a squash to a checkpoint taken with older writers in flight
 //                    is accepted: the restore silently loses their mappings and
 //                    leaves their tags unreachable.
+//   JOURNAL_NO_RETIRE_FREE
+//                    the window is not drained by retirement (the defect
+//                    CASE=rename.journal_window pins down and this package
+//                    fixes): an entry is never removed when its owner commits,
+//                    so a branchless stretch longer than ROB_ENTRIES
+//                    allocations fills the window, the clamp fires and a squash
+//                    to a checkpoint inside it would restore less than the
+//                    truth. Case rename.journal_window fails on the clamp, on
+//                    the conservation identity and on the window depth.
 //
 // The architectural-initial-mapping rule above has no mutant here, because this
 // module's half of it is a pure observation of `gen_valid` that adds no state
@@ -624,6 +662,10 @@ module mosaic_rename (
   localparam int unsigned REN_SCAN_W    = REN_TAG_W + 1;  // address into the doubled mask
   localparam int unsigned REN_FCNT_W    = REN_TAG_W + 1;  // must represent ENTRIES itself
   localparam int unsigned REN_BANK_ROWS = REN_ENTRIES / REN_BANKS;
+  // The journal stores at most REN_ROB entries, so an entry address (the window
+  // head, and the push index) is one bit narrower than the length, which also has
+  // to be able to say "full".
+  localparam int unsigned REN_JIDX_W    = (REN_ROB <= 1) ? 1 : $clog2(REN_ROB);
 
   // A false branch of a generate is never elaborated, so naming a module that
   // does not exist is an elaboration-time error rather than a runtime one.
@@ -678,15 +720,22 @@ module mosaic_rename (
   // Data arrays: never reset. See "why a generation exists" in the header.
   logic [REN_GEN_W-1:0]  gen  [REN_ENTRIES];
   logic [REN_TAG_W-1:0]  j_tag [REN_ROB];
+  // The generation the journalled allocation produced. It is the entry's identity
+  // half -- what a commit is matched against to decide whether this entry's owner
+  // is the instruction retiring -- and it is stored rather than recomputed
+  // because the undo needs the *previous* validity, not the produced generation.
+  logic [REN_GEN_W-1:0]  j_gen [REN_ROB];
   logic                  j_prev_valid [REN_ROB];
 
-  // Control state: the rotation point of the allocation scan, the length of the
-  // undo window, whether any checkpoint has ever been taken, and the report that
-  // the window overflowed. There is no checkpoint *position* to save: a
-  // checkpoint empties the window rather than marking a point inside it, which is
-  // what makes the window's bound equal to "allocations since the last
-  // checkpoint" -- the quantity the ROB size justifies.
+  // Control state: the rotation point of the allocation scan, the head and length
+  // of the undo window, whether any checkpoint has ever been taken, and the report
+  // that the window was clamped. There is no checkpoint *position* to save: a
+  // checkpoint empties the window rather than marking a point inside it. The
+  // window's bound is the number of uncommitted allocations, which the ROB size
+  // justifies; `j_head` names the oldest live entry, because retirement removes
+  // entries from the front of the window (see the header).
   logic [REN_TAG_W-1:0]  alloc_ptr;
+  logic [REN_JIDX_W-1:0] j_head;
   logic [REN_JLEN_W-1:0] j_len;
   logic                  ckpt_seen;
   logic                  j_overflow;
@@ -1058,10 +1107,6 @@ module mosaic_rename (
   // ------------------------------------------------------------------- free
   logic free_in_range;
 
-  // The journal stores at most REN_ROB entries, so an entry address is one bit
-  // narrower than the length, which also has to be able to say "full".
-  localparam int unsigned REN_JIDX_W = (REN_ROB <= 1) ? 1 : $clog2(REN_ROB);
-
   assign free_in_range = (free_tag < REN_TAG_W'(REN_ENTRIES));
 
 `ifdef MOSAIC_RENAME_MUTANT_NO_GEN_CHECK
@@ -1335,12 +1380,17 @@ module mosaic_rename (
 `endif
     for (int unsigned k = 0; k < REN_ROB; k++) begin
       if (REN_JLEN_W'(k) < undo_apply) begin
-        free_q[j_tag[REN_JIDX_W'(k)]] = 1'b1;
-        gen_q[j_tag[REN_JIDX_W'(k)]]  =
-            j_prev_valid[REN_JIDX_W'(k)]
-              ? (gen[j_tag[REN_JIDX_W'(k)]] - REN_GEN_W'(1))
+        // The window's live entries start at `j_head`; the undo walks them oldest
+        // first, so entry k of the walk is slot head+k (wrapping at the end of the
+        // array). A squash cycle refuses allocation and does not retire, so the
+        // head and length this reads are the window the squash is consuming.
+        free_q[j_tag[REN_JIDX_W'(j_head + REN_JIDX_W'(k))]] = 1'b1;
+        gen_q[j_tag[REN_JIDX_W'(j_head + REN_JIDX_W'(k))]]  =
+            j_prev_valid[REN_JIDX_W'(j_head + REN_JIDX_W'(k))]
+              ? (gen[j_tag[REN_JIDX_W'(j_head + REN_JIDX_W'(k))]] - REN_GEN_W'(1))
               : {REN_GEN_W{1'b0}};
-        genv_q[j_tag[REN_JIDX_W'(k)]] = j_prev_valid[REN_JIDX_W'(k)];
+        genv_q[j_tag[REN_JIDX_W'(j_head + REN_JIDX_W'(k))]] =
+            j_prev_valid[REN_JIDX_W'(j_head + REN_JIDX_W'(k))];
       end
     end
 
@@ -1447,15 +1497,20 @@ module mosaic_rename (
   logic [REN_JLEN_W-1:0] j_len_q;
   logic                  j_overflow_q;
 
-  // The undo window advances by one entry per allocating lane, and the group's
-  // two entries go in lane order. `j_push0`/`j_push1` are the same conditions the
-  // register block uses, evaluated here so the slot arithmetic is written once:
-  // lane 1's entry is one past lane 0's when lane 0 has one, and at the tail when
-  // lane 0 allocated nothing (an x0 lane), which is what keeps the window a
-  // contiguous run in allocation order.
+  // The window is a FIFO, not a stack. Allocations append at the tail; the entry
+  // of the instruction that commits leaves at the head, because retirement is
+  // in-order and the oldest live entry belongs to the oldest uncommitted
+  // allocation. `j_head` is the head's index and `j_len` the number of live
+  // entries, so a retirement advances the head without moving any storage.
   //
-  // `j_tail` is the index this cycle's first entry lands on. A checkpoint empties
-  // the window, and it does so *before* this cycle's entries are appended: the
+  // The undo walks the live entries oldest first from `j_head`, which is the
+  // order the generation rollback depends on: the undo of an allocation is the
+  // exact inverse of its increment, and walking the interleaving in order is what
+  // makes the inverse correct for a tag allocated more than once inside the
+  // window.
+  //
+  // A clear point (a checkpoint, the trap path's restore, or a squash consuming
+  // the window) empties the window *before* this cycle's entries are appended: the
   // recovery point is the state at the start of the checkpoint cycle, so an
   // allocation made in that same cycle is younger than the checkpoint and must be
   // undone by a squash to it. Dropping it instead (the pre-I-014 rule) left its
@@ -1463,60 +1518,118 @@ module mosaic_rename (
   // nor owned per checkpoint-and-allocate cycle.
   logic                  j_push0;
   logic                  j_push1;
+  logic                  j_pop0;
+  logic                  j_pop1;
+  logic                  j_empty_now;
+  logic [REN_JIDX_W-1:0] j_head_q;
+  logic [REN_JIDX_W-1:0] j_head_base;
+  logic [REN_JLEN_W-1:0] j_len_base;
+  logic [REN_JIDX_W-1:0] j_idx0;
   logic [REN_JIDX_W-1:0] j_idx1;
-  logic [REN_JLEN_W-1:0] j_tail;
+  logic [REN_JIDX_W-1:0] j_pop_idx1;
 
-  // A checkpoint (a branch redirect's recovery point) and the trap path's full
-  // restore both empty the window, and both do it *before* this cycle's entries
-  // would be appended. A squash cycle clears it too, because the squash
-  // consumes the window.
-  assign j_tail = ((ckpt_valid && !squash) || flush_restore)
-                  ? {REN_JLEN_W{1'b0}} : j_len;
+  // The base state this cycle's events act on. A clear point starts a fresh,
+  // empty window at index zero; nothing else moves the base.
+  assign j_empty_now = (ckpt_valid && !squash) || flush_restore || squash_accepted;
+  assign j_head_base = j_empty_now ? {REN_JIDX_W{1'b0}} : j_head;
+  assign j_len_base  = j_empty_now ? {REN_JLEN_W{1'b0}} : j_len;
+
+  // Where this cycle's entries append: one past the newest live entry, wrapping
+  // at the end of the array. `j_push1` is one past `j_push0` when lane 0 has an
+  // entry and at the same slot when lane 0 allocated nothing (an x0 lane), which
+  // keeps the window a contiguous run in allocation order.
+  assign j_idx0 = REN_JIDX_W'(j_head_base + j_len_base);
+  assign j_idx1 = REN_JIDX_W'(j_idx0 + (j_push0 ? REN_JIDX_W'(1) : REN_JIDX_W'(0)));
 
 `ifdef MOSAIC_RENAME_MUTANT_CKPT_ALLOC_LEAK
   // NEGATIVE CONTROL 12 (I-014): a checkpoint cycle's allocations are not
   // journalled (the pre-I-014 rule). The recovery point is then the *end* of the
   // checkpoint cycle while the free set is restored to its start, so the tag the
   // group took is neither free nor named by any mapping after a squash.
-  assign j_push0 = alloc_new_valid && !ckpt_valid && (j_len < REN_JLEN_W'(REN_ROB));
-  assign j_idx1  = REN_JIDX_W'(j_push0 ? (j_len + REN_JLEN_W'(1)) : j_len);
+  assign j_push0 = alloc_new_valid && !ckpt_valid && (j_len_base < REN_JLEN_W'(REN_ROB));
   assign j_push1 = alloc2_new_valid && !ckpt_valid &&
-                   (REN_JLEN_W'(j_idx1) < REN_JLEN_W'(REN_ROB));
+                   ((j_len_base + REN_JLEN_W'(j_push0 ? 1 : 0)) < REN_JLEN_W'(REN_ROB));
 `else
-  assign j_push0 = alloc_new_valid && (j_tail < REN_JLEN_W'(REN_ROB));
-  assign j_idx1  = REN_JIDX_W'(j_push0 ? (j_tail + REN_JLEN_W'(1)) : j_tail);
-  assign j_push1 = alloc2_new_valid && (REN_JLEN_W'(j_idx1) < REN_JLEN_W'(REN_ROB));
+  // Lane 1's entry is counted only if lane 0's fit. A window that held a later
+  // entry while missing an earlier one could not be undone: the undo walks oldest
+  // first, and it would step a generation down without the step that made it go
+  // up.
+  assign j_push0 = alloc_new_valid && (j_len_base < REN_JLEN_W'(REN_ROB));
+  assign j_push1 = alloc2_new_valid &&
+                   ((j_len_base + REN_JLEN_W'(j_push0 ? 1 : 0)) < REN_JLEN_W'(REN_ROB));
+`endif
+
+`ifdef MOSAIC_RENAME_MUTANT_JOURNAL_NO_RETIRE_FREE
+  // NEGATIVE CONTROL: the window is never drained by retirement -- an entry is
+  // never removed when its owner commits. A branchless stretch longer than
+  // ROB_ENTRIES allocations then fills the window, the clamp fires, and a squash
+  // to a checkpoint inside it restores less than the truth. Case
+  // rename.journal_window fails on the clamp, on the conservation identity and on
+  // the window depth.
+  assign j_pop0 = 1'b0;
+  assign j_pop1 = 1'b0;
+  assign j_pop_idx1 = {REN_JIDX_W{1'b0}};
+`else
+  // The oldest live entry leaves the window when its owner commits. The identity
+  // is *matched*, never assumed from "a commit happened, so one entry is due":
+  // an x0 commit journals nothing, and a commit of an instruction allocated
+  // before the window was cleared has no entry at all. Matching drops nothing in
+  // both cases, which is the correct answer -- dropping an entry that is not the
+  // committer's would lose a live record and leave its tag unfreed on a squash.
+  assign j_pop0 = commit_accepted && !j_empty_now && (j_len_base > REN_JLEN_W'(0)) &&
+                  (j_tag[j_head_base] == commit_tag) && (j_gen[j_head_base] == commit_gen);
+  assign j_pop_idx1 = REN_JIDX_W'(j_head_base + (j_pop0 ? REN_JIDX_W'(1) : REN_JIDX_W'(0)));
+  // Lane 1 pops only if lane 0's pop did not already take the entry it matches,
+  // and only if a second live entry exists.
+  assign j_pop1 = commit2_accepted && !j_empty_now &&
+                  (j_len_base > REN_JLEN_W'(j_pop0 ? 1 : 0)) &&
+                  (j_tag[j_pop_idx1] == commit2_tag) && (j_gen[j_pop_idx1] == commit2_gen);
 `endif
 
   always_comb begin
-    j_len_q      = j_tail;
+    j_head_q     = j_head_base;
+    j_len_q      = j_len_base;
     j_overflow_q = j_overflow;
 
-    // Lane 1's entry is counted only if lane 0's fit. A window that held a later
-    // entry while missing an earlier one could not be undone: the undo walks
-    // oldest first, and it would step a generation down without the step that
-    // made it go up.
-    if (alloc_new_valid) begin
-      if (j_len_q < REN_JLEN_W'(REN_ROB)) begin
-        j_len_q = j_len_q + REN_JLEN_W'(1);
-      end else begin
-        // The undo bound was violated. Reported, not silently absorbed: the
-        // alternative is a squash that restores less than the truth while
-        // reporting success.
-        j_overflow_q = 1'b1;
-      end
+    // 1. Retirement drains the window from the head, in program order.
+    if (j_pop0) begin
+      j_head_q = REN_JIDX_W'(j_head_q + REN_JIDX_W'(1));
+      j_len_q  = j_len_q - REN_JLEN_W'(1);
+    end
+    if (j_pop1) begin
+      j_head_q = REN_JIDX_W'(j_head_q + REN_JIDX_W'(1));
+      j_len_q  = j_len_q - REN_JLEN_W'(1);
     end
 
-    if (alloc2_new_valid) begin
-      if (j_len_q < REN_JLEN_W'(REN_ROB)) begin
-        j_len_q      = j_len_q + REN_JLEN_W'(1);
-      end else begin
-        j_overflow_q = 1'b1;
-      end
+    // 2. This cycle's allocations append. The capacity test above saw the
+    //    pre-edge length, so a slot freed by a same-cycle retirement is not reused
+    //    for a same-cycle allocation -- conservative, and unreachable: a full
+    //    window means every allocatable tag is held by an uncommitted
+    //    instruction, so the free-set test in the allocation path has already
+    //    refused the group.
+    if (j_push0) begin
+      j_len_q = j_len_q + REN_JLEN_W'(1);
+    end else if (alloc_new_valid) begin
+      // The undo bound was violated: an allocation was made that this window
+      // cannot record. Reported, not silently absorbed -- the clamp is what
+      // `journal_overflow` means -- and the flag is cleared at every point the
+      // clamped window no longer exists (a clear point, or a full drain).
+      j_overflow_q = 1'b1;
     end
 
-    if (squash_accepted) begin
-      j_len_q = {REN_JLEN_W{1'b0}};
+    if (j_push1) begin
+      j_len_q = j_len_q + REN_JLEN_W'(1);
+    end else if (alloc2_new_valid) begin
+      j_overflow_q = 1'b1;
+    end
+
+    // The clamp describes the window in flight. A fresh window (a checkpoint, a
+    // flush, a squash) has clamped nothing, and a window that has drained to
+    // empty has nothing left to clamp; either way the condition the flag reports
+    // no longer holds. A clamp raised this cycle leaves `j_len_q` non-zero, so
+    // this cannot clear a clamp that is still current.
+    if (j_empty_now || (j_len_q == {REN_JLEN_W{1'b0}})) begin
+      j_overflow_q = 1'b0;
     end
   end
 
@@ -1538,6 +1651,7 @@ module mosaic_rename (
       // first allocation takes the lowest free tag instead of scanning past the
       // reserved range.
       alloc_ptr  <= REN_TAG_W'(REN_ARCH_REGS);
+      j_head     <= {REN_JIDX_W{1'b0}};
       j_len      <= {REN_JLEN_W{1'b0}};
       ckpt_seen  <= 1'b0;
       ckpt_at_boundary <= 1'b0;
@@ -1569,20 +1683,26 @@ module mosaic_rename (
       end
 
       // One journal entry per allocation, holding the state that allocation
-      // replaced. The previous generation itself is not stored: the undo is the
-      // exact inverse of the allocation's increment, so one bit is the whole
-      // undo state. A two-wide group pushes lane 0's entry and then lane 1's, so
-      // the window stays in allocation order and the undo can walk it oldest
-      // first -- which is the property the generation rollback depends on.
+      // replaced and the identity it produced. The previous generation itself is
+      // not stored: the undo is the exact inverse of the allocation's increment,
+      // so one bit (the previous validity) is the whole undo state. The produced
+      // generation *is* stored, because recognising an entry's owner's commit is
+      // an identity match and cannot be reconstructed from the undo bit. A
+      // two-wide group pushes lane 0's entry and then lane 1's, so the window
+      // stays in allocation order and the undo can walk it oldest first -- which
+      // is the property the generation rollback depends on.
       if (j_push0) begin
-        j_tag[REN_JIDX_W'(j_tail)] <= scan_tag;
-        j_prev_valid[REN_JIDX_W'(j_tail)] <= gen_valid[scan_tag];
+        j_tag[j_idx0]        <= scan_tag;
+        j_gen[j_idx0]        <= alloc_new_gen;
+        j_prev_valid[j_idx0] <= gen_valid[scan_tag];
       end
       if (j_push1) begin
-        j_tag[j_idx1] <= alloc2_new_tag;
+        j_tag[j_idx1]        <= alloc2_new_tag;
+        j_gen[j_idx1]        <= alloc2_new_gen;
         j_prev_valid[j_idx1] <= gen_valid[alloc2_new_tag];
       end
 
+      j_head     <= j_head_q;
       j_len      <= j_len_q;
       j_overflow <= j_overflow_q;
       if (flush_restore) begin

@@ -1,6 +1,6 @@
 // ============================================================================
-// tb_rename.cpp -- CASE=rename.single_width_ownership (I-013) and
-// CASE=rename.same_cycle_chain (I-014).
+// tb_rename.cpp -- CASE=rename.single_width_ownership (I-013),
+// CASE=rename.same_cycle_chain (I-014) and CASE=rename.journal_window (I-018).
 //
 // The DUT is never its own oracle. Every output and every piece of internal
 // state is compared against an independent C++ shadow written from the
@@ -78,8 +78,17 @@
 //  13. twowide-ckpt     a two-wide group pushes two undo entries, and a squash
 //                       returns both tags, steps both generations back and
 //                       restores the maps exactly.
-//  14. twowide-random   a randomized soak of two-wide groups, retires and
+//   14. twowide-random   a randomized soak of two-wide groups, retires and
 //                       recovery windows, shadow-compared every cycle.
+//
+// CASE=rename.journal_window (I-018) runs a phase of its own, because the undo
+// window is a single-width quantity with a contract of its own:
+//
+//  15. journal-window   the window is the set of allocations that have not
+//                       committed and retirement drains it: a branchless stretch
+//                       of several ROBs of allocations never clamps it, the depth
+//                       equals the uncommitted count every cycle, and a branch
+//                       checkpoint and the trap restore each empty it.
 //
 // Standing invariants, checked on every cycle of every phase rather than in one
 // place:
@@ -177,6 +186,10 @@ struct Stim {
 
   bool ckpt_valid = false;
   bool squash = false;
+  // The trap path's full restore: `spec := cmt`, `free := ~{tags named by cmt}`,
+  // and the window is emptied. It is absolute rather than a delta to a checkpoint,
+  // so it needs no checkpoint to have been taken.
+  bool flush_restore = false;
 
   std::string str() const {
     return "[alloc=" + Bool(alloc_req) + ":x" + Dec(alloc_rd) +
@@ -186,7 +199,8 @@ struct Stim {
            " wb=" + Bool(wb_valid) + wb.str() + " free=" + Bool(free_valid) + free_.str() +
            " commit=" + Bool(commit_valid) + ":x" + Dec(commit_rd) + commit.str() +
            " commit2=" + Bool(commit2_valid) + ":x" + Dec(commit2_rd) + commit2.str() +
-           " ckpt=" + Bool(ckpt_valid) + " squash=" + Bool(squash) + "]";
+           " ckpt=" + Bool(ckpt_valid) + " squash=" + Bool(squash) +
+           " flush=" + Bool(flush_restore) + "]";
   }
 };
 
@@ -281,6 +295,12 @@ class ShadowRename {
   // Tags this model returned to the free set over the last edge by events that are
   // not journalled (an explicit release, or a commit releasing what it supersedes).
   uint32_t last_unjournalled_returns() const { return last_returns_; }
+  // Journal entries this model removed from the head because their owner
+  // committed, since the window was last emptied. A committed allocation's tag
+  // stays owned by the committed map, so it leaves the free set without ever
+  // coming back: the harness's conservation identity needs this count as well as
+  // the live window depth.
+  uint32_t journal_popped() const { return static_cast<uint32_t>(j_popped_); }
 
 
   // The documented cold state: arch reg i -> tag i at generation 0, those tags
@@ -301,8 +321,10 @@ class ShadowRename {
     gen_valid_.assign(entries_, false);
     wb_done_.assign(entries_, false);
     rot_ = arch_regs_;
-    undo_.clear();
+    undo_.assign(journal_, UndoEntry{});
+    j_head_ = 0;
     j_len_ = 0;
+    j_popped_ = 0;
     ckpt_seen_ = false;
     ckpt_boundary_ = false;
     j_overflow_ = false;
@@ -355,22 +377,28 @@ class ShadowRename {
     const bool wants1 = s.alloc2_req && (s.alloc2_rd != 0);
     const uint32_t need = (wants0 ? 1u : 0u) + (wants1 ? 1u : 0u);
     const bool has_enough = free_count() >= need;
+    // A squash and the trap path's full restore both own the cycle: each is
+    // recomputing the free set, and an allocation landing inside that would race
+    // the recomputation. The module reports both refusals on `alloc_squashed`,
+    // because from the group's point of view they are the same answer -- this
+    // cycle's tags are not available.
+    const bool blocked = s.squash || s.flush_restore;
 
-    o.alloc_squashed = s.alloc_req && s.squash;
-    o.alloc_is_x0 = s.alloc_req && (s.alloc_rd == 0) && !s.squash;
+    o.alloc_squashed = s.alloc_req && blocked;
+    o.alloc_is_x0 = s.alloc_req && (s.alloc_rd == 0) && !blocked;
     // Mutually exclusive with the squash report, matching the documented rule: a
     // squash wins, because it discards the group whether or not tags were
     // available.
-    o.alloc_exhausted = s.alloc_req && !s.squash && need > 0 && !has_enough;
-    o.alloc_accepted = s.alloc_req && !s.squash && has_enough;
+    o.alloc_exhausted = s.alloc_req && !blocked && need > 0 && !has_enough;
+    o.alloc_accepted = s.alloc_req && !blocked && has_enough;
     o.alloc_new_valid = o.alloc_accepted && (s.alloc_rd != 0);
 
     // Lane 1 is part of the same decision, so its acceptance is the group's --
     // gated on lane 1 being present at all. A lane 1 without a lane 0 is refused
     // rather than served: program order admits no second macro without a first.
-    o.alloc2_squashed = s.alloc2_req && s.squash;
-    o.alloc2_is_x0 = s.alloc2_req && (s.alloc2_rd == 0) && !s.squash;
-    o.alloc2_exhausted = s.alloc_req && s.alloc2_req && !s.squash && need > 0 && !has_enough;
+    o.alloc2_squashed = s.alloc2_req && blocked;
+    o.alloc2_is_x0 = s.alloc2_req && (s.alloc2_rd == 0) && !blocked;
+    o.alloc2_exhausted = s.alloc_req && s.alloc2_req && !blocked && need > 0 && !has_enough;
     o.alloc2_accepted = o.alloc_accepted && s.alloc2_req;
     o.alloc2_new_valid = o.alloc2_accepted && (s.alloc2_rd != 0);
 
@@ -497,44 +525,87 @@ class ShadowRename {
     // checkpoint baseline plus the un-journalled returns minus the window depth.
     last_returns_ = 0;
 
-    // 1. A checkpoint empties the window and marks that one exists. The recovery
+    // 1. The clear points and retirement's drain of the head.
+    //
+    //    A checkpoint empties the window and marks that one exists. The recovery
     //    point is the state at the *start* of this cycle, so the window is emptied
     //    first and this cycle's own allocations are pushed onto it below: a branch
     //    dispatched as lane 1 of a group whose lane 0 allocates in the same cycle
     //    is the ordinary case, and its allocation has to be undoable too. The
     //    boundary test is evaluated on the pre-edge maps, for the same reason.
     //    A squash in the same cycle does not take a new checkpoint -- it is undoing
-    //    to the one that already exists.
-    if (s.ckpt_valid && !s.squash) {
-      undo_.clear();
+    //    to the one that already exists -- but it does consume the window.
+    const bool empty_now = (s.ckpt_valid && !s.squash) || o.squash_accepted || s.flush_restore;
+    const size_t head_base = empty_now ? 0u : j_head_;
+    const size_t len_base = empty_now ? 0u : j_len_;
+    // The window the squash (if any) consumes: the pre-edge head and length, which
+    // step 6 below reads after this step has already started the next window.
+    const size_t undo_head = j_head_;
+    const size_t undo_len = j_len_;
+    if (empty_now) {
+      j_head_ = 0;
       j_len_ = 0;
+      j_popped_ = 0;
+    }
+    if (s.ckpt_valid && !s.squash) {
       ckpt_seen_ = true;
       ckpt_boundary_ = SpecEqCmt();
     }
 
+    // Retirement removes the oldest live entry when its owner commits, matched by
+    // the commit's destination identity. A commit that has no entry -- an x0
+    // commit, or one of an instruction allocated before the window was cleared --
+    // matches nothing and drops nothing.
+    if (!empty_now && o.commit_accepted && j_len_ > 0 &&
+        undo_[j_head_].tag == s.commit.tag && undo_[j_head_].gen == s.commit.gen) {
+      j_head_ = (j_head_ + 1) % journal_;
+      j_len_--;
+      j_popped_++;
+    }
+    if (!empty_now && o.commit2_accepted && j_len_ > 0 &&
+        undo_[j_head_].tag == s.commit2.tag && undo_[j_head_].gen == s.commit2.gen) {
+      j_head_ = (j_head_ + 1) % journal_;
+      j_len_--;
+      j_popped_++;
+    }
+
     // 2. One journal entry per allocation, holding the state that allocation
-    //    replaced. Allocation is refused in a squash cycle, so the push and the
-    //    undo below can never both happen in one cycle.
+    //    replaced and the identity it produced. Allocation is refused in a squash
+    //    cycle, so the push and the undo below can never both happen in one
+    //    cycle. The capacity test is the *base* window length -- the RTL's push
+    //    conditions read the pre-edge length -- and the slot is the base tail, one
+    //    past the newest live entry, which a same-cycle retirement does not move.
     if (o.alloc_new_valid) {
-      if (j_len_ >= journal_) {
+      if (len_base < journal_) {
+        undo_[(head_base + len_base) % journal_] =
+            UndoEntry{o.alloc_new.tag, o.alloc_new.gen, gen_valid_[o.alloc_new.tag]};
+        j_len_++;
+      } else {
         // More allocations than the journal can hold. The contract is that this is
         // *reported*, so the shadow records it and the test checks the report.
         j_overflow_ = true;
-      } else {
-        undo_.push_back(UndoEntry{o.alloc_new.tag, gen_valid_[o.alloc_new.tag]});
-        j_len_++;
       }
     }
     // Lane 1's entry follows lane 0's, so the window stays in allocation order and
     // the undo (which walks it oldest first) can invert both allocations. It is
     // pushed only if lane 0's entry fit, which is the same rule the RTL applies.
     if (o.alloc2_new_valid) {
-      if (j_len_ >= journal_) {
-        j_overflow_ = true;
-      } else {
-        undo_.push_back(UndoEntry{o.alloc2_new.tag, gen_valid_[o.alloc2_new.tag]});
+      const size_t lane1_slot = head_base + len_base + (o.alloc_new_valid ? 1u : 0u);
+      if (len_base + (o.alloc_new_valid ? 1u : 0u) < journal_) {
+        undo_[lane1_slot % journal_] =
+            UndoEntry{o.alloc2_new.tag, o.alloc2_new.gen, gen_valid_[o.alloc2_new.tag]};
         j_len_++;
+      } else {
+        j_overflow_ = true;
       }
+    }
+
+    // The clamp describes the window currently in flight: a fresh window has
+    // clamped nothing, and a drained one has nothing left to clamp. A clamp
+    // raised this cycle leaves a non-empty window, so this cannot clear a live
+    // clamp.
+    if (empty_now || j_len_ == 0) {
+      j_overflow_ = false;
     }
 
     // 3. Allocation: take the tag out of the free set, step its generation, and
@@ -584,17 +655,40 @@ class ShadowRename {
       last_returns_++;
     }
 
-    // 6. A squash undoes every allocation made after the checkpoint, oldest entry
-    //    first so that the newest is applied last.
+    // The committed map as both lanes leave it: what the trap restore derives the
+    // surviving ownership from.
+    std::vector<Dest> cmt_after_commits = cmt_after_lane0;
+    if (o.commit2_accepted) cmt_after_commits[s.commit2_rd] = s.commit2;
+
+    // 6. A squash undoes every allocation in the window, oldest entry first so
+    //    that the newest is applied last. The walk starts at the pre-edge head,
+    //    which step 1 has already moved on from when it began the next window.
     if (o.squash_accepted) {
-      for (size_t k = 0; k < j_len_; k++) {
-        const UndoEntry& e = undo_[k];
+      for (size_t k = 0; k < undo_len; k++) {
+        const UndoEntry& e = undo_[(undo_head + k) % journal_];
         free_next[e.tag] = true;
         gen_[e.tag] = e.prev_valid ? ((gen_[e.tag] - 1) & gen_mask_) : 0;
         gen_valid_[e.tag] = e.prev_valid;
       }
-      j_len_ = 0;
-      undo_.clear();
+    }
+
+    // 6b. The trap path's full restore, and it is last because it is absolute:
+    //     the free set becomes exactly the complement of the post-commit committed
+    //     map. It needs no journal: after a precise trap the only mappings that may
+    //     exist are the committed ones, so deriving the set from the committed map
+    //     cannot restore more than the truth. Generations are deliberately not
+    //     rolled back (the generation counts allocations, and not rolling it back
+    //     is what keeps a late writeback from a discarded instruction stale).
+    if (s.flush_restore) {
+      std::vector<bool> owned(entries_, false);
+      for (uint32_t a = 0; a < arch_regs_; a++) {
+        owned[cmt_after_commits[a].tag] = true;
+      }
+      for (uint32_t t = 0; t < entries_; t++) {
+        free_next[t] = !owned[t];
+      }
+      ckpt_seen_ = true;
+      ckpt_boundary_ = true;
     }
 
     free_ = free_next;
@@ -610,6 +704,10 @@ class ShadowRename {
     if (o.commit_accepted) cmt_[s.commit_rd] = s.commit;
     if (o.commit2_accepted) cmt_[s.commit2_rd] = s.commit2;
     if (o.squash_accepted) spec_ = cmt_;
+    // The trap path's restore: the same assignment as the squash, a different
+    // precondition (it re-derives the boundary from the committed map rather than
+    // restoring *to* a sampled one).
+    if (s.flush_restore) spec_ = cmt_;
     if (o.alloc_new_valid) spec_[s.alloc_rd] = o.alloc_new;
     // Lane 1 lands after lane 0, so a WAW pair ends with lane 1's mapping.
     if (o.alloc2_new_valid) spec_[s.alloc2_rd] = o.alloc2_new;
@@ -617,8 +715,12 @@ class ShadowRename {
 
  private:
   struct UndoEntry {
-    uint32_t tag;
-    bool prev_valid;
+    uint32_t tag = 0;
+    // The generation the journalled allocation produced. It is the entry's
+    // identity half, matched against a commit to decide whether this entry's
+    // owner is the instruction retiring.
+    uint32_t gen = 0;
+    bool prev_valid = false;
   };
 
   // The documented rotating scan: the first free tag at or after the rotation
@@ -672,7 +774,12 @@ class ShadowRename {
   uint32_t rot_;
 
   std::vector<UndoEntry> undo_;
+  // The window is a FIFO: `j_head_` is the oldest live entry and `j_len_` the live
+  // count. Retirement advances the head; allocations append at head+len.
+  size_t j_head_ = 0;
   size_t j_len_ = 0;
+  // Entries removed from the head by a commit since the window was last emptied.
+  size_t j_popped_ = 0;
   bool ckpt_seen_ = false;
   // Whether the checkpoint that is the current recovery point was taken where
   // the speculative and committed maps agreed -- the only place this module's
@@ -682,7 +789,8 @@ class ShadowRename {
   // Tags returned to the free set this cycle by events that are *not*
   // journalled: an explicit release, or a commit releasing the mapping it
   // supersedes. The harness uses it to check that the free set is exactly the
-  // checkpoint baseline plus these returns minus the window depth.
+  // checkpoint baseline plus these returns, minus the window depth and minus the
+  // entries retirement has drained (whose tags are owned by the committed map).
   uint32_t last_returns_ = 0;
 };
 
@@ -714,6 +822,7 @@ class Harness {
     track_window_ = false;
     track_base_free_ = 0;
     track_returns_ = 0;
+    conservation_checked_ = true;
   }
 
   // Track the recovery window for the conservation check in CheckInvariants: a
@@ -721,11 +830,23 @@ class Harness {
   // return since then is counted. Called after the edge, so the baseline is the
   // pre-edge free count and this cycle's own returns are part of "since the
   // checkpoint".
+  //
+  // The trap path's full restore re-establishes a recovery point too, but it does
+  // it *absolutely*: the free set becomes the complement of the committed map, not
+  // a baseline plus a delta. So the identity cannot be checked across the flush
+  // cycle; the harness re-baselines on the state the flush established and resumes
+  // checking from the next cycle.
   void NoteWindow(const Stim& s, uint32_t pre_free) {
+    conservation_checked_ = true;
     if (s.ckpt_valid && !s.squash) {
       track_window_ = true;
       track_base_free_ = pre_free;
       track_returns_ = 0;
+    } else if (s.flush_restore) {
+      track_window_ = true;
+      track_base_free_ = dut_->free_count;  // the state the restore established
+      track_returns_ = 0;
+      conservation_checked_ = false;
     }
     if (track_window_) track_returns_ += shadow_->last_unjournalled_returns();
   }
@@ -781,6 +902,7 @@ class Harness {
     dut_->commit2_gen = static_cast<uint8_t>(s.commit2.gen & 0x7f);
     dut_->ckpt_valid = s.ckpt_valid ? 1 : 0;
     dut_->squash = s.squash ? 1 : 0;
+    dut_->flush_restore = s.flush_restore ? 1 : 0;
     dut_->eval();
     // The free count at the *start* of this cycle, which is what a checkpoint
     // taken now makes its recovery point.
@@ -832,6 +954,9 @@ class Harness {
   // The DUT's undo-window depth, read from the register itself. A phase that
   // checked the shadow's depth here instead would be asserting about the model.
   uint32_t dut_j_len() const { return dut_->dbg_j_len; }
+  // The window's size (the ROB), read from the model that was sized from the
+  // elaborated geometry.
+  uint32_t journal_depth() const { return shadow_->journal_depth(); }
   const std::vector<uint32_t> dut_gens() const { return DutGens(); }
 
   std::vector<bool> DutFreeMask() const {
@@ -1248,24 +1373,31 @@ class Harness {
             "would restore less than the truth");
 
     // Conservation across the current recovery window. Every tag that has left the
-    // free set since the checkpoint is a journalled allocation -- the window depth
-    // -- and every tag that has come back is either the undo or an un-journalled
-    // release (a commit's supersede, or an explicit release). The identity below
-    // therefore has to hold on *every* cycle, not just after a squash, which is
-    // what makes it the arithmetic form of "no tag is leaked, none is handed out
-    // twice, and none is left neither free nor owned". It is the check the
-    // checkpoint-cycle rule used to break: a tag allocated in the checkpoint cycle
-    // but not journalled leaves the free set short of the identity by exactly one
-    // per occurrence.
-    if (track_window_) {
+    // free set since the checkpoint is a journalled allocation that has not been
+    // undone -- either still live in the window, or already drained by its owner's
+    // commit (a committed allocation's tag stays owned by the committed map, so it
+    // never comes back). Every tag that has come back is either the undo or an
+    // un-journalled release (a commit's supersede, or an explicit release). The
+    // identity below therefore has to hold on *every* cycle, not just after a
+    // squash, which is what makes it the arithmetic form of "no tag is leaked, none
+    // is handed out twice, and none is left neither free nor owned".
+    //
+    // The `popped` term is what the retire drain adds: a window depth alone would
+    // count a drained allocation as returned, and it was not. Both quantities are
+    // read from the DUT (the depth) and from the shadow (the drained count, which
+    // `CompareState` has already proved the DUT's depth agrees with).
+    if (track_window_ && conservation_checked_) {
       const int64_t expected = static_cast<int64_t>(track_base_free_) +
                                static_cast<int64_t>(track_returns_) -
-                               static_cast<int64_t>(dut_->dbg_j_len);
+                               static_cast<int64_t>(dut_->dbg_j_len) -
+                               static_cast<int64_t>(shadow_->journal_popped());
       Require(static_cast<int64_t>(dut_->free_count) == expected, where,
               "free-set conservation over the recovery window failed: free_count is " +
                   Dec(dut_->free_count) + ", expected baseline " + Dec(track_base_free_) +
                   " + un-journalled returns " + Dec(track_returns_) + " - window depth " +
-                  Dec(dut_->dbg_j_len) + " = " + Dec(static_cast<uint64_t>(expected)));
+                  Dec(dut_->dbg_j_len) + " - retired entries " +
+                  Dec(shadow_->journal_popped()) + " = " +
+                  Dec(static_cast<uint64_t>(expected)));
     }
   }
 
@@ -1284,6 +1416,9 @@ class Harness {
   bool     track_window_ = false;
   uint32_t track_base_free_ = 0;
   uint32_t track_returns_ = 0;
+  // Cleared on the cycle a flush re-baselined the window, when the identity cannot
+  // be evaluated. See NoteWindow.
+  bool     conservation_checked_ = true;
 
   Vmosaic_rename_tb* dut_;
   mosaic::ClockDriver* clk_;
@@ -3443,6 +3578,267 @@ void PhaseTwoWideRandom(Harness* h, mosaic::Reporter* reporter, uint32_t arch_re
 }
 
 
+// ============================================================================
+// Phase 15: the undo window's contract (I-018).
+//
+// The window holds **the set of allocations that have not committed**, and
+// retirement drains it. The defect this case pins down: the window was emptied
+// only by a branch checkpoint or the trap path, never by retirement, so a
+// branchless stretch longer than ROB_ENTRIES allocations filled it, an
+// allocation was silently left un-journalled, and `journal_overflow` latched --
+// a flag that could no longer be told apart from "the window is clamped right
+// now".
+//
+// The phase drives that exact shape, with no branch checkpoint anywhere in it:
+// allocate until one tag remains free (ROB-1 uncommitted allocations, the exact
+// depth the bound is sized for), then retire one and allocate one every cycle for
+// several ROBs. The total number of allocations crosses the bound many times
+// over while the *uncommitted* count stays at ROB-1, which is the whole contract:
+// the window must equal the uncommitted allocations on every cycle, must stay
+// inside the bound, and must never report the clamp. Then it shows the two clear
+// points -- a branch checkpoint, and the trap path's full restore -- each
+// emptying a non-empty window, and checks the trap restore's absolute effect on
+// the maps and the free set.
+// ----------------------------------------------------------------------------
+void PhaseJournalWindow(Harness* h, mosaic::Reporter* reporter, uint32_t arch_regs) {
+  // The window is sized for the ROB; the conservation claim is about that bound,
+  // read from the elaborated model rather than written as a literal.
+  const uint32_t rob = h->journal_depth();
+  Require(rob > 0, "journal-window", "the undo window has no entries");
+
+  // The uncommitted allocations, in program order: the phase's own record of what
+  // the window must hold. `head` is the oldest live entry, exactly as the hardware
+  // tracks it.
+  struct Out {
+    uint32_t rd;
+    Dest dest;
+  };
+  std::vector<Out> outstanding;
+  size_t head = 0;
+  uint32_t next_rd = 1;
+  uint32_t total_allocs = 0;
+
+  const auto live = [&]() { return static_cast<uint32_t>(outstanding.size() - head); };
+  const auto next_reg = [&]() {
+    const uint32_t rd = next_rd;
+    next_rd = (next_rd % (arch_regs - 1)) + 1;  // 1..arch_regs-1, never x0
+    return rd;
+  };
+  // The trap restore's absolute effect, stated as the contract states it: the free
+  // set is exactly the complement of the set of tags the committed map names.
+  const auto free_is_complement_of_cmt = [&]() {
+    const std::vector<bool> free_mask = h->DutFreeMask();
+    const std::vector<Dest> cmt = h->DutCmtMap();
+    std::vector<bool> owned(free_mask.size(), false);
+    for (const Dest& d : cmt) {
+      if (d.tag < owned.size()) owned[d.tag] = true;
+    }
+    for (size_t t = 0; t < free_mask.size(); t++) {
+      if (free_mask[t] == owned[t]) return false;
+    }
+    return true;
+  };
+  // The identity the window's contract demands, plus the flag that says the
+  // window was clamped. Both are read from the DUT, not from the phase's model.
+  const auto check_window = [&](const std::string& where) {
+    Require(h->dut_j_len() == live(), where,
+            "the undo window holds " + Dec(h->dut_j_len()) + " entries but " + Dec(live()) +
+                " allocations are uncommitted: the window is not the set of "
+                "allocations that have not committed");
+    Require(h->dut_j_len() <= rob, where,
+            "the undo window holds " + Dec(h->dut_j_len()) + " entries, past its bound " +
+                Dec(rob));
+    Require(!h->journal_overflow(), where,
+            "journal_overflow reported a clamped window while the window held " +
+                Dec(h->dut_j_len()) + " of its " + Dec(rob) +
+                " entries: the flag no longer means a clamp in the window in flight");
+  };
+
+  // --- the recovery window the conservation identity is measured from ---
+  Require(h->DutSpecMap() == h->DutCmtMap(), "journal-window",
+          "the machine is not at a committed boundary after reset");
+  Stim ck;
+  ck.ckpt_valid = true;
+  Outputs cko = h->Cycle(ck);
+  Require(cko.ckpt_committed, "journal-window",
+          "the checkpoint at the reset boundary was not reported as usable");
+  Require(h->dut_j_len() == 0, "journal-window", "a checkpoint did not empty the window");
+
+  // --- fill: ROB-1 uncommitted allocations, no commit anywhere ---
+  while (h->free_count() > 1) {
+    Stim a;
+    a.alloc_req = true;
+    a.alloc_rd = next_reg();
+    Outputs o = h->Cycle(a);
+    Require(o.alloc_new_valid, "journal-window",
+            "an allocation was refused while " + Dec(h->free_count()) + " tags were free");
+    outstanding.push_back(Out{a.alloc_rd, o.alloc_new});
+    total_allocs++;
+    check_window("journal-window");
+  }
+  Require(h->dut_j_len() == rob - 1, "journal-window",
+          "the fill left the window at " + Dec(h->dut_j_len()) + " entries, expected " +
+              Dec(rob - 1) + ": with no commit in the stretch the window holds every "
+              "allocation, and the free set drained to one tag");
+
+  // --- the branchless stretch: one retire and one allocation per cycle ---
+  //
+  // The branch checkpoint is the ordinary way a window is emptied in a real core;
+  // by taking none here, the stretch is exactly the case the defect got wrong. The
+  // window stays at ROB-1 (the retire drains the head, the allocation appends at
+  // the tail) while the total number of allocations crosses the bound many times.
+  // One tag is kept free so each cycle's allocation is served from the tag the
+  // previous cycle's retire returned: the free-set scan sees the pre-edge set, so
+  // a window at its full bound would refuse the allocation and the phase would be
+  // measuring tag back-pressure rather than the window.
+  for (uint32_t i = 0; i < 3 * rob; i++) {
+    Stim s;
+    s.alloc_req = true;
+    s.alloc_rd = next_reg();
+    Require(live() >= rob - 1, "journal-window",
+            "the stretch lost its retirement pipeline");
+    s.commit_valid = true;
+    s.commit_rd = outstanding[head].rd;
+    s.commit = outstanding[head].dest;
+    Outputs o = h->Cycle(s);
+    Require(o.alloc_new_valid, "journal-window",
+            "the allocation in the retiring stretch was refused at cycle " + Dec(i));
+    Require(o.commit_accepted, "journal-window",
+            "the retire in the window-drain stretch was refused at cycle " + Dec(i));
+    head++;
+    outstanding.push_back(Out{s.alloc_rd, o.alloc_new});
+    total_allocs++;
+    check_window("journal-window");
+  }
+  Require(total_allocs > rob + 8, "journal-window",
+          "the branchless stretch made only " + Dec(total_allocs) +
+              " allocations, so it never crossed the window bound");
+  Require(h->dut_j_len() == rob - 1, "journal-window",
+          "after " + Dec(total_allocs) + " allocations with retirement running the window "
+          "is at " + Dec(h->dut_j_len()) + " entries, expected " + Dec(rob - 1) +
+          ": the bound is on uncommitted allocations, not on allocations");
+
+  // --- a branch checkpoint empties a non-empty window ---
+  //
+  // Taken with writers still outstanding, so the window is non-empty and the
+  // checkpoint is *not* a usable recovery point (`spec != cmt`), which the module
+  // reports -- but the emptying itself is unconditional, and that is what this
+  // case asserts here.
+  Require(h->dut_j_len() > 0, "journal-window",
+          "the window was already empty, so the checkpoint's emptying is not tested");
+  Stim ck2;
+  ck2.ckpt_valid = true;
+  Outputs ck2o = h->Cycle(ck2);
+  Require(!ck2o.ckpt_committed, "journal-window",
+          "a checkpoint with " + Dec(live()) + " writers outstanding was reported as a "
+          "committed boundary");
+  Require(h->dut_j_len() == 0, "journal-window",
+          "a branch checkpoint did not empty the window");
+
+  // Drain what is left, so the machine is at a committed boundary again. The
+  // window was just emptied, so these retires have no entries to remove; the
+  // contract is that they drop nothing rather than underflow.
+  while (head < outstanding.size()) {
+    Stim c;
+    c.commit_valid = true;
+    c.commit_rd = outstanding[head].rd;
+    c.commit = outstanding[head].dest;
+    Require(h->Cycle(c).commit_accepted, "journal-window", "a draining retire was refused");
+    head++;
+    Require(h->dut_j_len() == 0, "journal-window",
+            "a retire with no window entry changed the window depth");
+  }
+  h->Cycle(Stim{});
+  Require(h->DutSpecMap() == h->DutCmtMap(), "journal-window",
+          "the maps did not converge to a committed boundary after the drain");
+  Require(free_is_complement_of_cmt(), "journal-window",
+          "at the drained boundary the free set is not the complement of the committed map");
+
+  // --- the trap path's flush empties the window and restores absolutely ---
+  // A few uncommitted allocations, then the flush: the window must empty, the
+  // speculative map must become the committed map, and the free set must become
+  // exactly the complement of the committed map.
+  for (uint32_t i = 0; i < 5; i++) {
+    Stim a;
+    a.alloc_req = true;
+    a.alloc_rd = next_reg();
+    Outputs o = h->Cycle(a);
+    Require(o.alloc_new_valid, "journal-window", "a pre-flush allocation was refused");
+  }
+  Require(h->dut_j_len() == 5, "journal-window",
+          "the pre-flush window holds " + Dec(h->dut_j_len()) + " entries, expected 5");
+
+  Stim fl;
+  fl.flush_restore = true;
+  h->Cycle(fl);
+  Require(h->dut_j_len() == 0, "journal-window",
+          "the trap path's full restore did not empty the window");
+  Require(h->DutSpecMap() == h->DutCmtMap(), "journal-window",
+          "after the trap restore the speculative map is not the committed map");
+  Require(free_is_complement_of_cmt(), "journal-window",
+          "after the trap restore the free set is not the complement of the committed map");
+
+  // A restore re-establishes a recovery point, so the next branch squash is
+  // accepted rather than refused as having no checkpoint.
+  Stim sq;
+  sq.squash = true;
+  Outputs sqo = h->Cycle(sq);
+  Require(sqo.squash_accepted, "journal-window",
+          "the recovery point the trap restore establishes was not usable: a squash "
+          "after it was refused");
+
+  // --- two lanes drain two entries in one cycle ---
+  // Both commits land in one cycle and both name the two oldest live entries, in
+  // program order, so both must leave the window on the same edge. A drain that
+  // removed only the first lane's entry would leave one uncommitted allocation
+  // recorded for ever -- the leak this window's bound exists to make impossible.
+  Dest d0{};
+  Dest d1{};
+  {
+    Stim a0;
+    a0.alloc_req = true;
+    a0.alloc_rd = 5;
+    Outputs o0 = h->Cycle(a0);
+    Require(o0.alloc_new_valid, "journal-window", "the dual-drain setup allocation was refused");
+    d0 = o0.alloc_new;
+
+    Stim a1;
+    a1.alloc_req = true;
+    a1.alloc_rd = 6;
+    Outputs o1 = h->Cycle(a1);
+    Require(o1.alloc_new_valid, "journal-window", "the second dual-drain allocation was refused");
+    d1 = o1.alloc_new;
+  }
+  Require(h->dut_j_len() == 2, "journal-window",
+          "the dual-drain setup left the window at " + Dec(h->dut_j_len()) +
+              " entries, expected 2");
+
+  Stim dc;
+  dc.commit_valid = true;
+  dc.commit_rd = 5;
+  dc.commit = d0;
+  dc.commit2_valid = true;
+  dc.commit2_rd = 6;
+  dc.commit2 = d1;
+  Outputs dco = h->Cycle(dc);
+  Require(dco.commit_accepted && dco.commit2_accepted, "journal-window",
+          "the two-lane retire was refused");
+  Require(h->dut_j_len() == 0, "journal-window",
+          "a two-lane retire left " + Dec(h->dut_j_len()) +
+              " of the window's two entries: a commit lane did not remove its entry");
+  h->Cycle(Stim{});
+  Require(h->DutSpecMap() == h->DutCmtMap(), "journal-window",
+          "the two-lane retire did not leave the machine at a committed boundary");
+
+  reporter->Check(true,
+                  "journal-window: " + Dec(total_allocs) + " allocations in a branchless "
+                  "stretch never clamped the undo window (depth held at " + Dec(rob - 1) +
+                  " of " + Dec(rob) + "), the window equalled the uncommitted "
+                  "allocations on every cycle, and a checkpoint and the trap restore "
+                  "each emptied it");
+}
+
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -3501,11 +3897,33 @@ int main(int argc, char** argv) {
       harness.BindShadow(&shadow);
     };
 
+    // The case id is validated before any phase runs, and an unknown id is
+    // refused instead of silently running a subset: a case that ran the wrong
+    // phases and printed PASS would be worse than a failure.
+    const bool two_wide = options.case_id == "rename.same_cycle_chain";
+    const bool journal_case = options.case_id == "rename.journal_window";
+    if (!two_wide && !journal_case && options.case_id != "rename.single_width_ownership") {
+      Fail("case", "unknown case id '" + options.case_id +
+                       "': expected rename.single_width_ownership, "
+                       "rename.same_cycle_chain or rename.journal_window");
+    }
+
     // Phase order is deliberate. Each phase resets first and owns exactly one
     // mechanism, and a run stops at the first failure, so the order decides
-    // *which* phase names a given defect. The directed mechanisms run first and
-    // the random soak runs last, because the soak fails on "some cycle" and would
-    // mask the phases that can say which structure is at fault.
+    // *which* phase names a given defect. For rename.journal_window the window
+    // phase runs first, because it is the case's subject: a window defect would
+    // otherwise be reported by whichever earlier phase happened to retire inside
+    // an open window, which is the masking this ordering exists to avoid. The
+    // single-width campaign follows it, so the case still exercises the whole
+    // contract. The two-wide phases run only for their own case and only after
+    // the single-width ones, so a two-wide change which broke the single-width
+    // path is caught by the phase that owns that path.
+    if (journal_case) {
+      fresh();
+      harness.Phase("journal-window");
+      PhaseJournalWindow(&harness, &reporter, arch_regs);
+    }
+
     fresh();
     harness.Phase("reset-state");
     PhaseResetState(&harness, &reporter, entries, arch_regs, banks, rows);
@@ -3538,19 +3956,8 @@ int main(int argc, char** argv) {
     harness.Phase("random");
     PhaseRandom(&harness, &reporter, entries, arch_regs, static_cast<uint32_t>(options.seed), 4000);
 
-    // The two-wide phases (I-014) run only for their own case, and they run *after*
-    // the single-width ones so that a two-wide change which broke the single-width
-    // path is caught by the phase that owns that path rather than by a soak. The
-    // case id decides, and an unknown id is refused instead of silently running a
-    // subset: a case that ran the wrong phases and printed PASS would be worse than
-    // a failure.
-    const bool two_wide = options.case_id == "rename.same_cycle_chain";
-    if (!two_wide && options.case_id != "rename.single_width_ownership") {
-      Fail("case", "unknown case id '" + options.case_id +
-                       "': expected rename.single_width_ownership or "
-                       "rename.same_cycle_chain");
-    }
-
+    // The two-wide phases (I-014) run only for their own case, after the
+    // single-width ones; the case id was validated before any phase ran.
     if (two_wide) {
       fresh();
       harness.Phase("twowide-raw");

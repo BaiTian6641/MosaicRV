@@ -1,5 +1,5 @@
-// Simulation wrapper for CASE=rename.single_width_ownership (I-013) and
-// CASE=rename.same_cycle_chain (I-014).
+// Simulation wrapper for CASE=rename.single_width_ownership (I-013),
+// CASE=rename.same_cycle_chain (I-014) and CASE=rename.journal_window (I-018).
 //
 // `mosaic_rename` is a stateful single-clock module with combinational source
 // reads and a combinational allocation answer (it describes the edge that is
@@ -157,6 +157,12 @@ module mosaic_rename_tb (
     // recovery
     input  logic                                       ckpt_valid,
     input  logic                                       squash,
+    // The trap path's full restore. A trap cannot use the branch checkpoint rule
+    // (its boundary is not a committed one), so it asserts `flush_restore`, which
+    // restores `spec := cmt` and `free := ~{tags named by cmt}` and re-establishes
+    // a recovery point. CASE=rename.journal_window drives it, because "the window
+    // is emptied by the trap path" is half of the contract this case pins down.
+    input  logic                                       flush_restore,
     output logic                                       squash_accepted,
     output logic                                       squash_underflow,
     output logic                                       squash_not_committed,
@@ -273,6 +279,7 @@ module mosaic_rename_tb (
 
       .ckpt_valid       (ckpt_valid),
       .squash           (squash),
+      .flush_restore    (flush_restore),
       .squash_accepted  (squash_accepted),
       .squash_underflow (squash_underflow),
       .squash_not_committed (squash_not_committed),

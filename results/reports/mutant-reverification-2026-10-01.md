@@ -881,3 +881,8 @@ The two controls with no package-report claim, for completeness:
   work, not a mutant-claim discrepancy. No mutant behaves differently from its
   report.
 
+
+
+---
+
+**Staleness note (2026-10-01, after the I-018 journal triage).** The two `CKPT_ALLOC_LEAK` rows in this report's Round 3 table name `random: cycle 1890` as the first divergence. That was true of the revision they were collected against. The journal window is now a FIFO drained by commit (see `results/reports/I-018-journal.md`), and the same mutant's first divergence is now `random: cycle 1887: the undo window holds 0 entries but the shadow says 1`. The rows are left as collected -- they are a record of what was observed on that revision -- and this note is the pointer from them to the current behaviour.

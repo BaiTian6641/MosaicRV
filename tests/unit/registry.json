@@ -1084,8 +1084,7 @@
     "sim/unit/tb_rename.cpp"
    ],
    "max_cycles": 200000,
-   "seed": 1,
-   "pending": true
+   "seed": 1
   }
  }
 }
