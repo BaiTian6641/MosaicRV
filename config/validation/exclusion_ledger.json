@@ -345,33 +345,38 @@
     {
       "id": "EX-012",
       "kind": "skip",
-      "subjects": [
-        "ACT4 ELFs for the p1-advertised extensions A, C, Zicond, Zmmul and CMO"
-      ],
-      "reason": "tools/run_act_dut.py executes only the p0 applicable suites (I/M/Zicsr/Zifencei). The extensions A, C, Zicond, Zmmul and CMO are advertised at p1 (their implementation tasks are delivered), but no ACT4 ELF for any of them is executed on a DUT.",
+   "subjects": [
+    "ACT4 ELFs for the p1 extensions still without DUT evidence: Zicond (no suite in the frozen checkout), Zmmul, Zicntr, Zicbom, Zicbop and CMO, and the privileged-mode tests/priv corpus",
+    "The five ACT4 ELFs that run on the p1 DUT and fail: Zca-c.lui-00 (compressed LUI immediate), Zalrsc-sc.d-00 / Zalrsc-sc.w-00 (SC returns failure where the reference succeeds) and Zihpm-csrrc-00 / Zihpm-csrrs-00 (HPM csrrc/csrrs read-modify-write)"
+   ],
+   "reason": "tools/run_act_dut.py now generates and executes the p1 advertised ACT4 set on the integrated out-of-order core (mosaic_core_tb) and records every pass and fail: 122 of 127 ELFs pass, 5 fail (results/reports/V-043-act4.md). The remaining gaps are (a) Zicond, which the p1 profile claims but the frozen riscv-arch-test checkout has no suite for, (b) Zmmul, Zicntr, Zicbom, Zicbop and CMO, which config/profiles/p1.json claims but tools/check_profile.py --all reports not yet implemented/not advertised, so no applicable ELF is generated, and (c) the privileged-mode corpus, which this configuration does not generate.",
       "spec_clause": "RISC-V ISA manual, A and C extension chapters and the Zicond/Zmmul/CMO extension specifications.",
       "alternative_verification": {
         "status": "open",
         "cases": [],
         "checks": [],
-        "note": "Unit cases cover the semantics (amo.linearization, lrsc.reservation_progress, compressed.cross_boundary, muldiv.kill_and_edges, cache.refill_evict_fault), but those are the DUT's own directed tests, not the independent ACT4 corpus. There is no ACT4 evidence for any advertised p1 extension."
-      },
-      "affected_cases": [
-        {
-          "case": "amo.linearization",
-          "fields": []
-        },
-        {
-          "case": "lrsc.reservation_progress",
-          "fields": []
-        },
-        {
-          "case": "compressed.cross_boundary",
-          "fields": []
-        }
-      ],
-      "affected_scope": "tools/run_act_dut.py; config/capability_ladder.json; config/profiles/p1.json",
-      "end_condition": "An ACT4 ELF for each advertised p1 extension executes on a p1 DUT and passes, closing the ACT4 count for that extension."
+   "note": "The p1 DUT now executes the ACT4 corpus: CASE=core.act_dut (sim/unit/tb_core_act.cpp) runs every generated ELF on mosaic_core_tb and reports 122/127 passing, with per-ELF logs in results/v043 and the full record in results/reports/V-043-act4.md. The runner is calibrated (a corrupted expected-signature word and an ALU mutant both make it exit 1). The five failing ELFs and the extensions with no suite or no advertised implementation remain open."
+  },
+  "affected_cases": [
+   {
+    "case": "amo.linearization",
+    "fields": []
+   },
+   {
+    "case": "lrsc.reservation_progress",
+    "fields": []
+   },
+   {
+    "case": "compressed.cross_boundary",
+    "fields": []
+   },
+   {
+    "case": "core.act_dut",
+    "fields": []
+   }
+  ],
+  "affected_scope": "tools/run_act_dut.py; sim/unit/tb_core_act.cpp; tests/act4/mosaic-p1/; config/capability_ladder.json; config/profiles/p1.json",
+  "end_condition": "An ACT4 ELF for each advertised p1 extension executes on the p1 DUT and passes -- currently met for I, M, Zicsr, Zifencei, Zihpm, Zaamo and Zca except the five failures named above -- and Zicond/Zmmul/CMO either gain a suite that runs or are dropped from the p1 profile."
     },
     {
       "id": "EX-013",

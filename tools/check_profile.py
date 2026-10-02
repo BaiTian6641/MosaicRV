@@ -200,6 +200,22 @@ class NegativeControls(object):
             "CSR without a spec clause",
             self.patch_first_csr(lambda t: t["modes"][0]["csrs"][0].pop("spec_clause")),
         )
+        # The role is what a register *is*. A CSR whose table entry declares no
+        # role, or one outside config_check.CSR_ROLES, is a register no tool or
+        # model can classify, and the failure must be here -- a configuration
+        # gate -- rather than later, inside a unit case whose model meets a
+        # table row it has no role for ("generated table row sstatus has no
+        # known role", the p1 hygiene defect this control closes).
+        self.case(
+            "CSR without a role",
+            self.patch_first_csr(lambda t: t["modes"][0]["csrs"][0].pop("role", None)),
+        )
+        self.case(
+            "CSR with an unknown role",
+            self.patch_first_csr(
+                lambda t: t["modes"][0]["csrs"][0].update({"role": "not-a-declared-role"})
+            ),
+        )
         self.case(
             "CSR with a duplicate address",
             self.patch_first_csr(

@@ -78,15 +78,16 @@ ACT_CONFIG = os.path.join(REPO, "tests", "act4", "mosaic-p1", "test_config.yaml"
 WORKDIR_DEFAULT = os.path.join(REF_ROOT, "act4-mosaic-p1-work")
 
 # The extension filter handed to `act`. Each name is the extension a suite's tests
-# declare in REQUIRED_EXTENSIONS; the p1 profile's advertised set is the source of
-# truth (config/profiles/p1.json), and a name with no suite in this checkout
-# simply produces nothing. `A`/`C` are the ISA names; their suites are the
-# sub-extension names the checkout uses.
+# declare in REQUIRED_EXTENSIONS. The set is exactly the p1 *advertised* set that
+# `tools/check_profile.py --all` derives (config/capability_ladder.json x
+# config/status/implementation_status.json): I, M, Zicsr, Zifencei, Zihpm, A
+# (through its Zaamo/Zalrsc suites) and C (through its Zca suite). A name with no
+# suite in this checkout produces nothing, and a suite that produces no ELF is
+# reported rather than assumed to pass.
 APPLICABLE_EXTENSIONS = [
-    "I", "M", "Zicsr", "Zifencei",
+    "I", "M", "Zicsr", "Zifencei", "Zihpm",
     "Zaamo", "Zalrsc",             # A
-    "Zca", "Zcb", "Zcmop",         # C
-    "Zicntr", "Zihpm", "Zmmul", "Zicbom", "Zicbop",
+    "Zca",                         # C (Zcd needs D; Zcb/Zcmop are not advertised)
 ]
 
 CASE_ID = "core.act_dut"
@@ -129,6 +130,13 @@ DEFERRED_REASONS = {
     "ZfhD": "F/D/Zfh floating point: not in the p1 profile.",
     "Zfhmin": "F/D/Zfh floating point: not in the p1 profile.",
     "ZfhminD": "F/D/Zfh floating point: not in the p1 profile.",
+    "Zcb": "C sub-extension: p1's advertised C is Zca only (tools/check_profile.py --all); Zcb is not advertised.",
+    "Zcmop": "C sub-extension: p1's advertised C is Zca only (tools/check_profile.py --all); Zcmop is not advertised.",
+    "Zicntr": "counter CSR suite: p1 does not advertise Zicntr (tools/check_profile.py --all lists it not yet implemented).",
+    "Zicbom": "cache-block management: p1 does not advertise Zicbom (tools/check_profile.py --all lists it not yet implemented).",
+    "Zicbop": "cache-block prefetch: p1 does not advertise Zicbop (tools/check_profile.py --all lists it not yet implemented).",
+    "Zmmul": "low-width multiply: p1 does not advertise Zmmul (tools/check_profile.py --all lists it not yet implemented).",
+    "Zicond": "conditional ops: p1 does not advertise Zicond (tools/check_profile.py --all lists it not yet implemented), and this checkout has no Zicond suite.",
     "Zicboz": "cache-block zero: not in the p1 profile.",
     "Zihintntl": "hint ops: not in the p1 profile.",
     "ZihintntlZca": "hint/C ops: not in the p1 profile.",
@@ -185,12 +193,16 @@ def act_env():
 
 def elf_symbols(path):
     """Parse `.symtab`; host binutils reads RISC-V ELFs."""
-    for tool in ("riscv64-unknown-elf-readelf", "riscv64-elf-readelf", "readelf"):
-        code, out = sh([tool, "-sW", path])
-        if code == 0:
+    tool = None
+    for cand in ("riscv64-unknown-elf-readelf", "riscv64-elf-readelf", "readelf"):
+        if shutil.which(cand):
+            tool = cand
             break
-    else:
-        raise Blocked("no readelf that can read %s" % path)
+    if tool is None:
+        raise Blocked("no readelf available to read %s" % path)
+    code, out = sh([tool, "-sW", path])
+    if code != 0:
+        raise Blocked("readelf failed on %s" % path)
     symbols = {}
     for line in out.splitlines():
         parts = line.split()
@@ -290,6 +302,10 @@ def generate(workdir, log):
     if code != 0:
         raise Blocked("cannot read the ACT4 checkout revision")
     commit = commit.strip()
+    # A stale ELF from an earlier configuration would inflate N and make the run
+    # look bigger than the suite. The generator's own output directory is cleared
+    # so the enumerated set is exactly what this configuration produced.
+    shutil.rmtree(os.path.join(workdir, "mosaic-p1", "elfs"), ignore_errors=True)
     cmd = ["mise", "exec", "--", "uv", "run", "act", ACT_CONFIG,
            "--extensions", ",".join(APPLICABLE_EXTENSIONS),
            "--workdir", workdir]
@@ -347,13 +363,33 @@ def calibate_selfcheck(elfs, log):
     return symbols
 
 
+def _file_offset(path, vaddr):
+    """The file offset of a virtual address in a PT_LOAD segment."""
+    with open(path, "rb") as handle:
+        blob = handle.read()
+    if blob[:4] != b"\x7fELF":
+        raise Blocked("not an ELF: %s" % path)
+    phoff = struct.unpack_from("<Q", blob, 0x20)[0]
+    phnum = struct.unpack_from("<H", blob, 0x38)[0]
+    for i in range(phnum):
+        p_type, _, p_offset, p_vaddr, _, p_filesz = struct.unpack_from(
+            "<IIQQQQ", blob, phoff + 56 * i)[:6]
+        if p_type == 1 and p_vaddr <= vaddr < p_vaddr + p_filesz:
+            return p_offset + (vaddr - p_vaddr)
+    raise Blocked("address %#x is not in any PT_LOAD segment of %s" % (vaddr, path))
+
+
 def corrupt_signature(src, dst, symbols):
     """Copy `src` to `dst` and flip one byte of the expected signature region."""
     shutil.copyfile(src, dst)
+    offset = _file_offset(dst, symbols["begin_signature"])
     with open(dst, "r+b") as handle:
-        handle.seek(symbols["begin_signature"])
+        handle.seek(offset)
         byte = handle.read(1)
-        handle.seek(symbols["begin_signature"])
+        if not byte:
+            raise Blocked("cannot read the signature word at %#x in %s"
+                          % (symbols["begin_signature"], dst))
+        handle.seek(offset)
         handle.write(bytes([byte[0] ^ 0x01]))
     return dst
 
@@ -431,6 +467,28 @@ def main():
                     suite, "not in the p1 profile; no DUT support claimed")})
         with open(os.path.join(args.out, "suite_manifest.json"), "w") as handle:
             json.dump(manifest, handle, indent=2, sort_keys=True)
+        # The manifest the registered case reads when run without --image, so
+        # `make unit` executes the whole generated suite.
+        driver_manifest = {
+            "task": "V-043", "case": CASE_ID, "act_commit": commit,
+            "config": os.path.relpath(ACT_CONFIG, REPO),
+            "elf_root": elf_root, "count": len(elfs),
+            "suites": sorted({s for s, _ in elfs}),
+            "excluded_suites": len(manifest["exclusions"]),
+        }
+        with open(os.path.join(REPO, "tests", "act4", "mosaic-p1",
+                               "elf_manifest.json"), "w") as handle:
+            json.dump(driver_manifest, handle, indent=2, sort_keys=True)
+
+        # Every suite the checkout holds that produced no ELF must be accounted
+        # for by name; a silent drop is the failure mode this runner exists to
+        # forbid. A suite whose reason is not recorded is a generation failure.
+        unaccounted = [e["suite"] for e in manifest["exclusions"]
+                       if e["reason"].startswith("not in the p1 profile")
+                       and e["suite"] not in DEFERRED_REASONS]
+        if unaccounted:
+            raise Failed("suites dropped without a recorded reason: %s"
+                         % ", ".join(sorted(unaccounted)))
         record["planes"] = {"suites": sorted({s for s, _ in elfs}),
                             "n": len(elfs),
                             "exclusions": len(manifest["exclusions"])}
@@ -453,6 +511,7 @@ def main():
         for suite, path in elfs:
             name = os.path.basename(path)
             case_dir = os.path.join(args.out, "cases", suite, name.replace(".elf", ""))
+            os.makedirs(case_dir, exist_ok=True)
             shutil.copy(path, os.path.join(case_dir, name))
             kind, code, out = run_elf(binary, path, case_dir, args.max_cycles)
             with open(os.path.join(case_dir, "dut_run.log"), "w") as handle:
@@ -556,6 +615,13 @@ def main():
         log("BLOCKED " + detail)
         log("RESULT BLOCKED %s %s" % (CASE_ID, detail))
         record["verdict"] = "BLOCKED"
+        record["detail"] = detail
+    except Failed as exc:
+        verdict = "FAIL"
+        detail = str(exc)
+        log("FAIL " + detail)
+        log("RESULT FAIL %s %s" % (CASE_ID, detail))
+        record["verdict"] = "FAIL"
         record["detail"] = detail
 
     with open(os.path.join(args.out, "run.log"), "w") as handle:

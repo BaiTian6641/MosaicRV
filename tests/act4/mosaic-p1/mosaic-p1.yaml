@@ -8,7 +8,7 @@ description: "MosaicRV p1 RV64IMAC_Zicsr_Zifencei, S/U, no F/D/H/V (the advertis
 implemented_extensions:
   - { name: I, version: "= 2.1" }
   - { name: M, version: "= 2.0" }
-  - { name: Zmmul, version: "= 1.0.0" }
+  - { name: Zmmul, version: "= 1.0.0" }   # prerequisite of M in UDB
   - { name: A, version: "= 2.1.0" }
   - { name: C, version: "= 2.0" }
   - { name: U, version: "= 1.0.0" }
@@ -26,11 +26,6 @@ implemented_extensions:
   - { name: Zaamo, version: "= 1.0.0" }
   - { name: Zalrsc, version: "= 1.0.0" }
   - { name: Zca, version: "= 1.0.0" }
-  - { name: Zcb, version: "= 1.0.0" }
-  - { name: Zcmop, version: "= 1.0.0" }
-  - { name: Zicbom, version: "= 1.0.0" }
-  - { name: Zicbop, version: "= 1.0.0" }
-  - { name: Zicond, version: "= 1.0.0" }
   - { name: Ssccptr, version: "= 1.0.0" }
   - { name: Sstvala, version: "= 1.0.0" }
   - { name: Sstvecd, version: "= 1.0.0" }
@@ -57,8 +52,6 @@ params:
   MSTATUS_FS_LEGAL_VALUES: [0]
   MUTABLE_MISA_C: false
   # Zicbom / Zicbop params (p1 blocking L1: 64-byte cache block)
-  CACHE_BLOCK_SIZE: 64
-  FORCE_UPGRADE_CBO_INVAL_TO_FLUSH: false
   # Zicntr params
   TIME_CSR_IMPLEMENTED: true
   # U params

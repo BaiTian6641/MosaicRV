@@ -55,6 +55,7 @@
               "additionalProperties": false,
               "required": [
                 "name",
+                "role",
                 "address",
                 "width",
                 "access",
@@ -66,6 +67,11 @@
                 "name": {
                   "type": "string",
                   "pattern": "^[a-z][a-z0-9_]*$"
+                },
+                "role": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "What this register is: the behavioural role it plays, shared by registers that the same machinery reads and writes (mstatus and sstatus are both \"status\", mepc and sepc are both \"trap-pc\"). The closed set is config_check.CSR_ROLES and tools/check_profile.py rejects a CSR that declares no role or one outside it, so a register added to a table cannot reach a unit case unclassified."
                 },
                 "address": {
                   "type": "integer",

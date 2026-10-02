@@ -10,7 +10,7 @@
   "image": "",
   "expect": "",
   "tool": "Verilator 5.052 2026-09-05",
-  "timestamp": "2026-10-02T07:46:34Z",
+  "timestamp": "2026-10-02T08:04:20Z",
   "first_mismatch": "priv-matrix at cycle 22954: s-load-deny-r (S/load/napot): the destination register is untouched: x5=0x00000000dead0014 expected the pre-value 0x8d30489b4a97a240: expected every privilege/access/PMP cell matches the ISA, got contract violated",
   "failed_checks": ["priv-matrix: s-load-deny-r (S/load/napot): the destination register is untouched -- x5=0x00000000dead0014 expected the pre-value 0x8d30489b4a97a240", "no contract violation"]
 }

@@ -10,7 +10,7 @@
   "image": "",
   "expect": "",
   "tool": "Verilator 5.052 2026-09-05",
-  "timestamp": "2026-10-02T07:46:44Z",
+  "timestamp": "2026-10-02T08:04:31Z",
   "first_mismatch": "priv-matrix at cycle 22954: ialign-odd-pc-mepc (M/fetch/no-entry): mepc names the faulting instruction: mepc=0x0000000080019100 expected 0x0000000080019102: expected every privilege/access/PMP cell matches the ISA, got contract violated",
   "failed_checks": ["priv-matrix: ialign-odd-pc-mepc (M/fetch/no-entry): mepc names the faulting instruction -- mepc=0x0000000080019100 expected 0x0000000080019102", "no contract violation"]
 }

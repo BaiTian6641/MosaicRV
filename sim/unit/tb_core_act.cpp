@@ -66,6 +66,7 @@
 #include <fstream>
 #include <map>
 #include <set>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -105,8 +106,12 @@ std::string U64(uint64_t value) { return mosaic::Hex(value); }
 std::string Dec(uint64_t value) { return std::to_string(value); }
 
 // ============================================================================
-// The loaded program image (instruction words from every loadable segment)
+// The loaded program image
 // ============================================================================
+// Holds the parsed ELF so the run can read its entry point, its `tohost` symbol
+// and its loadable segments. The segments are copied into the shared memory
+// model (which the fetch and data ports both read), so this class is not a second
+// memory -- it is the image the one memory is loaded from.
 class ProgImage {
  public:
   bool Load(const std::string& path, std::string* detail) {
@@ -120,43 +125,44 @@ class ProgImage {
     elf_ = image;
     entry_ = image.entry;
     for (const mosaic::Segment& seg : image.segments) {
-      for (uint64_t off = 0; off + 4 <= seg.memsz; off += 4) {
-        uint32_t word = 0;
-        for (uint64_t b = 0; b < 4; b++) {
-          if (off + b < seg.filesz) {
-            word |= static_cast<uint32_t>(seg.data[off + b]) << (8 * b);
-          }
-        }
-        words_[seg.vaddr + off] = word;
+      for (uint64_t i = 0; i < seg.filesz; ++i) {
+        bytes_[seg.vaddr + i] = seg.data[i];
       }
     }
-    return !words_.empty();
-  }
-
-  // A fetch past the image reaches an ECALL with a trap vector installed (the
-  // convention the other core cases use), so a runaway names itself rather than
-  // running off into a don't-care.
-  uint32_t Word(uint64_t addr) const {
-    auto it = words_.find(addr);
-    return (it == words_.end()) ? 0x00000073u : it->second;
+    return !bytes_.empty();
   }
 
   uint64_t entry() const { return entry_; }
   const mosaic::Image& elf() const { return elf_; }
+  const std::map<uint64_t, uint8_t>& bytes() const { return bytes_; }
 
   const mosaic::Symbol* FindSymbol(const std::string& name) const {
     return elf_.FindSymbol(name);
   }
 
  private:
-  std::map<uint64_t, uint32_t> words_;
   mosaic::Image elf_;
+  std::map<uint64_t, uint8_t> bytes_;
   uint64_t entry_ = 0;
 };
 
 // ============================================================================
-// The instruction memory: one outstanding request, response held until taken
+// The instruction memory
 // ============================================================================
+// The fetch port reads one byte image that the data port's stores also update,
+// so `fence.i` self-modification is visible to the front end -- a separate,
+// static copy of the image would make the store land in one memory and the fetch
+// read another, which is not a model of any real machine.
+//
+// The image is read directly rather than through the shared memory model,
+// because the model (correctly) shadows the profile's TOHOST/FROMHOST words with
+// the test protocol, and those addresses fall inside these ACT images' `.text`.
+// Reading the model would make four code bytes read as the protocol and refuse a
+// perfectly legal instruction; the driver keeps the image itself and applies the
+// store overlay on top.
+//
+// A fetch past the image reaches an ECALL with a trap vector installed (the
+// convention the other core cases use), so a runaway names itself.
 class Imem {
  public:
   struct Request {
@@ -165,7 +171,7 @@ class Imem {
     uint32_t epoch = 0;
   };
 
-  explicit Imem(const ProgImage* img) : img_(img) {}
+  explicit Imem(const std::map<uint64_t, uint8_t>* bytes) : bytes_(bytes) {}
 
   void Reset() {
     inflight_.clear();
@@ -175,8 +181,21 @@ class Imem {
 
   bool HasResponse() const { return !ready_.empty(); }
   const Request& Response() const { return ready_.front(); }
-  uint64_t ResponseWord() const { return img_->Word(ready_.front().addr); }
+  uint64_t ResponseWord() const { return Word(ready_.front().addr); }
   uint64_t accepted() const { return accepted_; }
+
+  uint32_t Word(uint64_t addr) const {
+    uint32_t word = 0;
+    bool any = false;
+    for (uint64_t b = 0; b < 4; b++) {
+      auto it = bytes_->find(addr + b);
+      if (it != bytes_->end()) {
+        any = true;
+        word |= static_cast<uint32_t>(it->second) << (8 * b);
+      }
+    }
+    return any ? word : 0x00000073u;
+  }
 
   void Accept(uint64_t addr, uint32_t id, uint32_t epoch) {
     inflight_.push_back(Entry{Request{addr, id, epoch}, 1});
@@ -201,7 +220,7 @@ class Imem {
     Request req;
     int left = 0;
   };
-  const ProgImage* img_;
+  const std::map<uint64_t, uint8_t>* bytes_;
   std::deque<Entry> inflight_;
   std::deque<Request> ready_;
   uint64_t accepted_ = 0;
@@ -272,6 +291,8 @@ struct RunRecord {
   uint64_t last_trap_pc = 0;
   uint64_t last_trap_tval = 0;
   uint64_t console_chars = 0;
+  std::string console_text;
+  std::vector<uint64_t> signature;
   bool delivery_tracking_overflowed = false;
   std::string note;
 };
@@ -311,8 +332,11 @@ class Runner {
         return record;
       }
     }
+    // The fetch image: the ELF bytes plus every byte the data port stores, so a
+    // `fence.i` self-modifying program is fetched as it wrote it.
+    bytes_ = image.bytes();
 
-    Imem imem(&image);
+    Imem imem(&bytes_);
     DataMem dmem(&dut_mem);
     imem.Reset();
     dmem.Reset();
@@ -331,6 +355,7 @@ class Runner {
     last_trap_tval_ = 0;
     pending_low_ = 0;
     console_chars_ = 0;
+    console_text_.clear();
     exit_seen_ = false;
     exit_value_ = 0;
 
@@ -389,6 +414,7 @@ class Runner {
     record.last_trap_pc = last_trap_pc_;
     record.last_trap_tval = last_trap_tval_;
     record.console_chars = console_chars_;
+    record.console_text = console_text_;
     record.delivery_tracking_overflowed = delivery_tracking_overflowed_;
 
     if (record.status == RunStatus::kStopped && !saw_unsupported_) {
@@ -403,11 +429,41 @@ class Runner {
       }
     }
     if (exit_seen_) {
-      record.status = (exit_value_ & 1ull) ? RunStatus::kPass : RunStatus::kFail;
+      // ACT4's exit protocol is exact: `RVMODEL_HALT_PASS` writes the value 1
+      // and `RVMODEL_HALT_FAIL` writes 3 (rvmodel_macros.h). The value is not
+      // HTIF's bit-0 convention, so anything other than 1 is a failure.
+      record.status = (exit_value_ == 1ull) ? RunStatus::kPass : RunStatus::kFail;
       if (record.retires == 0) {
         record.status = RunStatus::kFail;
         record.note = "the exit store retired with no instruction counted: the run "
                       "cannot be accepted";
+      }
+    }
+
+    // Diagnosis only: with MOSAIC_ACT_SIG_DUMP set, read the image's signature
+    // region back out of the memory model. Used with the signature-mode ELF
+    // (`<name>.sig.elf`, which stores rather than compares) to locate the exact
+    // word a self-check disagrees about.
+    if (std::getenv("MOSAIC_ACT_SIG_DUMP") != nullptr) {
+      const mosaic::Symbol* sig = image.FindSymbol("begin_signature");
+      const mosaic::Symbol* sig_end = image.FindSymbol("end_signature");
+      if (sig != nullptr && sig_end != nullptr && sig_end->value > sig->value) {
+        const uint64_t words = (sig_end->value - sig->value) / 8;
+        for (uint64_t i = 0; i < words && i < 65536; ++i) {
+          uint64_t value = 0;
+          bool ok = true;
+          for (uint64_t b = 0; b < 8; ++b) {
+            uint64_t byte = 0;
+            if (dut_mem.Read(sig->value + i * 8 + b, 1, &byte) !=
+                mosaic::AccessStatus::kOk) {
+              ok = false;
+              break;
+            }
+            value |= (byte & 0xffull) << (8 * b);
+          }
+          if (!ok) break;
+          record.signature.push_back(value);
+        }
       }
     }
     return record;
@@ -444,6 +500,13 @@ class Runner {
         last_trap_cause_ = PayloadLane(dut_->ev_trap_cause_o, lane);
         last_trap_tval_ = PayloadLane(dut_->ev_trap_tval_o, lane);
         last_trap_pc_ = PayloadLane(dut_->ev_pc_o, lane);
+        if (std::getenv("MOSAIC_ACT_DEBUG") != nullptr && debug_traps_ < 40) {
+          std::printf("  [trap] #%llu pc=%s cause=%s tval=%s\n",
+                      static_cast<unsigned long long>(debug_traps_),
+                      U64(last_trap_pc_).c_str(), U64(last_trap_cause_).c_str(),
+                      U64(last_trap_tval_).c_str());
+          ++debug_traps_;
+        }
       }
       if ((store & (1u << lane)) == 0) continue;
       const uint64_t addr = PayloadLane(dut_->ev_store_addr_o, lane);
@@ -465,6 +528,18 @@ class Runner {
       }
     }
     if (dut_->o_unsupported_o != 0) saw_unsupported_ = true;
+    if (std::getenv("MOSAIC_ACT_DEBUG") != nullptr && dut_->o_stopped_o != 0 &&
+        !debug_stopped_) {
+      debug_stopped_ = true;
+      std::printf("  [stop] cycle=%llu deliver_pc=%s deliver_bits=%s "
+                  "unsupported=%u illegal=%u rob=%u\n",
+                  static_cast<unsigned long long>(cycles_),
+                  U64(dut_->o_dbg_deliver_pc_o).c_str(),
+                  mosaic::Hex(static_cast<uint32_t>(dut_->o_dbg_deliver_bits_o), 8).c_str(),
+                  static_cast<unsigned>(dut_->o_unsupported_o),
+                  static_cast<unsigned>(dut_->o_illegal_o),
+                  static_cast<unsigned>(dut_->o_rob_occupied_o));
+    }
     const bool progressed = (dut_->o_commit_o != last_commit_) ||
                             (dut_->o_wb_pub_valid_o != 0) ||
                             (dut_->o_dbg_alloc_ctr_o != last_alloc_);
@@ -479,6 +554,10 @@ class Runner {
   void ConsiderExit(uint64_t low, uint64_t high) {
     if (exit_seen_) return;
     if (high != 0) {
+      // A console command: device in the high word, payload (the character) in
+      // the low word. Kept so a failing test's own diagnostic is evidence.
+      const uint8_t ch = static_cast<uint8_t>(low & 0xff);
+      if (console_text_.size() < 4000 && ch != 0) console_text_.push_back(ch);
       ++console_chars_;
       pending_low_ = 0;
       return;
@@ -550,6 +629,17 @@ class Runner {
       r.wstrb = dut_->dmem_req_wstrb_o;
       r.wdata = dut_->dmem_req_wdata_o;
       dmem->Accept(r, cycles_);
+      if (r.we) {
+        // The endpoint's payload is the aligned doubleword the address selects,
+        // so the store is applied to the same window the data memory applies it
+        // to, and the fetch image sees the bytes the program wrote.
+        const uint64_t base = r.addr & ~UINT64_C(7);
+        for (unsigned i = 0; i < 8; ++i) {
+          if (((r.wstrb >> i) & 1u) != 0u) {
+            bytes_[base + i] = static_cast<uint8_t>((r.wdata >> (8 * i)) & 0xff);
+          }
+        }
+      }
     }
     if ((dut_->dmem_rsp_valid_i != 0) && (dut_->dmem_rsp_ready_o != 0)) {
       dmem->PopResponse();
@@ -579,14 +669,142 @@ class Runner {
   uint64_t exit_value_ = 0;
   uint64_t pending_low_ = 0;
   uint64_t console_chars_ = 0;
+  std::string console_text_;
   uint64_t tohost_addr_ = 0;
   uint64_t last_trap_cause_ = 0;
   uint64_t last_trap_pc_ = 0;
   uint64_t last_trap_tval_ = 0;
+  uint64_t debug_traps_ = 0;
+  bool debug_stopped_ = false;
   std::vector<Delivery> delivered_;
   std::set<uint64_t> retired_pcs_;
+  std::map<uint64_t, uint8_t> bytes_;
   bool delivery_tracking_overflowed_ = false;
 };
+
+// ============================================================================
+// The generation manifest and the repository root
+// ============================================================================
+// The registered run (no `--image`) reads the manifest `tools/run_act_dut.py`
+// writes, so `make unit` executes the whole generated suite rather than a single
+// file. The manifest names the ELF root and the count the generator produced; the
+// driver enumerates the root itself, so the count and the set are cross-checked
+// rather than one being trusted.
+struct ElfCase {
+  std::string suite;
+  std::string path;
+};
+
+struct Manifest {
+  uint64_t count = 0;
+  std::string elf_root;
+  std::string act_commit = "?";
+  std::string config = "?";
+};
+
+bool ReadWholeFile(const std::string& path, std::string* out) {
+  std::ifstream in(path, std::ios::binary);
+  if (!in) return false;
+  std::ostringstream buffer;
+  buffer << in.rdbuf();
+  *out = buffer.str();
+  return true;
+}
+
+bool JsonString(const std::string& text, const std::string& key, std::string* out) {
+  const std::string needle = "\"" + key + "\"";
+  const size_t at = text.find(needle);
+  if (at == std::string::npos) return false;
+  size_t pos = text.find(':', at + needle.size());
+  if (pos == std::string::npos) return false;
+  ++pos;
+  while (pos < text.size() && (text[pos] == ' ' || text[pos] == '\t' ||
+                               text[pos] == '\n' || text[pos] == '\r')) {
+    ++pos;
+  }
+  if (pos >= text.size() || text[pos] != '"') return false;
+  ++pos;
+  std::string value;
+  while (pos < text.size() && text[pos] != '"') {
+    if (text[pos] == '\\' && pos + 1 < text.size()) ++pos;
+    value.push_back(text[pos++]);
+  }
+  *out = value;
+  return true;
+}
+
+bool JsonUint(const std::string& text, const std::string& key, uint64_t* out) {
+  const std::string needle = "\"" + key + "\"";
+  const size_t at = text.find(needle);
+  if (at == std::string::npos) return false;
+  size_t pos = text.find(':', at + needle.size());
+  if (pos == std::string::npos) return false;
+  ++pos;
+  while (pos < text.size() && (text[pos] == ' ' || text[pos] == '\t' ||
+                               text[pos] == '\n' || text[pos] == '\r')) {
+    ++pos;
+  }
+  size_t end = pos;
+  while (end < text.size() && std::isdigit(static_cast<unsigned char>(text[end]))) ++end;
+  if (end == pos) return false;
+  *out = std::strtoull(text.substr(pos, end - pos).c_str(), nullptr, 10);
+  return true;
+}
+
+std::string FindRepoRoot() {
+  std::string dir = ".";
+  for (int depth = 0; depth < 8; ++depth) {
+    std::ifstream probe(dir + "/config/profiles/p1.json");
+    if (probe) {
+      char resolved[4096];
+      if (realpath(dir.c_str(), resolved) != nullptr) return std::string(resolved);
+      return dir;
+    }
+    dir += "/..";
+  }
+  Fail("setup", "cannot find the repository root: no config/profiles/p1.json above the "
+                "working directory");
+}
+
+bool ReadManifest(const std::string& path, Manifest* out, std::string* why) {
+  std::string text;
+  if (!ReadWholeFile(path, &text)) {
+    *why = "no ACT4 manifest at " + path +
+           "; run `python3 tools/run_act_dut.py` to generate the suite and write it";
+    return false;
+  }
+  if (!JsonUint(text, "count", &out->count) || out->count == 0) {
+    *why = "the ACT4 manifest " + path + " has no positive `count`";
+    return false;
+  }
+  if (!JsonString(text, "elf_root", &out->elf_root) || out->elf_root.empty()) {
+    *why = "the ACT4 manifest " + path + " has no `elf_root`";
+    return false;
+  }
+  JsonString(text, "act_commit", &out->act_commit);
+  JsonString(text, "config", &out->config);
+  return true;
+}
+
+std::vector<ElfCase> EnumerateElfs(const std::string& root) {
+  std::vector<ElfCase> out;
+  std::string command = "find " + root + " -type f -name '*.elf' | sort";
+  std::FILE* pipe = popen(command.c_str(), "r");
+  if (pipe == nullptr) return out;
+  char line[4096];
+  while (std::fgets(line, sizeof(line), pipe) != nullptr) {
+    std::string path(line);
+    while (!path.empty() && (path.back() == '\n' || path.back() == '\r')) path.pop_back();
+    if (path.empty()) continue;
+    const size_t slash = path.find_last_of('/');
+    const std::string dir = (slash == std::string::npos) ? "" : path.substr(0, slash);
+    const size_t slash2 = dir.find_last_of('/');
+    const std::string suite = (slash2 == std::string::npos) ? dir : dir.substr(slash2 + 1);
+    out.push_back(ElfCase{suite, path});
+  }
+  pclose(pipe);
+  return out;
+}
 
 }  // namespace
 
@@ -604,70 +822,101 @@ int main(int argc, char** argv) {
   Vmosaic_core_tb dut;
 
   try {
-    if (options.image.empty()) {
-      throw Failure{"setup: --image <act-elf> is required; this case runs one ACT4 "
-                    "ELF per invocation and is driven by tools/run_act_dut.py"};
-    }
     dut.clk = 0;
     dut.rst = 0;
     dut.eval();
     const Geometry geometry = ReadGeometry(&dut);
     if (geometry.xlen != 64) Fail("geometry", "the profile is not 64-bit");
 
-    Runner runner(&dut, geometry);
-    const RunRecord record = runner.Run(options.image, options.max_cycles);
-
-    const std::string name = options.image;
-    std::printf("ACT-ELF %s tohost=%s entry=%s value=%s cycles=%llu retires=%llu "
-                "traps=%llu console=%llu status=%s\n",
-                name.c_str(), U64(record.tohost_addr).c_str(), U64(record.entry).c_str(),
-                U64(record.tohost_value).c_str(),
-                static_cast<unsigned long long>(record.cycles),
-                static_cast<unsigned long long>(record.retires),
-                static_cast<unsigned long long>(record.traps_taken),
-                static_cast<unsigned long long>(record.console_chars),
-                StatusName(record.status));
-
-    reporter.Check(record.status != RunStatus::kSetupError,
-                   "the ELF loaded and carries the exit-protocol symbols");
-    reporter.Check(record.status != RunStatus::kTimeout, "the run ended before the "
-                   "cycle bound (" + Dec(record.cycles) + " cycles)");
-    reporter.Check(record.status != RunStatus::kStalled,
-                   "the machine kept making progress (last progress cycle " +
-                       Dec(record.stop_cycle) + ")");
-    reporter.Check(record.status != RunStatus::kStopped,
-                   "the machine retired every instruction it accepted before the "
-                   "exit store (stopped at " + U64(record.stop_pc) + ", word " +
-                       mosaic::Hex(record.stop_bits, 8) + ")");
-    reporter.Check(record.tohost_seen,
-                   "the ELF's tohost store retired (symbol " + U64(record.tohost_addr) +
-                       ")");
-    if (record.tohost_seen) {
-      reporter.Check((record.tohost_value & 1ull) != 0,
-                     "the ELF's own verdict has bit 0 set (tohost " +
-                         U64(record.tohost_value) + "); its self-check passed");
+    // The set to run: one image named on the command line, or the generated
+    // suite the manifest describes.
+    std::vector<ElfCase> entries;
+    uint64_t generated = 0;
+    std::string commit = "?";
+    std::string config = "?";
+    if (!options.image.empty()) {
+      entries.push_back(ElfCase{"(single)", options.image});
+      generated = 1;
+    } else {
+      const std::string repo = FindRepoRoot();
+      const std::string manifest_path =
+          repo + "/tests/act4/mosaic-p1/elf_manifest.json";
+      Manifest manifest;
+      std::string why;
+      if (!ReadManifest(manifest_path, &manifest, &why)) Fail("manifest", why);
+      entries = EnumerateElfs(manifest.elf_root);
+      generated = manifest.count;
+      commit = manifest.act_commit;
+      config = manifest.config;
+      std::printf("ACT4 manifest: generated=%llu enumerated=%zu elf_root=%s "
+                  "act_commit=%s config=%s\n",
+                  static_cast<unsigned long long>(generated), entries.size(),
+                  manifest.elf_root.c_str(), commit.c_str(), config.c_str());
     }
-    reporter.Check(record.retires > 0, "at least one instruction retired (" +
-                                           Dec(record.retires) + ")");
 
-    std::string detail = "value=" + U64(record.tohost_value) + " cycles=" +
-                         Dec(record.cycles) + " retires=" + Dec(record.retires) +
-                         " traps=" + Dec(record.traps_taken) + " status=" +
-                         StatusName(record.status);
-    if (!record.note.empty()) detail += " note=" + record.note;
-    if (record.status == RunStatus::kStopped) {
-      detail += " stop_pc=" + U64(record.stop_pc) + " stop_word=" +
-                mosaic::Hex(record.stop_bits, 8);
+    uint64_t run = 0;
+    uint64_t passed = 0;
+    uint64_t failed = 0;
+    std::string first_fail;
+    for (const ElfCase& entry : entries) {
+      Runner runner(&dut, geometry);
+      const RunRecord record = runner.Run(entry.path, options.max_cycles);
+      const std::string name = entry.path;
+      std::printf("ACT-ELF %-40s suite=%-9s value=%s cycles=%llu retires=%llu "
+                  "traps=%llu console=%llu status=%s\n",
+                  name.c_str(), entry.suite.c_str(),
+                  U64(record.tohost_value).c_str(),
+                  static_cast<unsigned long long>(record.cycles),
+                  static_cast<unsigned long long>(record.retires),
+                  static_cast<unsigned long long>(record.traps_taken),
+                  static_cast<unsigned long long>(record.console_chars),
+                  StatusName(record.status));
+      ++run;
+      const bool ok = (record.status == RunStatus::kPass);
+      if (ok) {
+        ++passed;
+      } else {
+        ++failed;
+        if (first_fail.empty()) first_fail = name;
+        std::printf("  first failure: status=%s value=%s stop_pc=%s stop_word=%s "
+                    "last_trap pc=%s cause=%s tval=%s note=%s\n",
+                    StatusName(record.status), U64(record.tohost_value).c_str(),
+                    U64(record.stop_pc).c_str(),
+                    mosaic::Hex(record.stop_bits, 8).c_str(),
+                    U64(record.last_trap_pc).c_str(),
+                    U64(record.last_trap_cause).c_str(),
+                    U64(record.last_trap_tval).c_str(), record.note.c_str());
+        if (!record.console_text.empty()) {
+          std::printf("  console: %s\n", record.console_text.c_str());
+        }
+      }
+      if (!record.signature.empty()) {
+        std::printf("  signature (%zu words):", record.signature.size());
+        for (uint64_t w : record.signature) std::printf(" %s", U64(w).c_str());
+        std::printf("\n");
+      }
+      reporter.Check(ok, "ELF " + entry.suite + "/" +
+                             name.substr(name.find_last_of('/') + 1) +
+                             " passed its own self-check (status " +
+                             StatusName(record.status) + ")");
     }
-    if (record.last_trap_pc != 0 || record.last_trap_cause != 0) {
-      detail += " last_trap pc=" + U64(record.last_trap_pc) + " cause=" +
-                U64(record.last_trap_cause) + " tval=" + U64(record.last_trap_tval);
-    }
-    const std::string verdict =
-        (reporter.failures() == 0) ? "PASS" : "FAIL";
+
+    reporter.Check(generated == entries.size(),
+                   "the generated count equals the enumerated set (" +
+                       Dec(generated) + " vs " + Dec(entries.size()) + ")");
+    reporter.Check(run == generated,
+                   "every generated ELF ran (" + Dec(run) + " of " + Dec(generated) + ")");
+    reporter.Check(failed == 0, "no ELF failed (" + Dec(failed) + " failed)");
+
+    std::string detail = "applicable=" + Dec(generated) + " generated=" +
+                         Dec(generated) + " run=" + Dec(run) + " passed=" +
+                         Dec(passed) + " failed=" + Dec(failed);
+    detail += " act_commit=" + commit + " config=" + config;
+    if (!first_fail.empty()) detail += " first_fail=" + first_fail;
+    const std::string verdict = (reporter.failures() == 0) ? "PASS" : "FAIL";
     return reporter.Finish(verdict, detail);
   } catch (const Failure& failure) {
-    reporter.Mismatch(failure.what, "a runnable ACT4 image", "setup failure");
+    reporter.Mismatch(failure.what, "a runnable ACT4 suite", "setup failure");
     return reporter.Finish("BLOCKED", failure.what);
   }
 }

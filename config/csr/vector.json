@@ -7,7 +7,8 @@
       "csrs": [
         {
           "name": "vstart",
-          "address": 8,
+          "role": "vector-state",
+"address": 8,
           "width": 64,
           "access": "rwr",
           "behavior": "warl_wpri",
@@ -19,7 +20,8 @@
         },
         {
           "name": "vxsat",
-          "address": 9,
+          "role": "vector-state",
+"address": 9,
           "width": 64,
           "access": "rwr",
           "behavior": "warl_wpri",
@@ -31,7 +33,8 @@
         },
         {
           "name": "vxrm",
-          "address": 10,
+          "role": "vector-state",
+"address": 10,
           "width": 64,
           "access": "rwr",
           "behavior": "warl_wpri",
@@ -43,7 +46,8 @@
         },
         {
           "name": "vcsr",
-          "address": 15,
+          "role": "vector-state",
+"address": 15,
           "width": 64,
           "access": "rwr",
           "behavior": "warl_wpri",
@@ -55,7 +59,8 @@
         },
         {
           "name": "vl",
-          "address": 3104,
+          "role": "vector-state",
+"address": 3104,
           "width": 64,
           "access": "ro",
           "behavior": "fixed",
@@ -65,7 +70,8 @@
         },
         {
           "name": "vtype",
-          "address": 3105,
+          "role": "vector-state",
+"address": 3105,
           "width": 64,
           "access": "rwr",
           "behavior": "warl_wpri",
@@ -77,7 +83,8 @@
         },
         {
           "name": "vlenb",
-          "address": 3106,
+          "role": "vector-state",
+"address": 3106,
           "width": 64,
           "access": "ro",
           "behavior": "fixed",

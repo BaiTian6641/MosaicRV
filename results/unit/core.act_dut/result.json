@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "case": "core.act_dut",
+  "verdict": "FAIL",
+  "detail": "applicable=127 generated=127 run=127 passed=122 failed=5 act_commit=96493a91448ca50780013fd892daec2c204487ba config=tests/act4/mosaic-p1/test_config.yaml first_fail=/Users/flare/mosaic-ref/act4-mosaic-p1-work/mosaic-p1/elfs/rv64i/Zalrsc/Zalrsc-sc.d-00.elf",
+  "seed": 1,
+  "max_cycles": 4000000,
+  "checks": 130,
+  "failures": 6,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-02T08:06:32Z",
+  "first_mismatch": "",
+  "failed_checks": ["ELF Zalrsc/Zalrsc-sc.d-00.elf passed its own self-check (status FAIL)", "ELF Zalrsc/Zalrsc-sc.w-00.elf passed its own self-check (status FAIL)", "ELF Zca/Zca-c.lui-00.elf passed its own self-check (status FAIL)", "ELF Zihpm/Zihpm-csrrc-00.elf passed its own self-check (status FAIL)", "ELF Zihpm/Zihpm-csrrs-00.elf passed its own self-check (status FAIL)", "no ELF failed (5 failed)"]
+}

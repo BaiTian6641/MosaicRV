@@ -12,7 +12,8 @@
       "csrs": [
         {
           "name": "mstatus",
-          "address": 768,
+          "role": "status",
+"address": 768,
           "width": 64,
           "access": "rwr",
           "behavior": "warl",
@@ -53,7 +54,8 @@
         },
         {
           "name": "misa",
-          "address": 769,
+          "role": "isa",
+"address": 769,
           "width": 64,
           "access": "rwr",
           "behavior": "warl",
@@ -67,7 +69,8 @@
         },
         {
           "name": "medeleg",
-          "address": 770,
+          "role": "delegation",
+"address": 770,
           "width": 64,
           "access": "rw",
           "behavior": "warl",
@@ -83,7 +86,8 @@
         },
         {
           "name": "mideleg",
-          "address": 771,
+          "role": "delegation",
+"address": 771,
           "width": 64,
           "access": "rw",
           "behavior": "warl",
@@ -97,7 +101,8 @@
         },
         {
           "name": "mie",
-          "address": 772,
+          "role": "intr-enable",
+"address": 772,
           "width": 64,
           "access": "rwr",
           "behavior": "warl_wpri",
@@ -121,7 +126,8 @@
         },
         {
           "name": "mtvec",
-          "address": 773,
+          "role": "trap-vector",
+"address": 773,
           "width": 64,
           "access": "rw",
           "behavior": "warl",
@@ -136,7 +142,8 @@
         },
         {
           "name": "mcounteren",
-          "address": 774,
+          "role": "counter-enable",
+"address": 774,
           "width": 32,
           "access": "rwr",
           "behavior": "warl",
@@ -154,7 +161,8 @@
         },
         {
           "name": "mscratch",
-          "address": 832,
+          "role": "scratch",
+"address": 832,
           "width": 64,
           "access": "rw",
           "behavior": "warl",
@@ -168,7 +176,8 @@
         },
         {
           "name": "mepc",
-          "address": 833,
+          "role": "trap-pc",
+"address": 833,
           "width": 64,
           "access": "rwr",
           "behavior": "warl",
@@ -185,7 +194,8 @@
         },
         {
           "name": "mcause",
-          "address": 834,
+          "role": "trap-cause",
+"address": 834,
           "width": 64,
           "access": "rw",
           "behavior": "warl",
@@ -199,7 +209,8 @@
         },
         {
           "name": "mtval",
-          "address": 835,
+          "role": "trap-value",
+"address": 835,
           "width": 64,
           "access": "rw",
           "behavior": "warl",
@@ -213,7 +224,8 @@
         },
         {
           "name": "mip",
-          "address": 836,
+          "role": "intr-pending",
+"address": 836,
           "width": 64,
           "access": "rwr",
           "behavior": "warl_wpri",
@@ -237,7 +249,8 @@
         },
         {
           "name": "mvendorid",
-          "address": 3857,
+          "role": "machine-id",
+"address": 3857,
           "width": 32,
           "access": "ro",
           "behavior": "fixed",
@@ -249,7 +262,8 @@
         },
         {
           "name": "marchid",
-          "address": 3858,
+          "role": "machine-id",
+"address": 3858,
           "width": 64,
           "access": "ro",
           "behavior": "fixed",
@@ -261,7 +275,8 @@
         },
         {
           "name": "mimpid",
-          "address": 3859,
+          "role": "machine-id",
+"address": 3859,
           "width": 64,
           "access": "ro",
           "behavior": "fixed",
@@ -273,7 +288,8 @@
         },
         {
           "name": "mhartid",
-          "address": 3860,
+          "role": "machine-id",
+"address": 3860,
           "width": 64,
           "access": "ro",
           "behavior": "fixed",
@@ -285,7 +301,8 @@
         },
         {
           "name": "mcycle",
-          "address": 2816,
+          "role": "cycle-counter",
+"address": 2816,
           "width": 64,
           "access": "rw",
           "behavior": "warl",
@@ -299,7 +316,8 @@
         },
         {
           "name": "minstret",
-          "address": 2818,
+          "role": "instret-counter",
+"address": 2818,
           "width": 64,
           "access": "rw",
           "behavior": "warl",
@@ -313,7 +331,8 @@
         },
         {
           "name": "cycle",
-          "address": 3072,
+          "role": "counter-shadow",
+"address": 3072,
           "width": 64,
           "access": "ro",
           "behavior": "fixed",
@@ -325,7 +344,8 @@
         },
         {
           "name": "time",
-          "address": 3073,
+          "role": "counter-shadow",
+"address": 3073,
           "width": 64,
           "access": "ro",
           "behavior": "fixed",
@@ -337,7 +357,8 @@
         },
         {
           "name": "instret",
-          "address": 3074,
+          "role": "counter-shadow",
+"address": 3074,
           "width": 64,
           "access": "ro",
           "behavior": "fixed",

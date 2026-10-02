@@ -10,7 +10,7 @@
   "image": "",
   "expect": "",
   "tool": "Verilator 5.052 2026-09-05",
-  "timestamp": "2026-10-02T07:45:57Z",
+  "timestamp": "2026-10-02T08:03:33Z",
   "first_mismatch": "priv-matrix at cycle 22958: s-overlap-lower-allows (S/load/overlap): mcause is the ISA's: mcause=0x0000000000000005 expected 0x0000000000000009: expected every privilege/access/PMP cell matches the ISA, got contract violated",
   "failed_checks": ["priv-matrix: s-overlap-lower-allows (S/load/overlap): mcause is the ISA's -- mcause=0x0000000000000005 expected 0x0000000000000009", "no contract violation"]
 }

@@ -21,6 +21,23 @@
 // spec clauses in config/csr/mode_m.json, so a wrong decode fails loudly here
 // instead of passing in both models at once.
 //
+// Every row of the generated table also declares its *role* -- what the register
+// is, not where it lives (mstatus and sstatus are both "status"; mepc and sepc
+// are both "trap-pc"). The role is a configuration property declared in
+// config/csr/*.json and validated by tools/check_profile.py against
+// config_check.CSR_ROLES; the generator copies it into the table and this model
+// checks that every row declares one and that the roles it drives are the
+// classes it expects. A register added to a table therefore fails the
+// configuration gate, not a unit case.
+//
+// Profile scope: the shadow models the *machine-mode* CSR file, mode_m.json's
+// 21 rows. A profile that also implements supervisor and PMP registers (p1
+// loads mode_su.json and mode_pmp.json) generates a larger table; those rows
+// still declare roles, but this model has no shadow for them, so the case is a
+// p0 gate and a p1 run stops at the table phase, which names the row count it
+// was written for. The supervisor and PMP registers are verified by
+// privilege.permission_matrix.
+//
 // Phases, each of which resets first and can fail on its own:
 //
 //   1. table          the generated table equals the hand-derived one
@@ -59,7 +76,13 @@
 //   * interrupt sampling and the mip owner (I-020): mip_we_o/mip_op_o/mip_wdata_o
 //     are checked as forwarded values, not by applying them anywhere;
 //   * privilege violations: p0 is M-only, so no access can be illegal for
-//     privilege reasons and the interface has no port for one.
+//     privilege reasons and the interface has no port for one. (A profile that
+//     implements S or U has such ports and such violations, which is why this
+//     model is the machine-mode file's.)
+//   * the supervisor, PMP and vector registers a richer profile implements:
+//     their rows are in the generated table and declare roles, but this shadow
+//     models only mode_m.json's machine-mode set. privilege.permission_matrix
+//     is the case that covers the supervisor and PMP registers.
 // ============================================================================
 
 #include <verilated.h>
@@ -127,6 +150,19 @@ const char* const kRoleName[kRoleCount] = {
     "mscratch", "mepc",     "mcause",  "mtval",   "mip",      "mvendorid", "marchid",
     "mimpid",   "mhartid",  "mcycle",  "minstret", "cycle",   "time",   "instret"};
 
+// The role each modelled register must declare in the generated table. The role
+// is a configuration property (config/csr/**.json, validated against
+// config_check.CSR_ROLES by tools/check_profile.py) and the generator copies it
+// into mosaic_csr_desc_t; this is the model's own statement of the class it
+// expects, so a table that classifies mepc as "status" fails here rather than
+// being accepted as "a role".
+const char* const kRoleClass[kRoleCount] = {
+    "status",         "isa",     "delegation", "delegation", "intr-enable",
+    "trap-vector",    "counter-enable", "scratch", "trap-pc", "trap-cause",
+    "trap-value",     "intr-pending",   "machine-id", "machine-id", "machine-id",
+    "machine-id",     "cycle-counter",  "instret-counter", "counter-shadow",
+    "counter-shadow", "counter-shadow"};
+
 // Addresses the shadow uses to reach a role. The numbers themselves are only in
 // the generated table; this is a lookup, not a copy.
 struct TableIndex {
@@ -150,13 +186,27 @@ struct TableIndex {
         problem = std::string("the generated table has no row named ") + kRoleName[r];
         return;
       }
+      if (std::string(MOSAIC_CSR_TABLE[row_of_role[r]].role) != kRoleClass[r]) {
+        ok = false;
+        problem = std::string("generated table row ") + kRoleName[r] + " declares role '" +
+                  MOSAIC_CSR_TABLE[row_of_role[r]].role + "', expected '" + kRoleClass[r] + "'";
+        return;
+      }
       role_of_addr[MOSAIC_CSR_TABLE[row_of_role[r]].addr] = r;
     }
+    // Every generated row must *declare* a role. That the role is one the tools
+    // can reason about is the configuration gate's job (check_profile.py against
+    // config_check.CSR_ROLES), not this case's: demanding that this M-mode model
+    // implement every role made adding a supervisor register -- which is what p1
+    // did, with sstatus, sepc, satp, pmpaddr0..15 -- a *unit-case* failure with a
+    // decode-flavoured message. The check moved to the gate; this loop is the
+    // cheap generator sanity check that the declaration reached the table.
     for (int t = 0; t < MOSAIC_CSR_COUNT; t++) {
-      if (role_of_addr[MOSAIC_CSR_TABLE[t].addr] < 0) {
+      const char* role = MOSAIC_CSR_TABLE[t].role;
+      if (role == nullptr || role[0] == '\0') {
         ok = false;
         problem = std::string("generated table row ") + MOSAIC_CSR_TABLE[t].name +
-                  " has no known role";
+                  " declares no role";
         return;
       }
     }

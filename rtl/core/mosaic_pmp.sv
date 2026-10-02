@@ -415,7 +415,6 @@ module mosaic_pmp (
 
       pmp_query_t data_q;
       pmp_query_t fetch_q;
-      pmp_query_t store_q0, store_q1;
 
       always_comb begin
         // The data side: a load (and a load-reserved) reads, a store, a
@@ -431,17 +430,33 @@ module mosaic_pmp (
         fetch_q = pmp_query(f_req_addr_i, f_req_bytes_i, 1'b0, 1'b0, 1'b1, f_req_priv_i);
         // The store-commit lanes: a store is checked for W alone. See the port
         // comment for why this question is asked at authorisation and not at
-        // drain.
-        store_q0 = pmp_query(sc_req_addr0_i, sc_req_bytes0_i, 1'b0, 1'b1, 1'b0, sc_req_priv0_i);
-        store_q1 = pmp_query(sc_req_addr1_i, sc_req_bytes1_i, 1'b0, 1'b1, 1'b0, sc_req_priv1_i);
+        // drain. Only `allow` is taken from these two queries. The store-commit
+        // port has no matched/locked output -- the deny decision is `!allow`
+        // alone -- so binding the whole record to a named signal would compute
+        // two fields nothing reads, which is what this module's lint gate
+        // (UNUSEDSIGNAL, a warning and therefore an error) had been reporting.
+`ifdef MOSAIC_PMP_MUTANT_STORE_COMMIT_UNGATED
+        // NEGATIVE CONTROL: the store-commit answer is discarded and both lanes
+        // are told "allowed". That is the state the pre-fix code shape left
+        // behind -- the query ran but its result reached nothing -- so a
+        // PMP-refused store is authorised at commit and the endpoint's
+        // post-retirement refusal is counted and dropped: defect D5 at this
+        // boundary. CASE=privilege.permission_matrix's `s-store-deny-w` must
+        // fail on it.
+        sc_allow0_o = 1'b1;
+        sc_allow1_o = 1'b1;
+`else
+        sc_allow0_o = pmp_query(sc_req_addr0_i, sc_req_bytes0_i, 1'b0, 1'b1, 1'b0,
+                                sc_req_priv0_i).allow;
+        sc_allow1_o = pmp_query(sc_req_addr1_i, sc_req_bytes1_i, 1'b0, 1'b1, 1'b0,
+                                sc_req_priv1_i).allow;
+`endif
         allow_o    = data_q.allow;
         matched_o  = data_q.matched;
         locked_o   = data_q.locked;
         f_allow_o  = fetch_q.allow;
         f_matched_o = fetch_q.matched;
         f_locked_o = fetch_q.locked;
-        sc_allow0_o    = store_q0.allow;
-        sc_allow1_o    = store_q1.allow;
       end
 
       // ----------------------------------------------------------------- reads

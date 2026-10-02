@@ -7,7 +7,8 @@
       "csrs": [
         {
           "name": "sstatus",
-          "address": 256,
+          "role": "status",
+"address": 256,
           "width": 64,
           "access": "rwr",
           "behavior": "warl_wpri",
@@ -19,7 +20,8 @@
         },
         {
           "name": "sie",
-          "address": 260,
+          "role": "intr-enable",
+"address": 260,
           "width": 64,
           "access": "rwr",
           "behavior": "warl_wpri",
@@ -31,7 +33,8 @@
         },
         {
           "name": "sip",
-          "address": 324,
+          "role": "intr-pending",
+"address": 324,
           "width": 64,
           "access": "rwr",
           "behavior": "warl_wpri",
@@ -43,7 +46,8 @@
         },
         {
           "name": "stvec",
-          "address": 261,
+          "role": "trap-vector",
+"address": 261,
           "width": 64,
           "access": "rw",
           "behavior": "warl",
@@ -55,7 +59,8 @@
         },
         {
           "name": "scounteren",
-          "address": 262,
+          "role": "counter-enable",
+"address": 262,
           "width": 32,
           "access": "rwr",
           "behavior": "warl_wpri",
@@ -67,7 +72,8 @@
         },
         {
           "name": "senvcfg",
-          "address": 266,
+          "role": "env-config",
+"address": 266,
           "width": 64,
           "access": "rwr",
           "behavior": "warl_wpri",
@@ -79,7 +85,8 @@
         },
         {
           "name": "sscratch",
-          "address": 320,
+          "role": "scratch",
+"address": 320,
           "width": 64,
           "access": "rw",
           "behavior": "warl",
@@ -91,7 +98,8 @@
         },
         {
           "name": "sepc",
-          "address": 321,
+          "role": "trap-pc",
+"address": 321,
           "width": 64,
           "access": "rwr",
           "behavior": "warl",
@@ -104,7 +112,8 @@
         },
         {
           "name": "scause",
-          "address": 322,
+          "role": "trap-cause",
+"address": 322,
           "width": 64,
           "access": "rw",
           "behavior": "warl",
@@ -116,7 +125,8 @@
         },
         {
           "name": "stval",
-          "address": 323,
+          "role": "trap-value",
+"address": 323,
           "width": 64,
           "access": "rw",
           "behavior": "warl",
@@ -128,7 +138,8 @@
         },
         {
           "name": "satp",
-          "address": 384,
+          "role": "address-translation",
+"address": 384,
           "width": 64,
           "access": "rwr",
           "behavior": "warl",
@@ -145,7 +156,8 @@
       "csrs": [
         {
           "name": "cycle",
-          "address": 3072,
+          "role": "counter-shadow",
+"address": 3072,
           "width": 64,
           "access": "ro",
           "behavior": "fixed",
@@ -155,7 +167,8 @@
         },
         {
           "name": "time",
-          "address": 3073,
+          "role": "counter-shadow",
+"address": 3073,
           "width": 64,
           "access": "ro",
           "behavior": "fixed",
@@ -165,7 +178,8 @@
         },
         {
           "name": "instret",
-          "address": 3074,
+          "role": "counter-shadow",
+"address": 3074,
           "width": 64,
           "access": "ro",
           "behavior": "fixed",

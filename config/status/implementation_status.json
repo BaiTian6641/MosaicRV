@@ -59,7 +59,8 @@
     "I-045",
     "V-019",
     "I-046",
-    "V-020"
+    "V-020",
+    "V-043"
   ],
   "evidence": {
     "I-001": {
@@ -722,6 +723,18 @@
       "verdict": "PASS",
       "notes": "No silent exclusions and no reference skips -- the package that decides whether this project's green lines mean anything, and the last gate on advertising the A extension. It records 52 exclusions (4 disabled checkers, 21 skips, 7 waivers, 15 unimplemented reference features, 3 timeouts, 2 generation failures), of which 32 are covered by a named alternative verification that exists AND passes, and 20 are OPEN with an end condition; the closure counts are printed rather than implied (4 checks disabled, 30 cases skipped, 14 fields waived). The checker is wired into make check, validates the ledger against its schema, verifies that every affected case exists in the registry, that every alternative-verification case exists AND has a recorded pass, and that every end condition is non-empty; a registered case with no recorded result that no ledger entry names is itself an unregistered exclusion. 13 negative controls are all rejected, each naming the offending entry -- including the card's central prohibition (a waiver generated from an observed difference) and a case filtered out of the total. The largest open exclusions it records, in its own words, are the most useful thing this package produced: (1) no ACT4 ELF executes for ANY advertised p1 extension -- A, C, Zicond, Zmmul, CMO -- because V-043 is undelivered, so those advertisements rest on this project's own cases rather than on an architectural test suite; (2) mepc[1:0] is read-only zero (the IALIGN=32 mask) while p1 claims the C extension, which is a genuine inconsistency in an advertised capability and is now tracked rather than forgotten; (3) no independent reference (NEMU, Sail or XiangShan) has ever been compared against this core -- every 'independent' expectation in this repository is a model written here; (4) four holes in the event interface (no MEM_VISIBLE producer, no interrupt event, three fields absent, store payload unwired); (5) p13's store-to-read-only trap has no independent oracle because only the DUT models boot_rom read-only; (6) one profile, one seed, and no device watchdog. Those six lines are the honest answer to 'what does this machine not prove yet', and they are machine-readable from here on.",
       "report": "results/reports/V-020-exclusions.md"
+    },
+    "V-043": {
+      "cases": [
+        "core.act_dut"
+      ],
+      "commands": [
+        "python3 tools/run_unit.py --profile p1 --case core.act_dut",
+        "python3 tools/run_act_dut.py"
+      ],
+      "verdict": "DELIVERED AS A RUNNER; THE RUN ITSELF FAILS ON FIVE REAL DUT DIVERGENCES -- see below",
+      "notes": "The architectural test suite (ACT4) against the integrated out-of-order core. N IS CLOSED against the generation manifest, which is the card's central requirement: applicable=127, generated=127, run=127, passed=122, failed=5, with the ACT commit hash and the first failing ELF printed in the RESULT line (verified independently here: the case exits 1 for exactly those five). Coverage by extension: I 51, M 13, Zicsr 6, Zifencei 1, Zihpm 2, Zaamo 18, Zalrsc 4, Zca 32; the 47 excluded suites are each named with a reason in results/v043/suite_manifest.json, and the exclusions are recorded in the ledger rather than left implicit. The PASS macro is CALIBRATED rather than trusted: a corrupted expected-signature byte in I-add-00 makes the case exit 1, and MOSAIC_ALU_MUTANT_4 (slt unsigned) fails I-slt-00 -- so the suite can fail, which is what makes its passes mean anything. THE FIVE FAILURES ARE REAL DIVERGENCES IN ADVERTISED EXTENSIONS, located by diffing the signature-mode ELF against Sail's .results: (1) Zca-c.lui-00 -- c.lui places its 6-bit immediate 16 bits too high, 51 signature words differ (the C extension is advertised); (2) and (3) Zalrsc-sc.d-00 and Zalrsc-sc.w-00 -- SC returns failure where the reference expects success, 23 words (Zalrsc is advertised); (4) and (5) Zihpm-csrrc-00 and Zihpm-csrrs-00 -- the HPM csrrc/csrrs read-modify-write diverges, 357 words (Zihpm is advertised). The package is therefore recorded as a working runner with recorded failures, not as 'all applicable ACTs pass'. THREE HARNESS DEFECTS were found and fixed on the way, each of which had been hiding real behaviour: a fetch image that was 4-byte-aligned-only (which broke every Zca test), a static fetch image invisible to fence.i self-modification (which broke Zifencei), and reading fetch through the shared memory model shadowing MOSAIC_TOHOST inside the ELF text (the driver now keeps one byte image updated by data-port stores). Ledger: EX-012 is narrowed rather than closed -- it now records the p1 ACT4 coverage and the five failures, names core.act_dut in affected_cases, and lists the extensions with no suite (Zicond) or no advertised implementation (Zmmul, Zicntr, Zicbom, Zicbop, CMO). NOTE ON THE TREE'S STATE: core.act_dut is registered and will report FAIL until the five divergences are fixed; that is the honest state and the suite is not to be narrowed or skipped to make it green. Gates green at the recorded revision: check_exclusions (52 registered, 19 open / 33 covered), check_profile --all, check_records.",
+      "report": "results/reports/V-043-act4.md"
     }
   },
   "blocked_tasks": {},

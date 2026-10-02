@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "case": "core.act_dut",
+  "verdict": "FAIL",
+  "detail": "applicable=1 generated=1 run=1 passed=0 failed=1 act_commit=? config=? first_fail=/Users/flare/MosaicRV/results/v043/controls/corrupt_signature/I-add-00.elf",
+  "seed": 1,
+  "max_cycles": 4000000,
+  "checks": 4,
+  "failures": 2,
+  "image": "/Users/flare/MosaicRV/results/v043/controls/corrupt_signature/I-add-00.elf",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-02T08:04:10Z",
+  "first_mismatch": "",
+  "failed_checks": ["ELF (single)/I-add-00.elf passed its own self-check (status FAIL)", "no ELF failed (1 failed)"]
+}

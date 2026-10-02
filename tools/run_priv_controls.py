@@ -18,6 +18,13 @@ control for defect D5:
                                       in mosaic_core). This is the control that
                                       shows the case detects D5 rather than the
                                       failure having been argued away.
+  MOSAIC_PMP_MUTANT_STORE_COMMIT_UNGATED
+                                      the store-commit *query*'s answer is
+                                      discarded at the PMP boundary (both lanes
+                                      tied to "allowed"), so the query runs but
+                                      reaches nothing -- D5 reproduced at the
+                                      unit whose unused matched/locked fields the
+                                      p1 hygiene pass removed (-D in mosaic_pmp).
   MOSAIC_PRIV_MUTANT_FAULT_WRITES     "a permission fault still writes": the
                                       *checker* is mutated to expect the refused
                                       access to have taken effect (driver-side;
@@ -63,6 +70,7 @@ CONTROLS = [
     ("OVERLAP_INVERTED", "MOSAIC_PMP_MUTANT_OVERLAP_INVERTED"),
     ("M_MODE_ENFORCED", "MOSAIC_PMP_MUTANT_M_MODE_ENFORCED"),
     ("STORE_DENY_NOT_TAKEN", "MOSAIC_PMP_MUTANT_STORE_DENY_NOT_TAKEN"),
+    ("STORE_COMMIT_UNGATED", "MOSAIC_PMP_MUTANT_STORE_COMMIT_UNGATED"),
     ("FAULT_WRITES", "MOSAIC_PRIV_MUTANT_FAULT_WRITES"),
     ("MEPC_IALIGN32", "MOSAIC_CSR_MUTANT_MEPC_IALIGN32"),
 ]

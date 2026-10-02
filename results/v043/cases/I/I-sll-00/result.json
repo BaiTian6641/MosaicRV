@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "case": "core.act_dut",
+  "verdict": "PASS",
+  "detail": "applicable=1 generated=1 run=1 passed=1 failed=0 act_commit=? config=?",
+  "seed": 1,
+  "max_cycles": 4000000,
+  "checks": 4,
+  "failures": 0,
+  "image": "/Users/flare/mosaic-ref/act4-mosaic-p1-work/mosaic-p1/elfs/rv64i/I/I-sll-00.elf",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-02T08:03:48Z",
+  "first_mismatch": ""
+}

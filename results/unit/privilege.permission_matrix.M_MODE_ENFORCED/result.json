@@ -10,7 +10,7 @@
   "image": "",
   "expect": "",
   "tool": "Verilator 5.052 2026-09-05",
-  "timestamp": "2026-10-02T07:46:16Z",
+  "timestamp": "2026-10-02T08:03:53Z",
   "first_mismatch": "priv-matrix at cycle 4000000: max-cycles (4000000) exhausted: head_pc=0x0000000080007d48 occupied=5 retired=1115349 traps=44291 priv=3: expected every privilege/access/PMP cell matches the ISA, got contract violated",
   "failed_checks": ["no contract violation"]
 }

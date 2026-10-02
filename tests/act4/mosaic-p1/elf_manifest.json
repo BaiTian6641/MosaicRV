@@ -1,0 +1,19 @@
+{
+  "act_commit": "96493a91448ca50780013fd892daec2c204487ba",
+  "case": "core.act_dut",
+  "config": "tests/act4/mosaic-p1/test_config.yaml",
+  "count": 127,
+  "elf_root": "/Users/flare/mosaic-ref/act4-mosaic-p1-work/mosaic-p1/elfs/rv64i",
+  "excluded_suites": 47,
+  "suites": [
+    "I",
+    "M",
+    "Zaamo",
+    "Zalrsc",
+    "Zca",
+    "Zicsr",
+    "Zifencei",
+    "Zihpm"
+  ],
+  "task": "V-043"
+}

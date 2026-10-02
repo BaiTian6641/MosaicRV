@@ -741,6 +741,7 @@ def render_csr_header(bundle: config_check.Bundle) -> str:
     add("")
     add("typedef struct {")
     add("  const char *name;")
+    add("  const char *role;         /* what the register is (config_check.CSR_ROLES) */")
     add("  uint16_t    addr;         /* 12-bit CSR number */")
     add("  uint64_t    reset;        /* reset value */")
     add("  uint64_t    wmask;        /* bits software may change */")
@@ -754,8 +755,8 @@ def render_csr_header(bundle: config_check.Bundle) -> str:
         access = csr["access"]
         write_legal = access != "ro"
         wmask = effective_csr_wmask(csr, less_privileged, ialign)
-        add('  { "%s", 0x%03x, UINT64_C(0x%016x), UINT64_C(0x%016x), %d, %d, %d },'
-            % (csr["name"], csr["address"], csr["reset"], wmask,
+        add('  { "%s", "%s", 0x%03x, UINT64_C(0x%016x), UINT64_C(0x%016x), %d, %d, %d },'
+            % (csr["name"], csr["role"], csr["address"], csr["reset"], wmask,
                1 if write_legal else 0, csr["min_priv_r"], csr["min_priv_w"]))
     add("};")
     add("")

@@ -12,7 +12,8 @@
       "csrs": [
         {
           "name": "pmpcfg0",
-          "address": 928,
+          "role": "pmp-config",
+"address": 928,
           "width": 64,
           "access": "rw",
           "behavior": "warl",
@@ -50,7 +51,8 @@
         },
         {
           "name": "pmpcfg2",
-          "address": 930,
+          "role": "pmp-config",
+"address": 930,
           "width": 64,
           "access": "rw",
           "behavior": "warl",
@@ -88,7 +90,8 @@
         },
         {
           "name": "pmpaddr0",
-          "address": 944,
+          "role": "pmp-address",
+"address": 944,
           "width": 64,
           "access": "rw",
           "behavior": "warl",
@@ -104,7 +107,8 @@
         },
         {
           "name": "pmpaddr1",
-          "address": 945,
+          "role": "pmp-address",
+"address": 945,
           "width": 64,
           "access": "rw",
           "behavior": "warl",
@@ -120,7 +124,8 @@
         },
         {
           "name": "pmpaddr2",
-          "address": 946,
+          "role": "pmp-address",
+"address": 946,
           "width": 64,
           "access": "rw",
           "behavior": "warl",
@@ -136,7 +141,8 @@
         },
         {
           "name": "pmpaddr3",
-          "address": 947,
+          "role": "pmp-address",
+"address": 947,
           "width": 64,
           "access": "rw",
           "behavior": "warl",
@@ -152,7 +158,8 @@
         },
         {
           "name": "pmpaddr4",
-          "address": 948,
+          "role": "pmp-address",
+"address": 948,
           "width": 64,
           "access": "rw",
           "behavior": "warl",
@@ -168,7 +175,8 @@
         },
         {
           "name": "pmpaddr5",
-          "address": 949,
+          "role": "pmp-address",
+"address": 949,
           "width": 64,
           "access": "rw",
           "behavior": "warl",
@@ -184,7 +192,8 @@
         },
         {
           "name": "pmpaddr6",
-          "address": 950,
+          "role": "pmp-address",
+"address": 950,
           "width": 64,
           "access": "rw",
           "behavior": "warl",
@@ -200,7 +209,8 @@
         },
         {
           "name": "pmpaddr7",
-          "address": 951,
+          "role": "pmp-address",
+"address": 951,
           "width": 64,
           "access": "rw",
           "behavior": "warl",
@@ -216,7 +226,8 @@
         },
         {
           "name": "pmpaddr8",
-          "address": 952,
+          "role": "pmp-address",
+"address": 952,
           "width": 64,
           "access": "rw",
           "behavior": "warl",
@@ -232,7 +243,8 @@
         },
         {
           "name": "pmpaddr9",
-          "address": 953,
+          "role": "pmp-address",
+"address": 953,
           "width": 64,
           "access": "rw",
           "behavior": "warl",
@@ -248,7 +260,8 @@
         },
         {
           "name": "pmpaddr10",
-          "address": 954,
+          "role": "pmp-address",
+"address": 954,
           "width": 64,
           "access": "rw",
           "behavior": "warl",
@@ -264,7 +277,8 @@
         },
         {
           "name": "pmpaddr11",
-          "address": 955,
+          "role": "pmp-address",
+"address": 955,
           "width": 64,
           "access": "rw",
           "behavior": "warl",
@@ -280,7 +294,8 @@
         },
         {
           "name": "pmpaddr12",
-          "address": 956,
+          "role": "pmp-address",
+"address": 956,
           "width": 64,
           "access": "rw",
           "behavior": "warl",
@@ -296,7 +311,8 @@
         },
         {
           "name": "pmpaddr13",
-          "address": 957,
+          "role": "pmp-address",
+"address": 957,
           "width": 64,
           "access": "rw",
           "behavior": "warl",
@@ -312,7 +328,8 @@
         },
         {
           "name": "pmpaddr14",
-          "address": 958,
+          "role": "pmp-address",
+"address": 958,
           "width": 64,
           "access": "rw",
           "behavior": "warl",
@@ -328,7 +345,8 @@
         },
         {
           "name": "pmpaddr15",
-          "address": 959,
+          "role": "pmp-address",
+"address": 959,
           "width": 64,
           "access": "rw",
           "behavior": "warl",

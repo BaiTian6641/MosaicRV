@@ -74,6 +74,39 @@ ARCH_INT_REGS = 32
 # unmodifiable -- freezing them is exactly the EX-034 defect.
 PC_VALUED_CSRS = ("mepc", "sepc")
 
+# What a CSR *is*, as opposed to where it lives: the behavioural role its entry
+# declares in `config/csr/*.json`. Two registers can share a role across
+# privilege levels -- mstatus and sstatus are both `status`, mepc and sepc are
+# both `trap-pc` -- because the machinery that reads and writes them is the same
+# and only the address decides which one an access selects. The role is what
+# lets a tool or a model reason about a register it has never seen; a CSR that
+# declares no role, or one outside this set, is a CSR nobody can reason about, so
+# `_check_csr` rejects it here rather than letting it reach a unit case and fail
+# there with a decode error (the class of defect that `generated table row
+# sstatus has no known role` was).
+CSR_ROLES = frozenset((
+    "status",              # mstatus, sstatus
+    "isa",                 # misa
+    "delegation",          # medeleg, mideleg
+    "intr-enable",         # mie, sie
+    "intr-pending",        # mip, sip
+    "trap-vector",         # mtvec, stvec
+    "counter-enable",      # mcounteren, scounteren
+    "scratch",             # mscratch, sscratch
+    "trap-pc",             # mepc, sepc
+    "trap-cause",          # mcause, scause
+    "trap-value",          # mtval, stval
+    "machine-id",          # mvendorid, marchid, mimpid, mhartid
+    "cycle-counter",       # mcycle
+    "instret-counter",     # minstret
+    "counter-shadow",      # cycle, time, instret
+    "address-translation",  # satp
+    "env-config",          # senvcfg
+    "pmp-config",          # pmpcfg0, pmpcfg2
+    "pmp-address",         # pmpaddr0..pmpaddr15
+    "vector-state",        # vstart, vxsat, vxrm, vcsr, vl, vtype, vlenb
+))
+
 
 class Problem(object):
     __slots__ = ("where", "message")
@@ -560,6 +593,29 @@ def _check_csr(bundle: Bundle, profile_name: str) -> None:
                     bundle.fail(where, "behavior wpri requires a non-empty wpri_fields")
                 if not csr.get("spec_clause"):
                     bundle.fail(where, "missing spec_clause; an unproven CSR must not ship")
+
+                # The role: what this register *is*. Declared, not derived from
+                # the name, because the name is an instance ("pmpaddr7") while
+                # the role is the machinery ("pmp-address"), and because the
+                # closed set is what lets every consumer classify a register --
+                # including one added after it was written. A CSR with no role,
+                # or with one outside CSR_ROLES, is rejected here so the failure
+                # is a configuration gate failure rather than a decode failure
+                # inside a unit case.
+                role = csr.get("role")
+                if not role:
+                    bundle.fail(
+                        where,
+                        "missing role; a CSR with no declared role is a CSR nobody "
+                        "can reason about (declared roles: %s)"
+                        % ", ".join(sorted(CSR_ROLES)),
+                    )
+                elif role not in CSR_ROLES:
+                    bundle.fail(
+                        where,
+                        "unknown role %r; declared roles are %s"
+                        % (role, ", ".join(sorted(CSR_ROLES))),
+                    )
 
                 # Extension-state fields. The privileged specification states that
                 # mstatus.FS shall not be read-only zero when the F extension is
