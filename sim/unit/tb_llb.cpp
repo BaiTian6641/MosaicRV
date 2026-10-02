@@ -94,6 +94,8 @@ constexpr uint8_t kPermRW_S = 0x6;    // S: r+w
 constexpr uint32_t kRamBase = static_cast<uint32_t>(MOSAIC_RAM_BASE);
 constexpr uint32_t kUartBase = static_cast<uint32_t>(MOSAIC_UART_BASE);
 constexpr uint32_t kRomBase = static_cast<uint32_t>(MOSAIC_BOOT_ROM_BASE);
+constexpr uint32_t kTestHarnessBase = static_cast<uint32_t>(MOSAIC_TEST_HARNESS_BASE);
+constexpr uint32_t kClintBase = static_cast<uint32_t>(MOSAIC_CLINT_BASE);
 constexpr bool kRamCacheable = (MOSAIC_RAM_CACHEABLE != 0);
 
 constexpr uint8_t kFenceMem = 0;
@@ -316,6 +318,39 @@ class Harness {
     fill_asid_ = asid;
     fill_perms_ = perms;
     fill_data_ = MemLine(pa);
+    Eval();
+    const bool ok = dut_->fill_ok != 0;
+    Edge();
+    Idle();
+    Eval();
+    return ok;
+  }
+
+  // A speculative (prefetch-style) fill presented in the *same cycle* as an
+  // invalidation of the same line. `source` selects the invalidation exactly as
+  // ConflictProbe does: store, refill, snoop, snoop-all, fence, fence-i,
+  // sfence, ctx. Returns the `fill_ok_o` the DUT presents in that cycle; the
+  // caller requires it to be 0 (the racing fill must not install).
+  bool FillRacingInvalidate(uint32_t pa, uint32_t vpn, uint16_t asid, uint8_t perms,
+                            int source) {
+    Idle();
+    fill_valid_ = true;
+    fill_pa_ = pa;
+    fill_vpn_ = vpn & 0x7ffffffu;
+    fill_asid_ = asid;
+    fill_perms_ = perms;
+    fill_data_ = MemLine(pa);
+    switch (source) {
+      case 0: inv_store_valid_ = true; inv_store_pa_ = pa; break;
+      case 1: inv_refill_valid_ = true; inv_refill_pa_ = pa; break;
+      case 2: inv_snoop_valid_ = true; inv_snoop_pa_ = pa; break;
+      case 3: inv_snoop_valid_ = true; inv_snoop_all_ = true; break;
+      case 4: fence_valid_ = true; fence_kind_ = kFenceMem; break;
+      case 5: fence_valid_ = true; fence_kind_ = kFenceI; break;
+      case 6: fence_valid_ = true; fence_kind_ = kFenceSfence;
+              fence_has_asid_ = true; fence_asid_ = asid; break;
+      default: ctx_valid_ = true; break;
+    }
     Eval();
     const bool ok = dut_->fill_ok != 0;
     Edge();
@@ -1022,6 +1057,475 @@ class Campaign {
   static constexpr uint32_t kVpnC = 0x0000003;
 };
 
+// ============================================================================
+// V-061 -- llb.freshness_and_ownership
+//
+// `llb.stale_copy_invalidation` (I-060) proves the invalidation *protocol* of
+// `mosaic_llb`. This campaign is the V-061 card over the same DUT, and reuses
+// the same Harness, host-memory oracle and primitives rather than standing up a
+// second model. It adds the directed sequences the card enumerates that the
+// I-060 case does not carry as its subject: another hart's store, a DMA write,
+// same-address aliasing in both directions, the PMA non-cacheable regions, the
+// translation-context dimension of ownership, and a speculative
+// (prefetch-style) fill or hit racing an invalidation.
+//
+// The invariant every phase leans on is stated once: **the LLB is a locality
+// structure, not a source of truth.** Under this driver's single-hart
+// sequential memory model the only observation a load to `pa` is allowed to see
+// is the *current* content of `mem_` at that line, so every hit is compared
+// word for word against `mem_` at the moment of the hit, and at rest every
+// resident entry is compared against `mem_` again (`provenance-invariant`).
+// ============================================================================
+class FreshnessCampaign {
+ public:
+  FreshnessCampaign(Harness* h, mosaic::Reporter* rep) : h_(h), rep_(rep) {}
+
+  std::string Run() {
+    Geometry();
+    DirectedHitMissBypass();
+    LocalWriterFreshness();
+    RemoteHartStore();
+    DmaWrite();
+    SameAddressAliasing();
+    PmaNonCacheable();
+    OwnershipContextChange();
+    MispredictionRace();
+    ProvenanceInvariant();
+    Conservation();
+    return Summary();
+  }
+
+  // A profile whose map declares RAM non-cacheable has nothing the LLB is
+  // permitted to hold, so the freshness sequences have no subject. What is
+  // still real -- and still checked -- is that nothing is cached anyway.
+  std::string RunNonCacheableProfile() {
+    Geometry();
+    BypassAllRegions();
+    return Summary();
+  }
+
+ private:
+  void Require(bool ok, const std::string& where, const std::string& expected,
+               const std::string& actual) {
+    h_->Require(ok, where, expected, actual);
+  }
+
+  // A hit that must equal the host memory's current content, word for word:
+  // the "allowed memory observation" the card's Pass criterion names.
+  void ExpectHitCurrent(uint32_t pa, uint32_t vpn, uint16_t asid, uint8_t perms,
+                        bool atomic) {
+    Probe p = h_->ProbeLookup(pa, vpn, asid, perms, atomic);
+    h_->Require(p.hit, "", "a hit on " + U64(pa), "a miss on " + U64(pa));
+    const Lanes want = h_->MemLine(pa);
+    h_->Require(p.data == want, "",
+                "the hit carries the memory's current line",
+                "the hit carries a different line (stale)");
+    h_->CommitLookup();
+  }
+
+  void Geometry() {
+    h_->Phase("geometry");
+    Require(h_->Entries() == kEntries, "",
+            "o_entries=" + Dec(kEntries), "o_entries=" + Dec(h_->Entries()));
+    Require(h_->LineBytes() == kLineBytes, "",
+            "o_line_bytes=" + Dec(kLineBytes), "o_line_bytes=" + Dec(h_->LineBytes()));
+    Require(h_->Count() == 0, "", "0 valid entries after reset",
+            Dec(h_->Count()) + " valid entries after reset");
+  }
+
+  // ---------------------------------------------------- hit / miss / bypass
+  // The three architectural outcomes of a lookup, each driven directly and
+  // checked against the oracle rather than inferred from a counter.
+  void DirectedHitMissBypass() {
+    h_->Phase("hit-miss-bypass");
+    const uint32_t l1 = kRamBase + 0x2000;
+    h_->WriteLine(l1, 0x1100);
+
+    // miss: nothing has been filled.
+    const uint32_t miss_before = h_->MissCtr();
+    Probe m = h_->ProbeLookup(l1, kVpnA, 1, kPermRW, false);
+    Require(!m.hit && !m.bypass, "hit-miss-bypass",
+            "a miss on an unfilled line", "a hit on an unfilled line");
+    h_->CommitLookup();
+    Require(h_->MissCtr() > miss_before, "hit-miss-bypass",
+            "the miss is counted", "the miss was not counted");
+
+    // hit: the fill took the memory's current content, and the hit returns it.
+    h_->Fill(l1, kVpnA, 1, kPermRW);
+    const uint32_t hit_before = h_->HitCtr();
+    ExpectHitCurrent(l1, kVpnA, 1, kPermRW, false);
+    Require(h_->HitCtr() > hit_before, "hit-miss-bypass",
+            "the hit is counted", "the hit was not counted");
+
+    // bypass: an atomic and a non-cacheable line are never served.
+    Probe a = h_->ProbeLookup(l1, kVpnA, 1, kPermRW, true);
+    Require(!a.hit && a.bypass, "hit-miss-bypass",
+            "an atomic is bypassed", "an atomic was served");
+    h_->CommitLookup();
+    Probe d = h_->ProbeLookup(kUartBase, kVpnA, 1, kPermRW, false);
+    Require(!d.hit && d.bypass, "hit-miss-bypass",
+            "a device lookup is bypassed", "a device lookup was served");
+    h_->CommitLookup();
+
+    // A bypassed atomic must not have evicted the line it bypassed.
+    Require(h_->FindEntry(l1, 1, kPermRW) >= 0, "hit-miss-bypass",
+            "an atomic does not evict the line it bypassed",
+            "the bypassed line disappeared");
+    ExpectHitCurrent(l1, kVpnA, 1, kPermRW, false);
+  }
+
+  // --------------------------------------------------- local writer freshness
+  // The card's central fail mode: a clean copy treated as needing no coherence.
+  // A local store is a writer; the copy is stale the moment it commits.
+  void LocalWriterFreshness() {
+    h_->Phase("local-writer-freshness");
+    const uint32_t l = kRamBase + 0x2040;
+    const uint32_t other = kRamBase + 0x2060;
+    h_->WriteLine(l, 0x1200);
+    h_->WriteLine(other, 0x1300);
+    h_->Fill(l, kVpnA, 1, kPermRW);
+    h_->Fill(other, kVpnA, 1, kPermRW);
+    ExpectHitCurrent(l, kVpnA, 1, kPermRW, false);   // hit before
+
+    h_->WriteLine(l, 0x1400);       // the store makes the new value visible
+    h_->PulseStore(l);
+    Require(h_->FindEntry(l, 1, kPermRW) < 0, "local-writer-freshness",
+            "the store removed the clean copy",
+            "the clean copy survived the store");
+    Require(h_->FindEntry(other, 1, kPermRW) >= 0, "local-writer-freshness",
+            "an unrelated copy survives the store",
+            "an unrelated copy was removed");
+    Probe p = h_->ProbeLookup(l, kVpnA, 1, kPermRW, false);
+    Require(!p.hit, "local-writer-freshness",
+            "a miss after the store", "a hit after the store");
+    h_->CommitLookup();
+    h_->Fill(l, kVpnA, 1, kPermRW);
+    ExpectHitCurrent(l, kVpnA, 1, kPermRW, false);   // the fresh copy hits
+  }
+
+  // ------------------------------------------------------ another hart's store
+  // A remote hart's store reaches this hart's LLB as a coherence snoop. The
+  // value is visible to memory before the invalidation, so a survivor here is a
+  // stale read.
+  void RemoteHartStore() {
+    h_->Phase("remote-hart-store");
+    const uint32_t l = kRamBase + 0x2080;
+    const uint32_t other = kRamBase + 0x20a0;
+    h_->WriteLine(l, 0x2100);
+    h_->WriteLine(other, 0x2200);
+    h_->Fill(l, kVpnA, 1, kPermRW);
+    h_->Fill(other, kVpnA, 1, kPermRW);
+    ExpectHitCurrent(l, kVpnA, 1, kPermRW, false);   // hit before
+
+    h_->WriteLine(l, 0x2300);       // hart 1 stores
+    h_->PulseSnoop(l);
+    Require(h_->FindEntry(l, 1, kPermRW) < 0, "remote-hart-store",
+            "hart 1's store removed this hart's copy",
+            "the copy survived hart 1's store");
+    Require(h_->FindEntry(other, 1, kPermRW) >= 0, "remote-hart-store",
+            "an unrelated copy survives another hart's store",
+            "an unrelated copy was removed");
+    Probe p = h_->ProbeLookup(l, kVpnA, 1, kPermRW, false);
+    Require(!p.hit, "remote-hart-store",
+            "a miss after hart 1's store", "a stale hit after hart 1's store");
+    h_->CommitLookup();
+    h_->Fill(l, kVpnA, 1, kPermRW);
+    ExpectHitCurrent(l, kVpnA, 1, kPermRW, false);   // equals hart 1's value
+  }
+
+  // ------------------------------------------------------------------- DMA
+  // A DMA engine is an external writer with no hart context: it is the same
+  // snoop interface, and a DMA flush broadcast is a shootdown.
+  void DmaWrite() {
+    h_->Phase("dma-write");
+    const uint32_t l = kRamBase + 0x20c0;
+    const uint32_t other = kRamBase + 0x20e0;
+    h_->WriteLine(l, 0x3100);
+    h_->WriteLine(other, 0x3200);
+    h_->Fill(l, kVpnA, 1, kPermRW);
+    h_->Fill(other, kVpnA, 1, kPermRW);
+    ExpectHitCurrent(l, kVpnA, 1, kPermRW, false);   // hit before
+
+    h_->WriteLine(l, 0x3300);       // the DMA engine wrote the line
+    h_->PulseSnoop(l);
+    Require(h_->FindEntry(l, 1, kPermRW) < 0, "dma-write",
+            "the DMA's line was removed", "the DMA's line is still resident");
+    Require(h_->FindEntry(other, 1, kPermRW) >= 0, "dma-write",
+            "an unrelated line survives a DMA write", "an unrelated line was removed");
+    Probe p = h_->ProbeLookup(l, kVpnA, 1, kPermRW, false);
+    Require(!p.hit && !p.bypass, "dma-write",
+            "a miss after the DMA write", "a hit with the pre-DMA value");
+    h_->CommitLookup();
+    h_->Fill(l, kVpnA, 1, kPermRW);
+    ExpectHitCurrent(l, kVpnA, 1, kPermRW, false);
+
+    // A DMA flush / shootdown broadcast removes every copy.
+    Require(h_->Count() >= 2, "dma-write",
+            "copies are resident before the flush",
+            Dec(h_->Count()) + " copies before the flush");
+    h_->PulseSnoopAll();
+    Require(h_->Count() == 0, "dma-write",
+            "the DMA flush removed every copy",
+            Dec(h_->Count()) + " copies survived");
+  }
+
+  // ------------------------------------------------- same-address aliasing
+  // Both directions: the same physical line through two VAs shares one copy,
+  // and the same VA to a different PA is a different line. The identity is the
+  // physical line, and neither the VA nor the sub-line offset may enter it.
+  void SameAddressAliasing() {
+    h_->Phase("same-address-aliasing");
+    const uint32_t l1 = kRamBase + 0x2100;
+    const uint32_t l2 = kRamBase + 0x2120;
+    h_->WriteLine(l1, 0x4100);
+    h_->WriteLine(l2, 0x4200);
+
+    // Same PA, two VAs: the second alias hits the one physical copy.
+    h_->Fill(l1, kVpnA, 1, kPermRW);
+    ExpectHitCurrent(l1, kVpnA, 1, kPermRW, false);
+    ExpectHitCurrent(l1, kVpnB, 1, kPermRW, false);
+
+    // Same VA, a different PA: a VA-keyed LLB would serve l1's data for l2.
+    Probe wrong = h_->ProbeLookup(l2, kVpnA, 1, kPermRW, false);
+    Require(!wrong.hit, "same-address-aliasing",
+            "same VA, different PA misses",
+            "an alias hit that would serve another line's data");
+    h_->CommitLookup();
+
+    // A sub-line address of the filled line still hits its line (the offset is
+    // not part of the identity), while the same offset of another line does
+    // not (the offset alone must not match).
+    ExpectHitCurrent(l1 + 0x18, kVpnA, 1, kPermRW, false);
+    Probe off = h_->ProbeLookup(l2 + 0x18, kVpnA, 1, kPermRW, false);
+    Require(!off.hit, "same-address-aliasing",
+            "a same-offset different line misses",
+            "a hit on low address bits alone");
+    h_->CommitLookup();
+
+    // Same PA, a different ASID: a different address space is a different
+    // owner and must not be served the other's copy.
+    Probe asid = h_->ProbeLookup(l1, kVpnA, 2, kPermRW, false);
+    Require(!asid.hit, "same-address-aliasing",
+            "same PA, different ASID misses", "a hit across address spaces");
+    h_->CommitLookup();
+  }
+
+  // ------------------------------------------------- PMA non-cacheable
+  // The map agreement the bypass rule rests on: every region this profile
+  // declares non-idempotent is also non-cacheable, so gating a fill on
+  // cacheability keeps non-idempotent addresses out. Constants come from the
+  // generated header, not a hand-written list.
+  void PmaNonCacheable() {
+    h_->Phase("pma-non-cacheable");
+    Require(MOSAIC_UART_CACHEABLE == 0 && MOSAIC_TEST_HARNESS_CACHEABLE == 0 &&
+                MOSAIC_CLINT_CACHEABLE == 0,
+            "pma-non-cacheable",
+            "every non-idempotent (device) region is declared non-cacheable",
+            "a non-idempotent region is declared cacheable");
+    Require(MOSAIC_BOOT_ROM_CACHEABLE == 0, "pma-non-cacheable",
+            "the non-cacheable ROM is declared non-cacheable",
+            "the ROM is declared cacheable");
+    Require(MOSAIC_RAM_CACHEABLE == 1, "pma-non-cacheable",
+            "a cacheable RAM region exists in this profile",
+            "this profile has no cacheable region");
+
+    // A cacheable region is accepted, so the refusals below are not vacuous.
+    const uint32_t ram = kRamBase + 0x2200;
+    h_->WriteLine(ram, 0x5100);
+    h_->Fill(ram, kVpnA, 1, kPermRW);
+    Require(h_->FindEntry(ram, 1, kPermRW) >= 0, "pma-non-cacheable",
+            "a cacheable RAM line is filled", "a cacheable RAM line was refused");
+    ExpectHitCurrent(ram, kVpnA, 1, kPermRW, false);
+
+    struct Region { const char* name; uint32_t base; };
+    const Region regions[] = {
+        {"uart", kUartBase},
+        {"test-harness", kTestHarnessBase},
+        {"clint", kClintBase},
+        {"boot-rom", kRomBase},
+    };
+    for (const Region& r : regions) {
+      h_->WriteLine(r.base, 0x6000 + r.base);
+      const bool ok = h_->FillExpectRefused(r.base, kVpnA, 1, kPermRW);
+      Require(!ok, "pma-non-cacheable",
+              std::string(r.name) + " is refused a fill",
+              std::string(r.name) + " was accepted");
+      Require(h_->FindEntry(r.base, 1, kPermRW) < 0, "pma-non-cacheable",
+              std::string(r.name) + " is not resident",
+              std::string(r.name) + " became resident");
+      Probe p = h_->ProbeLookup(r.base, kVpnA, 1, kPermRW, false);
+      Require(!p.hit && p.bypass, "pma-non-cacheable",
+              std::string(r.name) + " lookups are bypassed",
+              std::string(r.name) + " lookup was served");
+      h_->CommitLookup();
+    }
+  }
+
+  // ---------------------------------------- ownership: translation context
+  // A `satp` write / ASID switch reconfigures the *translation* that a copy is
+  // reachable through, so every translation-backed copy becomes unreachable --
+  // even under a reused ASID number. (A *lane* reassignment / owner-domain
+  // transfer is a different mechanism this module does not model; see the
+  // report's not-covered list.)
+  void OwnershipContextChange() {
+    h_->Phase("ownership-context-change");
+    const uint32_t l = kRamBase + 0x2300;
+    h_->WriteLine(l, 0x7100);
+    h_->Fill(l, kVpnA, 7, kPermRW);
+    ExpectHitCurrent(l, kVpnA, 7, kPermRW, false);   // hit before
+
+    h_->WriteLine(l, 0x7200);
+    h_->PulseCtx();
+    Require(h_->FindEntry(l, 7, kPermRW) < 0, "ownership-context-change",
+            "the context change left no copy reachable",
+            "a copy survived the context change");
+    Probe p = h_->ProbeLookup(l, kVpnA, 7, kPermRW, false);
+    Require(!p.hit, "ownership-context-change",
+            "a miss under the new context", "a stale hit under the new context");
+    h_->CommitLookup();
+    // The reused ASID number sees fresh data: the flush is what protects it.
+    h_->Fill(l, kVpnA, 7, kPermRW);
+    ExpectHitCurrent(l, kVpnA, 7, kPermRW, false);
+  }
+
+  // ------------------------------------- misprediction racing invalidation
+  // A prefetch/predictor installs speculative copies. A wrong prediction may
+  // change latency and traffic -- it must never change the value a demand
+  // access sees. Two races are driven: a speculative *fill* arriving in the
+  // same cycle as an invalidation of its line (must be refused, so no
+  // about-to-be-superseded line is installed), and a speculative *hit* in the
+  // same cycle as the invalidating writer (refused, or already the new value).
+  void MispredictionRace() {
+    h_->Phase("misprediction-race");
+    const uint32_t base = kRamBase + 0x2400;
+    const char* names[8] = {"store",  "refill",  "snoop",   "snoop-all",
+                            "fence",  "fence-i", "sfence",  "ctx"};
+
+    for (int source = 0; source < 8; ++source) {
+      const uint32_t line = base + 0x40 * static_cast<uint32_t>(source);
+      h_->WriteLine(line, 0x8000 + 0x100 * static_cast<uint32_t>(source));
+      h_->Fill(line, kVpnA, 1, kPermRW);             // the speculative copy
+      ExpectHitCurrent(line, kVpnA, 1, kPermRW, false);   // hit before
+
+      // The writer makes a new value visible; the predictor's fill for the same
+      // line arrives in the invalidating cycle.
+      h_->WriteLine(line, 0x8800 + 0x100 * static_cast<uint32_t>(source));
+      const bool installed = h_->FillRacingInvalidate(line, kVpnA, 1, kPermRW, source);
+      const std::string twe = std::string("misprediction-race/fill-") + names[source];
+      Require(!installed, twe,
+              "a speculative fill racing an invalidation is refused",
+              "the racing fill was installed");
+      Require(h_->FindEntry(line, 1, kPermRW) < 0, twe,
+              "no copy is resident after the racing fill", "a copy is resident");
+
+      // The demand access that follows must miss (latency), and the value it
+      // finally sees is memory's, never the predictor's speculative copy.
+      Probe p = h_->ProbeLookup(line, kVpnA, 1, kPermRW, false);
+      if (p.hit) {
+        Require(p.data == h_->MemLine(line), twe,
+                "no hit after the refused fill (or the post-write value)",
+                "a hit with the pre-write value");
+      }
+      h_->CommitLookup();
+      h_->Fill(line, kVpnA, 1, kPermRW);
+      ExpectHitCurrent(line, kVpnA, 1, kPermRW, false);
+    }
+
+    // A speculative hit racing the invalidating writer.
+    const uint32_t hline = kRamBase + 0x2800;
+    h_->WriteLine(hline, 0x9000);
+    h_->Fill(hline, kVpnA, 1, kPermRW);
+    ExpectHitCurrent(hline, kVpnA, 1, kPermRW, false);   // hit before
+    h_->WriteLine(hline, 0x9100);
+    Probe race = h_->ConflictProbe(hline, kVpnA, 1, kPermRW, 0);   // store source
+    if (race.hit) {
+      Require(race.data == h_->MemLine(hline), "misprediction-race/hit-store",
+              "no hit in the invalidating cycle (or the post-store value)",
+              "a hit with the pre-store value");
+    }
+    Require(h_->FindEntry(hline, 1, kPermRW) < 0, "misprediction-race/hit-store",
+            "the invalidating store removed the line", "the line survived");
+  }
+
+  // ------------------------------------------------------- provenance at rest
+  // The global form of "every hit is consistent with an allowed memory
+  // observation": when the campaign is at rest, every resident copy must equal
+  // memory's current content for its line. A clean copy that was treated as
+  // needing no coherence shows up here as a mismatch.
+  void ProvenanceInvariant() {
+    h_->Phase("provenance-invariant");
+    uint32_t checked = 0;
+    for (uint32_t i = 0; i < kEntries; ++i) {
+      Entry e = h_->Dbg(i);
+      if (!e.valid) continue;
+      ++checked;
+      const Lanes want = h_->MemLine(e.line);
+      Require(e.data == want, "provenance-invariant",
+              "resident entry " + Dec(i) + " equals memory's line",
+              "resident entry " + Dec(i) + " holds a stale line");
+    }
+    Require(checked > 0, "provenance-invariant",
+            "at least one resident copy was compared against memory",
+            "no copy was resident to compare");
+  }
+
+  // ----------------------------------------------------------- conservation
+  void Conservation() {
+    h_->Phase("conservation");
+    uint32_t valid = 0;
+    for (uint32_t i = 0; i < kEntries; ++i) {
+      if (h_->Dbg(i).valid) ++valid;
+    }
+    Require(valid == h_->Count(), "",
+            "o_count equals the debug port's live entries",
+            "o_count=" + Dec(h_->Count()) + " debug=" + Dec(valid));
+    Require(h_->HitCtr() > 0, "", "hits covered", "no hits");
+    Require(h_->MissCtr() > 0, "", "misses covered", "no misses");
+    Require(h_->BypassCtr() > 0, "", "bypasses covered", "no bypasses");
+    Require(h_->FillCtr() > 0, "", "fills covered", "no fills");
+    Require(h_->FillRefusedCtr() > 0, "", "refused fills covered", "none");
+    Require(h_->InvCtr() > 0, "", "invalidations covered", "none");
+    Require(h_->RaceRefuseCtr() > 0, "", "racing-hit refusals covered", "none");
+  }
+
+  void BypassAllRegions() {
+    h_->Phase("non-cacheable-ram");
+    const uint32_t line = kRamBase + 0x1000;
+    h_->WriteLine(line, 0xA100);
+    Require(!h_->FillExpectRefused(line, kVpnA, 1, kPermRW), "non-cacheable-ram",
+            "a RAM fill is refused under a non-cacheable map",
+            "a RAM fill was accepted");
+    Require(h_->FindEntry(line, 1, kPermRW) < 0, "non-cacheable-ram",
+            "no RAM line is resident", "a RAM line is resident");
+    Probe p = h_->ProbeLookup(line, kVpnA, 1, kPermRW, false);
+    Require(!p.hit && p.bypass, "non-cacheable-ram",
+            "a RAM lookup is bypassed", "a RAM lookup was served");
+    h_->CommitLookup();
+    Require(h_->Count() == 0, "non-cacheable-ram",
+            "the buffer is empty",
+            Dec(h_->Count()) + " entries were cached");
+    Require(h_->BypassCtr() > 0 && h_->FillRefusedCtr() > 0, "non-cacheable-ram",
+            "bypass and refusal are covered", "a counter did not move");
+  }
+
+  std::string Summary() {
+    char detail[360];
+    std::snprintf(detail, sizeof(detail),
+                  "llb-fresh: hit=%u miss=%u bypass=%u fill=%u fill_refused=%u "
+                  "inv=%u race_refuse=%u checks=%d cycles=%llu",
+                  h_->HitCtr(), h_->MissCtr(), h_->BypassCtr(), h_->FillCtr(),
+                  h_->FillRefusedCtr(), h_->InvCtr(), h_->RaceRefuseCtr(),
+                  rep_->checks(), static_cast<unsigned long long>(h_->Cycles()));
+    return std::string(detail);
+  }
+
+  Harness* h_;
+  mosaic::Reporter* rep_;
+
+  static constexpr uint32_t kVpnA = 0x0000001;
+  static constexpr uint32_t kVpnB = 0x0000002;
+};
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -1045,17 +1549,29 @@ int main(int argc, char** argv) {
   std::string detail;
   try {
     Harness harness(&dut, &clk, &reporter, options.max_cycles);
-    Campaign campaign(&harness, &reporter);
-    if (!kRamCacheable) {
-      // This profile's platform map declares RAM non-cacheable, so the
-      // freshness campaign has nothing it is permitted to cache. The bypass
-      // rules are still real and are still checked -- a profile where nothing
-      // may be cached must not silently cache anyway.
-      detail = campaign.RunNonCacheableProfile() +
-               " (profile declares RAM non-cacheable: the map-driven bypass is "
-               "verified; the freshness rules need a cacheable region)";
+    if (options.case_id == "llb.freshness_and_ownership") {
+      // The V-061 campaign over the same DUT and the same oracle.
+      FreshnessCampaign campaign(&harness, &reporter);
+      if (!kRamCacheable) {
+        detail = campaign.RunNonCacheableProfile() +
+                 " (profile declares RAM non-cacheable: the map-driven bypass is "
+                 "verified; the freshness rules need a cacheable region)";
+      } else {
+        detail = campaign.Run();
+      }
     } else {
-      detail = campaign.Run();
+      Campaign campaign(&harness, &reporter);
+      if (!kRamCacheable) {
+        // This profile's platform map declares RAM non-cacheable, so the
+        // freshness campaign has nothing it is permitted to cache. The bypass
+        // rules are still real and are still checked -- a profile where nothing
+        // may be cached must not silently cache anyway.
+        detail = campaign.RunNonCacheableProfile() +
+                 " (profile declares RAM non-cacheable: the map-driven bypass is "
+                 "verified; the freshness rules need a cacheable region)";
+      } else {
+        detail = campaign.Run();
+      }
     }
   } catch (const std::exception& f) {
     passed = false;

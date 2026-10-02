@@ -2641,6 +2641,26 @@
    "profiles": [
     "p1"
    ]
+  },
+  "llb.freshness_and_ownership": {
+   "task": "V-061",
+   "profiles": [
+    "p1"
+   ],
+   "top": "mosaic_llb_tb",
+   "rtl": [
+    "rtl/core/mosaic_pkg.sv",
+    "rtl/core/mosaic_cache.sv",
+    "rtl/core/mosaic_llb.sv"
+   ],
+   "sv": [
+    "sim/tb/mosaic_llb_tb.sv"
+   ],
+   "cpp": [
+    "sim/unit/tb_llb.cpp"
+   ],
+   "max_cycles": 200000,
+   "seed": 1
   }
  }
 }

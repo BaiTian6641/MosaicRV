@@ -81,7 +81,8 @@
     "I-062",
     "I-063",
     "I-084",
-    "I-064"
+    "I-064",
+    "V-061"
   ],
   "evidence": {
     "I-001": {
@@ -1006,6 +1007,19 @@
       "verdict": "PASS",
       "notes": "TWO ARCHITECTURAL DOMAINS ON ONE PHYSICAL MACHINE -- the plan's premise made real, and the first time anything in this project has tested that two domains can coexist without corrupting each other. Case PASS under profile p3 (the two-hart profile) from a clean build, verified here by the integration lead: RESULT PASS multihart.isolation. THE CONSTRUCTION: independent PC, rename tables, ROB, CSRs, load/store queues and interrupt state per hart, with the memory and cache service shared, statically partitioned as the card requires for a first cut, and EVERY PACKET CARRYING ITS HART OWNERSHIP so a response is matched to the identity that asked rather than to arrival order -- the same identity discipline the store queue, the TLB, the MSHR and the chaining network each needed. THE ISOLATION PROPERTIES THE CARD NAMES are the acceptance criteria and each has its control: a fault or a flush in one hart does not lose the other hart's in-flight requests or state; NO GLOBAL REDIRECT clears the other hart (the card's first fail mode); and hart-identity reuse cannot confuse a response (the second). The case runs DIFFERENT programs with different ASIDs on the two harts -- deliberately different, because two identical programs on two harts would pass with the domains cross-wired -- and compares each hart's retirement stream and signature against its own reference, while a shared-structure counter shows both harts actually used the same memory service. The single-hart machine is unchanged: lint is 64 sources clean and core.mem_program still passes with the two-hart module present. THE RECORD KEEPS TWO NOTES IT SHOULD NOT HIDE: (1) this is STATIC partitioning -- the plan's dynamic sharing, migration and reconfiguration are later work, and I-031's ownership FSM remains compiled but not instantiated, so nothing here claims dynamic resource movement; (2) the lane's edits were swept into the integration lead's commit by a `git add -A` while the lane was still running, which is a process slip this ledger has recorded once before -- the state happened to be green when swept and the lead re-verified it (lint 64/64, core.mem_program PASS, this case PASS) before recording, but the rule stands: commit only what has been verified, and never with `-A` while another lane is mid-edit.",
       "report": "results/reports/I-064-multihart.md"
+    },
+    "V-061": {
+      "cases": [
+        "llb.freshness_and_ownership"
+      ],
+      "commands": [
+        "python3 tools/run_unit.py --profile p1 --case llb.freshness_and_ownership",
+        "python3 tools/run_unit.py --profile p1 --case llb.stale_copy_invalidation",
+        "python3 tools/run_llb_freshness_controls.py"
+      ],
+      "verdict": "PASS",
+      "notes": "Delivered as a second campaign in sim/unit/tb_llb.cpp (main branches on --case), reusing the I-060 Harness/host-memory oracle. Lead re-ran the case: RESULT PASS llb.freshness_and_ownership llb-fresh: hit=31 miss=17 bypass=6 fill=31 fill_refused=12 inv=14 race_refuse=1 checks=0 cycles=107. NOTE ON THAT LINE: checks=0 is a reporting defect in this harness, not a coverage statement -- rep_->checks() is not the counter the harness's Require wrapper increments (the pre-existing llb.stale_copy_invalidation case prints checks=0 for the same reason), so the ledger does NOT quote a check count from it. What proves the stimulus arrived is the case's own coverage requirements, which PASS: hits, misses, bypasses, fills, refused fills and invalidations each moved a counter, and every hit is compared word-for-word against an independent memory oracle with every resident entry checked at rest. Five controls, each rebuilt from a deleted build directory with its -D on the Verilator command line and in -CFLAGS, all exit 1 with a named first failure and a binary hash distinct from the shipping fb6b1dd90314ddab: STORE_NO_INVALIDATE 1bbb8fa57ee907f0 (local-writer-freshness), MMIO_HIT 14cb02cd088b60ba (hit-miss-bypass), RACE_STALE_HIT 7b55ede690dd7ec4 (misprediction-race/hit-store), ASID_SWITCH_NO_INVALIDATE babc65022ef8d729 (ownership-context-change), VA_KEYED 8eec1f8401f87e90 (same-address-aliasing). GAPS NAMED RATHER THAN CHECKED: lane reassignment / owner-domain transfer is NOT TESTED because mosaic_llb.sv has no owner, lane or domain field or port (its key is {physical line, ASID, leaf permissions}), the lane broker does not connect to it, and the LLB is not instantiated in mosaic_core.sv -- there is no mechanism to drive or observe a leaked owner's data, so no check was invented; version/generation checking is untestable because no version field exists (the design takes the conservative flush-and-refuse path); there is no invalidation-acknowledgement port, so same-cycle removal is checked as the closest observable; cross-hart shootdown, DMA/device-master topologies, the prefetcher and o_evict_valid_o are not driven in a single-hart harness (snoop ports stand in); a non-idempotent-but-cacheable region would not be excluded (the LLB gates on mosaic_pa_cacheable, and the map agreement that makes that sufficient IS checked). No RTL changed by this package.",
+      "report": "results/reports/llb.freshness_and_ownership.md"
     }
   },
   "blocked_tasks": {},
