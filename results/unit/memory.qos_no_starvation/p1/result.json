@@ -1,15 +1,15 @@
 {
   "schema_version": 1,
-  "case": "rvv.partial_fault_restart",
+  "case": "memory.qos_no_starvation",
   "verdict": "PASS",
-  "detail": "checks=613 cells=48 interrupts=6 fof=12 restarts=3 cycles=2859",
+  "detail": "QoS memory arbitration holds: 112152 per-cycle checks over 6819 cycles",
   "seed": 1,
   "max_cycles": 200000,
-  "checks": 613,
+  "checks": 12,
   "failures": 0,
   "image": "",
   "expect": "",
   "tool": "Verilator 5.052 2026-09-05",
-  "timestamp": "2026-10-02T19:06:27Z",
+  "timestamp": "2026-10-02T19:12:40Z",
   "first_mismatch": ""
 }

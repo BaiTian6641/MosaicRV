@@ -3089,6 +3089,10 @@ struct LsuMem {
   // this map is non-empty it decides the fault; otherwise the element/field
   // match does, which is what the I-056 and I-057 phases use.
   std::vector<bool> fault_bytes;
+  // I-057 stop path: extra cycles a *faulting* response is held before it is
+  // returned, so that a later element has been issued (and is genuinely in
+  // flight) when the fault is reported. Zero for every other case.
+  int fault_hold = 0;
   int req_count = 0;
   int device_reqs = 0;
   int ram_reqs = 0;
@@ -3134,13 +3138,16 @@ struct LsuMem {
     return r >= 0 && regions[static_cast<size_t>(r)].device;
   }
 
-  // Clear the byte-granular fault map and any element-keyed fault.
+  // Clear the byte-granular fault map and any element-keyed fault. The map is
+  // emptied rather than filled with `false`: `Faults` tests `!fault_bytes.empty()`
+  // to choose the byte path, so a non-empty all-false map would silently make an
+  // element-keyed fault unreachable.
   void ClearFaults() {
     fault_enable = false;
     fault_all = false;
     fault_elem = -1;
     fault_field = 0;
-    fault_bytes.assign(static_cast<size_t>(kSize), false);
+    fault_bytes.clear();
   }
 
   // Fault an element's bytes, addressed as `addr`..`addr+be-1`.
@@ -3259,6 +3266,13 @@ struct LsuObs {
   bool desc_fault_valid = false;
   int desc_fault_elem = 0, desc_fault_code = 0;
   uint64_t desc_bm_lo = 0, desc_bm_hi = 0;
+  // ---- I-057 stop path ---------------------------------------------------
+  // How many requests the harness had in flight (accepted, no response yet)
+  // when this observation was taken, and the element of the oldest one. The
+  // stop-path case uses it to prove the scenario is not vacuous: a response was
+  // genuinely in flight at the moment the stop was taken.
+  int flight = 0;
+  int flight_head = -1;
 };
 
 class Lsu {
@@ -3297,14 +3311,20 @@ class Lsu {
     int re = 0, rf = 0;
     bool rfault = false;
     uint64_t rdata = 0;
-    if (!pending_.empty() && pending_.front().age >= mem_->latency) {
-      const Pending& p = pending_.front();
-      rsp = true;
-      re = p.elem;
-      rf = p.field;
-      rdata = mem_->Beat(p.addr);
-      rfault = mem_->fault_enable && mem_->Faults(p.addr, p.mask, re, rf);
-      if (!rfault && p.we) mem_->Apply(p.addr, p.mask, p.wdata);
+    if (!pending_.empty()) {
+      const Pending& p0 = pending_.front();
+      const bool front_faults =
+          mem_->fault_enable && mem_->Faults(p0.addr, p0.mask, p0.elem, p0.field);
+      const int need = mem_->latency + (front_faults ? mem_->fault_hold : 0);
+      if (p0.age >= need) {
+        const Pending& p = pending_.front();
+        rsp = true;
+        re = p.elem;
+        rf = p.field;
+        rdata = mem_->Beat(p.addr);
+        rfault = front_faults;
+        if (!rfault && p.we) mem_->Apply(p.addr, p.mask, p.wdata);
+      }
     }
 
     d_->clk = 0;
@@ -3461,6 +3481,8 @@ class Lsu {
     }
     if (rsp) pending_.erase(pending_.begin());
     for (size_t i = 0; i < pending_.size(); ++i) pending_[i].age++;
+    o.flight = static_cast<int>(pending_.size());
+    o.flight_head = pending_.empty() ? -1 : pending_.front().elem;
 
     clk_->Tick();
     return o;
@@ -6170,6 +6192,491 @@ void RunVecRestartCase(Vmosaic_vec_tb* dut, ClockDriver* clk, Reporter* rep,
 }
 
 // ============================================================================
+// I-057 -- the stop path: the disposition of an in-flight load
+// (CASE=rvv.stop_path_inflight).
+//
+// A vector memory macro can stop in more than one way, and the architecture
+// decides what happens to a response that is still in flight by one sentence:
+// an element that has already **committed** must not be discarded, and an
+// element that will be **re-executed** must not be written back. This case
+// drives each stop kind with a load in flight at the moment the stop is taken
+// and checks the architectural outcome -- the destination element, the memory
+// side effect, and the re-execution -- against an expectation computed here
+// from that sentence, never read from the DUT.
+//
+// The kinds, and what each one means for an in-flight response:
+//
+//   element fault at k    partial: [0,k) committed, [k,vl) re-executed.
+//                         An in-flight response for an element >= k is stale
+//                         and must be discarded; the prefix is written back.
+//   whole-macro trap      nothing committed (here: a fault at element 0, and
+//                         the coalesced-group fallback), so every element is
+//                         re-executed and every in-flight response is discarded.
+//   redirect / cancel     the boundary stop a precise interrupt takes at
+//                         element b: [0,b) committed, nothing at or after b
+//                         issued, the resume re-executes [b,vl). Every response
+//                         in flight is for an element < b and must be WRITTEN
+//                         BACK. This is where the coalescing lane's probe found
+//                         the defect (`wf_push_c` gated by `abort_q`); the case
+//                         asserts the prefix and is the check that replaced the
+//                         probe.
+//   lane broker drain     not a stop: I-059's broker waits for the macro to
+//                         drain and never asserts `stop_i`. The macro completes
+//                         and every response is written back. The case paces
+//                         the memory to keep the pipeline full and requires the
+//                         complete, undiscarded result.
+//
+// A store is issued strictly (limit 1), so no store response can be in flight
+// at a boundary stop; the store rows carry the resume/no-duplicate-side-effect
+// half of the rule (a resume that re-issued an already-completed element would
+// write a byte twice).
+// ============================================================================
+
+enum : int { SK_FAULT = 0, SK_WHOLE = 1, SK_REDIRECT = 2, SK_DRAIN = 3, SK_KIND_COUNT = 4 };
+
+const char* StopKindName(int k) {
+  switch (k) {
+    case SK_FAULT: return "element-fault";
+    case SK_WHOLE: return "whole-macro-trap";
+    case SK_REDIRECT: return "redirect-cancel";
+    case SK_DRAIN: return "lane-broker-drain";
+    default: return "?";
+  }
+}
+
+struct StopCoverage {
+  int cells[SK_KIND_COUNT] = {};
+  int resume_cells = 0;
+  int inflight_cells = 0;
+};
+
+struct StopRun {
+  LsuObs fin;                 // the cycle `done` pulsed
+  LsuObs post;                // after the controller walked the committed elements
+  bool captured = false;      // a stop or a fault was observed
+  int inflight_at_stop = 0;   // responses in flight when it was taken
+  int head_at_stop = -1;      // element of the oldest one
+  int stop_elem = -1;
+};
+
+// Run one macro, requesting a boundary stop once `stop_after_elems` elements
+// have been offered (or injecting a fault at `fault_elem`), and stop the
+// observation at the cycle the macro finishes. `mem_ready_after_stop` keeps the
+// memory ready so the request pipeline stays full and a response is genuinely
+// in flight when the stop is taken.
+StopRun StopRunMacro(Cfg* cfg, Vec* vec, Lsu* lsu, LsuMem* mem, const RstCfg& R,
+                     int vstart, int fault_elem, int fault_code, int stop_after_elems,
+                     bool mem_ready_after_stop) {
+  (void)vec;
+  LsuConfig(cfg, R.sew_l, VlmulOfExp(R.lmul), static_cast<uint64_t>(R.vl), vstart,
+            R.vta, R.vma);
+  mem->ClearFaults();
+  if (fault_elem >= 0) {
+    mem->fault_enable = true;
+    mem->fault_all = false;
+    mem->fault_elem = fault_elem;
+    mem->fault_field = 0;
+  }
+  RstAlloc(lsu, R.vl, vstart, Vtypei(R.sew_l, R.lmul));
+
+  LsuStim s;
+  RstFillStim(&s, R, true);
+  s.fault_code = fault_code;
+  LsuObs o = lsu->Step(s);
+
+  StopRun r;
+  bool stopping = false;
+  int guard = 0;
+  while (!o.done && ++guard < 40000) {
+    if (!r.captured && (o.stopped || o.trap)) {
+      r.captured = true;
+      r.inflight_at_stop = o.flight;
+      r.head_at_stop = o.flight_head;
+    }
+    if (stop_after_elems >= 0 && o.elems >= stop_after_elems) stopping = true;
+    LsuStim t;
+    RstFillStim(&t, R, false);
+    t.fault_code = fault_code;
+    if (stopping) {
+      t.intr = true;
+      t.mem_ready = mem_ready_after_stop;
+    }
+    o = lsu->Step(t);
+  }
+  if (!r.captured && (o.stopped || o.trap)) {
+    r.captured = true;
+    r.inflight_at_stop = o.flight;
+    r.head_at_stop = o.flight_head;
+  }
+  r.fin = o;
+  r.stop_elem = static_cast<int>(o.stop_elem);
+  // let the controller finish its walk over the committed elements
+  while (o.rst_busy && ++guard < 40000) {
+    LsuStim t;
+    RstFillStim(&t, R, false);
+    o = lsu->Step(t);
+  }
+  r.post = o;
+  mem->ClearFaults();
+  return r;
+}
+
+// The prefix of the request stream a resume from `start` must issue: exactly the
+// elements [start, vl), in order, and nothing else.
+bool StopResumeIssued(const std::vector<LsuRec>& reqs, size_t from, int start, int vl) {
+  if (static_cast<int>(reqs.size() - from) != vl - start) return false;
+  for (int j = 0; j < vl - start; ++j) {
+    if (reqs[from + static_cast<size_t>(j)].elem != start + j) return false;
+  }
+  return true;
+}
+
+// --- kind 1: an element fault at k, with a later element in flight ----------
+void PhaseStopFault(Cfg* cfg, Vec* vec, Lsu* lsu, LsuMem* mem, Reporter* rep,
+                    StopCoverage* cov) {
+  const int vl = 6, sew_l = 3, lmul = 0, vd = 8;
+  const int ks[2] = {2, 3};
+  // Hold the faulting response so the next element has been issued by the time
+  // the fault is reported: the later element is then genuinely in flight, and
+  // the discard is a real decision rather than a race the case would win by
+  // accident.
+  mem->fault_hold = 4;
+  for (int ki = 0; ki < 2; ++ki) {
+    const int k = ks[ki];
+    mem->OneRam();
+    mem->ResetCounters();
+    RstCfg R;
+    R.mode = LS_UNIT; R.we = false; R.vl = vl; R.sew_l = sew_l; R.lmul = lmul;
+    R.vd = vd; R.base = 0x8000 + 0x40 * ki;
+    lsu->ClearReqs();
+    HostVrf vf;
+    std::vector<uint64_t> old(static_cast<size_t>(vl), 0);
+    for (int e = 0; e < vl; ++e) {
+      old[static_cast<size_t>(e)] = Pat(211 * e + 7 * ki + 3) & 0xFFull;
+      vec->Prime(vf, vd, e, sew_l, lmul, old[static_cast<size_t>(e)]);
+    }
+    StopRun r = StopRunMacro(cfg, vec, lsu, mem, R, 0, k, RC_PAGE, -1, true);
+    const std::string name = "element fault at " + Dec(k);
+
+    rep->Check(r.fin.trap && r.fin.trap_elem == k,
+               name + ": packetizer trap=" + Dec(r.fin.trap) + " at " + Dec(r.fin.trap_elem) +
+                   " expected 1/" + Dec(k));
+    rep->Check(r.post.rst_trap && r.post.rst_vstart == k,
+               name + ": controller trap=" + Dec(r.post.rst_trap) + " vstart=" +
+                   Dec(r.post.rst_vstart) + " expected 1/" + Dec(k));
+    // an element strictly after the fault was in flight when it was taken, so
+    // the discard is a real decision and not vacuous
+    rep->Check(r.inflight_at_stop >= 1 && r.head_at_stop > k,
+               name + ": no element after the fault was in flight (flight=" +
+                   Dec(r.inflight_at_stop) + " head=" + Dec(r.head_at_stop) +
+                   "), the discard check would be vacuous");
+    if (r.inflight_at_stop >= 1 && r.head_at_stop > k) cov->inflight_cells += 1;
+
+    bool ok = true;
+    std::string detail;
+    for (int e = 0; e < vl; ++e) {
+      const uint64_t got = vec->MemRead(vd, e, sew_l, lmul);
+      const uint64_t want = (e < k) ? mem->Elem(R.base + static_cast<uint64_t>(e), 1)
+                                    : old[static_cast<size_t>(e)];
+      if (got != want) { ok = false; detail += " dest" + Dec(e); }
+    }
+    rep->Check(ok, name + ": the partial destination is wrong (the committed prefix must be "
+                      "loaded, the faulting and later elements untouched):" + detail);
+
+    // the restart re-executes [k,vl) and nothing else
+    RstFaultClear(lsu);
+    const size_t before = lsu->reqs().size();
+    StopRun r2 = StopRunMacro(cfg, vec, lsu, mem, R, k, -1, RC_NONE, -1, true);
+    rep->Check(!r2.fin.trap && r2.fin.done, name + ": the restart did not complete cleanly");
+    bool ok2 = true;
+    for (int e = 0; e < vl; ++e) {
+      const uint64_t got = vec->MemRead(vd, e, sew_l, lmul);
+      const uint64_t want = mem->Elem(R.base + static_cast<uint64_t>(e), 1);
+      if (got != want) ok2 = false;
+    }
+    rep->Check(ok2, name + ": after the restart an element is not the value the re-execution "
+                        "must produce");
+    rep->Check(r2.post.desc_prefix == vl, name + ": after the restart prefix=" +
+                                               Dec(r2.post.desc_prefix) + " expected " + Dec(vl));
+    rep->Check(StopResumeIssued(lsu->reqs(), before, k, vl),
+               name + ": the restart did not issue exactly elements " + Dec(k) + ".." +
+                   Dec(vl - 1) + " (no committed element may be re-issued)");
+    cov->cells[SK_FAULT] += 1;
+    cov->resume_cells += 1;
+    RstRelease(lsu);
+  }
+  mem->fault_hold = 0;
+}
+
+// --- kind 2: a whole-macro trap (nothing committed) -------------------------
+void PhaseStopWhole(Cfg* cfg, Vec* vec, Lsu* lsu, LsuMem* mem, Reporter* rep,
+                    StopCoverage* cov) {
+  const int vl = 6, sew_l = 3, lmul = 0, vd = 8;
+  mem->OneRam();
+  mem->ResetCounters();
+  RstCfg R;
+  R.mode = LS_UNIT; R.we = false; R.vl = vl; R.sew_l = sew_l; R.lmul = lmul;
+  R.vd = vd; R.base = 0x8800;
+  lsu->ClearReqs();
+  mem->fault_hold = 4;
+  HostVrf vf;
+  std::vector<uint64_t> old(static_cast<size_t>(vl), 0);
+  for (int e = 0; e < vl; ++e) {
+    old[static_cast<size_t>(e)] = Pat(191 * e + 17) & 0xFFull;
+    vec->Prime(vf, vd, e, sew_l, lmul, old[static_cast<size_t>(e)]);
+  }
+  StopRun r = StopRunMacro(cfg, vec, lsu, mem, R, 0, 0, RC_ACCESS, -1, true);
+  const std::string name = "whole-macro trap (fault at 0)";
+
+  rep->Check(r.fin.trap && r.fin.trap_elem == 0 && r.post.rst_vstart == 0,
+             name + ": trap=" + Dec(r.fin.trap) + " at " + Dec(r.fin.trap_elem) +
+                 " vstart=" + Dec(r.post.rst_vstart) + " expected 1/0/0");
+  // nothing committed: every element is re-executed, so an in-flight element
+  // after 0 must be discarded, not written back
+  rep->Check(r.inflight_at_stop >= 1 && r.head_at_stop > 0,
+             name + ": no element after 0 was in flight (flight=" +
+                 Dec(r.inflight_at_stop) + " head=" + Dec(r.head_at_stop) + ")");
+  bool ok = true;
+  std::string detail;
+  for (int e = 0; e < vl; ++e) {
+    const uint64_t got = vec->MemRead(vd, e, sew_l, lmul);
+    if (got != old[static_cast<size_t>(e)]) { ok = false; detail += " dest" + Dec(e); }
+  }
+  rep->Check(ok, name + ": an element took effect even though the whole macro is "
+                    "re-executed:" + detail);
+
+  RstFaultClear(lsu);
+  const size_t before = lsu->reqs().size();
+  StopRun r2 = StopRunMacro(cfg, vec, lsu, mem, R, 0, -1, RC_NONE, -1, true);
+  rep->Check(!r2.fin.trap && r2.fin.done, name + ": the re-execution did not complete cleanly");
+  bool ok2 = true;
+  for (int e = 0; e < vl; ++e) {
+    const uint64_t got = vec->MemRead(vd, e, sew_l, lmul);
+    const uint64_t want = mem->Elem(R.base + static_cast<uint64_t>(e), 1);
+    if (got != want) ok2 = false;
+  }
+  rep->Check(ok2, name + ": the re-execution from 0 did not load every element");
+  rep->Check(StopResumeIssued(lsu->reqs(), before, 0, vl),
+             name + ": the re-execution did not issue exactly elements 0.." + Dec(vl - 1));
+  cov->cells[SK_WHOLE] += 1;
+  cov->resume_cells += 1;
+  RstRelease(lsu);
+  mem->fault_hold = 0;
+}
+
+// --- kind 3: the boundary stop / redirect (the reported defect) -------------
+void PhaseStopRedirect(Cfg* cfg, Vec* vec, Lsu* lsu, LsuMem* mem, Reporter* rep,
+                       StopCoverage* cov) {
+  const int vl = 8, sew_l = 3, lmul = 0, vd = 8, data = 16;
+  for (int we = 0; we < 2; ++we) {
+    mem->OneRam();
+    mem->ResetCounters();
+    RstCfg R;
+    R.mode = LS_UNIT; R.we = (we != 0); R.vl = vl; R.sew_l = sew_l; R.lmul = lmul;
+    R.vd = vd; R.data = data; R.base = 0x9000 + 0x40 * we;
+    lsu->ClearReqs();
+    HostVrf vf;
+    const int grp = we ? data : vd;
+    std::vector<uint64_t> val(static_cast<size_t>(vl), 0);
+    std::vector<uint8_t> pristine;
+    for (int e = 0; e < vl; ++e) {
+      val[static_cast<size_t>(e)] = Pat(97 * e + 31 * we + 9) & 0xFFull;
+      vec->Prime(vf, grp, e, sew_l, lmul, val[static_cast<size_t>(e)]);
+    }
+    pristine = mem->mem;
+
+    // the memory stays ready: the pipeline is full and a response is in flight
+    // when the stop is taken
+    StopRun r = StopRunMacro(cfg, vec, lsu, mem, R, 0, -1, RC_NONE, 4, true);
+    const std::string name = std::string("redirect/cancel boundary stop ") +
+                             (we ? "store" : "load");
+    const int b = r.stop_elem;
+
+    rep->Check(r.fin.done, name + ": the macro never completed");
+    rep->Check(!r.fin.trap, name + ": a boundary stop reported a fault");
+    rep->Check(r.fin.stopped && b >= 1 && b <= vl,
+               name + ": stopped=" + Dec(r.fin.stopped) + " stop_elem=" + Dec(b) +
+                   " is out of range");
+    if (b < 1 || b > vl) { RstRelease(lsu); continue; }
+
+    // the reported boundary is the first element not performed: exactly the
+    // elements [0,b) were offered in this run, so a resume from b cannot
+    // re-issue an element that already completed
+    const int offered = static_cast<int>(lsu->reqs().size());
+    rep->Check(offered == b, name + ": the stop reported boundary " + Dec(b) + " but " +
+                   Dec(offered) + " elements had been offered -- the resume would re-issue "
+                   "an element that already completed and duplicate its effect");
+
+    // the prefix took effect, the boundary and later did not
+    bool ok = true;
+    std::string detail;
+    for (int e = 0; e < vl; ++e) {
+      if (we) {
+        const uint64_t addr = R.base + static_cast<uint64_t>(e);
+        const int writes = mem->byte_writes[static_cast<size_t>(addr & 0xFFFFull)];
+        const uint8_t got = mem->mem[static_cast<size_t>(addr & 0xFFFFull)];
+        if (e < b) {
+          if (writes != 1 || got != static_cast<uint8_t>(val[static_cast<size_t>(e)])) {
+            ok = false; detail += " mem" + Dec(e);
+          }
+        } else if (writes != 0 ||
+                   got != pristine[static_cast<size_t>(addr & 0xFFFFull)]) {
+          ok = false; detail += " mem" + Dec(e);
+        }
+      } else {
+        const uint64_t got = vec->MemRead(vd, e, sew_l, lmul);
+        const uint64_t want = (e < b) ? mem->Elem(R.base + static_cast<uint64_t>(e), 1)
+                                      : val[static_cast<size_t>(e)];
+        if (got != want) { ok = false; detail += " dest" + Dec(e); }
+      }
+    }
+    rep->Check(ok, name + ": the partial state after the stop is wrong (an in-flight load "
+                      "whose element committed must be written back, an element at or after "
+                      "the boundary must be untouched):" + detail);
+
+    // the load row carries the in-flight evidence: with the memory ready the
+    // last pre-boundary element is still in flight when the stop is taken
+    if (!we) {
+      rep->Check(r.inflight_at_stop >= 1 && r.head_at_stop >= 0 && r.head_at_stop < b,
+                 name + ": no element below the boundary was in flight (flight=" +
+                     Dec(r.inflight_at_stop) + " head=" + Dec(r.head_at_stop) + " b=" +
+                     Dec(b) + "), the write-back check would be vacuous");
+      if (r.inflight_at_stop >= 1 && r.head_at_stop >= 0 && r.head_at_stop < b) {
+        cov->inflight_cells += 1;
+      }
+    }
+
+    // the resume from b re-executes [b,vl) and nothing before it
+    RstFaultClear(lsu);
+    const size_t before = lsu->reqs().size();
+    StopRun r2 = StopRunMacro(cfg, vec, lsu, mem, R, b, -1, RC_NONE, -1, true);
+    rep->Check(!r2.fin.trap && r2.fin.done, name + ": the resume did not complete cleanly");
+    rep->Check(StopResumeIssued(lsu->reqs(), before, b, vl),
+               name + ": the resume did not issue exactly elements " + Dec(b) + ".." +
+                   Dec(vl - 1) + " (a re-issued completed element duplicates an effect)");
+    bool ok2 = true;
+    for (int e = 0; e < vl; ++e) {
+      if (we) {
+        const uint64_t addr = R.base + static_cast<uint64_t>(e);
+        if (mem->byte_writes[static_cast<size_t>(addr & 0xFFFFull)] != 1) ok2 = false;
+        if (mem->mem[static_cast<size_t>(addr & 0xFFFFull)] !=
+            static_cast<uint8_t>(val[static_cast<size_t>(e)])) {
+          ok2 = false;
+        }
+      } else {
+        const uint64_t got = vec->MemRead(vd, e, sew_l, lmul);
+        if (got != mem->Elem(R.base + static_cast<uint64_t>(e), 1)) ok2 = false;
+      }
+    }
+    rep->Check(ok2, name + ": after the resume an element is wrong or a side effect was "
+                        "duplicated or lost");
+    rep->Check(r2.post.desc_prefix == vl, name + ": after the resume prefix=" +
+                                               Dec(r2.post.desc_prefix) + " expected " + Dec(vl));
+    cov->cells[SK_REDIRECT] += 1;
+    cov->resume_cells += 1;
+    RstRelease(lsu);
+  }
+}
+
+// --- kind 4: the lane broker's drain (no stop, nothing discarded) -----------
+void PhaseStopDrain(Cfg* cfg, Vec* vec, Lsu* lsu, LsuMem* mem, Reporter* rep,
+                    StopCoverage* cov) {
+  const int vl = 8, sew_l = 3, lmul = 0, vd = 8, data = 16;
+  for (int we = 0; we < 2; ++we) {
+    mem->OneRam();
+    mem->ResetCounters();
+    RstCfg R;
+    R.mode = LS_UNIT; R.we = (we != 0); R.vl = vl; R.sew_l = sew_l; R.lmul = lmul;
+    R.vd = vd; R.data = data; R.base = 0xA000 + 0x40 * we;
+    lsu->ClearReqs();
+    HostVrf vf;
+    const int grp = we ? data : vd;
+    std::vector<uint64_t> val(static_cast<size_t>(vl), 0);
+    for (int e = 0; e < vl; ++e) {
+      val[static_cast<size_t>(e)] = Pat(113 * e + 41 * we + 7) & 0xFFull;
+      vec->Prime(vf, grp, e, sew_l, lmul, val[static_cast<size_t>(e)]);
+    }
+    LsuConfig(cfg, R.sew_l, VlmulOfExp(R.lmul), static_cast<uint64_t>(R.vl), 0, R.vta, R.vma);
+    mem->ClearFaults();
+    RstAlloc(lsu, R.vl, 0, Vtypei(R.sew_l, R.lmul));
+
+    // pace the memory so the pipeline is genuinely occupied; the broker's drain
+    // never asserts `stop_i`, it waits for exactly this macro to finish
+    LsuStim s;
+    RstFillStim(&s, R, true);
+    LsuObs o = lsu->Step(s);
+    int maxf = o.flight;
+    bool ready = true;
+    int guard = 0;
+    while (!o.done && ++guard < 40000) {
+      LsuStim t;
+      RstFillStim(&t, R, false);
+      t.mem_ready = ready;
+      ready = !ready;
+      o = lsu->Step(t);
+      if (o.flight > maxf) maxf = o.flight;
+    }
+    const std::string name = std::string("lane-broker drain ") + (we ? "store" : "load");
+    rep->Check(o.done && !o.stopped && !o.trap,
+               name + ": done=" + Dec(o.done) + " stopped=" + Dec(o.stopped) + " trap=" +
+                   Dec(o.trap) + " (the drain is not a stop)");
+    rep->Check(maxf >= 1, name + ": the pipeline was never occupied (max flight " + Dec(maxf) + ")");
+    bool ok = true;
+    for (int e = 0; e < vl; ++e) {
+      if (we) {
+        const uint64_t addr = R.base + static_cast<uint64_t>(e);
+        if (mem->byte_writes[static_cast<size_t>(addr & 0xFFFFull)] != 1) ok = false;
+        if (mem->mem[static_cast<size_t>(addr & 0xFFFFull)] !=
+            static_cast<uint8_t>(val[static_cast<size_t>(e)])) {
+          ok = false;
+        }
+      } else {
+        const uint64_t got = vec->MemRead(vd, e, sew_l, lmul);
+        if (got != mem->Elem(R.base + static_cast<uint64_t>(e), 1)) ok = false;
+      }
+    }
+    rep->Check(ok, name + ": an element was discarded or a side effect lost while the macro "
+                        "drained");
+    while (o.rst_busy && ++guard < 40000) {
+      LsuStim t;
+      RstFillStim(&t, R, false);
+      o = lsu->Step(t);
+    }
+    cov->cells[SK_DRAIN] += 1;
+    RstRelease(lsu);
+  }
+}
+
+void RunStopPathCase(Vmosaic_vec_tb* dut, ClockDriver* clk, Reporter* rep,
+                     StopCoverage* cov) {
+  Cfg cfg(dut, clk);
+  Vec vec(dut, clk);
+  LsuMem mem;
+  Lsu lsu(dut, clk);
+  lsu.BindMem(&mem);
+
+  PhaseStopFault(&cfg, &vec, &lsu, &mem, rep, cov);
+  PhaseStopWhole(&cfg, &vec, &lsu, &mem, rep, cov);
+  PhaseStopRedirect(&cfg, &vec, &lsu, &mem, rep, cov);
+  PhaseStopDrain(&cfg, &vec, &lsu, &mem, rep, cov);
+
+  // coverage is asserted, not implied: every stop kind ran, and the in-flight
+  // write-back and the in-flight discard were each observed on a real flight
+  for (int k = 0; k < SK_KIND_COUNT; ++k) {
+    rep->Check(cov->cells[k] >= 1, std::string("coverage: stop kind ") + StopKindName(k) +
+                                       " never ran");
+  }
+  rep->Check(cov->cells[SK_FAULT] == 2, "coverage: " + Dec(cov->cells[SK_FAULT]) +
+                                            " element-fault cells ran, expected 2");
+  rep->Check(cov->cells[SK_REDIRECT] == 2, "coverage: " + Dec(cov->cells[SK_REDIRECT]) +
+                                               " boundary-stop cells ran, expected 2");
+  rep->Check(cov->inflight_cells >= 2, "coverage: only " + Dec(cov->inflight_cells) +
+                                           " cells observed a genuine in-flight response");
+  rep->Check(cov->resume_cells >= 4, "coverage: only " + Dec(cov->resume_cells) +
+                                         " cells exercised a resume");
+}
+
+// ============================================================================
 // I-058 -- vector chaining, element readiness and the two element-granular
 // hazards.  CASE=rvv.chaining_hazards.
 //
@@ -7815,11 +8322,12 @@ void PhaseCoalStop(Cfg* cfg, Vec* vec, Lsu* lsu, LsuMem* mem, Reporter* rep,
       rep->Check(b > 0 && b < vl, name + ": stop_elem " + Dec(b) + " is out of range");
 
       // The boundary is inviolable: nothing at or above stop_elem took effect,
-      // in either build. Under coalescing the pending group lies strictly below
-      // the boundary and must have been performed; the uncoalesced pacing leaves
-      // the last pre-boundary element in flight when the unit stops, which is a
-      // property of the I-057 stop path, not of the coalescer (see the report),
-      // so the pre-boundary elements are asserted only for the coalesced run.
+      // in either build. The elements strictly below it took effect -- the
+      // in-flight response a boundary stop leaves outstanding is for one of
+      // them and is written back (I-057's stop rule) -- so the prefix is
+      // asserted for both the coalesced and the uncoalesced run. This was the
+      // I-061 lane's probe while the uncoalesced path discarded that response;
+      // it is a check now.
       for (int e = 0; e < vl; ++e) {
         if (e >= b) {
           if (we != 0) {
@@ -7836,7 +8344,7 @@ void PhaseCoalStop(Cfg* cfg, Vec* vec, Lsu* lsu, LsuMem* mem, Reporter* rep,
                            mosaic::Hex(got, 16) + " expected the untouched " +
                            mosaic::Hex(old[static_cast<size_t>(e)], 16));
           }
-        } else if (coalesce != 0) {
+        } else {
           if (we != 0) {
             const uint64_t addr = CoalAddr(LS_UNIT, kCoalRamBase, 0, e, 1);
             const uint8_t got = mem->mem[static_cast<size_t>(addr & 0xFFFFull)];
@@ -7907,6 +8415,7 @@ int main(int argc, char** argv) {
   RstCoverage rst_cov;
   ChainCov chain_cov;
   CoalCoverage coal_cov;
+  StopCoverage stop_cov;
 
   std::string detail;
   bool aborted = false;
@@ -7936,6 +8445,8 @@ int main(int argc, char** argv) {
       RunVecFpCase(&dut, &clk, &reporter, &fp_cov);
     } else if (options.case_id == "rvv.partial_fault_restart") {
       RunVecRestartCase(&dut, &clk, &reporter, &rst_cov);
+    } else if (options.case_id == "rvv.stop_path_inflight") {
+      RunStopPathCase(&dut, &clk, &reporter, &stop_cov);
     } else if (options.case_id == "rvv.chaining_hazards") {
       RunVecChainCase(&dut, &clk, &reporter, &chain_cov);
     } else if (options.case_id == "rvv.vtype_layout") {
@@ -8005,6 +8516,14 @@ int main(int argc, char** argv) {
                                        Dec(rst_cov.intr_cells) + " fof=" + Dec(rst_cov.fof_cells) +
                                        " restarts=" + Dec(rst_cov.restart_cells) +
                                        " cycles=" + Dec(cycles));
+  }
+  if (options.case_id == "rvv.stop_path_inflight") {
+    return reporter.Finish("PASS", "checks=" + Dec(reporter.checks()) + " kinds=" +
+                                       Dec(SK_KIND_COUNT) + " cells=" +
+                                       Dec(stop_cov.cells[SK_FAULT] + stop_cov.cells[SK_WHOLE] +
+                                           stop_cov.cells[SK_REDIRECT] + stop_cov.cells[SK_DRAIN]) +
+                                       " resumes=" + Dec(stop_cov.resume_cells) + " inflight=" +
+                                       Dec(stop_cov.inflight_cells) + " cycles=" + Dec(cycles));
   }
   if (options.case_id == "rvv.chaining_hazards") {
     return reporter.Finish("PASS", "checks=" + Dec(reporter.checks()) + " orders=" +

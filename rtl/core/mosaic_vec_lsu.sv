@@ -148,6 +148,58 @@
 // fault path without a fault: it is checked only at the item boundary in
 // ST_SCAN, and it sets `stopped_o`, never `trap_o`.
 //
+// --------------------------------- the stop rule and in-flight dispositions
+//
+// A stop is not one thing. The architecture decides the disposition of a
+// response that is still in flight when the stop is taken by one sentence:
+//
+//   an element that has already **committed** must not be discarded; an element
+//   that will be **re-executed** must not be written back (the re-execution
+//   produces the right value, and the stale one must not land in between).
+//
+// The stop kinds this unit can see, and what each one means for an in-flight
+// response:
+//
+//   element fault at k   a synchronous fault at element k commits the elements
+//                        strictly before k and re-executes k and every later
+//                        element. Responses in flight when the fault response
+//                        arrives are therefore for elements >= k and must be
+//                        DISCARDED. Because the response stream is in order,
+//                        every response for an element < k has already been
+//                        written back when the fault response arrives, so no
+//                        committed element is lost. This is the `discard_q`
+//                        path: `abort_q` and `discard_q` are set together.
+//   boundary stop at b   a precise interrupt at the element boundary b commits
+//                        the elements strictly before b and issues nothing at
+//                        or after b. Every response still in flight is
+//                        therefore for an element < b, which has already taken
+//                        effect, and must be WRITTEN BACK. This is the
+//                        `abort_q`-only path: only `abort_q` is set, so the
+//                        write-back push is not suppressed. Discarding here
+//                        loses an architectural update -- the defect the I-061
+//                        lane probed (`wf_push_c` was gated by `abort_q`, which
+//                        conflated the two kinds). `MOSAIC_VEC_LSU_MUTANT_
+//                        STOP_DISCARD` re-injects exactly that defect.
+//   whole-macro trap     a trap that reports the macro's own start (nothing
+//                        committed -- reachable here as a fault at element 0,
+//                        and as the coalesced-group fallback that reports the
+//                        group's first element). Every element is re-executed,
+//                        so every in-flight response is discarded: the fault
+//                        path above.
+//   redirect / cancel    a pipeline redirect that kills the macro before it
+//                        retires; nothing committed, everything re-fetched.
+//                        There is no such input on this unit and it is not
+//                        claimed; if one is added it must set `discard_q` (and
+//                        `abort_q`) exactly as the fault path does, because the
+//                        abort-only path would wrongly write back.
+//
+// The invariant that makes the in-order response stream sufficient: the unit
+// offers items in ascending logical order, so a response for element j proves
+// every response for an element < j has already been processed. A stop that
+// keeps a *prefix* of the elements therefore never sees a response for the
+// prefix after the stop; only the fault path can have later-element responses
+// outstanding, and it discards them.
+//
 // ------------------------------------------------------ ordering and the network
 //
 // The indexed forms are provided in both an *ordered* form (`vluxei`/`vsuxei`,
@@ -220,6 +272,17 @@
 //                         MMIO element is merged with its beat-mates
 //   COALESCE_STORE_ORDER  overlapping-byte stores are merged, so a
 //                         repeated-address pair applies out of element order
+//
+// Three more prove the stop rule (results/reports/I-057-stop-path.md):
+//
+//   STOP_DISCARD     the write-back push is gated by the abort signal, so a
+//                    boundary stop discards an in-flight load whose element has
+//                    already committed (the reported defect)
+//   STOP_WRITEBACK   the discard is dropped altogether, so an in-flight load of
+//                    an element that will be re-executed lands a stale value
+//   STOP_REISSUE     the boundary stop reports the element before the first one
+//                    not performed, so the resume re-issues an element that
+//                    already completed, duplicating an irreversible effect
 // ============================================================================
 
 `default_nettype none
@@ -541,6 +604,17 @@ module mosaic_vec_lsu #(
   logic [31:0] reqctr_r;
   logic [31:0] vrdctr_r;
   logic        abort_q;
+  // `abort_q` stops the unit offering new work; `discard_q` additionally says
+  // the responses still in flight belong to elements that will be *re-executed*,
+  // so their data must not be written back. The two are set together by the
+  // fault path (elements >= k are re-executed) and only `abort_q` is set by the
+  // boundary stop (every in-flight response is for an element strictly before
+  // the boundary and has already taken effect). See the header's stop rule.
+  // Two of the control builds inject a defect that leaves this register read by
+  // nothing, so the lint pragma keeps their evidence a clean build.
+  /* verilator lint_off UNUSEDSIGNAL */
+  logic        discard_q;
+  /* verilator lint_on UNUSEDSIGNAL */
   logic [2:0]  outstanding_q;
   logic [2:0]  vr_kind_q;
 
@@ -1001,6 +1075,17 @@ module mosaic_vec_lsu #(
     end
   end
 
+  // the element a boundary stop reports: the first element not performed, i.e.
+  // the item the scan had reached. `MOSAIC_VEC_LSU_MUTANT_STOP_REISSUE` reports
+  // the element before it, so the resume re-issues an element that already
+  // completed -- a duplicate irreversible effect, caught by the stop-path case.
+  logic [6:0] stop_elem_c;
+`ifdef MOSAIC_VEC_LSU_MUTANT_STOP_REISSUE
+  assign stop_elem_c = (elem_q == 8'd0) ? 7'd0 : (elem_q[6:0] - 7'd1);
+`else
+  assign stop_elem_c = elem_q[6:0];
+`endif
+
   // the tail/mask policy for the current post-pass item
   function automatic logic tail_write_needed();
     begin
@@ -1039,8 +1124,22 @@ module mosaic_vec_lsu #(
     // one write-back per response for a size-1 group; a coalesced group is
     // distributed one member per cycle straight to the VRF by ST_DIST, so the
     // write-back queue only ever holds size-1 entries (and always has room)
+`ifdef MOSAIC_VEC_LSU_MUTANT_STOP_DISCARD
+    // NEGATIVE CONTROL: the reported defect -- the write-back push is gated by
+    // the abort signal, so a *boundary stop* also discards a response whose
+    // element has already committed, losing an architectural update.
     rsp_push_c = rsp_c && !we_q && !mem_rsp_fault_i && !abort_q &&
                  !(gf_coal_q[0] && (gf_n_q[0] > 4'd1)) && wf_room_c;
+`elsif MOSAIC_VEC_LSU_MUTANT_STOP_WRITEBACK
+    // NEGATIVE CONTROL: the discard is dropped, so a response that arrives
+    // after a fault -- for an element that will be re-executed -- is written
+    // back with a stale value.
+    rsp_push_c = rsp_c && !we_q && !mem_rsp_fault_i &&
+                 !(gf_coal_q[0] && (gf_n_q[0] > 4'd1)) && wf_room_c;
+`else
+    rsp_push_c = rsp_c && !we_q && !mem_rsp_fault_i && !discard_q &&
+                 !(gf_coal_q[0] && (gf_n_q[0] > 4'd1)) && wf_room_c;
+`endif
     wf_push_c = rsp_push_c;
   end
 
@@ -1104,6 +1203,7 @@ module mosaic_vec_lsu #(
       reqctr_r       <= 32'd0;
       vrdctr_r       <= 32'd0;
       abort_q        <= 1'b0;
+      discard_q      <= 1'b0;
       outstanding_q  <= 3'd0;
       wf_count_q     <= 3'd0;
       vr_kind_q      <= 3'd0;
@@ -1198,7 +1298,11 @@ module mosaic_vec_lsu #(
             elem_q   <= {1'b0, gf0_first_elem_c};
             field_q  <= 4'd0;
           end else begin
-            abort_q <= 1'b1;
+            // R1: the fault commits the elements strictly before the faulting
+            // one and re-executes it and every later element, so a response
+            // still in flight from a later element is stale -- discard it.
+            abort_q   <= 1'b1;
+            discard_q <= 1'b1;
             trap_r  <= 1'b1;
             trap_code_r <= mem_rsp_fault_code_i;
 `ifdef MOSAIC_VEC_LSU_MUTANT_WHOLE_FAULT
@@ -1317,6 +1421,7 @@ module mosaic_vec_lsu #(
             vrdctr_r    <= 32'd0;
             merge_r     <= 32'd0;
             abort_q     <= 1'b0;
+            discard_q   <= 1'b0;
             outstanding_q <= 3'd0;
             wf_count_q  <= 3'd0;
             loaded_bm_q <= 128'd0;
@@ -1402,6 +1507,7 @@ module mosaic_vec_lsu #(
               // reported for the group's first element rather than dropped.
               replay_q    <= 1'b0;
               abort_q     <= 1'b1;
+              discard_q   <= 1'b1;
               trap_r      <= 1'b1;
               trap_elem_r <= replay_first_q;
               trap_code_r <= replay_code_q;
@@ -1417,7 +1523,7 @@ module mosaic_vec_lsu #(
             // elem_q is the first element not performed. A pending group's
             // items lie before that boundary and must be performed first.
             stopped_r   <= 1'b1;
-            stop_elem_r <= elem_q[6:0];
+            stop_elem_r <= stop_elem_c;
             if (coalesce_q && acc_valid_q) begin
               ret_q   <= RET_STOP;
               state_q <= ST_REQ;
@@ -1548,7 +1654,7 @@ module mosaic_vec_lsu #(
             // group is different -- its items lie *before* the boundary and must
             // be performed -- so the unit waits for the memory instead.
             stopped_r   <= 1'b1;
-            stop_elem_r <= elem_q[6:0];
+            stop_elem_r <= stop_elem_c;
             abort_q     <= 1'b1;
             state_q     <= ST_WAIT;
           end

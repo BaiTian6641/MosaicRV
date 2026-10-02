@@ -2384,8 +2384,7 @@
     "sim/unit/tb_qos.cpp"
    ],
    "max_cycles": 200000,
-   "seed": 1,
-   "pending": true
+   "seed": 1
   },
   "rvv.stop_path_inflight": {
    "task": "I-057",
