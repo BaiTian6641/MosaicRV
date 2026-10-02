@@ -279,6 +279,19 @@ module mosaic_vec_lsu #(
     end
   endfunction
 
+  // NFIELDS is a power of two; its LMUL exponent is log2 of the count.
+  function automatic logic [3:0] nm_nf_log2(input logic [3:0] nf);
+    begin
+      case (nf)
+        4'd1:    nm_nf_log2 = 4'd0;
+        4'd2:    nm_nf_log2 = 4'd1;
+        4'd4:    nm_nf_log2 = 4'd2;
+        4'd8:    nm_nf_log2 = 4'd3;
+        default: nm_nf_log2 = 4'd0;
+      endcase
+    end
+  endfunction
+
   function automatic int nm_vlmax(input int eew_l, input int lmul_e);
     int e;
     begin
@@ -298,13 +311,15 @@ module mosaic_vec_lsu #(
   // byte enables relative to the 8-byte beat holding byte `addr`
   function automatic logic [7:0] nm_byte_mask(input logic [3:0] be, input logic [2:0] lane);
     /* verilator lint_off UNUSEDSIGNAL */
+    logic [15:0] ones;
     logic [15:0] shifted;
     /* verilator lint_on UNUSEDSIGNAL */
     begin
       if (be >= 4'd8) begin
         nm_byte_mask = 8'hFF;
       end else begin
-        shifted = 16'h0001 << (be + {1'b0, lane});
+        ones = (16'h0001 << be) - 16'h0001;   // be width bits, then at the lane
+        shifted = ones << {1'b0, lane};
         nm_byte_mask = shifted[7:0];
       end
     end
@@ -377,6 +392,12 @@ module mosaic_vec_lsu #(
   logic [63:0]           wf_data_q  [0:WFIFO_D-1];
   logic [2:0]            wf_count_q;
 
+  // the byte lane of each accepted request, in issue order: a response does not
+  // carry the address, so the load's element is extracted from the beat with the
+  // lane the request was offered with
+  logic [2:0]            lane_fifo_q [0:3];
+  logic [2:0]            lane_count_q;
+
   // ------------------------------------------------------- derived signals
   logic        is_seg;
   logic        is_indexed;
@@ -422,7 +443,7 @@ module mosaic_vec_lsu #(
              : int'(vl_q);
     tail_end = is_mask ? (VLEN / 8) : nm_vlmax(int'(eew_log2_q), nm_i4(lmul_exp_q));
 
-    be64    = 64'd1 << eew_log2_q;
+    be64    = 64'd1 << (eew_log2_q - 3'd3);   // EEW in bytes
     elem64  = {56'd0, elem_q};
     field64 = {60'd0, field_q};
     nf64    = {60'd0, nf_q};
@@ -475,7 +496,7 @@ module mosaic_vec_lsu #(
       rdw_base_c = data_q;
       rdw_elem_c = elem_q[6:0];
       rdw_sew_c  = eew_log2_q;
-      rdw_lmul_c = nf_q;
+      rdw_lmul_c = nm_nf_log2(nf_q);
     end else if (is_mask) begin
       rdw_base_c = data_q;
       rdw_elem_c = elem_q[6:0];
@@ -574,7 +595,7 @@ module mosaic_vec_lsu #(
         wr_base_c = vd_q;
         wr_elem_c = wf_elem_q[0];
         wr_sew_c  = eew_log2_q;
-        wr_lmul_c = nf_q;
+        wr_lmul_c = nm_nf_log2(nf_q);
       end else if (is_mask) begin
         wr_base_c = vd_q;
         wr_elem_c = wf_elem_q[0];
@@ -660,7 +681,7 @@ module mosaic_vec_lsu #(
   assign mem_req_wmask_o  = mreq_mask_c;
   assign mem_req_wdata_o  = mreq_wdata_c;
   assign mem_req_we_o     = we_q;
-  assign mem_req_size_o   = 4'(eew_log2_q);
+  assign mem_req_size_o   = 4'(eew_log2_q - 3'd3);   // log2 bytes
   assign mem_req_ordered_o = ordered_q;
 
   // ---------------------------------------------------- item stepping
@@ -696,6 +717,31 @@ module mosaic_vec_lsu #(
       else tail_write_needed = vta_q;
     end
   endfunction
+
+  // ---------------------------------------------------------------- retire
+  // A response and an acceptance can fall in one cycle, so the outstanding
+  // count is updated once from these flags: two blocking-assignment-style
+  // writes to one variable would otherwise have the later one win and lose a
+  // completion.
+  logic accept_c;
+  logic rsp_c;
+  logic wf_pop_c;
+  logic wf_push_c;
+  logic [1:0] wf_tail_c;
+  logic [1:0] lane_tail_c;
+
+  always_comb begin
+    accept_c = (state_q == ST_REQ) && !abort_q && mem_req_ready_i;
+    rsp_c    = mem_rsp_valid_i && (outstanding_q != 3'd0);
+    wf_pop_c = (wf_count_q != 3'd0) && vrf_wr_gnt_i;
+    // the FIFO holds at most WFIFO_D entries; the push index is the count after
+    // any pop this cycle, expressed in two bits because the push is refused at
+    // the full count
+    wf_tail_c = 2'(wf_count_q) - (wf_pop_c ? 2'd1 : 2'd0);
+    lane_tail_c = 2'(lane_count_q) - (rsp_c ? 2'd1 : 2'd0);
+    wf_push_c = mem_rsp_valid_i && !we_q && !mem_rsp_fault_i && !abort_q &&
+                ((wf_count_q != 3'(WFIFO_D)) || wf_pop_c);
+  end
 
   // ================================================================= FSM
   always_ff @(posedge clk_i) begin
@@ -740,6 +786,8 @@ module mosaic_vec_lsu #(
       outstanding_q  <= 3'd0;
       wf_count_q     <= 3'd0;
       vr_kind_q      <= 3'd0;
+      lane_count_q   <= 3'd0;
+      for (int unsigned k = 0; k < 3; ++k) lane_fifo_q[k] <= 3'd0;
       for (int unsigned k = 0; k < WFIFO_D; ++k) begin
         wf_valid_q[k] <= 1'b0;
         wf_elem_q[k]  <= 7'd0;
@@ -768,10 +816,12 @@ module mosaic_vec_lsu #(
         endcase
       end
 
+      // ---- retirement: outstanding count -------------------------------
+      outstanding_q <= outstanding_q + (accept_c ? 3'd1 : 3'd0) -
+                       (rsp_c ? 3'd1 : 3'd0);
+
       // ---- memory response ---------------------------------------------
       if (mem_rsp_valid_i) begin
-        if (outstanding_q != 3'd0) outstanding_q <= outstanding_q - 3'd1;
-
         if (mem_rsp_fault_i && !abort_q) begin
           abort_q <= 1'b1;
           trap_r  <= 1'b1;
@@ -782,19 +832,20 @@ module mosaic_vec_lsu #(
           trap_elem_r <= mem_rsp_elem_i;
 `endif
         end
-
-        if (!we_q && !mem_rsp_fault_i && !abort_q && (wf_count_q < 3'(WFIFO_D))) begin
-          wf_valid_q[int'(wf_count_q)] <= 1'b1;
-          wf_elem_q[int'(wf_count_q)]  <= mem_rsp_elem_i;
-          wf_field_q[int'(wf_count_q)] <= mem_rsp_field_i;
-          wf_data_q[int'(wf_count_q)]  <= mem_rsp_rdata_i;
-          wf_count_q <= wf_count_q + 3'd1;
-        end
       end
 
-      // ---- write-queue drain -------------------------------------------
-      if ((wf_count_q != 3'd0) && vrf_wr_gnt_i) begin
-        wf_count_q <= wf_count_q - 3'd1;
+      // ---- lane FIFO (issue order) -------------------------------------
+      if (rsp_c) begin
+        for (int unsigned k = 0; k < 3; ++k) lane_fifo_q[k] <= lane_fifo_q[k+1];
+      end
+      if (accept_c) begin
+        if (lane_count_q < 3'(WFIFO_D)) lane_fifo_q[lane_tail_c] <= lane_c;
+      end
+      lane_count_q <= lane_count_q + (accept_c ? 3'd1 : 3'd0) -
+                      (rsp_c ? 3'd1 : 3'd0);
+
+      // ---- write-queue push and drain ----------------------------------
+      if (wf_pop_c) begin
         for (int unsigned k = 0; k < WFIFO_D - 1; ++k) begin
           wf_valid_q[k] <= wf_valid_q[k+1];
           wf_elem_q[k]  <= wf_elem_q[k+1];
@@ -803,6 +854,16 @@ module mosaic_vec_lsu #(
         end
         wf_valid_q[WFIFO_D-1] <= 1'b0;
       end
+      if (wf_push_c) begin
+        wf_valid_q[wf_tail_c] <= 1'b1;
+        wf_elem_q[wf_tail_c]  <= mem_rsp_elem_i;
+        wf_field_q[wf_tail_c] <= mem_rsp_field_i;
+        wf_data_q[wf_tail_c]  <=
+            (mem_rsp_rdata_i >> (8 * {61'b0, lane_fifo_q[0]})) &
+            nm_width_mask(1 << eew_log2_q);
+      end
+      wf_count_q <= wf_count_q + (wf_push_c ? 3'd1 : 3'd0) -
+                    (wf_pop_c ? 3'd1 : 3'd0);
 
 `ifdef MOSAIC_VEC_LSU_MUTANT_MERGE_CROSS_REGION
       // ---- merge bookkeeping -------------------------------------------
@@ -928,7 +989,13 @@ module mosaic_vec_lsu #(
 
         ST_VRD: begin
           if (vrf_rd_rsp_valid_i) begin
-            state_q <= (vr_kind_q == 3'd1) ? ST_SCAN : ST_REQ;
+            if (vr_kind_q == 3'd1) state_q <= ST_SCAN;
+            else if ((vr_kind_q == 3'd2) && we_q) begin
+              vr_kind_q <= 3'd3;
+              state_q   <= ST_DATA;   // an indexed store reads its data too
+            end else begin
+              state_q <= ST_REQ;
+            end
           end
         end
 
@@ -937,7 +1004,6 @@ module mosaic_vec_lsu #(
           if (abort_q) begin
             state_q <= ST_WAIT;
           end else if (mem_req_ready_i) begin
-            outstanding_q <= outstanding_q + 3'd1;
             reqctr_r      <= reqctr_r + 32'd1;
             elems_r       <= elems_r + 8'd1;
             if (elem_q <= 8'd127) loaded_bm_q[elem_q[6:0]] <= 1'b1;
@@ -991,6 +1057,7 @@ module mosaic_vec_lsu #(
           if (vrf_wr_gnt_i) begin
             t_elem_q  <= tail_nelem_c;
             t_field_q <= tail_nfield_c;
+            state_q   <= ST_TAIL;
           end
         end
 

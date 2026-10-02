@@ -264,7 +264,6 @@ module mosaic_vec_tb (
     output logic [6:0]                 lsu_trap_elem_o,
     output logic [7:0]                 lsu_elems_o,
     output logic [31:0]                lsu_req_ctr_o,
-    output logic [31:0]                lsu_vrd_ctr_o,
     output logic                       lsu_mem_req_valid_o,
     input  logic                       lsu_mem_req_ready_i,
     output logic [6:0]                 lsu_mem_req_elem_o,
@@ -714,9 +713,86 @@ module mosaic_vec_tb (
       .vrf_wr_elem_o      (alu_wr_elem),
       .vrf_wr_sew_o       (alu_wr_sew),
       .vrf_wr_lmul_o      (alu_wr_lmul),
-      .vrf_wr_data_o      (alu_wr_data),
-      .vrf_wr_gnt_i       (alu_wr_gnt)
+      .vrf_wr_data_o     (alu_wr_data),
+      .vrf_wr_gnt_i      (alu_wr_gnt)
   );
+
+  // ==========================================================================
+  // I-056: the vector memory packetizer. It shares the single VRF read slot and
+  // write port with the arithmetic engine through the same driver arbitration
+  // (`mem_owner_i` > LSU busy > ALU), and takes its configuration from the same
+  // I-052 snapshot the ALU uses.
+  // ==========================================================================
+  mosaic_vec_lsu #(
+      .VLEN (128),
+      .ELEN (64),
+      .NLSM (8)
+  ) u_vec_lsu (
+      .clk_i              (clk),
+      .rst_i              (rst),
+
+      .caps_i             (lsu_caps_i),
+      .cfg_vtype_i        (cfg_snap_vtype),
+      .cfg_vl_i           (cfg_snap_vl[7:0]),
+      .cfg_vstart_i       (cfg_snap_vstart[6:0]),
+
+      .exec_valid_i       (lsu_exec_valid_i),
+      .exec_mode_i        (lsu_mode_i),
+      .exec_we_i          (lsu_we_i),
+      .exec_ordered_i     (lsu_ordered_i),
+      .exec_nf_i          (lsu_nf_i),
+      .exec_vd_i          (lsu_vd_i),
+      .exec_data_i        (lsu_data_i),
+      .exec_index_i       (lsu_index_i),
+      .exec_idx_sew_i     (lsu_idx_sew_i),
+      .exec_base_i        (lsu_base_i),
+      .exec_stride_i      (lsu_stride_i),
+      .exec_mask_en_i     (lsu_mask_en_i),
+
+      .busy_o             (lsu_busy_o),
+      .done_o             (lsu_done_o),
+      .illegal_o          (lsu_illegal_o),
+      .trap_o             (lsu_trap_o),
+      .trap_elem_o        (lsu_trap_elem_o),
+      .elems_o            (lsu_elems_o),
+      .req_ctr_o          (lsu_req_ctr_o),
+
+      .vrf_rd_valid_o     (lsu_rd_valid),
+      .vrf_rd_base_o      (lsu_rd_base),
+      .vrf_rd_elem_o      (lsu_rd_elem),
+      .vrf_rd_sew_o       (lsu_rd_sew),
+      .vrf_rd_lmul_o      (lsu_rd_lmul),
+      .vrf_rd_tag_o       (lsu_rd_tag),
+      .vrf_rd_gnt_i       (lsu_rd_gnt),
+      .vrf_rd_rsp_valid_i (lsu_rd_rsp_valid),
+      .vrf_rd_rsp_tag_i   (lsu_rd_rsp_tag),
+      .vrf_rd_rsp_data_i  (lsu_rd_rsp_data),
+
+      .vrf_wr_valid_o     (lsu_wr_valid),
+      .vrf_wr_base_o      (lsu_wr_base),
+      .vrf_wr_elem_o      (lsu_wr_elem),
+      .vrf_wr_sew_o       (lsu_wr_sew),
+      .vrf_wr_lmul_o      (lsu_wr_lmul),
+      .vrf_wr_data_o      (lsu_wr_data),
+      .vrf_wr_gnt_i       (lsu_wr_gnt),
+
+      .mem_req_valid_o    (lsu_mem_req_valid_o),
+      .mem_req_ready_i    (lsu_mem_req_ready_i),
+      .mem_req_elem_o     (lsu_mem_req_elem_o),
+      .mem_req_field_o    (lsu_mem_req_field_o),
+      .mem_req_addr_o     (lsu_mem_req_addr_o),
+      .mem_req_wmask_o    (lsu_mem_req_wmask_o),
+      .mem_req_wdata_o    (lsu_mem_req_wdata_o),
+      .mem_req_we_o       (lsu_mem_req_we_o),
+      .mem_req_size_o     (lsu_mem_req_size_o),
+      .mem_req_ordered_o  (lsu_mem_req_ordered_o),
+      .mem_rsp_valid_i    (lsu_mem_rsp_valid_i),
+      .mem_rsp_elem_i     (lsu_mem_rsp_elem_i),
+      .mem_rsp_field_i    (lsu_mem_rsp_field_i),
+      .mem_rsp_fault_i    (lsu_mem_rsp_fault_i),
+      .mem_rsp_rdata_i    (lsu_mem_rsp_rdata_i)
+  );
+
 
 endmodule : mosaic_vec_tb
 

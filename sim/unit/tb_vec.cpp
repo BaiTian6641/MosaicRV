@@ -1840,6 +1840,7 @@ uint64_t HostGet(const HostVrf& vf, int base, int elem, int sew_l, int lmul) {
   int sew = 1 << sew_l;
   int bit_off = elem * sew;
   int reg = HostGrpBase(base, lmul) + bit_off / 128;
+
   int bit = bit_off % 128;
   u128 m = (static_cast<u128>(1) << sew) - 1;
   return static_cast<uint64_t>((vf.r[reg] >> bit) & m);
@@ -1849,6 +1850,7 @@ void HostSet(HostVrf& vf, int base, int elem, int sew_l, int lmul, uint64_t val)
   int sew = 1 << sew_l;
   int bit_off = elem * sew;
   int reg = HostGrpBase(base, lmul) + bit_off / 128;
+
   int bit = bit_off % 128;
   u128 m = (static_cast<u128>(1) << sew) - 1;
   vf.r[reg] = (vf.r[reg] & ~(m << bit)) | ((static_cast<u128>(val) & m) << bit);
@@ -2912,6 +2914,1033 @@ void RunVecIntCase(Vmosaic_vec_tb* dut, ClockDriver* clk, Reporter* rep, Coverag
   PhaseCoverage(&cfg, &vec, rep, cov);
 }
 
+// ============================================================================
+// I-056 -- the phase set for CASE=rvv.memory_modes
+// ============================================================================
+// ============================================================================
+// I-056 -- the vector memory packetizer (CASE=rvv.memory_modes).
+//
+// The expectation is computed here from the V specification's address rules,
+// not from the RTL: `PlanLsu` is written from the spec's element-address
+// formulas (unit/strided/indexed/segment/whole/mask, offset zero-extension,
+// NFIELDS and the EVL of a mask transfer), and it is the same function the
+// phase uses to decide which memory a request should have reached. The
+// packetizer's request stream is captured on its memory port and compared
+// item-by-item and byte-mask-by-byte-mask.
+//
+// The host memory model carries the *region map*: a request whose enabled bytes
+// leave one region -- a merge across a permission or MMIO boundary -- is caught
+// however it was formed, so the device-straddling phase does not need to trust
+// the packetizer's own notion of a region.
+//
+// Coverage is itself a check: every memory mode the case claims to exercise
+// must be shown to have run, and the cell count must match the scope.
+// ============================================================================
+
+enum : int {
+  LS_UNIT = 0, LS_STRIDED = 1, LS_INDEXED = 2,
+  LS_SEG_UNIT = 3, LS_SEG_STRIDED = 4, LS_SEG_INDEXED = 5,
+  LS_WHOLE = 6, LS_MASK = 7, LS_MODE_COUNT = 8
+};
+
+const char* LsuModeName(int m) {
+  switch (m) {
+    case LS_UNIT: return "unit";
+    case LS_STRIDED: return "strided";
+    case LS_INDEXED: return "indexed";
+    case LS_SEG_UNIT: return "seg-unit";
+    case LS_SEG_STRIDED: return "seg-strided";
+    case LS_SEG_INDEXED: return "seg-indexed";
+    case LS_WHOLE: return "whole";
+    case LS_MASK: return "mask";
+    default: return "?";
+  }
+}
+
+int LsuVlmaxOf(int sew_l, int lmul_e) {
+  int e = 7 + lmul_e - sew_l;
+  return e < 0 ? 0 : (1 << e);
+}
+int LsuEmulRegs(int lmul_e) { return lmul_e >= 0 ? (1 << lmul_e) : 1; }
+int LsuGrpAlign(int base, int lmul_e) { int g = LsuEmulRegs(lmul_e); return base & ~(g - 1); }
+int LsuIsSeg(int mode) {
+  return mode == LS_SEG_UNIT || mode == LS_SEG_STRIDED || mode == LS_SEG_INDEXED;
+}
+int LsuIsIndexed(int mode) { return mode == LS_INDEXED || mode == LS_SEG_INDEXED; }
+
+// The byte enables of an element at `addr`, relative to its 8-byte beat.
+uint8_t LsuByteMaskOf(int be, uint64_t addr) {
+  int lane = static_cast<int>(addr & 7ull);
+  if (be >= 8) return 0xFF;
+  return static_cast<uint8_t>(((1u << be) - 1u) << lane);
+}
+
+// ---------------------------------------------------------------- the oracle
+// One expected item: the logical index, the field and the byte address. Written
+// from the spec's address rules.
+struct ExpReq {
+  int elem = 0;
+  int field = 0;
+  uint64_t addr = 0;
+  uint8_t mask = 0;
+};
+
+void PlanLsu(int mode, int sew_l, int lmul_e, int nf, int vl, int vstart,
+             bool mask_en, const std::vector<bool>& mbits, uint64_t base,
+             int64_t stride, const std::vector<uint64_t>& idxv,
+             std::vector<ExpReq>* out) {
+  (void)lmul_e;   // the offsets do not scale with LMUL; the group size does
+  out->clear();
+  int be = (1 << sew_l) / 8;   // EEW in bytes
+  int nfe = LsuIsSeg(mode) ? nf : 1;
+  int vlmax_w = 16 / be;   // VLEN=128 bits / EEW
+  int elem_end;
+  if (mode == LS_WHOLE) elem_end = nf * vlmax_w;
+  else if (mode == LS_MASK) elem_end = (vl + 7) / 8;
+  else elem_end = vl;
+  for (int e = vstart; e < elem_end; ++e) {
+    if (mode != LS_WHOLE && mode != LS_MASK && mask_en && !mbits[static_cast<size_t>(e)]) {
+      continue;
+    }
+    for (int f = 0; f < nfe; ++f) {
+      uint64_t off = 0;
+      switch (mode) {
+        case LS_UNIT:        off = static_cast<uint64_t>(e) * static_cast<uint64_t>(be); break;
+        case LS_STRIDED:     off = static_cast<uint64_t>(e) * static_cast<uint64_t>(stride); break;
+        case LS_INDEXED:     off = idxv[static_cast<size_t>(e)]; break;
+        case LS_SEG_UNIT:    off = (static_cast<uint64_t>(e) * nf + f) * static_cast<uint64_t>(be); break;
+        case LS_SEG_STRIDED: off = static_cast<uint64_t>(e) * static_cast<uint64_t>(stride) +
+                                   static_cast<uint64_t>(f) * static_cast<uint64_t>(be); break;
+        case LS_SEG_INDEXED: off = idxv[static_cast<size_t>(e)] +
+                                   static_cast<uint64_t>(f) * static_cast<uint64_t>(be); break;
+        case LS_WHOLE:       off = static_cast<uint64_t>(e) * static_cast<uint64_t>(be); break;
+        default:             off = static_cast<uint64_t>(e); break;   // mask: one byte
+      }
+      ExpReq r;
+      r.elem = e;
+      r.field = f;
+      r.addr = base + off;
+      r.mask = LsuByteMaskOf(mode == LS_MASK ? 1 : be, r.addr);
+      out->push_back(r);
+    }
+  }
+}
+
+// ------------------------------------------------------------- the host memory
+struct LsuRegion {
+  uint64_t lo = 0;
+  uint64_t hi = 0;
+  bool device = false;
+  bool read_ok = true;
+  bool write_ok = true;
+};
+
+struct LsuRec {
+  int elem = 0;
+  int field = 0;
+  uint64_t addr = 0;
+  uint8_t mask = 0;
+  uint64_t wdata = 0;
+  bool we = false;
+  int size = 0;
+  bool ordered = false;
+};
+
+struct LsuMem {
+  static const int kSize = 0x10000;
+  std::vector<uint8_t> mem;
+  std::vector<LsuRegion> regions;
+  int latency = 2;
+  bool fault_enable = false;
+  bool fault_all = false;
+  int fault_elem = -1;
+  int fault_field = 0;
+  int req_count = 0;
+  int device_reqs = 0;
+  int ram_reqs = 0;
+
+  LsuMem() : mem(static_cast<size_t>(kSize)) {
+    for (int i = 0; i < kSize; ++i) {
+      mem[static_cast<size_t>(i)] = static_cast<uint8_t>(Pat(4000 + i) & 0xFFull);
+    }
+    OneRam();
+  }
+
+  void OneRam() {
+    regions.clear();
+    LsuRegion r;
+    r.lo = 0; r.hi = static_cast<uint64_t>(kSize); r.device = false;
+    regions.push_back(r);
+  }
+
+  void DeviceAt(uint64_t boundary) {
+    regions.clear();
+    LsuRegion a; a.lo = 0; a.hi = boundary; a.device = false; regions.push_back(a);
+    LsuRegion b; b.lo = boundary; b.hi = static_cast<uint64_t>(kSize); b.device = true;
+    regions.push_back(b);
+  }
+
+  void ResetCounters() { req_count = 0; device_reqs = 0; ram_reqs = 0; }
+
+  int RegionOf(uint64_t byte) const {
+    for (size_t i = 0; i < regions.size(); ++i) {
+      if (byte >= regions[i].lo && byte < regions[i].hi) return static_cast<int>(i);
+    }
+    return -1;
+  }
+
+  bool IsDevice(uint64_t byte) const {
+    int r = RegionOf(byte);
+    return r >= 0 && regions[static_cast<size_t>(r)].device;
+  }
+
+  uint64_t Beat(uint64_t addr) const {
+    uint64_t beat = addr & ~7ull;
+    uint64_t v = 0;
+    for (int k = 0; k < 8; ++k) {
+      v |= static_cast<uint64_t>(mem[static_cast<size_t>((beat + static_cast<uint64_t>(k)) & 0xFFFFull)]) << (8 * k);
+    }
+    return v;
+  }
+
+  void Apply(uint64_t addr, uint8_t mask, uint64_t wdata) {
+    uint64_t beat = addr & ~7ull;
+    for (int k = 0; k < 8; ++k) {
+      if ((mask >> k) & 1u) {
+        mem[static_cast<size_t>((beat + static_cast<uint64_t>(k)) & 0xFFFFull)] =
+            static_cast<uint8_t>((wdata >> (8 * k)) & 0xFFull);
+      }
+    }
+  }
+
+  // the element's little-endian bytes starting at addr
+  uint64_t Elem(uint64_t addr, int be) const {
+    uint64_t v = 0;
+    for (int k = 0; k < be; ++k) {
+      v |= static_cast<uint64_t>(mem[static_cast<size_t>((addr + static_cast<uint64_t>(k)) & 0xFFFFull)]) << (8 * k);
+    }
+    return v;
+  }
+};
+
+// ---------------------------------------------------------------- the harness
+struct LsuStim {
+  bool exec_valid = false;
+  int mode = 0;
+  bool we = false;
+  bool ordered = false;
+  int nf = 1;
+  int vd = 0, data = 0, index = 0, idx_sew = 3;
+  uint64_t base = 0, stride = 0;
+  bool mask_en = false;
+  uint8_t caps = 0xFF;
+  bool mem_ready = true;
+};
+
+struct LsuObs {
+  bool busy = false, done = false, illegal = false, trap = false;
+  int trap_elem = 0, elems = 0;
+  uint32_t req_ctr = 0;
+  bool req_valid = false;
+  int req_elem = 0, req_field = 0;
+  uint64_t req_addr = 0;
+  uint8_t req_mask = 0;
+  uint64_t req_wdata = 0;
+};
+
+class Lsu {
+ public:
+  Lsu(Vmosaic_vec_tb* d, ClockDriver* clk) : d_(d), clk_(clk) {
+    d_->lsu_exec_valid_i = 0;
+    d_->lsu_caps_i = 0;
+    d_->lsu_mem_req_ready_i = 0;
+    d_->lsu_mem_rsp_valid_i = 0;
+  }
+
+  void BindMem(LsuMem* m) { mem_ = m; }
+
+  struct Pending {
+    int elem = 0;
+    int field = 0;
+    uint64_t addr = 0;
+    uint8_t mask = 0;
+    uint64_t wdata = 0;
+    bool we = false;
+    int age = 0;
+  };
+
+  LsuObs Step(const LsuStim& s) {
+    bool rsp = false;
+    int re = 0, rf = 0;
+    bool rfault = false;
+    uint64_t rdata = 0;
+    if (!pending_.empty() && pending_.front().age >= mem_->latency) {
+      const Pending& p = pending_.front();
+      rsp = true;
+      re = p.elem;
+      rf = p.field;
+      rdata = mem_->Beat(p.addr);
+      rfault = mem_->fault_enable &&
+               (mem_->fault_all || ((re == mem_->fault_elem) && (rf == mem_->fault_field)));
+      if (!rfault && p.we) mem_->Apply(p.addr, p.mask, p.wdata);
+    }
+
+    d_->clk = 0;
+    d_->rst = 0;
+    d_->mem_owner_i = 0;
+    d_->mem_rd_valid_i = 0;
+    d_->mem_wr_valid_i = 0;
+    d_->alu_exec_valid_i = 0;
+    d_->alu_caps_i = 0;
+    d_->el_valid_i = 0;
+    d_->cfg_vset_valid = 0;
+    d_->cfg_snap_capture = 0;
+    d_->cfg_replay_valid = 0;
+    d_->cfg_exec_valid = 0;
+    d_->cfg_csr_valid = 0;
+
+    d_->lsu_caps_i = s.caps;
+    d_->lsu_exec_valid_i = s.exec_valid ? 1 : 0;
+    d_->lsu_mode_i = static_cast<uint8_t>(s.mode & 0xF);
+    d_->lsu_we_i = s.we ? 1 : 0;
+    d_->lsu_ordered_i = s.ordered ? 1 : 0;
+    d_->lsu_nf_i = static_cast<uint8_t>(s.nf & 0xF);
+    d_->lsu_vd_i = static_cast<uint8_t>(s.vd & 0x1F);
+    d_->lsu_data_i = static_cast<uint8_t>(s.data & 0x1F);
+    d_->lsu_index_i = static_cast<uint8_t>(s.index & 0x1F);
+    d_->lsu_idx_sew_i = static_cast<uint8_t>(s.idx_sew & 0x7);
+    d_->lsu_base_i = s.base;
+    d_->lsu_stride_i = s.stride;
+    d_->lsu_mask_en_i = s.mask_en ? 1 : 0;
+    d_->lsu_mem_req_ready_i = s.mem_ready ? 1 : 0;
+    d_->lsu_mem_rsp_valid_i = rsp ? 1 : 0;
+    d_->lsu_mem_rsp_elem_i = static_cast<uint8_t>(re & 0x7F);
+    d_->lsu_mem_rsp_field_i = static_cast<uint8_t>(rf & 0xF);
+    d_->lsu_mem_rsp_fault_i = rfault ? 1 : 0;
+    d_->lsu_mem_rsp_rdata_i = rdata;
+
+    d_->eval();
+    const bool pre_req = d_->lsu_mem_req_valid_o != 0;
+    const int pre_elem = static_cast<int>(d_->lsu_mem_req_elem_o);
+    const int pre_field = static_cast<int>(d_->lsu_mem_req_field_o);
+    const uint64_t pre_addr = d_->lsu_mem_req_addr_o;
+    const uint8_t pre_mask = static_cast<uint8_t>(d_->lsu_mem_req_wmask_o);
+    const uint64_t pre_wdata = d_->lsu_mem_req_wdata_o;
+    const bool pre_we = d_->lsu_mem_req_we_o != 0;
+    const int pre_size = static_cast<int>(d_->lsu_mem_req_size_o);
+    const bool pre_ordered = d_->lsu_mem_req_ordered_o != 0;
+
+    d_->clk = 1;
+    d_->eval();
+    d_->clk = 0;
+    d_->eval();
+
+    LsuObs o;
+    o.busy = d_->lsu_busy_o != 0;
+    o.done = d_->lsu_done_o != 0;
+    o.illegal = d_->lsu_illegal_o != 0;
+    o.trap = d_->lsu_trap_o != 0;
+    o.trap_elem = static_cast<int>(d_->lsu_trap_elem_o);
+    o.elems = static_cast<int>(d_->lsu_elems_o);
+    o.req_ctr = static_cast<uint32_t>(d_->lsu_req_ctr_o);
+    o.req_valid = pre_req;
+    o.req_elem = pre_elem;
+    o.req_field = pre_field;
+    o.req_addr = pre_addr;
+    o.req_mask = pre_mask;
+    o.req_wdata = pre_wdata;
+
+    if (pre_req && s.mem_ready) {
+      if (!pending_.empty()) {
+        overlapped_ = true;
+        if (pre_ordered) ordered_overlap_ = true;
+      }
+      Pending p;
+      p.elem = pre_elem;
+      p.field = pre_field;
+      p.addr = pre_addr;
+      p.mask = pre_mask;
+      p.wdata = pre_wdata;
+      p.we = pre_we;
+      p.age = 0;
+      pending_.push_back(p);
+      LsuRec r;
+      r.elem = pre_elem;
+      r.field = pre_field;
+      r.addr = pre_addr;
+      r.mask = pre_mask;
+      r.wdata = pre_wdata;
+      r.we = pre_we;
+      r.size = pre_size;
+      r.ordered = pre_ordered;
+      reqs_.push_back(r);
+      if (static_cast<int>(pending_.size()) > max_outstanding_) {
+        max_outstanding_ = static_cast<int>(pending_.size());
+      }
+    }
+    if (rsp) pending_.erase(pending_.begin());
+    for (size_t i = 0; i < pending_.size(); ++i) pending_[i].age++;
+
+    clk_->Tick();
+    return o;
+  }
+
+  // launch one macro and run it to completion; returns the final observation
+  LsuObs Run(int mode, bool we, bool ordered, int nf, int vd, int data, int index,
+             int idx_sew, uint64_t base, uint64_t stride, bool mask_en,
+             int guard_cycles = 40000, uint8_t caps = 0xFF) {
+    reqs_.clear();
+    pending_.clear();
+    overlapped_ = false;
+    ordered_overlap_ = false;
+    max_outstanding_ = 0;
+
+    LsuStim s;
+    s.exec_valid = true;
+    s.mode = mode;
+    s.we = we;
+    s.ordered = ordered;
+    s.nf = nf;
+    s.vd = vd;
+    s.data = data;
+    s.index = index;
+    s.idx_sew = idx_sew;
+    s.base = base;
+    s.stride = stride;
+    s.mask_en = mask_en;
+    s.caps = caps;
+    s.mem_ready = true;
+    LsuObs o = Step(s);
+
+    LsuStim idle;
+    idle.caps = caps;
+    idle.mem_ready = true;
+    int guard = 0;
+    while (!o.done && ++guard < guard_cycles) o = Step(idle);
+    if (!o.done) o.busy = false;
+    return o;
+  }
+
+  const std::vector<LsuRec>& reqs() const { return reqs_; }
+  bool overlapped() const { return overlapped_; }
+  bool ordered_overlap() const { return ordered_overlap_; }
+  int max_outstanding() const { return max_outstanding_; }
+
+ private:
+  Vmosaic_vec_tb* d_;
+  ClockDriver* clk_;
+  LsuMem* mem_ = nullptr;
+  std::vector<Pending> pending_;
+  std::vector<LsuRec> reqs_;
+  bool overlapped_ = false;
+  bool ordered_overlap_ = false;
+  int max_outstanding_ = 0;
+};
+
+// configure I-052 and capture the snapshot the packetizer executes from
+void LsuConfig(Cfg* cfg, int sew_l, int vlmul, uint64_t avl, int vstart, int vta, int vma) {
+  (void)RunVset(cfg, VSETVLI, 5, 6, avl, Vtypei(sew_l, vlmul, vta, vma));
+  if (vstart != 0) (void)CsrWrite(cfg, kCsrVstart, static_cast<uint64_t>(vstart));
+  CfgStim cap;
+  cap.snap_capture = true;
+  cfg->Cycle(cap);
+}
+
+// ------------------------------------------------------------- coverage state
+struct LsuCoverage {
+  bool mode_seen[LS_MODE_COUNT] = {};
+  int cells = 0;
+  int modes = 0;
+};
+
+// Compare the recorded request stream with the oracle, item by item.
+void CheckLsuReqs(Reporter* rep, const std::string& name,
+                  const std::vector<LsuRec>& got, const std::vector<ExpReq>& want) {
+  rep->Check(got.size() == want.size(),
+             name + ": " + Dec(got.size()) + " memory requests, expected " +
+                 Dec(want.size()) + " (one per item, no merge)");
+  size_t n = got.size() < want.size() ? got.size() : want.size();
+  for (size_t i = 0; i < n; ++i) {
+    const LsuRec& g = got[i];
+    const ExpReq& w = want[i];
+    std::string at = name + " item" + Dec(i);
+    rep->Check(g.elem == w.elem && g.field == w.field,
+               at + ": index (" + Dec(g.elem) + "," + Dec(g.field) + ") expected (" +
+                   Dec(w.elem) + "," + Dec(w.field) + ")");
+    rep->Check(g.addr == (w.addr & ~7ull),
+               at + ": beat " + mosaic::Hex(g.addr, 16) + " expected " +
+                   mosaic::Hex(w.addr & ~7ull, 16) + " (element at " +
+                   mosaic::Hex(w.addr, 16) + ")");
+    rep->Check(g.mask == w.mask,
+               at + ": mask " + mosaic::Hex(g.mask, 2) + " expected " +
+                   mosaic::Hex(w.mask, 2));
+  }
+}
+
+// One full cell: configure, prime, run, and compare the request stream.
+struct LsuRun {
+  int mode = LS_UNIT;
+  bool we = false;
+  bool ordered = false;
+  int nf = 1;
+  int sew_l = 3;
+  int lmul = 0;
+  int idx_l = 3;
+  int vd = 8, data = 16, index = 24;
+  uint64_t base = 0x1000;
+  int64_t stride = 0;
+  int vl = 4;
+  int vstart = 0;
+  bool mask_en = false;
+  int vta = 0, vma = 0;
+  const char* tag = "";
+};
+
+void RunLsuCell(Cfg* cfg, Vec* vec, Lsu* lsu, LsuMem* mem, Reporter* rep,
+                const LsuRun& R, bool check_dest, bool check_store, LsuCoverage* cov) {
+  const std::string name = std::string("lsu ") + LsuModeName(R.mode) +
+                           (R.we ? " store " : " load ") + R.tag;
+  const int sew = 1 << R.sew_l;
+  const int be = sew / 8;
+  const int vlmax = LsuVlmaxOf(R.sew_l, R.lmul);
+  const int emul = LsuEmulRegs(R.lmul);
+  const int nfe = LsuIsSeg(R.mode) ? R.nf : 1;
+  const bool indexed = LsuIsIndexed(R.mode) != 0;
+
+  LsuConfig(cfg, R.sew_l, VlmulOfExp(R.lmul), static_cast<uint64_t>(R.vl), R.vstart, R.vta, R.vma);
+  HostVrf vf;
+
+  // ---- prime the mask register and remember the bits
+  std::vector<bool> mbits(128, false);
+  if (R.mask_en) {
+    for (int b = 0; b < 16; ++b) {
+      uint64_t byte = 0;
+      for (int k = 0; k < 8; ++k) {
+        int bit = b * 8 + k;
+        bool set = (Pat(31 * R.mode + 7 * bit + 3) & 3ull) != 0;
+        if (set) byte |= (1ull << k);
+        mbits[static_cast<size_t>(bit)] = set;
+      }
+      vec->Prime(vf, 0, b, 3, 0, byte);
+    }
+  }
+
+  // ---- prime the index group for an indexed access
+  std::vector<uint64_t> idxv(128, 0);
+  if (indexed) {
+    const int idx_emul = R.lmul + (R.idx_l - R.sew_l);
+    for (int i = 0; i < 128; ++i) {
+      // byte offsets, naturally aligned to the element
+      uint64_t off = static_cast<uint64_t>(0x100) +
+                     static_cast<uint64_t>(i) * 16ull;   // well-separated, aligned
+      idxv[static_cast<size_t>(i)] = off;
+      if (i < vlmax) vec->Prime(vf, R.index, i, R.idx_l, idx_emul, off);
+    }
+  }
+
+  // ---- prime the data (store) or destination (load) group
+  const int grp = R.we ? R.data : R.vd;
+  const int grp_a = LsuGrpAlign(grp, R.lmul);
+  auto SetElem = [&](int field, int i, uint64_t val) {
+    if (LsuIsSeg(R.mode)) {
+      vec->Prime(vf, grp_a + field * emul, i, R.sew_l, R.lmul, val);
+    } else {
+      vec->Prime(vf, grp, i, R.sew_l, R.lmul, val);
+    }
+  };
+  const int nfle = (R.nf == 1) ? 0 : (R.nf == 2) ? 1 : (R.nf == 4) ? 2 : 3;
+  auto GetElem = [&](int field, int i) -> uint64_t {
+    if (R.mode == LS_WHOLE) return vec->MemRead(grp, i, R.sew_l, nfle);
+    if (LsuIsSeg(R.mode)) return vec->MemRead(grp_a + field * emul, i, R.sew_l, R.lmul);
+    return vec->MemRead(grp, i, R.sew_l, R.lmul);
+  };
+
+  int nprime;
+  if (R.mode == LS_WHOLE) nprime = R.nf * (16 / be);
+  else if (R.mode == LS_MASK) nprime = 16;
+  else nprime = vlmax;
+  std::vector<std::vector<uint64_t> > oldv(static_cast<size_t>(nfe),
+                                           std::vector<uint64_t>(static_cast<size_t>(nprime), 0));
+
+  if (R.mode == LS_WHOLE) {
+    for (int i = 0; i < nprime; ++i) {
+      uint64_t val = Pat(97 * R.mode + 13 * i + 5) & MaskW(sew);
+      vec->Prime(vf, grp, i, R.sew_l, nfle, val);
+    }
+  } else {
+    for (int f = 0; f < nfe; ++f) {
+      for (int i = 0; i < nprime; ++i) {
+        uint64_t val = Pat(97 * R.mode + 131 * f + 13 * i + 5) & MaskW(sew);
+        oldv[static_cast<size_t>(f)][static_cast<size_t>(i)] = val;
+        SetElem(f, i, val);
+      }
+    }
+  }
+
+  // the configuration unit clamps vl to VLMAX, so the oracle must too
+  const int vl_eff = (R.mode == LS_WHOLE || R.mode == LS_MASK)
+                         ? R.vl
+                         : (R.vl > vlmax ? vlmax : R.vl);
+
+  // ---- the expected request stream
+  std::vector<ExpReq> want;
+  PlanLsu(R.mode, R.sew_l, R.lmul, R.nf, vl_eff, R.vstart, R.mask_en, mbits,
+          R.base, R.stride, idxv, &want);
+
+  // ---- run
+  LsuObs o = lsu->Run(R.mode, R.we, R.ordered, R.nf, R.vd, R.data, R.index,
+                      R.idx_l, R.base, R.stride, R.mask_en);
+  rep->Check(!o.illegal, name + ": a declared mode was refused");
+  rep->Check(!o.trap, name + ": the packet trapped");
+  rep->Check(o.done, name + ": the packet never completed");
+  // ---- the region property: no request's bytes may cross a region boundary
+  for (size_t i = 0; i < lsu->reqs().size(); ++i) {
+    const LsuRec& g = lsu->reqs()[i];
+    uint64_t beat = g.addr & ~7ull;
+    int region = -1;
+    bool span = false;
+    for (int k = 0; k < 8; ++k) {
+      if (((g.mask >> k) & 1u) == 0) continue;
+      int r = mem->RegionOf(beat + static_cast<uint64_t>(k));
+      if (region < 0) region = r;
+      else if (r != region) span = true;
+    }
+    rep->Check(!span, name + " req" + Dec(i) + ": a request spans two regions");
+  }
+
+  CheckLsuReqs(rep, name, lsu->reqs(), want);
+
+
+  // ---- the store payload and the memory side
+  if (R.we && check_store) {
+    for (size_t i = 0; i < lsu->reqs().size() && i < want.size(); ++i) {
+      const LsuRec& g = lsu->reqs()[i];
+      const ExpReq& w = want[i];
+      uint64_t src;
+      if (R.mode == LS_WHOLE) {
+        src = HostGet(vf, grp, w.elem, R.sew_l, nfle);
+      } else if (LsuIsSeg(R.mode)) {
+        src = HostGet(vf, grp_a + w.field * emul, w.elem, R.sew_l, R.lmul);
+      } else {
+        src = HostGet(vf, grp, w.elem, R.sew_l, R.lmul);
+      }
+      int lane = static_cast<int>(w.addr & 7ull);
+      uint64_t exp_wdata = src << (8 * lane);
+      rep->Check(g.wdata == exp_wdata,
+                 name + " req" + Dec(i) + ": wdata " + mosaic::Hex(g.wdata, 16) +
+                     " expected " + mosaic::Hex(exp_wdata, 16));
+      uint64_t ev = mem->Elem(w.addr, be);
+      rep->Check(ev == (src & MaskW(sew)),
+                 name + " req" + Dec(i) + ": memory has " + mosaic::Hex(ev, 16) +
+                     " expected " + mosaic::Hex(src & MaskW(sew), 16));
+    }
+  }
+
+  // ---- the load destination
+  if (!R.we && check_dest) {
+    for (int f = 0; f < nfe; ++f) {
+      for (int i = 0; i < nprime; ++i) {
+        const uint64_t old = (R.mode == LS_WHOLE)
+                                 ? 0
+                                 : oldv[static_cast<size_t>(f)][static_cast<size_t>(i)];
+        uint64_t exp;
+        if (R.mode == LS_WHOLE) {
+          exp = mem->Elem(R.base + static_cast<uint64_t>(i) * be, be) & MaskW(sew);
+        } else if (R.mode == LS_MASK) {
+          exp = (i < (vl_eff + 7) / 8) ? (mem->Elem(R.base + i, 1) & 0xFFull) : 0xFFull;
+        } else if (i >= vl_eff) {
+          exp = R.vta ? MaskW(sew) : old;
+        } else if (R.mask_en && !mbits[static_cast<size_t>(i)]) {
+          exp = R.vma ? MaskW(sew) : old;
+        } else {
+          exp = old;
+          for (size_t k = 0; k < want.size(); ++k) {
+            if (want[k].elem == i && want[k].field == f) {
+              exp = mem->Elem(want[k].addr, be) & MaskW(sew);
+              break;
+            }
+          }
+        }
+        uint64_t got = GetElem(f, i);
+        rep->Check(got == exp, name + " dest f" + Dec(f) + " e" + Dec(i) + ": " +
+                                  mosaic::Hex(got, 16) + " expected " +
+                                  mosaic::Hex(exp, 16));
+      }
+    }
+  }
+
+  if (cov != nullptr) {
+    if (!cov->mode_seen[R.mode]) {
+      cov->mode_seen[R.mode] = true;
+      cov->modes += 1;
+    }
+    cov->cells += 1;
+  }
+}
+
+// ------------------------------------------------------------------- phases
+
+// The device-straddling access: a byte-granular unit-stride run crosses a
+// permission/MMIO boundary *inside one 8-byte beat*, so a merge could not hide:
+// every request must keep its bytes on one side, the RAM elements must reach RAM
+// and the device elements the device, and the request count must be the item
+// count.
+void PhaseLsuDeviceStraddle(Cfg* cfg, Vec* vec, Lsu* lsu, LsuMem* mem, Reporter* rep,
+                            LsuCoverage* cov) {
+  const uint64_t boundary = 0x105;   // not beat-aligned: beat 0x100 straddles it
+  const uint64_t base = 0x100;
+  const int vl = 8;
+
+  for (int we = 0; we < 2; ++we) {
+    mem->DeviceAt(boundary);
+    mem->ResetCounters();
+    LsuRun R;
+    R.mode = LS_UNIT;
+    R.we = (we != 0);
+    R.sew_l = 3;
+    R.lmul = 0;
+    R.base = base;
+    R.vl = vl;
+    R.vd = 8;
+    R.data = 16;
+    R.tag = "device-straddle";
+    RunLsuCell(cfg, vec, lsu, mem, rep, R, we == 0, we != 0, cov);
+
+    std::string name = std::string("device-straddle ") + (we ? "store" : "load");
+    // each element is one byte; the boundary sits between element 4 (0x104)
+    // and element 5 (0x105)
+    int ram = 0, dev = 0;
+    bool addr_ok = true;
+    for (size_t i = 0; i < lsu->reqs().size(); ++i) {
+      const LsuRec& g = lsu->reqs()[i];
+      if (g.mask == 0 || (g.mask & static_cast<uint8_t>(g.mask - 1)) != 0) addr_ok = false;
+      int bit = 0;
+      for (int k = 0; k < 8; ++k) if ((g.mask >> k) & 1u) bit = k;
+      uint64_t byte = (g.addr & ~7ull) + static_cast<uint64_t>(bit);
+      if (byte <= 0x104) ram += 1;
+      else dev += 1;
+    }
+    rep->Check(addr_ok, name + ": a byte request did not enable exactly its byte");
+    rep->Check(lsu->reqs().size() == static_cast<size_t>(vl),
+               name + ": " + Dec(lsu->reqs().size()) + " requests for " + Dec(vl) +
+                   " elements (a merge crossed the boundary)");
+    rep->Check(ram == 5 && dev == 3,
+               name + ": ram=" + Dec(ram) + " device=" + Dec(dev) +
+                   " (expected 5 RAM and 3 device elements)");
+    bool dev_in_device = true;
+    for (size_t i = 0; i < lsu->reqs().size(); ++i) {
+      const LsuRec& g = lsu->reqs()[i];
+      uint64_t a = g.addr & ~7ull;
+      for (int k = 0; k < 8; ++k) {
+        if (((g.mask >> k) & 1u) == 0) continue;
+        uint64_t byte = a + static_cast<uint64_t>(k);
+        bool is_dev = mem->IsDevice(byte);
+        if (byte >= 0x105 && !is_dev) dev_in_device = false;
+        if (byte < 0x105 && is_dev) dev_in_device = false;
+      }
+    }
+    rep->Check(dev_in_device,
+               name + ": a device element was addressed in RAM or vice versa");
+  }
+  mem->OneRam();
+}
+
+// The byte mask must name the element's bytes at its own lane, for every width
+// and every lane the width admits.
+void PhaseLsuByteMask(Cfg* cfg, Vec* vec, Lsu* lsu, LsuMem* mem, Reporter* rep,
+                      LsuCoverage* cov) {
+  (void)cov;
+  struct Bm { int mode; int sew_l; int lmul; int64_t stride; uint64_t base; };
+  const Bm cases[] = {
+      {LS_UNIT, 3, 0, 0, 0x2000},
+      {LS_UNIT, 4, 0, 0, 0x2002},
+      {LS_UNIT, 5, 0, 0, 0x2004},
+      {LS_UNIT, 6, 0, 0, 0x2008},
+      {LS_STRIDED, 4, 0, 6, 0x2012},
+      {LS_STRIDED, 5, 0, 12, 0x2024},
+      {LS_INDEXED, 5, 0, 0, 0x2030},
+  };
+  for (size_t c = 0; c < sizeof(cases) / sizeof(cases[0]); ++c) {
+    const Bm& b = cases[c];
+    LsuRun R;
+    R.mode = b.mode;
+    R.we = false;
+    R.sew_l = b.sew_l;
+    R.lmul = b.lmul;
+    R.idx_l = b.sew_l;
+    R.base = b.base;
+    R.stride = b.stride;
+    R.vl = 4;
+    R.vd = 8;
+    R.data = 16;
+    R.index = 24;
+    R.tag = "byte-mask";
+    // RunLsuCell compares every request's byte mask byte-for-byte against the
+    // oracle, which is the width-and-position mask; the phase is named so a
+    // lane-0 or full-width mask fails a check whose text says "byte-mask".
+    RunLsuCell(cfg, vec, lsu, mem, rep, R, true, false, cov);
+  }
+}
+
+// A fault must be attributed to the element that caused it: vstart is that
+// element's index, the elements before it have taken effect, the faulting one
+// and every later one have not.
+void PhaseLsuFaultPosition(Cfg* cfg, Vec* vec, Lsu* lsu, LsuMem* mem, Reporter* rep,
+                           LsuCoverage* cov) {
+  const int vl = 6;
+  const int positions[] = {0, 1, 3, 5};
+  for (int pi = 0; pi < 4; ++pi) {
+    const int pos = positions[pi];
+    for (int we = 0; we < 2; ++we) {
+      mem->OneRam();
+      LsuRun R;
+      R.mode = LS_UNIT;
+      R.we = (we != 0);
+      R.sew_l = 3;
+      R.lmul = 0;
+      R.base = 0x3000;
+      R.vl = vl;
+      R.vd = 8;
+      R.data = 16;
+      R.tag = "fault-position";
+      const int sew = 8;
+      LsuConfig(cfg, R.sew_l, VlmulOfExp(R.lmul), static_cast<uint64_t>(R.vl), 0, 0, 0);
+      HostVrf vf;
+      const int grp = R.we ? R.data : R.vd;
+      std::vector<uint64_t> src(vl, 0);
+      std::vector<uint64_t> old(vl, 0);
+      for (int i = 0; i < vl; ++i) {
+        uint64_t v = Pat(211 * i + 17) & MaskW(sew);
+        src[static_cast<size_t>(i)] = v;
+        old[static_cast<size_t>(i)] = v;
+        vec->Prime(vf, grp, i, R.sew_l, R.lmul, v);
+      }
+      // snapshot the memory the store would have written
+      std::vector<uint8_t> before(mem->mem.begin(), mem->mem.begin() + 0x3100);
+
+      mem->fault_enable = true;
+      mem->fault_all = false;
+      mem->fault_elem = pos;
+      mem->fault_field = 0;
+      LsuObs o = lsu->Run(R.mode, R.we, R.ordered, R.nf, R.vd, R.data, R.index,
+                          R.idx_l, R.base, R.stride, R.mask_en);
+      mem->fault_enable = false;
+
+      std::string name = std::string("fault-position ") + (we ? "store" : "load") +
+                         " at " + Dec(pos) + " of " + Dec(vl);
+      rep->Check(o.done, name + ": the packet never completed");
+      rep->Check(o.trap, name + ": the fault was not reported");
+      rep->Check(o.trap_elem == pos,
+                 name + ": vstart " + Dec(o.trap_elem) + " expected " + Dec(pos) +
+                     " (whole-macro trap or wrong element)");
+      // the elements strictly before the fault are all present; a store must
+      // have issued nothing past the fault (a load may have its next request
+      // already on the wire, but that result is discarded)
+      int n_before = 0;
+      int n_after = 0;
+      for (size_t i = 0; i < lsu->reqs().size(); ++i) {
+        if (lsu->reqs()[i].elem < pos) n_before += 1;
+        if (lsu->reqs()[i].elem > pos) n_after += 1;
+      }
+      rep->Check(n_before == pos,
+                 name + ": " + Dec(n_before) + " requests before the fault, expected " + Dec(pos));
+      if (we != 0) {
+        rep->Check(n_after == 0,
+                   name + ": " + Dec(n_after) + " stores were issued past the fault");
+      }
+
+      if (we != 0) {
+        // the stores before the fault are in memory; the faulting one and later are not
+        bool ok = true;
+        for (int e = 0; e < vl; ++e) {
+          uint64_t addr = R.base + static_cast<uint64_t>(e);
+          uint8_t got = mem->mem[static_cast<size_t>(addr & 0xFFFFull)];
+          uint8_t exp;
+          if (e < pos) exp = static_cast<uint8_t>(src[static_cast<size_t>(e)] & 0xFFull);
+          else exp = before[static_cast<size_t>(addr)];
+          if (got != exp) ok = false;
+        }
+        rep->Check(ok, name + ": a store at or after the fault reached memory, or one "
+                          "before it was lost");
+      } else {
+        bool ok = true;
+        for (int e = 0; e < vl; ++e) {
+          uint64_t got = vec->MemRead(grp, e, R.sew_l, R.lmul);
+          uint64_t exp;
+          if (e < pos) exp = mem->Elem(R.base + static_cast<uint64_t>(e), 1);
+          else exp = old[static_cast<size_t>(e)];
+          if (got != exp) ok = false;
+        }
+        rep->Check(ok, name + ": a load element at or after the fault was written, or one "
+                          "before it was lost");
+      }
+    }
+  }
+  (void)cov;
+}
+
+// The ordered indexed forms must not be reordered: no request is offered until
+// the previous one has completed.
+void PhaseLsuOrderedOrder(Cfg* cfg, Vec* vec, Lsu* lsu, LsuMem* mem, Reporter* rep,
+                          LsuCoverage* cov) {
+  (void)cov;
+  const int vl = 6;
+  for (int ordered = 0; ordered < 2; ++ordered) {
+    mem->OneRam();
+    // the response must be slower than the index read a request costs, or the
+    // ordered form would have completed before the next item was even ready
+    mem->latency = 6;
+    LsuRun R;
+    R.mode = LS_INDEXED;
+    R.we = false;
+    R.ordered = (ordered != 0);
+    R.sew_l = 5;
+    R.lmul = 0;
+    R.idx_l = 5;
+    R.base = 0x4000;
+    R.vl = vl;
+    R.vd = 8;
+    R.index = 24;
+    R.tag = ordered ? "ordered" : "unordered";
+    RunLsuCell(cfg, vec, lsu, mem, rep, R, true, false, cov);
+
+    std::string name = std::string("ordered-order ") + (ordered ? "ordered" : "unordered");
+    // the sequence on the memory port is ascending for both; the ordered form
+    // additionally never overlaps
+    bool ascending = true;
+    for (size_t i = 0; i < lsu->reqs().size(); ++i) {
+      if (lsu->reqs()[i].elem != static_cast<int>(i)) ascending = false;
+    }
+    rep->Check(ascending, name + ": the request order on the memory port is not ascending");
+    if (ordered) {
+      rep->Check(!lsu->ordered_overlap(),
+                 name + ": a second ordered request was issued before the first completed");
+      rep->Check(lsu->max_outstanding() <= 1,
+                 name + ": " + Dec(lsu->max_outstanding()) + " ordered requests were outstanding");
+    }
+  }
+  mem->latency = 2;
+}
+
+// The capability gate: each mode runs with its bit set and is refused with no
+// memory transaction when the bit is clear.
+void PhaseLsuCapGate(Cfg* cfg, Vec* vec, Lsu* lsu, LsuMem* mem, Reporter* rep,
+                     LsuCoverage* cov) {
+  (void)vec;
+  (void)cov;
+  for (int mode = 0; mode < LS_MODE_COUNT; ++mode) {
+    std::string name = std::string("capability-gate ") + LsuModeName(mode);
+    mem->OneRam();
+    LsuRun R;
+    R.mode = mode;
+    R.we = false;
+    R.sew_l = 3;
+    R.lmul = 0;
+    R.nf = (mode == LS_WHOLE) ? 2 : 1;
+    R.base = 0x5000;
+    R.vl = 4;
+    R.vd = 8;
+    R.tag = "cap";
+    LsuConfig(cfg, R.sew_l, VlmulOfExp(R.lmul), static_cast<uint64_t>(R.vl), 0, 0, 0);
+    uint8_t caps = static_cast<uint8_t>(0xFFu & ~(1u << mode));
+    LsuObs o = lsu->Run(R.mode, R.we, R.ordered, R.nf, R.vd, R.data, R.index,
+                        R.idx_l, R.base, R.stride, R.mask_en, 4000, caps);
+    rep->Check(o.done, name + ": the refused packet never completed");
+    rep->Check(o.illegal, name + ": a mode whose capability bit is clear was executed");
+    rep->Check(lsu->reqs().empty(),
+               name + ": a refused mode issued " + Dec(lsu->reqs().size()) +
+                   " memory requests");
+  }
+}
+
+// The bulk matrix: every mode, every direction, several widths and group
+// geometries, plus accesses that cross a page and a line boundary.
+void PhaseLsuCoverage(Cfg* cfg, Vec* vec, Lsu* lsu, LsuMem* mem, Reporter* rep,
+                      LsuCoverage* cov) {
+  struct Row {
+    int mode; int sew_l; int lmul; int nf; int vl; uint64_t base; int64_t stride;
+    bool mask_en; int vta; int vma; const char* tag;
+  };
+  const Row rows[] = {
+      {LS_UNIT, 3, 0, 1, 8, 0x6000, 0, false, 0, 0, "sew8"},
+      {LS_UNIT, 4, 0, 1, 6, 0x6000, 0, false, 0, 0, "sew16"},
+      {LS_UNIT, 5, 0, 1, 4, 0x6000, 0, false, 0, 0, "sew32"},
+      {LS_UNIT, 6, 0, 1, 3, 0x6000, 0, false, 0, 0, "sew64"},
+      {LS_UNIT, 4, 1, 1, 4, 0x6000, 0, false, 0, 0, "lmul2"},
+      {LS_UNIT, 5, -1, 1, 4, 0x6000, 0, false, 0, 0, "lmul1of2"},
+      {LS_UNIT, 3, 0, 1, 8, 0x6000, 0, true, 0, 0, "masked-tail-undisturbed"},
+      {LS_UNIT, 3, 0, 1, 8, 0x6000, 0, true, 1, 1, "masked-tail-agnostic"},
+      {LS_UNIT, 3, 0, 1, 8, 0x6000, 0, true, 0, 1, "masked-vma1"},
+      // page and line boundaries: the run crosses the edge, each element does not
+      {LS_UNIT, 6, 0, 1, 4, 0x0FF8, 0, false, 0, 0, "page-cross"},
+      {LS_UNIT, 3, 0, 1, 12, 0x103C, 0, false, 0, 0, "line-cross"},
+      {LS_STRIDED, 4, 0, 1, 5, 0x6010, 6, false, 0, 0, "sew16"},
+      {LS_STRIDED, 5, 0, 1, 4, 0x6010, 12, false, 0, 0, "sew32"},
+      {LS_INDEXED, 5, 0, 1, 4, 0x6020, 0, false, 0, 0, "ei32"},
+      {LS_INDEXED, 4, 0, 1, 4, 0x6020, 0, false, 0, 0, "ei16"},
+      {LS_SEG_UNIT, 3, 0, 2, 4, 0x6030, 0, false, 0, 0, "nf2-sew8"},
+      {LS_SEG_UNIT, 5, 0, 4, 4, 0x6030, 0, false, 0, 0, "nf4-sew32"},
+      {LS_SEG_STRIDED, 4, 0, 2, 4, 0x6040, 8, false, 0, 0, "nf2-sew16"},
+      {LS_SEG_INDEXED, 5, 0, 2, 4, 0x6050, 0, false, 0, 0, "nf2-sew32"},
+      {LS_WHOLE, 6, 0, 1, 0, 0x6060, 0, false, 0, 0, "nf1-sew64"},
+      {LS_WHOLE, 6, 0, 2, 0, 0x6060, 0, false, 0, 0, "nf2-sew64"},
+      {LS_WHOLE, 6, 0, 4, 0, 0x6060, 0, false, 0, 0, "nf4-sew64"},
+      {LS_WHOLE, 6, 0, 8, 0, 0x6060, 0, false, 0, 0, "nf8-sew64"},
+      {LS_MASK, 3, 0, 1, 16, 0x6070, 0, false, 0, 0, "vl16"},
+      {LS_MASK, 3, 0, 1, 8, 0x6070, 0, false, 0, 0, "vl8"},
+  };
+  for (size_t r = 0; r < sizeof(rows) / sizeof(rows[0]); ++r) {
+    const Row& w = rows[r];
+    for (int dir = 0; dir < 2; ++dir) {
+      mem->OneRam();
+      LsuRun R;
+      R.mode = w.mode;
+      R.we = (dir != 0);
+      R.ordered = false;
+      R.nf = w.nf;
+      R.sew_l = w.sew_l;
+      R.lmul = w.lmul;
+      R.idx_l = w.sew_l;
+      R.vl = w.vl == 0 ? 4 : w.vl;
+      R.base = w.base;
+      R.stride = w.stride;
+      R.mask_en = w.mask_en;
+      R.vta = w.vta;
+      R.vma = w.vma;
+      R.vd = 8;
+      R.data = 16;
+      R.index = 24;
+      R.tag = w.tag;
+      // a masked access must not let vd overlap the mask register
+      RunLsuCell(cfg, vec, lsu, mem, rep, R, dir == 0, dir != 0, cov);
+    }
+  }
+  rep->Check(cov->cells >= 50, "coverage: only " + Dec(cov->cells) + " cells ran");
+}
+
+void RunLsuCase(Vmosaic_vec_tb* dut, ClockDriver* clk, Reporter* rep, LsuCoverage* cov) {
+  Cfg cfg(dut, clk);
+  Vec vec(dut, clk);
+  LsuMem mem;
+  Lsu lsu(dut, clk);
+  lsu.BindMem(&mem);
+  // the targeted policy phases run before the bulk sweep, so the first failure a
+  // policy defect produces names the policy
+  PhaseLsuDeviceStraddle(&cfg, &vec, &lsu, &mem, rep, cov);
+  PhaseLsuByteMask(&cfg, &vec, &lsu, &mem, rep, cov);
+  PhaseLsuFaultPosition(&cfg, &vec, &lsu, &mem, rep, cov);
+  PhaseLsuOrderedOrder(&cfg, &vec, &lsu, &mem, rep, cov);
+  PhaseLsuCapGate(&cfg, &vec, &lsu, &mem, rep, cov);
+  PhaseLsuCoverage(&cfg, &vec, &lsu, &mem, rep, cov);
+
+  for (int m = 0; m < LS_MODE_COUNT; ++m) {
+    rep->Check(cov->mode_seen[m],
+               std::string("coverage: mode ") + LsuModeName(m) + " did not run");
+  }
+  rep->Check(cov->modes == LS_MODE_COUNT,
+             "coverage: " + Dec(cov->modes) + " modes ran, expected " + Dec(LS_MODE_COUNT));
+}
+
 int main(int argc, char** argv) {
   mosaic::Options options;
   std::string error;
@@ -2931,6 +3960,7 @@ int main(int argc, char** argv) {
   VsetCounts vset_counts;
   LayoutCounts layout_counts;
   Coverage vec_cov;
+  LsuCoverage lsu_cov;
 
   std::string detail;
   bool aborted = false;
@@ -2954,6 +3984,8 @@ int main(int argc, char** argv) {
       RunVsetCase(&dut, &unit, &clk, &reporter, &vset_counts);
     } else if (options.case_id == "rvv.integer_mask_permute") {
       RunVecIntCase(&dut, &clk, &reporter, &vec_cov);
+    } else if (options.case_id == "rvv.memory_modes") {
+      RunLsuCase(&dut, &clk, &reporter, &lsu_cov);
     } else if (options.case_id == "rvv.vtype_layout") {
       RunVtypeLayoutCase(&dut, &unit, &clk, &reporter, &layout_counts);
     } else {
@@ -2997,6 +4029,11 @@ int main(int argc, char** argv) {
   if (options.case_id == "rvv.integer_mask_permute") {
     return reporter.Finish("PASS", "checks=" + Dec(reporter.checks()) + " cells=" +
                                        Dec(vec_cov.cells) + " families=" + Dec(VF_COUNT) +
+                                       " cycles=" + Dec(cycles));
+  }
+  if (options.case_id == "rvv.memory_modes") {
+    return reporter.Finish("PASS", "checks=" + Dec(reporter.checks()) + " modes=" +
+                                       Dec(lsu_cov.modes) + " cells=" + Dec(lsu_cov.cells) +
                                        " cycles=" + Dec(cycles));
   }
   return reporter.Finish("PASS", "checks=" + Dec(reporter.checks()) + " combos=" +
