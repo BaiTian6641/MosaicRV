@@ -353,7 +353,20 @@ module mosaic_core_tb (
     output logic [31:0] o_geom_fetch_outstanding_o,
     output logic [31:0] o_geom_seq_w_o,
     output logic [31:0] o_geom_ret_id_w_o,
-    output logic [TB_XLEN-1:0] o_geom_reset_vector_o
+    output logic [TB_XLEN-1:0] o_geom_reset_vector_o,
+    // I-044: the privilege/PMP geometry a driver must not re-derive. These are
+    // the profile's own numbers, taken from the generated package rather than
+    // from a formula in this wrapper: a profile with no `pmp` block in its
+    // geometry has MOSAIC_PMP_ENTRIES == 0 and a profile whose CSR list has no
+    // supervisor file has MOSAIC_CSR_HAS_S == 0, and a case that had to guess
+    // either would be testing its own guess.
+    output logic [31:0] o_geom_pmp_entries_o,
+    output logic [31:0] o_geom_pmp_g_o,
+    output logic [31:0] o_geom_pmp_grain_bytes_o,
+    output logic [31:0] o_geom_pmp_cfg_count_o,
+    output logic [31:0] o_geom_has_s_o,
+    output logic [31:0] o_geom_has_u_o,
+    output logic [31:0] o_geom_priv_least_o
 );
 
   // ------------------------------------------------------------------ core
@@ -666,6 +679,13 @@ module mosaic_core_tb (
   assign o_geom_seq_w_o        = 32'(TB_SEQ_W);
   assign o_geom_ret_id_w_o     = 32'(TB_RET_ID_W);
   assign o_geom_reset_vector_o = mosaic_cfg_pkg::MOSAIC_RESET_VECTOR;
+  assign o_geom_pmp_entries_o    = 32'(mosaic_cfg_pkg::MOSAIC_PMP_ENTRIES);
+  assign o_geom_pmp_g_o          = 32'(mosaic_cfg_pkg::MOSAIC_PMP_G);
+  assign o_geom_pmp_grain_bytes_o = 32'(mosaic_cfg_pkg::MOSAIC_PMP_GRAIN_BYTES);
+  assign o_geom_pmp_cfg_count_o  = 32'(mosaic_cfg_pkg::MOSAIC_PMP_CFG_COUNT);
+  assign o_geom_has_s_o          = mosaic_csr_pkg::MOSAIC_CSR_HAS_S ? 32'd1 : 32'd0;
+  assign o_geom_has_u_o          = mosaic_csr_pkg::MOSAIC_CSR_HAS_U ? 32'd1 : 32'd0;
+  assign o_geom_priv_least_o     = {30'd0, mosaic_csr_pkg::MOSAIC_PRIV_LEAST};
 
 endmodule : mosaic_core_tb
 /* verilator lint_on PINCONNECTEMPTY */

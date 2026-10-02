@@ -450,20 +450,26 @@ module mosaic_csr (
 
     // The supervisor registers. They come from a second table that only the
     // profiles with S-mode load, so the addresses exist in every profile that
-    // has them and this arm is compiled out of the ones that do not.
+    // has them and this arm is compiled out of the ones that do not. An address
+    // this arm matches is *implemented*, and it has to say so: the first table's
+    // `default` above already declared every address it does not name
+    // unimplemented, so an arm that raised only the write legality would leave
+    // every supervisor CSR looking unimplemented. That is not a hypothetical --
+    // CASE=privilege.permission_matrix found it, as a `csrw scounteren` from
+    // M-mode raising the illegal-instruction exception at reset.
     `ifdef MOSAIC_CSR_HAS_S
       case (csr_addr_i)
-        mosaic_csr_pkg::MOSAIC_CSR_ADDR_SSTATUS:    wr_legal = mosaic_csr_pkg::MOSAIC_CSR_WRITE_LEGAL_SSTATUS;
-        mosaic_csr_pkg::MOSAIC_CSR_ADDR_SIE:        wr_legal = mosaic_csr_pkg::MOSAIC_CSR_WRITE_LEGAL_SIE;
-        mosaic_csr_pkg::MOSAIC_CSR_ADDR_SIP:        wr_legal = mosaic_csr_pkg::MOSAIC_CSR_WRITE_LEGAL_SIP;
-        mosaic_csr_pkg::MOSAIC_CSR_ADDR_STVEC:      wr_legal = mosaic_csr_pkg::MOSAIC_CSR_WRITE_LEGAL_STVEC;
-        mosaic_csr_pkg::MOSAIC_CSR_ADDR_SCOUNTEREN: wr_legal = mosaic_csr_pkg::MOSAIC_CSR_WRITE_LEGAL_SCOUNTEREN;
-        mosaic_csr_pkg::MOSAIC_CSR_ADDR_SENVCFG:    wr_legal = mosaic_csr_pkg::MOSAIC_CSR_WRITE_LEGAL_SENVCFG;
-        mosaic_csr_pkg::MOSAIC_CSR_ADDR_SSCRATCH:   wr_legal = mosaic_csr_pkg::MOSAIC_CSR_WRITE_LEGAL_SSCRATCH;
-        mosaic_csr_pkg::MOSAIC_CSR_ADDR_SEPC:       wr_legal = mosaic_csr_pkg::MOSAIC_CSR_WRITE_LEGAL_SEPC;
-        mosaic_csr_pkg::MOSAIC_CSR_ADDR_SCAUSE:     wr_legal = mosaic_csr_pkg::MOSAIC_CSR_WRITE_LEGAL_SCAUSE;
-        mosaic_csr_pkg::MOSAIC_CSR_ADDR_STVAL:      wr_legal = mosaic_csr_pkg::MOSAIC_CSR_WRITE_LEGAL_STVAL;
-        mosaic_csr_pkg::MOSAIC_CSR_ADDR_SATP:       wr_legal = mosaic_csr_pkg::MOSAIC_CSR_WRITE_LEGAL_SATP;
+        mosaic_csr_pkg::MOSAIC_CSR_ADDR_SSTATUS:    begin addr_impl = 1'b1; wr_legal = mosaic_csr_pkg::MOSAIC_CSR_WRITE_LEGAL_SSTATUS; end
+        mosaic_csr_pkg::MOSAIC_CSR_ADDR_SIE:        begin addr_impl = 1'b1; wr_legal = mosaic_csr_pkg::MOSAIC_CSR_WRITE_LEGAL_SIE; end
+        mosaic_csr_pkg::MOSAIC_CSR_ADDR_SIP:        begin addr_impl = 1'b1; wr_legal = mosaic_csr_pkg::MOSAIC_CSR_WRITE_LEGAL_SIP; end
+        mosaic_csr_pkg::MOSAIC_CSR_ADDR_STVEC:      begin addr_impl = 1'b1; wr_legal = mosaic_csr_pkg::MOSAIC_CSR_WRITE_LEGAL_STVEC; end
+        mosaic_csr_pkg::MOSAIC_CSR_ADDR_SCOUNTEREN: begin addr_impl = 1'b1; wr_legal = mosaic_csr_pkg::MOSAIC_CSR_WRITE_LEGAL_SCOUNTEREN; end
+        mosaic_csr_pkg::MOSAIC_CSR_ADDR_SENVCFG:    begin addr_impl = 1'b1; wr_legal = mosaic_csr_pkg::MOSAIC_CSR_WRITE_LEGAL_SENVCFG; end
+        mosaic_csr_pkg::MOSAIC_CSR_ADDR_SSCRATCH:   begin addr_impl = 1'b1; wr_legal = mosaic_csr_pkg::MOSAIC_CSR_WRITE_LEGAL_SSCRATCH; end
+        mosaic_csr_pkg::MOSAIC_CSR_ADDR_SEPC:       begin addr_impl = 1'b1; wr_legal = mosaic_csr_pkg::MOSAIC_CSR_WRITE_LEGAL_SEPC; end
+        mosaic_csr_pkg::MOSAIC_CSR_ADDR_SCAUSE:     begin addr_impl = 1'b1; wr_legal = mosaic_csr_pkg::MOSAIC_CSR_WRITE_LEGAL_SCAUSE; end
+        mosaic_csr_pkg::MOSAIC_CSR_ADDR_STVAL:      begin addr_impl = 1'b1; wr_legal = mosaic_csr_pkg::MOSAIC_CSR_WRITE_LEGAL_STVAL; end
+        mosaic_csr_pkg::MOSAIC_CSR_ADDR_SATP:       begin addr_impl = 1'b1; wr_legal = mosaic_csr_pkg::MOSAIC_CSR_WRITE_LEGAL_SATP; end
         default: ;
       endcase
     `endif

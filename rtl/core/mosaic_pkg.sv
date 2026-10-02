@@ -132,6 +132,59 @@ package mosaic_pkg;
     AMO_MAXU = 4'd8
   } amo_op_e;
 
+  // ------------------------------------------------------------- F/D ops (I-049)
+  // The F and D extension operation list, added additively by work package
+  // I-049 so that `mosaic_fpu` and its testbench name an operation once instead
+  // of twice. The decoder does *not* decode OP-FP yet: `mosaic_decoder` still
+  // rejects every encoding outside RV64IM (that enumeration belongs to the
+  // decoder's owner, and CASE=decode.rv64im_reserved asserts it). This is the
+  // operation list the FPU implements, and the list the capability matrix in
+  // results/reports/I-049-fpu.md reports as implemented or declared-absent.
+  //
+  // The list is deliberately operation-shaped rather than encoding-shaped: an
+  // FPU does not care whether fadd.s came from OP-FP funct7 0000000 or from a
+  // future compressed form, and `mosaic_fpu` is handed the format as a side
+  // band (`req_fmt_i`) rather than re-deriving it from the instruction word.
+  //
+  // FP_SQRT is enumerated because the F/D *instruction* list contains fsqrt.s/d
+  // and a capability matrix has to name every operation in that list even when
+  // the answer is "declared not implemented". It is declared absent, not faked:
+  // see the header of rtl/core/mosaic_fpu.sv and the report.
+  typedef enum logic [4:0] {
+    FP_ADD     = 5'd0,   // fadd.s / fadd.d
+    FP_SUB     = 5'd1,   // fsub.s / fsub.d
+    FP_MUL     = 5'd2,   // fmul.s / fmul.d
+    FP_DIV     = 5'd3,   // fdiv.s / fdiv.d
+    FP_SQRT    = 5'd4,   // fsqrt.s / fsqrt.d -- DECLARED NOT IMPLEMENTED
+    FP_SGNJ    = 5'd5,   // fsgnj.s / fsgnj.d
+    FP_SGNJN   = 5'd6,   // fsgnjn.s / fsgnjn.d
+    FP_SGNJX   = 5'd7,   // fsgnjx.s / fsgnjx.d
+    FP_MIN     = 5'd8,   // fmin.s / fmin.d
+    FP_MAX     = 5'd9,   // fmax.s / fmax.d
+    FP_CMP_EQ  = 5'd10,  // feq.s / feq.d
+    FP_CMP_LT  = 5'd11,  // flt.s / flt.d
+    FP_CMP_LE  = 5'd12,  // fle.s / fle.d
+    FP_CLASS   = 5'd13,  // fclass.s / fclass.d
+    FP_MV_X    = 5'd14,  // fmv.x.w / fmv.x.d   (FP -> integer register)
+    FP_MV_W    = 5'd15,  // fmv.w.x / fmv.d.x   (integer register -> FP)
+    FP_CVT_FI  = 5'd16,  // fcvt.w[u].s / fcvt.l[u].s / .d  (FP -> integer)
+    FP_CVT_IF  = 5'd17,  // fcvt.s.w[u] / fcvt.s.l[u] / .d  (integer -> FP)
+    FP_CVT_FS  = 5'd18,  // fcvt.s.d             (double -> single, rounds)
+    FP_CVT_SF  = 5'd19   // fcvt.d.s             (single -> double, exact)
+  } fp_op_e;
+
+  // The five rounding modes, in the encoding the instruction's rm field uses.
+  // 101/110 are reserved and 111 is the dynamic mode; resolving 111 from
+  // frm/fcsr is work package I-050's, so this enumeration names only the five
+  // modes `mosaic_fpu` implements natively.
+  typedef enum logic [2:0] {
+    FP_RM_RNE = 3'b000,  // round to nearest, ties to even (IEEE default)
+    FP_RM_RTZ = 3'b001,  // round toward zero
+    FP_RM_RDN = 3'b010,  // round toward -infinity
+    FP_RM_RUP = 3'b011,  // round toward +infinity
+    FP_RM_RMM = 3'b100   // round to nearest, ties to maximum magnitude
+  } fp_rm_e;
+
   // ------------------------------------------------------------------ system
   typedef enum logic [1:0] {
     CSR_NONE = 2'b00,

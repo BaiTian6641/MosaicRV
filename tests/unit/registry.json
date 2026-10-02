@@ -1318,8 +1318,6 @@
     "rtl/core/mosaic_retire.sv",
     "rtl/core/mosaic_core.sv",
     "rtl/core/mosaic_csr.sv",
-    "rtl/core/mosaic_interrupt.sv",
-    "rtl/core/mosaic_csr.sv",
     "rtl/core/mosaic_interrupt.sv"
    ],
    "sv": [
@@ -1349,8 +1347,7 @@
     "sim/unit/tb_fpu.cpp"
    ],
    "max_cycles": 200000,
-   "seed": 1,
-   "pending": true
+   "seed": 1
   }
  }
 }
