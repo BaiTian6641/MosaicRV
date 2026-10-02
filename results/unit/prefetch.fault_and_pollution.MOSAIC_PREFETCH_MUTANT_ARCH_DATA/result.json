@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "case": "prefetch.fault_and_pollution",
+  "verdict": "FAIL",
+  "detail": "first failure: architectural-hit: a demand hit a copy that differs from memory at pa 0x0000000080002060",
+  "seed": 1,
+  "max_cycles": 200000,
+  "checks": 4,
+  "failures": 1,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-02T19:50:04Z",
+  "first_mismatch": "run: expected a wrong prediction adds only latency or traffic, got architectural-hit: a demand hit a copy that differs from memory at pa 0x0000000080002060",
+  "failed_checks": ["no contract violation in any phase"]
+}

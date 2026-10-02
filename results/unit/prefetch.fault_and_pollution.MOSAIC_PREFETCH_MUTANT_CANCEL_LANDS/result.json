@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "case": "prefetch.fault_and_pollution",
+  "verdict": "FAIL",
+  "detail": "first failure: cancel: the cancelled response was not dropped",
+  "seed": 1,
+  "max_cycles": 200000,
+  "checks": 9,
+  "failures": 1,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-02T19:50:02Z",
+  "first_mismatch": "run: expected a wrong prediction adds only latency or traffic, got cancel: the cancelled response was not dropped",
+  "failed_checks": ["no contract violation in any phase"]
+}

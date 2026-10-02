@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "case": "prefetch.fault_and_pollution",
+  "verdict": "FAIL",
+  "detail": "first failure: device-read: a prefetch read was presented for device pa 0x0000000000100060 -- a prediction may not perform an irreversible read",
+  "seed": 1,
+  "max_cycles": 200000,
+  "checks": 7,
+  "failures": 1,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-02T19:50:00Z",
+  "first_mismatch": "run: expected a wrong prediction adds only latency or traffic, got device-read: a prefetch read was presented for device pa 0x0000000000100060 -- a prediction may not perform an irreversible read",
+  "failed_checks": ["no contract violation in any phase"]
+}

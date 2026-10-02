@@ -2421,8 +2421,7 @@
     "sim/unit/tb_prefetch.cpp"
    ],
    "max_cycles": 200000,
-   "seed": 1,
-   "pending": true
+   "seed": 1
   }
  }
 }
