@@ -1,16 +1,15 @@
 {
   "schema_version": 1,
   "case": "compressed.cross_boundary",
-  "verdict": "FAIL",
-  "detail": "checks=107 runs=11 reserved_encodings=7 retires=66 compressed=14 straddling=1 cycles=968 seed=1",
+  "verdict": "PASS",
+  "detail": "checks=97 runs=11 reserved_encodings=7 retires=66 compressed=14 straddling=1 cycles=1022 seed=1",
   "seed": 1,
   "max_cycles": 4000000,
-  "checks": 108,
-  "failures": 16,
+  "checks": 98,
+  "failures": 0,
   "image": "",
   "expect": "",
   "tool": "Verilator 5.052 2026-09-05",
-  "timestamp": "2026-10-02T15:48:28Z",
-  "first_mismatch": "",
-  "failed_checks": ["mixed: the event record reports the instruction's own length: retire 15 at 0x000000008000002a expected 2, got 4", "mixed: the event record carries the instruction's own bits: retire 15 at 0x000000008000002a expected 0x0000000000000631, got 0x0000000000000617", "mixed: the retirement stream follows the reference: retire 15 at 0x000000008000002a value for x12 expected 0x0000000080000032, got 0x000000008000002a", "mixed: the retirement stream follows the reference: retire 16 pc expected 0x000000008000002c, got 0x000000008000002e", "mixed: the retirement stream equals the independent RV64IC reference, PC by PC, length by length, bits by bits (25 lanes compared)", "mixed: every instruction request is for an instruction's start address: 0x000000008000003e is inside an instruction, not the start of one", "mixed: every instruction request is for an instruction's start address: 0x0000000080000042 is inside an instruction, not the start of one", "mixed: every instruction request is for an instruction's start address: 0x0000000080000046 is inside an instruction, not the start of one", "mixed: every address the core requests is an instruction's own start address (58 requests checked)", "mixed: the program counter advances by the delivered instruction's own length: the instruction at 0x000000008000002a is 2 bytes long, but the fetch issued when it was answered went to 0x000000008000002e", "mixed: the program counter advances by the delivered instruction's own length: the instruction at 0x0000000080000036 is 2 bytes long, but the fetch issued when it was answered went to 0x000000008000003a", "mixed: the program counter advances by the delivered instruction's own length: the instruction at 0x000000008000003a is 2 bytes long, but the fetch issued when it was answered went to 0x000000008000003e", "mixed: the program counter advances by the delivered instruction's own length: the instruction at 0x0000000080000048 is 4 bytes long, but the fetch issued when it was answered went to 0x000000008000004a", "mixed: every fetch after an instruction is that instruction's own length further on (31 instruction/fetch pairs checked)", "mixed: the c.jalr retired", "no contract violation"]
+  "timestamp": "2026-10-02T15:52:52Z",
+  "first_mismatch": ""
 }

@@ -2,7 +2,7 @@
   "schema_version": 1,
   "case": "sv39.walk_and_faults",
   "verdict": "PASS",
-  "detail": "comparisons=36 checks=0 seed=1",
+  "detail": "profile has no supervisor mode",
   "seed": 1,
   "max_cycles": 4000000,
   "checks": 1,
@@ -10,6 +10,6 @@
   "image": "",
   "expect": "",
   "tool": "Verilator 5.052 2026-09-05",
-  "timestamp": "2026-10-02T08:06:34Z",
+  "timestamp": "2026-10-02T15:53:39Z",
   "first_mismatch": ""
 }
