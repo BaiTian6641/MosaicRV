@@ -95,7 +95,17 @@ package mosaic_pkg;
     // old value is read *and* the new one written as one indivisible step at a
     // shared serialization point. A consumer that treated it as either one
     // would either write memory speculatively or return a stale value.
-    MEM_AMO   = 3'b011
+    MEM_AMO   = 3'b011,
+    // LR/SC (work package I-040). They are their own access classes because
+    // neither is a plain load or store: an LR returns a value *and* establishes
+    // a reservation, and an SC conditionally performs exactly one write and
+    // returns a status (0 = succeeded, 1 = failed) instead of a memory value.
+    // Both are issued through the load queue -- they return a value to `rd`
+    // before retirement -- and both take the atomic serialization path, because
+    // an LR must not establish a reservation on a path that can be squashed and
+    // an SC must not perform its write speculatively.
+    MEM_LR    = 3'b100,
+    MEM_SC    = 3'b101
   } mem_kind_e;
 
   localparam logic [2:0] SZ_BYTE = 3'd0;
@@ -176,6 +186,12 @@ package mosaic_pkg;
     amo_op_e     amo_op;
     logic        amo_aq;
     logic        amo_rl;
+    // I-040. `mem_kind` is MEM_LR/MEM_SC for the load-reserved and
+    // store-conditional forms; these two bits are the same fact stated where a
+    // consumer that only cares about "is this one of the paired atomics" can
+    // read it without a second comparison of the kind enum.
+    logic        is_lr;
+    logic        is_sc;
 
     logic        is_branch;
     logic [2:0]  branch_funct;

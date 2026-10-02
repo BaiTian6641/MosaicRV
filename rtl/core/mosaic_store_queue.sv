@@ -715,6 +715,8 @@ module mosaic_store_queue #(
     drain_req_o.amo_op     = mosaic_pkg::AMO_ADD;
     drain_req_o.aq         = 1'b0;
     drain_req_o.rl         = 1'b0;
+    drain_req_o.is_lr      = 1'b0;
+    drain_req_o.is_sc      = 1'b0;
   end
 
   logic drain_accept_c;

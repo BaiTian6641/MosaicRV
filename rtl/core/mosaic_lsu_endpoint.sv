@@ -75,6 +75,35 @@
 // deliberate beat of latency: it keeps this endpoint reusable behind a cache
 // whose response arrives whenever it arrives, instead of putting the extraction
 // shifter combinationally between the memory and the writeback path.
+//
+// ------------------------------------------------------ LR/SC (I-040)
+//
+// `lr` and `sc` are two access *classes* the request carries (`is_lr`/`is_sc`),
+// not two accesses bolted onto the load/store path:
+//
+//   * an **LR** is the ordinary read path with one extra act on the memory
+//     response: it establishes the hart's reservation on the granule containing
+//     the address, and only if the read did not fault. Its response is the old
+//     value, exactly as a load's.
+//   * an **SC** is decided *before the memory is asked*. The reservation manager
+//     answers combinationally, and:
+//       - on a **miss** the endpoint never leaves `ST_IDLE` for `ST_REQ`: it
+//         builds the response (rd = 1) and moves to `ST_DONE`. The memory system
+//         does not see the instruction at all, which is the structural statement
+//         of "an SC with no reservation does not write".
+//       - on a **hit** it performs exactly one write beat -- `ST_REQ` presenting
+//         the store data, `ST_WAIT` taking the acknowledgement -- and returns
+//         rd = 0. The `ST_REQ`/`ST_WAIT` states are the *same* states an
+//         ordinary store uses, so there is no separate write path to keep in
+//         step, and the SC is one beat on the port by construction rather than
+//         by a second rule.
+//
+// The reservation manager (`mosaic_reservation`) sits beside the port because
+// this module is the only place that can see every event the reservation is a
+// function of: this hart's stores, AMOs and SCs, another agent's writes
+// (`ext_write_valid_i`), and a trap or context switch (`flush_i`). Its contract
+// -- the granule, the invalidation set, and why over-invalidation is a defect
+// here rather than a liberty -- is documented in that module.
 // ============================================================================
 
 `ifndef MOSAIC_LSU_ENDPOINT_SV_
@@ -122,6 +151,22 @@ module mosaic_lsu_endpoint (
     output logic                          mem_rsp_ready_o,
     input  mosaic_uop_pkg::mem_rsp_t      mem_rsp_i,
 
+    // ------------------------------------------ the coherence notification (A)
+    // Work package I-040. A write another agent performed, delivered to the
+    // reservation manager so a reservation that a conflicting write has
+    // invalidated cannot outlive it. In this profile there is no cache and one
+    // hart on the port, so there is no fabric to snoop and the notification is a
+    // port: a deeper design drives it from the same invalidation traffic its
+    // caches see, and the case drives it from the second agent it models. It has
+    // no effect on any access -- it is neither a request nor a response -- so an
+    // ordinary machine that ties it low is unchanged.
+    input  logic                          ext_write_valid_i,
+    input  logic [63:0]                   ext_write_addr_i,
+    input  logic [3:0]                    ext_write_bytes_i,
+
+    // A trap or a context switch: the hart's reservation does not survive it.
+    input  logic                          flush_i,
+
     // ------------------------------------------------------------ observability
     output logic                          o_busy,
     output logic [31:0]                   o_load_ctr,
@@ -145,7 +190,26 @@ module mosaic_lsu_endpoint (
     // response leaves -- and aligned with the memory request port, because both
     // are read from the same latched transaction.
     output mosaic_uop_pkg::uop_id_t       o_txn_id,
-    output logic                          o_txn_dev
+    output logic                          o_txn_dev,
+    // I-040. The kind of the transaction the port is carrying: 0 ordinary,
+    // 1 AMO, 2 LR, 3 SC. It rides beside the transaction like the device
+    // attribute, so a case can attribute every data-port beat to the access
+    // class the instruction asked for instead of inferring it from the address.
+    output logic [1:0]                    o_txn_kind,
+    // The reservation, and what happened to it. `o_res_valid`/`o_res_granule`
+    // are the state itself, so a case can require an LR to establish it and each
+    // invalidation source to destroy it rather than only observing the SC status
+    // it produces.
+    output logic                          o_res_valid,
+    output logic [63:0]                   o_res_granule,
+    output logic [31:0]                   o_lr_ctr,
+    output logic [31:0]                   o_sc_ok_ctr,
+    output logic [31:0]                   o_sc_fail_ctr,
+    output logic [31:0]                   o_res_set_ctr,
+    output logic [31:0]                   o_res_clear_ctr,
+    output logic [31:0]                   o_res_ext_inval_ctr,
+    output logic [31:0]                   o_res_hit_ctr,
+    output logic [31:0]                   o_res_miss_ctr
 );
 
   // --------------------------------------------------------------- localparams
@@ -157,6 +221,19 @@ module mosaic_lsu_endpoint (
   localparam logic [63:0] EXC_LOAD_ACCESS      = mosaic_pkg::EXC_LOAD_ACCESS;
   localparam logic [63:0] EXC_STORE_MISALIGNED = mosaic_pkg::EXC_STORE_MISALIGNED;
   localparam logic [63:0] EXC_STORE_ACCESS     = mosaic_pkg::EXC_STORE_ACCESS;
+
+  // The transaction-class label published beside the memory port (I-040). Small
+  // and local: it exists so a test can attribute each data-port beat to the
+  // access class the instruction asked for.
+  localparam logic [1:0] KIND_ORDINARY = 2'd0;
+  localparam logic [1:0] KIND_AMO      = 2'd1;
+  localparam logic [1:0] KIND_LR       = 2'd2;
+  localparam logic [1:0] KIND_SC       = 2'd3;
+
+  // The SC status the instruction writes to `rd`: 0 when the store-conditional
+  // performed its write, 1 when it did not.
+  localparam logic [63:0] SC_OK   = 64'd0;
+  localparam logic [63:0] SC_FAIL = 64'd1;
 
   //   IDLE --accept--> REQ --mem ready--> WAIT --mem response--> DONE
   //     |                                                         |
@@ -212,6 +289,13 @@ module mosaic_lsu_endpoint (
     mosaic_pkg::amo_op_e     amo_op;
     logic                    aq;
     logic                    rl;
+    // LR/SC (I-040). `is_lr` completes as a read whose response is also the
+    // moment the reservation is established; `is_sc` is checked against the
+    // reservation manager before the memory system is touched at all, and is
+    // performed as exactly one write beat when -- and only when -- the check
+    // hits.
+    logic                    is_lr;
+    logic                    is_sc;
   } txn_t;
 
   txn_t            req_q;
@@ -232,6 +316,12 @@ module mosaic_lsu_endpoint (
   logic            amo_pending_q;
 `endif
 
+  // `MOSAIC_LRSC_MUTANT_SC_DOUBLE_WRITE` only: a successful SC has already
+  // performed its write and this bit sends it back round for one more.
+`ifdef MOSAIC_LRSC_MUTANT_SC_DOUBLE_WRITE
+  logic            sc_rewrite_q;
+`endif
+
   // The response being held for the consumer.
   mosaic_uop_pkg::lsu_rsp_t rsp_q;
   logic                     rsp_valid_q;
@@ -240,6 +330,9 @@ module mosaic_lsu_endpoint (
   logic [31:0] load_ctr_q, store_ctr_q, txn_ctr_q;
   logic [31:0] misaligned_ctr_q, access_fault_ctr_q, rsp_ctr_q;
   logic [63:0] last_fault_cause_q, last_fault_tval_q;
+
+  // I-040: what the LR/SC path did, and what the reservation did.
+  logic [31:0] lr_ctr_q, sc_ok_ctr_q, sc_fail_ctr_q;
 
   // --------------------------------------------------------- combinatorial
   logic [XLEN-1:0] addr_c;
@@ -326,7 +419,9 @@ module mosaic_lsu_endpoint (
     // ordinary store keeps its own payload; only the atomic write uses the
     // datapath's output.
     mem_req_o.wdata = amo_write_c ? amo_new_c : shifted_store_c;
-    mem_req_o.we    = amo_write_c ? 1'b1 : req_q.we;
+    // An SC performs its write on the ST_REQ beat, which is a write for it even
+    // though the load queue issued the request as a load class.
+    mem_req_o.we    = amo_write_c ? 1'b1 : (req_q.we || req_q.is_sc);
     mem_req_o.addr  = addr_q;
     mem_req_o.size  = req_q.size;
     mem_req_o.wstrb = mosaic_uop_pkg::expected_wstrb(req_q.size, addr_q[2:0]);
@@ -355,6 +450,72 @@ module mosaic_lsu_endpoint (
 
   // The memory response is taken in the read-wait and the write-ack states.
   assign mem_rsp_ready_o = (state_q == ST_WAIT) || (state_q == ST_AMO_WAIT);
+
+  // ==========================================================================
+  // I-040: the LR/SC reservation manager
+  // ==========================================================================
+  // The reservation lives next to the only structure that can see every event
+  // the ISA makes it a function of: the endpoint performs this hart's stores,
+  // AMOs and SCs, and it is where another agent's writes are notified to.
+  //
+  // The four sources, and where each comes from:
+  //
+  //   own write    `mem_req_valid_o && mem_req_o.we` -- the offered write beat.
+  //                One strobe covers an ordinary store, an AMO's write beat and
+  //                an SC's write beat, so "a store, an AMO, or an SC" cannot be
+  //                three rules that disagree.
+  //   external     `ext_write_valid_i`, the notification described at the port.
+  //   SC consumed  `accept_c && req_i.is_sc`: an SC pairs with the most recent
+  //                LR whether it succeeds or fails, so it consumes the
+  //                reservation either way.
+  //   flush        `flush_i`: an exception or context switch, wired from the
+  //                core's redirect.
+  //
+  // The LR's establishment is the read's completion -- the cycle the memory
+  // returns the old value -- and only when that read did not fault: a faulting
+  // LR has not read the location, so it cannot reserve it.
+  logic        res_valid_c;
+  logic [63:0] res_granule_c;
+  logic        res_hit_c;
+  logic        res_set_c;
+  logic        res_consume_c;
+  logic        res_check_c;
+  logic        res_own_write_c;
+  logic [3:0]  res_own_bytes_c;
+  logic [31:0] res_set_ctr_c, res_clear_ctr_c, res_ext_inval_ctr_c;
+  logic [31:0] res_hit_ctr_c, res_miss_ctr_c;
+
+  assign res_set_c     = (state_q == ST_WAIT) && mem_rsp_valid_i &&
+                         req_q.is_lr && !mem_rsp_i.fault;
+  assign res_consume_c = accept_c && req_i.is_sc;
+  assign res_check_c   = accept_c && req_i.is_sc;
+  assign res_own_write_c   = mem_req_valid_o && mem_req_o.we;
+  assign res_own_bytes_c   = 4'(mosaic_uop_pkg::size_bytes(req_q.size));
+
+  mosaic_reservation u_reservation (
+      .clk                (clk),
+      .rst                (rst),
+      .set_valid_i        (res_set_c),
+      .set_addr_i         (addr_q),
+      .check_addr_i       (addr_c),
+      .check_valid_i      (res_check_c),
+      .hit_o              (res_hit_c),
+      .own_write_valid_i  (res_own_write_c),
+      .own_write_addr_i   (addr_q),
+      .own_write_bytes_i  (res_own_bytes_c),
+      .ext_write_valid_i  (ext_write_valid_i),
+      .ext_write_addr_i   (ext_write_addr_i),
+      .ext_write_bytes_i  (ext_write_bytes_i),
+      .flush_valid_i      (flush_i),
+      .consume_valid_i    (res_consume_c),
+      .valid_o            (res_valid_c),
+      .granule_o          (res_granule_c),
+      .set_ctr_o          (res_set_ctr_c),
+      .clear_ctr_o        (res_clear_ctr_c),
+      .clear_ext_ctr_o    (res_ext_inval_ctr_c),
+      .hit_ctr_o          (res_hit_ctr_c),
+      .miss_ctr_o         (res_miss_ctr_c)
+  );
 
   // ------------------------------------------------------- value extraction
   // The load's architectural value: the addressed byte lanes, sign- or
@@ -413,6 +574,21 @@ module mosaic_lsu_endpoint (
   assign o_inflight_size = req_q.size;
   assign o_txn_id        = req_q.id;
   assign o_txn_dev       = req_q.dev;
+  assign o_txn_kind      = req_q.is_amo ? KIND_AMO
+                         : req_q.is_lr  ? KIND_LR
+                         : req_q.is_sc  ? KIND_SC
+                         : KIND_ORDINARY;
+
+  assign o_res_valid           = res_valid_c;
+  assign o_res_granule         = res_granule_c;
+  assign o_lr_ctr              = lr_ctr_q;
+  assign o_sc_ok_ctr           = sc_ok_ctr_q;
+  assign o_sc_fail_ctr         = sc_fail_ctr_q;
+  assign o_res_set_ctr         = res_set_ctr_c;
+  assign o_res_clear_ctr       = res_clear_ctr_c;
+  assign o_res_ext_inval_ctr   = res_ext_inval_ctr_c;
+  assign o_res_hit_ctr         = res_hit_ctr_c;
+  assign o_res_miss_ctr        = res_miss_ctr_c;
 
   assign o_load_ctr         = load_ctr_q;
   assign o_store_ctr        = store_ctr_q;
@@ -440,6 +616,9 @@ module mosaic_lsu_endpoint (
 `ifdef MOSAIC_AMO_MUTANT_SPLIT
       amo_pending_q      <= 1'b0;
 `endif
+`ifdef MOSAIC_LRSC_MUTANT_SC_DOUBLE_WRITE
+      sc_rewrite_q       <= 1'b0;
+`endif
       load_ctr_q         <= 32'd0;
       store_ctr_q        <= 32'd0;
       txn_ctr_q          <= 32'd0;
@@ -448,6 +627,9 @@ module mosaic_lsu_endpoint (
       rsp_ctr_q          <= 32'd0;
       last_fault_cause_q <= 64'd0;
       last_fault_tval_q  <= 64'd0;
+      lr_ctr_q           <= 32'd0;
+      sc_ok_ctr_q        <= 32'd0;
+      sc_fail_ctr_q      <= 32'd0;
     end else begin
       // A held response leaves only when the consumer takes it. This is the
       // one transition that is not a function of the memory or of a new
@@ -483,10 +665,14 @@ module mosaic_lsu_endpoint (
             req_q.amo_op     <= req_i.amo_op;
             req_q.aq         <= req_i.aq;
             req_q.rl         <= req_i.rl;
+            req_q.is_lr      <= req_i.is_lr;
+            req_q.is_sc      <= req_i.is_sc;
             addr_q           <= addr_c;
 
             if (req_i.we) store_ctr_q <= store_ctr_q + 32'd1;
             else          load_ctr_q  <= load_ctr_q  + 32'd1;
+
+            if (req_i.is_lr) lr_ctr_q <= lr_ctr_q + 32'd1;
 
             if (misaligned_c) begin
               // The trap path. The response is built from the address alone,
@@ -495,19 +681,43 @@ module mosaic_lsu_endpoint (
               misaligned_ctr_q  <= misaligned_ctr_q + 32'd1;
               rsp_q.id          <= req_i.id;
               rsp_q.fault       <= 1'b1;
-              // The privileged spec folds AMO into the store/AMO pair for
-              // causes 6 and 7: a misaligned atomic access reports store/AMO
-              // address misaligned, not load address misaligned.
-              rsp_q.cause       <= (req_i.we || req_i.is_amo)
+              // The privileged spec folds AMO -- and, with it, every atomic
+              // access whose *effect* is a write -- into the store/AMO pair for
+              // causes 6 and 7. An SC is a conditional store and takes cause 6,
+              // not cause 4; an LR is a load and takes cause 4.
+              rsp_q.cause       <= (req_i.we || req_i.is_amo || req_i.is_sc)
                                    ? EXC_STORE_MISALIGNED : EXC_LOAD_MISALIGNED;
               rsp_q.tval        <= addr_c;
               rsp_q.data        <= 64'd0;
               rsp_valid_q       <= 1'b1;
-              last_fault_cause_q <= (req_i.we || req_i.is_amo)
+              last_fault_cause_q <= (req_i.we || req_i.is_amo || req_i.is_sc)
                                     ? EXC_STORE_MISALIGNED : EXC_LOAD_MISALIGNED;
               last_fault_tval_q  <= addr_c;
               rsp_ctr_q         <= rsp_ctr_q + 32'd1;
               state_q           <= ST_DONE;
+            end else if (req_i.is_sc && !res_hit_c) begin
+              // --------------------------------------------------- SC failure
+              // The reservation does not cover this address, so the
+              // store-conditional performs **no memory access at all**: it does
+              // not even enter ST_REQ, which is the structural statement of "an
+              // SC with no reservation does not write". `rd` receives 1.
+              //
+              // MOSAIC_LRSC_MUTANT_SC_WRITES_ON_FAIL removes the refusal and
+              // lets the write beat go out anyway -- the case's "an SC that did
+              // not succeed performs no write" check names it.
+`ifdef MOSAIC_LRSC_MUTANT_SC_WRITES_ON_FAIL
+              state_q <= ST_REQ;
+`else
+              sc_fail_ctr_q <= sc_fail_ctr_q + 32'd1;
+              rsp_q.id      <= req_i.id;
+              rsp_q.fault   <= 1'b0;
+              rsp_q.cause   <= EXC_STORE_ACCESS;
+              rsp_q.tval    <= addr_c;
+              rsp_q.data    <= SC_FAIL;
+              rsp_valid_q   <= 1'b1;
+              rsp_ctr_q     <= rsp_ctr_q + 32'd1;
+              state_q       <= ST_DONE;
+`endif
             end else begin
               state_q <= ST_REQ;
             end
@@ -559,23 +769,46 @@ module mosaic_lsu_endpoint (
             rsp_q.fault <= mem_rsp_i.fault;
 `endif
             rsp_q.tval  <= addr_q;
-            rsp_q.cause <= (req_q.we || req_q.is_amo)
+            rsp_q.cause <= (req_q.we || req_q.is_amo || req_q.is_sc)
                            ? EXC_STORE_ACCESS : EXC_LOAD_ACCESS;
             // An AMO's response is the *old* value, extracted exactly like a
             // load of the access width (the atomic op itself happened in the
-            // memory system, inside the one transaction).
-            rsp_q.data  <= req_q.we ? 64'd0 : extracted_c;
+            // memory system, inside the one transaction). An SC reports its
+            // status, not a memory value: 0 when it performed its write, 1 when
+            // it did not (and then there was no write at all).
+            rsp_q.data  <= req_q.is_sc ? SC_OK
+                         : (req_q.we ? 64'd0 : extracted_c);
             rsp_valid_q <= 1'b1;
 
             if (mem_rsp_i.fault) begin
               access_fault_ctr_q <= access_fault_ctr_q + 32'd1;
-              last_fault_cause_q <= (req_q.we || req_q.is_amo)
+              last_fault_cause_q <= (req_q.we || req_q.is_amo || req_q.is_sc)
                                     ? EXC_STORE_ACCESS : EXC_LOAD_ACCESS;
               last_fault_tval_q  <= addr_q;
             end
 
+            if (req_q.is_sc) begin
+              if (mem_rsp_i.fault) sc_fail_ctr_q <= sc_fail_ctr_q + 32'd1;
+              else                 sc_ok_ctr_q   <= sc_ok_ctr_q   + 32'd1;
+            end
+
             rsp_ctr_q <= rsp_ctr_q + 32'd1;
+`ifdef MOSAIC_LRSC_MUTANT_SC_DOUBLE_WRITE
+            // NEGATIVE CONTROL: a successful SC performs its write a second
+            // time -- "an SC that succeeds but writes twice". The final memory
+            // value is unchanged (the second write stores the same data), which
+            // is exactly why the case counts transactions per SC rather than
+            // only comparing the end state.
+            if (req_q.is_sc && !mem_rsp_i.fault && !sc_rewrite_q) begin
+              sc_rewrite_q <= 1'b1;
+              state_q      <= ST_REQ;
+            end else begin
+              sc_rewrite_q <= 1'b0;
+              state_q      <= ST_DONE;
+            end
+`else
             state_q   <= ST_DONE;
+`endif
             end
           end
         end

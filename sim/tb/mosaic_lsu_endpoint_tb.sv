@@ -107,6 +107,23 @@ module mosaic_lsu_endpoint_tb (
     output logic [31:0] o_txn_id,
     output logic        o_txn_dev,
 
+    // ------------------------------------------------- LR/SC observation (I-040)
+    // This case exercises no atomic access, so every one of these is constant;
+    // the ports exist so the wrapper connects every port the endpoint declares
+    // (a half-connected port list is how a tree stops elaborating), and
+    // CASE=lrsc.reservation_progress's own wrapper is where they are read.
+    output logic [1:0]  o_txn_kind,
+    output logic        o_res_valid,
+    output logic [63:0] o_res_granule,
+    output logic [31:0] o_lr_ctr,
+    output logic [31:0] o_sc_ok_ctr,
+    output logic [31:0] o_sc_fail_ctr,
+    output logic [31:0] o_res_set_ctr,
+    output logic [31:0] o_res_clear_ctr,
+    output logic [31:0] o_res_ext_inval_ctr,
+    output logic [31:0] o_res_hit_ctr,
+    output logic [31:0] o_res_miss_ctr,
+
     // ------------------------------------------------------------ geometry
     output logic [31:0] o_xlen_w,
     output logic [31:0] o_strb_w,
@@ -207,6 +224,15 @@ module mosaic_lsu_endpoint_tb (
       .mem_rsp_ready_o     (dn_rsp_ready),
       .mem_rsp_i           (dn_rsp_s),
 
+      // I-040's coherence notification and flush: this case is the ordinary
+      // load/store boundary and exercises no atomic access, so no second agent
+      // writes and nothing is flushed. The LR/SC path has its own case, and the
+      // reservation it establishes is observed there.
+      .ext_write_valid_i   (1'b0),
+      .ext_write_addr_i    (64'd0),
+      .ext_write_bytes_i   (4'd0),
+      .flush_i             (1'b0),
+
       .o_busy              (o_busy),
       .o_load_ctr          (o_load_ctr),
       .o_store_ctr         (o_store_ctr),
@@ -219,7 +245,19 @@ module mosaic_lsu_endpoint_tb (
       .o_inflight_addr     (o_inflight_addr),
       .o_inflight_size     (o_inflight_size_s),
       .o_txn_id            (o_txn_id_s),
-      .o_txn_dev           (o_txn_dev)
+      .o_txn_dev           (o_txn_dev),
+
+      .o_txn_kind          (o_txn_kind),
+      .o_res_valid         (o_res_valid),
+      .o_res_granule       (o_res_granule),
+      .o_lr_ctr            (o_lr_ctr),
+      .o_sc_ok_ctr         (o_sc_ok_ctr),
+      .o_sc_fail_ctr       (o_sc_fail_ctr),
+      .o_res_set_ctr       (o_res_set_ctr),
+      .o_res_clear_ctr     (o_res_clear_ctr),
+      .o_res_ext_inval_ctr (o_res_ext_inval_ctr),
+      .o_res_hit_ctr       (o_res_hit_ctr),
+      .o_res_miss_ctr      (o_res_miss_ctr)
   );
 
   assign o_txn_id = {{(32 - ID_W) {1'b0}}, o_txn_id_s};

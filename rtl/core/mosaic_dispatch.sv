@@ -276,6 +276,11 @@ module mosaic_dispatch (
     output mosaic_pkg::amo_op_e         mem_ins_amo_op,
     output logic                        mem_ins_amo_aq,
     output logic                        mem_ins_amo_rl,
+    // LR/SC (I-040). The class travels with the memory insert bus for the same
+    // reason the AMO's does: the integration recognises the macro from what
+    // dispatch says, not by re-decoding the instruction.
+    output logic                        mem_ins_is_lr,
+    output logic                        mem_ins_is_sc,
     output logic [DSP_XLEN-1:0]         mem_ins_data,
     output logic [DSP_TAG_W-1:0]        mem_ins_dst_tag,
     output logic [DSP_IGEN_W-1:0]       mem_ins_dst_gen,
@@ -606,6 +611,14 @@ module mosaic_dispatch (
       // drains after retirement, which would write memory before the atomic
       // read was even performed.
       new_meta.class_ = mosaic_uop_pkg::UOP_LOAD;
+    end else if ((dec_ctl0.mem_kind == mosaic_pkg::MEM_LR) ||
+                 (dec_ctl0.mem_kind == mosaic_pkg::MEM_SC)) begin
+      // LR/SC (I-040) take exactly the AMO's route and for the same reasons: an
+      // SC returns a *status* to rd and must never complete at allocation, and
+      // an LR/SC must be serialized at the ROB head so a reservation is not
+      // established on a path that can be squashed and a conditional write is
+      // not performed speculatively.
+      new_meta.class_ = mosaic_uop_pkg::UOP_LOAD;
     end else if (dec_ctl0.mem_kind == mosaic_pkg::MEM_STORE) begin
       new_meta.class_ = mosaic_uop_pkg::UOP_STORE;
     end else if (dec_ctl0.is_branch || dec_ctl0.is_jal || dec_ctl0.is_jalr) begin
@@ -628,6 +641,8 @@ module mosaic_dispatch (
     new_meta.amo_op      = dec_ctl0.amo_op;
     new_meta.amo_aq      = dec_ctl0.amo_aq;
     new_meta.amo_rl      = dec_ctl0.amo_rl;
+    new_meta.is_lr       = (dec_ctl0.mem_kind == mosaic_pkg::MEM_LR);
+    new_meta.is_sc       = (dec_ctl0.mem_kind == mosaic_pkg::MEM_SC);
     new_meta.is_fence    = dec_ctl0.is_miscmem && !dec_ctl0.is_fence_i;
     new_meta.is_fence_i  = dec_ctl0.is_fence_i;
   end
@@ -1041,6 +1056,8 @@ module mosaic_dispatch (
     mem_ins_amo_op   = head.meta.amo_op;
     mem_ins_amo_aq   = head.meta.amo_aq;
     mem_ins_amo_rl   = head.meta.amo_rl;
+    mem_ins_is_lr    = head.meta.is_lr;
+    mem_ins_is_sc    = head.meta.is_sc;
     mem_ins_data     = head.s2_x0 ? {DSP_XLEN{1'b0}}
                        : (head.s2_const ? head.s2_cval : s2_val_sel);
     // A store writes no register, so its destination is x0 by construction

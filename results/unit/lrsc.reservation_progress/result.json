@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "case": "lrsc.reservation_progress",
+  "verdict": "FAIL",
+  "detail": "checks=73 seed=1",
+  "seed": 1,
+  "max_cycles": 4000000,
+  "checks": 74,
+  "failures": 2,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-02T03:54:24Z",
+  "first_mismatch": "",
+  "failed_checks": ["semantics: the program reported success through the exit protocol (TOHOST = 0)", "progress: the program reported success through the exit protocol (TOHOST = 0)"]
+}

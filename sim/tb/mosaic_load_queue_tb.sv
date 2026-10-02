@@ -296,6 +296,11 @@ module mosaic_load_queue_tb (
       .alloc_dst_tag_i        ({7{1'b0}}),
       .alloc_dst_gen_i        ({7{1'b0}}),
       .alloc_dst_x0_i         (1'b1),
+      // I-040: this case is the load queue's own forwarding policy and holds no
+      // atomic macro, so the atomic record is idle and no head is atomic. The
+      // LR/SC path has its own case.
+      .atomic_id_i            ({TB_ID_W{1'b0}}),
+      .atomic_valid_i         (1'b0),
       .flush_valid_i          (1'b0),
 
       .sq_entry_pay_i         (o_sq_entry_pay),
@@ -474,6 +479,12 @@ module mosaic_load_queue_tb (
       .mem_rsp_ready_o    (lq_mem_rsp_ready),
       .mem_rsp_i          (ep_lq_mem_rsp_s),
 
+      // I-040: this case drives no LR/SC and no second agent.
+      .ext_write_valid_i  (1'b0),
+      .ext_write_addr_i   ({TB_XLEN{1'b0}}),
+      .ext_write_bytes_i  (4'd0),
+      .flush_i            (1'b0),
+
       .o_busy             (),
       .o_load_ctr         (),
       .o_store_ctr        (),
@@ -487,7 +498,20 @@ module mosaic_load_queue_tb (
       .o_inflight_size    (),
       // Observed by CASE=mmio.exactly_once on the integrated core (I-038).
       .o_txn_id           (),
-      .o_txn_dev          ()
+      .o_txn_dev          (),
+      // Observed by CASE=lrsc.reservation_progress on the integrated core
+      // (I-040); this case drives no atomic access.
+      .o_txn_kind         (),
+      .o_res_valid        (),
+      .o_res_granule      (),
+      .o_lr_ctr           (),
+      .o_sc_ok_ctr        (),
+      .o_sc_fail_ctr      (),
+      .o_res_set_ctr      (),
+      .o_res_clear_ctr    (),
+      .o_res_ext_inval_ctr(),
+      .o_res_hit_ctr      (),
+      .o_res_miss_ctr     ()
   );
 
   mosaic_lsu_endpoint u_ep_sq (
@@ -511,6 +535,12 @@ module mosaic_load_queue_tb (
       .mem_rsp_ready_o    (sq_mem_rsp_ready),
       .mem_rsp_i          (ep_sq_mem_rsp_s),
 
+      // I-040: this case drives no LR/SC and no second agent.
+      .ext_write_valid_i  (1'b0),
+      .ext_write_addr_i   ({TB_XLEN{1'b0}}),
+      .ext_write_bytes_i  (4'd0),
+      .flush_i            (1'b0),
+
       .o_busy             (),
       .o_load_ctr         (),
       .o_store_ctr        (),
@@ -524,7 +554,20 @@ module mosaic_load_queue_tb (
       .o_inflight_size    (),
       // Observed by CASE=mmio.exactly_once on the integrated core (I-038).
       .o_txn_id           (),
-      .o_txn_dev          ()
+      .o_txn_dev          (),
+      // Observed by CASE=lrsc.reservation_progress on the integrated core
+      // (I-040); this case drives no atomic access.
+      .o_txn_kind         (),
+      .o_res_valid        (),
+      .o_res_granule      (),
+      .o_lr_ctr           (),
+      .o_sc_ok_ctr        (),
+      .o_sc_fail_ctr      (),
+      .o_res_set_ctr      (),
+      .o_res_clear_ctr    (),
+      .o_res_ext_inval_ctr(),
+      .o_res_hit_ctr      (),
+      .o_res_miss_ctr     ()
   );
   /* verilator lint_on PINCONNECTEMPTY */
 

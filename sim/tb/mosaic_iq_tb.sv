@@ -378,6 +378,11 @@ module mosaic_iq_tb (
         ins_meta_s.mem_signed  = c0_ins_meta_mem_signed;
         ins_meta_s.is_fence    = c0_ins_meta_is_fence;
         ins_meta_s.is_fence_i  = c0_ins_meta_is_fence_i;
+        // I-040: the IQ case is about entry storage and wakeup, and its
+        // driver never presents an atomic macro. The fields are driven
+        // (not left undriven) so the packet the DUT stores is defined.
+        ins_meta_s.is_lr       = 1'b0;
+        ins_meta_s.is_sc       = 1'b0;
       end
       assign ins_imm_s      = c0_ins_imm;
       assign ins_src1_tag_s = c0_ins_src1_tag;
@@ -482,6 +487,11 @@ module mosaic_iq_tb (
         ins_meta_s.mem_signed  = c1_ins_meta_mem_signed;
         ins_meta_s.is_fence    = c1_ins_meta_is_fence;
         ins_meta_s.is_fence_i  = c1_ins_meta_is_fence_i;
+        // I-040: the IQ case is about entry storage and wakeup, and its
+        // driver never presents an atomic macro. The fields are driven
+        // (not left undriven) so the packet the DUT stores is defined.
+        ins_meta_s.is_lr       = 1'b0;
+        ins_meta_s.is_sc       = 1'b0;
       end
       assign ins_imm_s      = c1_ins_imm;
       assign ins_src1_tag_s = c1_ins_src1_tag;

@@ -57,6 +57,14 @@ module mosaic_amo_unit (
     input  mosaic_pkg::amo_op_e        alloc_op_i,
     input  logic                       alloc_aq_i,
     input  logic                       alloc_rl_i,
+    // LR/SC (I-040). The same record holds the paired atomics: an LR carries no
+    // operation and no operand (it reads and reserves), an SC carries the store
+    // data in `alloc_operand_i`. Keeping all three in one record is what makes
+    // "at most one atomic macro resident in the load queue" -- and therefore a
+    // single-entry record -- a property of one structure rather than of three
+    // that could each be holding one.
+    input  logic                       alloc_is_lr_i,
+    input  logic                       alloc_is_sc_i,
     input  logic [mosaic_cfg_pkg::MOSAIC_XLEN-1:0] alloc_operand_i,
 
     // The transaction has been handed to the serialization point, or the load
@@ -71,7 +79,18 @@ module mosaic_amo_unit (
     output mosaic_pkg::amo_op_e        op_o,
     output logic                       aq_o,
     output logic                       rl_o,
+    output logic                       is_lr_o,
+    output logic                       is_sc_o,
     output logic [mosaic_cfg_pkg::MOSAIC_XLEN-1:0] operand_o,
+
+    // The identity and validity of the held record, published so the load queue
+    // can recognise its *own* atomic head. An atomic macro must never be
+    // satisfied by store-to-load forwarding: an LR that is completed from a
+    // store never reaches memory and never establishes a reservation, and an SC
+    // that is completed from a store never performs its write. The queue uses
+    // this to force the atomic head to memory (`atomic_valid_o`/`atomic_id_o`).
+    output mosaic_uop_pkg::uop_id_t    atomic_id_o,
+    output logic                       atomic_valid_o,
 
     // The core refuses a further AMO allocation while this is high.
     output logic                       busy_o
@@ -83,6 +102,7 @@ module mosaic_amo_unit (
   mosaic_uop_pkg::uop_id_t id_q;
   mosaic_pkg::amo_op_e     op_q;
   logic                    aq_q, rl_q;
+  logic                    is_lr_q, is_sc_q;
   logic [XLEN-1:0]         operand_q;
 
   assign busy_o = valid_q;
@@ -95,7 +115,12 @@ module mosaic_amo_unit (
   assign op_o      = op_q;
   assign aq_o      = aq_q;
   assign rl_o      = rl_q;
+  assign is_lr_o   = is_lr_q;
+  assign is_sc_o   = is_sc_q;
   assign operand_o = operand_q;
+
+  assign atomic_id_o    = id_q;
+  assign atomic_valid_o = valid_q;
 
   always_ff @(posedge clk) begin
     if (rst) begin
@@ -112,6 +137,8 @@ module mosaic_amo_unit (
       op_q      <= alloc_op_i;
       aq_q      <= alloc_aq_i;
       rl_q      <= alloc_rl_i;
+      is_lr_q   <= alloc_is_lr_i;
+      is_sc_q   <= alloc_is_sc_i;
       operand_q <= alloc_operand_i;
     end
   end

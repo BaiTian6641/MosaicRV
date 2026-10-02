@@ -169,6 +169,12 @@ package mosaic_uop_pkg;
     mosaic_pkg::amo_op_e amo_op;
     logic              amo_aq;
     logic              amo_rl;
+    // LR/SC (I-040). They travel in the meta with the rest of the memory
+    // instruction's fields for the same reason the AMO's do: the dispatch entry
+    // carries them with the macro and the memory insert bus re-presents them
+    // without a second decode.
+    logic              is_lr;
+    logic              is_sc;
     logic              is_fence;    // FENCE / FENCE.I, drained by the memory path
     logic              is_fence_i;
   } uop_meta_t;
@@ -243,6 +249,14 @@ package mosaic_uop_pkg;
     mosaic_pkg::amo_op_e amo_op;
     logic              aq;
     logic              rl;
+    // LR/SC (I-040). `is_lr` is a load that also establishes the hart's
+    // reservation; `is_sc` is a conditional store that performs exactly one write
+    // when -- and only when -- the reservation still covers the address, and
+    // never touches memory when it does not. They ride in the request so the
+    // endpoint can perform them as one *classified* access rather than as a load
+    // or a store someone else interprets.
+    logic              is_lr;
+    logic              is_sc;
   } lsu_req_t;
 
   typedef struct packed {

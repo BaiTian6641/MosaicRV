@@ -158,6 +158,31 @@ module mosaic_core (
     output logic                        dmem_rsp_ready,
     input  mosaic_uop_pkg::mem_rsp_t    dmem_rsp,
 
+    // ------------------------------------- the coherence notification (I-040)
+    // A write another agent performed on the shared memory. It reaches the
+    // reservation manager inside mosaic_lsu_endpoint and has no effect on any
+    // access: with one hart and no cache this port *is* the invalidation
+    // interface a coherent fabric would otherwise supply, and a single-hart
+    // machine that ties it low behaves exactly as before. See I-040's report for
+    // what stands in for the second agent in the p0 profile.
+    input  logic                        ext_write_valid,
+    input  logic [63:0]                 ext_write_addr,
+    input  logic [3:0]                  ext_write_bytes,
+
+    // ---------------------------------------------------- LR/SC observation
+    // The reservation and what the LR/SC path did, exported so the case can
+    // require the *state* an LR establishes and each invalidation source
+    // destroys, rather than only the SC status that state produces.
+    output logic                        o_mem_res_valid,
+    output logic [63:0]                 o_mem_res_granule,
+    output logic [31:0]                 o_mem_lr_ctr,
+    output logic [31:0]                 o_mem_sc_ok_ctr,
+    output logic [31:0]                 o_mem_sc_fail_ctr,
+    output logic [31:0]                 o_mem_res_ext_inval_ctr,
+    // The class of the transaction the data port is carrying: 0 ordinary,
+    // 1 AMO, 2 LR, 3 SC (valid while a transaction is in flight).
+    output logic [1:0]                  o_mem_dmem_kind,
+
     // ------------------------------------------------------ retire event stream
     output logic [CORE_RET_N-1:0]       ev_valid,
     output logic [CORE_RET_N-1:0]       ev_trap,
@@ -665,6 +690,11 @@ module mosaic_core (
   logic                       disp_mem_is_amo;
   mosaic_pkg::amo_op_e        disp_mem_amo_op;
   logic                       disp_mem_amo_aq, disp_mem_amo_rl;
+  // LR/SC (I-040). `disp_mem_is_atomic` is the union the memory path keys on:
+  // allocation is refused while a second atomic is resident, and the serializer
+  // treats all three as one non-speculative class.
+  logic                       disp_mem_is_lr, disp_mem_is_sc;
+  logic                       disp_mem_is_atomic;
   logic [CORE_UOP_ID_W-1:0]   disp_mem_id;
   logic [CORE_MEM_ID_W-1:0]   disp_mem_full_id;
   logic [CORE_TAG_W-1:0]      disp_mem_dst_tag;
@@ -725,6 +755,12 @@ module mosaic_core (
   mosaic_uop_pkg::lsu_req_t   ser_req;
   logic [CORE_MEM_ID_W-1:0]   ep_txn_id;
   logic                       ep_txn_dev;
+  // I-040: the endpoint's LR/SC observations, and the transaction class.
+  logic [1:0]                 ep_txn_kind;
+  logic                       ep_res_valid;
+  logic [CORE_XLEN-1:0]       ep_res_granule;
+  logic [31:0]                ep_lr_ctr, ep_sc_ok_ctr, ep_sc_fail_ctr;
+  logic [31:0]                ep_res_ext_inval_ctr;
   logic                       ser_take_c;
   logic                       ser_nonspec_c;
   logic                       ser_is_device_c;
@@ -754,6 +790,11 @@ module mosaic_core (
   logic                       amo_hit;
   mosaic_pkg::amo_op_e        amo_hit_op;
   logic                       amo_hit_aq, amo_hit_rl;
+  // LR/SC (I-040): the class of the held atomic macro, and the identity/validity
+  // the load queue uses to recognise its atomic head.
+  logic                       amo_hit_lr, amo_hit_sc;
+  logic [CORE_MEM_ID_W-1:0]   amo_atomic_id;
+  logic                       amo_atomic_valid;
   logic [CORE_XLEN-1:0]       amo_hit_operand;
   logic [CORE_MEM_ID_W-1:0]   rob_head_id;
   logic                       rob_boundary_ok;
@@ -1086,13 +1127,21 @@ module mosaic_core (
   logic                amo_size_ok_c;
   logic                amo_op_ok_c;
   mosaic_pkg::amo_op_e amo_op_c;
+  // LR/SC (I-040) share opcode 0101111 and are recognised by funct5 here, for
+  // the same ownership reason the AMO operations are: they are outside RV64IM,
+  // so CASE=decode.rv64im_reserved pins them illegal *in the decoder*, and the
+  // integration recognises the encodings it builds from the raw word.
+  logic                lr_c;
+  logic                sc_c;
 
   assign amo_f5_c = fetch_out_bits[31:27];
   assign amo_f3_c = fetch_out_bits[14:12];
   // funct3 010 is AMO*.W and 011 is AMO*.D; every other funct3 on this opcode
-  // (including the W/D-less reserved bytes) is illegal. LR/SC keep the opcode
-  // but their funct5 values are handled by the op switch below and left illegal.
+  // (including the W/D-less reserved bytes) is illegal. LR/SC use the same two
+  // widths, so the same width check applies to them.
   assign amo_size_ok_c = (amo_f3_c == 3'b010) || (amo_f3_c == 3'b011);
+  assign lr_c = (amo_f5_c == 5'b00010);
+  assign sc_c = (amo_f5_c == 5'b00011);
 
   always_comb begin
     amo_op_ok_c = 1'b1;
@@ -1124,31 +1173,41 @@ module mosaic_core (
       dbuf_ctl_new.illegal   = 1'b0;
       dbuf_ctl_new.is_system = 1'b1;
       dbuf_ctl_new.is_wfi    = 1'b1;
-    end else if ((fetch_out_bits[6:0] == mosaic_pkg::OP_AMO) && amo_op_ok_c) begin
-      // A legal AMO always overwrites the illegal constant's fields; the
-      // reserved case (bad funct3) is refused by not entering this arm, so the
+    end else if ((fetch_out_bits[6:0] == mosaic_pkg::OP_AMO) &&
+                 (amo_op_ok_c || lr_c || sc_c)) begin
+      // A legal AMO/lr/sc always overwrites the illegal constant's fields; the
+      // reserved cases (bad funct3, or a funct5 that is none of the nine AMO
+      // operations, lr or sc) are refused by not entering this arm, so the
       // control word stays fully illegal rather than half-decoded.
       if (amo_size_ok_c) begin
         dbuf_ctl_new.valid      = 1'b1;
         dbuf_ctl_new.illegal    = 1'b0;
         dbuf_ctl_new.uses_rs1   = 1'b1;
-        dbuf_ctl_new.uses_rs2   = 1'b1;
+        // `lr` has no second source: its rs2 field is reserved. Leaving it
+        // unused is what makes rename present it as a ready x0 rather than
+        // waiting on a register the instruction never reads.
+        dbuf_ctl_new.uses_rs2   = !lr_c;
         dbuf_ctl_new.uses_imm   = 1'b0;   // the address is rs1, there is no offset
         dbuf_ctl_new.rs1        = fetch_out_bits[19:15];
         dbuf_ctl_new.rs2        = fetch_out_bits[24:20];
         dbuf_ctl_new.rd         = fetch_out_bits[11:7];
         dbuf_ctl_new.reg_write  = (fetch_out_bits[11:7] != 5'd0);
-        dbuf_ctl_new.mem_kind   = mosaic_pkg::MEM_AMO;
+        dbuf_ctl_new.mem_kind   = lr_c ? mosaic_pkg::MEM_LR
+                                : sc_c ? mosaic_pkg::MEM_SC
+                                : mosaic_pkg::MEM_AMO;
         dbuf_ctl_new.amo_op     = amo_op_c;
         dbuf_ctl_new.mem_size   = (amo_f3_c == 3'b010) ? mosaic_pkg::SZ_WORD
                                                        : mosaic_pkg::SZ_DBL;
-        // The old value is returned sign-extended for AMO*.W, exactly as `lw`
-        // returns it. The *operation*'s signedness is `amo_op` (MIN/MAX vs
-        // MINU/MAXU), not this bit; folding the two is the named
-        // signed/unsigned-boundary defect.
-        dbuf_ctl_new.mem_signed = 1'b1;
+        // The old value is returned sign-extended for AMO*.W and lr.w, exactly
+        // as `lw` returns it. The *operation*'s signedness is `amo_op`
+        // (MIN/MAX vs MINU/MAXU), not this bit; folding the two is the named
+        // signed/unsigned-boundary defect. An SC's result is a status in
+        // {0,1}, so its extension is immaterial -- it is zero-extended.
+        dbuf_ctl_new.mem_signed = !sc_c;
         dbuf_ctl_new.amo_aq     = fetch_out_bits[26];
         dbuf_ctl_new.amo_rl     = fetch_out_bits[25];
+        dbuf_ctl_new.is_lr      = lr_c;
+        dbuf_ctl_new.is_sc      = sc_c;
         dbuf_ctl_new.imm        = 64'd0;
       end
     end
@@ -1876,6 +1935,8 @@ module mosaic_core (
       .mem_ins_amo_op   (disp_mem_amo_op),
       .mem_ins_amo_aq   (disp_mem_amo_aq),
       .mem_ins_amo_rl   (disp_mem_amo_rl),
+      .mem_ins_is_lr    (disp_mem_is_lr),
+      .mem_ins_is_sc    (disp_mem_is_sc),
       .mem_ins_data     (disp_mem_data),
       .mem_ins_dst_tag  (disp_mem_dst_tag),
       .mem_ins_dst_gen  (disp_mem_dst_gen),
@@ -3088,13 +3149,22 @@ module mosaic_core (
   logic amo_active_c;
   assign amo_active_c = amo_hit && !sq_drain_valid;
 
+  // I-040: the class of the held atomic macro. The load queue issues all three
+  // as load class and carries none of these fields (see its atomic-head port),
+  // so the integration states the class here from the record it matched.
+  logic atomic_lr_c, atomic_sc_c;
+  assign atomic_lr_c = amo_active_c && amo_hit_lr;
+  assign atomic_sc_c = amo_active_c && amo_hit_sc;
+
   always_comb begin
     ep_req            = sq_drain_valid ? sq_drain_req : lq_req;
     ep_req.store_data = amo_active_c ? amo_hit_operand : ep_req.store_data;
-    ep_req.is_amo     = amo_active_c;
+    ep_req.is_amo     = amo_active_c && !atomic_lr_c && !atomic_sc_c;
     ep_req.amo_op     = amo_active_c ? amo_hit_op : mosaic_pkg::AMO_ADD;
     ep_req.aq         = amo_active_c && amo_hit_aq;
     ep_req.rl         = amo_active_c && amo_hit_rl;
+    ep_req.is_lr      = atomic_lr_c;
+    ep_req.is_sc      = atomic_sc_c;
   end
 
   assign sq_drain_ready = ep_req_ready;
@@ -3145,7 +3215,7 @@ module mosaic_core (
   // told differently is the atomic attribute itself. Keeping the device
   // attribute separate (`ser_hold_dev_q`) is what stops an AMO to RAM being
   // reported to the memory system as an MMIO access.
-  assign ser_is_amo_c    = ep_req.is_amo;
+  assign ser_is_amo_c    = ep_req.is_amo || ep_req.is_lr || ep_req.is_sc;
   assign ser_serialize_c = ser_is_device_c || ser_is_amo_c;
 
   // The identity of the ROB head, built exactly as every other identity in this
@@ -3272,6 +3342,14 @@ module mosaic_core (
   assign o_mem_dev_hold = dev_hold_ctr_q;
   assign o_mem_dmem_dev = ep_txn_dev;
   assign o_mem_dmem_id  = ep_txn_id;
+  // I-040: the reservation and the LR/SC path, straight from the endpoint.
+  assign o_mem_dmem_kind           = ep_txn_kind;
+  assign o_mem_res_valid           = ep_res_valid;
+  assign o_mem_res_granule         = ep_res_granule;
+  assign o_mem_lr_ctr              = ep_lr_ctr;
+  assign o_mem_sc_ok_ctr           = ep_sc_ok_ctr;
+  assign o_mem_sc_fail_ctr         = ep_sc_fail_ctr;
+  assign o_mem_res_ext_inval_ctr   = ep_res_ext_inval_ctr;
 `ifndef SYNTHESIS
   // Debug bundle for CASE=mmio.exactly_once while the device path is brought up:
   //   {31 lq_rsp_valid, 30 sq_rsp_valid, 29 ser_dev_out_q, 28 ser_hold_valid_q,
@@ -3293,7 +3371,7 @@ module mosaic_core (
   // above. `amo_taken_c` is the cycle the serializer takes the transaction: from
   // then on the fields are latched in `ser_hold_q` and the endpoint, and a second
   // copy here would be a second thing to keep in step.
-  assign amo_taken_c = ser_take_c && ep_req.is_amo;
+  assign amo_taken_c = ser_take_c && (ep_req.is_amo || ep_req.is_lr || ep_req.is_sc);
 
   mosaic_amo_unit u_amo (
       .clk            (clk),
@@ -3303,6 +3381,8 @@ module mosaic_core (
       .alloc_op_i     (disp_mem_amo_op),
       .alloc_aq_i     (disp_mem_amo_aq),
       .alloc_rl_i     (disp_mem_amo_rl),
+      .alloc_is_lr_i  (disp_mem_is_lr),
+      .alloc_is_sc_i  (disp_mem_is_sc),
       .alloc_operand_i(disp_mem_data),
       .taken_i        (amo_taken_c),
       .flush_i        (lq_flush),
@@ -3311,7 +3391,11 @@ module mosaic_core (
       .op_o           (amo_hit_op),
       .aq_o           (amo_hit_aq),
       .rl_o           (amo_hit_rl),
+      .is_lr_o        (amo_hit_lr),
+      .is_sc_o        (amo_hit_sc),
       .operand_o      (amo_hit_operand),
+      .atomic_id_o    (amo_atomic_id),
+      .atomic_valid_o (amo_atomic_valid),
       .busy_o         (amo_busy)
   );
 
@@ -3331,6 +3415,10 @@ module mosaic_core (
       .mem_rsp_valid_i      (dmem_rsp_valid),
       .mem_rsp_ready_o      (dmem_rsp_ready),
       .mem_rsp_i            (dmem_rsp),
+      .ext_write_valid_i    (ext_write_valid),
+      .ext_write_addr_i     (ext_write_addr),
+      .ext_write_bytes_i    (ext_write_bytes),
+      .flush_i              (lq_flush),
       .o_busy               (ep_busy),
       .o_load_ctr           (),
       .o_store_ctr          (),
@@ -3343,7 +3431,18 @@ module mosaic_core (
       .o_inflight_addr      (),
       .o_inflight_size      (),
       .o_txn_id             (ep_txn_id),
-      .o_txn_dev            (ep_txn_dev)
+      .o_txn_dev            (ep_txn_dev),
+      .o_txn_kind           (ep_txn_kind),
+      .o_res_valid          (ep_res_valid),
+      .o_res_granule        (ep_res_granule),
+      .o_lr_ctr             (ep_lr_ctr),
+      .o_sc_ok_ctr          (ep_sc_ok_ctr),
+      .o_sc_fail_ctr        (ep_sc_fail_ctr),
+      .o_res_set_ctr        (),
+      .o_res_clear_ctr      (),
+      .o_res_ext_inval_ctr  (ep_res_ext_inval_ctr),
+      .o_res_hit_ctr        (),
+      .o_res_miss_ctr       ()
   );
 
   // Which queue the endpoint's response belongs to. The endpoint holds one
@@ -3383,6 +3482,10 @@ module mosaic_core (
       .alloc_dst_tag_i      (disp_mem_dst_tag),
       .alloc_dst_gen_i      (disp_mem_dst_gen),
       .alloc_dst_x0_i       (disp_mem_dst_x0),
+      // I-040: the atomic record, so the queue never forwards into or replays an
+      // AMO/LR/SC head.
+      .atomic_id_i          (amo_atomic_id),
+      .atomic_valid_i       (amo_atomic_valid),
       .flush_valid_i        (lq_flush),
       .sq_entry_pay_i       (sq_entry_pay),
       .sq_count_i           (sq_count),
@@ -3649,17 +3752,18 @@ module mosaic_core (
   // store inserted on the flush edge survives, is never authorised (its ROB
   // entry is gone) and blocks the queue head for ever; CASE=fence.code_and_data_order's
   // FENCE.I redirect is what exposed it.
-  // An AMO is also refused while the AMO issue record is occupied (I-039): at
-// most one atomic read-modify-write is resident in the load queue, so the
-// record that carries its operation and operand can be a single entry. An
-// ordinary load is not refused -- it simply queues behind the AMO, which is
-// exactly the ordering the atomic needs.
-  assign amo_alloc_c = disp_mem_valid && disp_mem_is_amo && disp_mem_ready;
+  // An AMO, LR or SC is also refused while the atomic issue record is occupied
+  // (I-039/I-040): at most one atomic macro is resident in the load queue, so
+  // the record that carries its operation, operand and class can be a single
+  // entry. An ordinary load is not refused -- it simply queues behind the
+  // atomic, which is exactly the ordering the atomic needs.
+  assign disp_mem_is_atomic = disp_mem_is_amo || disp_mem_is_lr || disp_mem_is_sc;
+  assign amo_alloc_c = disp_mem_valid && disp_mem_is_atomic && disp_mem_ready;
   assign disp_mem_ready = !fence_block_younger_c && !rob_flush_pulse &&
       (disp_mem_is_store
       ? (disp_store_faults ? (lsu_wb_ready && !lq_result_valid)
                            : (sq_alloc_ready && lsu_wb_ready && !lq_result_valid))
-      : (lq_alloc_ready && (!disp_mem_is_amo || !amo_busy)));
+      : (lq_alloc_ready && (!disp_mem_is_atomic || !amo_busy)));
 
   assign lq_alloc_valid  = disp_mem_valid && !disp_mem_is_store && disp_mem_ready;
   assign sq_alloc_valid  = disp_mem_valid &&  disp_mem_is_store && !disp_store_faults &&

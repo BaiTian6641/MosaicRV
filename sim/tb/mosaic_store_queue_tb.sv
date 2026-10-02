@@ -326,6 +326,13 @@ module mosaic_store_queue_tb (
       .mem_rsp_ready_o    (mem_rsp_ready),
       .mem_rsp_i          (ep_mem_rsp_s),
 
+      // I-040: this case drives ordinary stores only; no second agent writes and
+      // nothing is flushed, so the reservation stays clear.
+      .ext_write_valid_i  (1'b0),
+      .ext_write_addr_i   ({TB_XLEN{1'b0}}),
+      .ext_write_bytes_i  (4'd0),
+      .flush_i            (1'b0),
+
       .o_busy             (o_ep_busy),
       .o_load_ctr         (),
       .o_store_ctr        (o_ep_store_ctr),
@@ -341,7 +348,20 @@ module mosaic_store_queue_tb (
       // CASE=mmio.exactly_once on the integrated core; a store queue never
       // classifies an access here (the attribute is constant zero in this case).
       .o_txn_id           (),
-      .o_txn_dev          ()
+      .o_txn_dev          (),
+      // I-040's LR/SC observations; observed by CASE=lrsc.reservation_progress
+      // on the integrated core, constant here.
+      .o_txn_kind         (),
+      .o_res_valid        (),
+      .o_res_granule      (),
+      .o_lr_ctr           (),
+      .o_sc_ok_ctr        (),
+      .o_sc_fail_ctr      (),
+      .o_res_set_ctr      (),
+      .o_res_clear_ctr    (),
+      .o_res_ext_inval_ctr(),
+      .o_res_hit_ctr      (),
+      .o_res_miss_ctr     ()
   );
   /* verilator lint_on PINCONNECTEMPTY */
 

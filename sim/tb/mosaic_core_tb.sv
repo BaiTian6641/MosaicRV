@@ -230,6 +230,21 @@ module mosaic_core_tb (
     output logic [TB_MEM_ID_W-1:0] o_mem_dmem_id_o,
     output logic [31:0] o_dbg_mmio_o,
 
+    // ------------------------------------------------- LR/SC reservation (I-040)
+    // The coherence notification a second agent's write arrives on, and the
+    // reservation state the case requires an LR to establish and each
+    // invalidation source to destroy.
+    input  logic        ext_write_valid_i,
+    input  logic [TB_XLEN-1:0] ext_write_addr_i,
+    input  logic [3:0]  ext_write_bytes_i,
+    output logic        o_mem_res_valid_o,
+    output logic [TB_XLEN-1:0] o_mem_res_granule_o,
+    output logic [31:0] o_mem_lr_ctr_o,
+    output logic [31:0] o_mem_sc_ok_ctr_o,
+    output logic [31:0] o_mem_sc_fail_ctr_o,
+    output logic [31:0] o_mem_res_ext_inval_ctr_o,
+    output logic [1:0]  o_mem_dmem_kind_o,
+
     // ------------------------------------------------- CSR / trap / interrupt
     input  logic        irq_soft_i,
     input  logic        irq_timer_i,
@@ -501,6 +516,16 @@ module mosaic_core_tb (
       .o_mem_dmem_dev  (o_mem_dmem_dev_o),
       .o_mem_dmem_id   (o_mem_dmem_id_o),
       .o_dbg_mmio      (o_dbg_mmio_o),
+      .ext_write_valid (ext_write_valid_i),
+      .ext_write_addr  (ext_write_addr_i),
+      .ext_write_bytes (ext_write_bytes_i),
+      .o_mem_res_valid (o_mem_res_valid_o),
+      .o_mem_res_granule(o_mem_res_granule_o),
+      .o_mem_lr_ctr    (o_mem_lr_ctr_o),
+      .o_mem_sc_ok_ctr (o_mem_sc_ok_ctr_o),
+      .o_mem_sc_fail_ctr(o_mem_sc_fail_ctr_o),
+      .o_mem_res_ext_inval_ctr(o_mem_res_ext_inval_ctr_o),
+      .o_mem_dmem_kind (o_mem_dmem_kind_o),
       .o_dbg_redir_bundle(o_dbg_redir_o),
       .o_dbg_fetch_state(o_dbg_fetch_o),
       .o_dbg_deliver_valid(o_dbg_deliver_valid_o),

@@ -253,6 +253,21 @@ module mosaic_load_queue #(
     input  logic [IGEN_W-1:0]             alloc_dst_gen_i,
     input  logic                          alloc_dst_x0_i,
 
+    // -------------------------------------------------- the atomic head (I-040)
+    // The identity and validity of the atomic macro (AMO/LR/SC) the single-entry
+    // issue record is holding, from mosaic_amo_unit. The head is *this* macro
+    // exactly when its identity matches the record.
+    //
+    // An atomic macro must never be satisfied from the store queue: an LR that
+    // is completed from a store never reaches memory and so never establishes a
+    // reservation, and an SC that is completed from a store never performs its
+    // write -- the reservation check, the write and the read all live in the
+    // endpoint, and a load-queue forward bypasses the endpoint. So an atomic
+    // head forwards no byte and is never replayed: it is offered to memory and
+    // its response completes it.
+    input  mosaic_uop_pkg::uop_id_t       atomic_id_i,
+    input  logic                          atomic_valid_i,
+
     // ------------------------------------------------------------ squash/flush
     // A redirect withdraws every load the recovery decided is dead, and cancels
     // the result of a load already in flight. It is a whole-queue flush: a load
@@ -462,6 +477,14 @@ module mosaic_load_queue #(
     head_dev_c  = mosaic_uop_pkg::is_device_addr(head_addr_c);
   end
 
+  // I-040: is the head the macro the atomic issue record is holding? The record
+  // holds at most one macro, and it holds it from the cycle the queue accepted
+  // it until the serializer took the transaction, so the match is exact while
+  // the head is still to be issued.
+  logic head_atomic_c;
+  assign head_atomic_c = atomic_valid_i &&
+                         mosaic_uop_pkg::uop_id_eq(atomic_id_i, head_c.id);
+
   // ------------------------------------------------------- the youngest-older rule
   // `FwdOlder`: the store entry's macro precedes the load's in program order.
   // The generation advances once per ROB allocation, so the half-modulus
@@ -525,7 +548,7 @@ module mosaic_load_queue #(
         covers = FwdCovers(sq_addr_c[j], sq_c[j].size, sel_x_c);
         sel_off_c = 3'(sel_x_c - sq_addr_c[j]);
         if (sq_resident_c[j] && older && sq_c[j].addr_valid && covers &&
-            !sq_dev_c[j]) begin
+            !sq_dev_c[j] && !head_atomic_c) begin
           if (sq_c[j].data_valid) begin
             src_store_c[i]  = 1'b1;
             src_nodata_c[i] = 1'b0;
@@ -557,7 +580,10 @@ module mosaic_load_queue #(
   end
 
   logic blocked_c;
-  assign blocked_c = (FWD_HONOURS_BLOCK && sq_query_blocked_i) || older_nodata_c;
+  // An atomic head is never blocked: it is going to memory, and the whole point
+  // of the atomic classes is that they must not be answered from anywhere else.
+  assign blocked_c = !head_atomic_c &&
+                     ((FWD_HONOURS_BLOCK && sq_query_blocked_i) || older_nodata_c);
 
   // ------------------------------------------------------------- the merge
   // Byte `i` of the load is the store's byte when an older store provides it,
@@ -683,6 +709,11 @@ module mosaic_load_queue #(
     req_o.amo_op     = mosaic_pkg::AMO_ADD;
     req_o.aq         = 1'b0;
     req_o.rl         = 1'b0;
+    // I-040: the class is merged in by the integration, which recognises the
+    // atomic macro by identity (mosaic_amo_unit holds it). See the atomic-head
+    // port above for why the *queue* also needs to know.
+    req_o.is_lr      = 1'b0;
+    req_o.is_sc      = 1'b0;
   end
 
   logic issue_accept_c;
@@ -718,8 +749,8 @@ module mosaic_load_queue #(
   // entry with an unknown address either, so the whole-queue block is likewise
   // clear. Stating it here means a future replay path cannot silently re-enable
   // it for a device access.
-  assign complete_c = inflight_q && rsp_accept_c && (!blocked_c || head_dev_c);
-  assign replay_c   = inflight_q && rsp_accept_c && blocked_c && !head_dev_c;
+  assign complete_c = inflight_q && rsp_accept_c && (!blocked_c || head_dev_c || head_atomic_c);
+  assign replay_c   = inflight_q && rsp_accept_c && blocked_c && !head_dev_c && !head_atomic_c;
 
   // ------------------------------------------------------------- next state
   lq_entry_t         ent_next_c [0:ENTRIES-1];
