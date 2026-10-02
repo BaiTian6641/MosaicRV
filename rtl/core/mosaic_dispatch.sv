@@ -1951,6 +1951,10 @@ module mosaic_dispatch (
     if (rst) begin
       alloc_ctr        <= 32'd0;
       alloc2_ctr       <= 32'd0;
+      // `pair_ctr` is reset and read out but never incremented: its increment
+      // counted the same-cycle second insert, which is held (see the header and
+      // results/reports/held-insert.md). It is structurally zero, not a
+      // measurement of a working pair path.
       pair_ctr         <= 32'd0;
       occ_sum          <= 32'd0;
       pair_offer_ctr   <= 32'd0;
@@ -2002,6 +2006,8 @@ module mosaic_dispatch (
 
   assign o_alloc_ctr       = alloc_ctr;
   assign o_alloc2_ctr      = alloc2_ctr;
+  // Read out for the performance harness, but structurally zero while the
+  // same-cycle insert is held (see the reset block's note).
   assign o_pair_ctr        = pair_ctr;
   assign o_occ_sum         = occ_sum;
   assign o_pair_offer_ctr  = pair_offer_ctr;
