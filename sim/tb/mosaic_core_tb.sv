@@ -56,10 +56,63 @@ module mosaic_core_tb (
     // unchanged.
     input  logic        fab_dyn_i,
 
+    // I-042: the integrated L1 caches' runtime enable. Low is the cacheless
+    // machine every case before `cache.integrated_path` built; high puts the
+    // instruction cache between fetch and the instruction port and the data
+    // cache between the endpoint and the data port, with cacheability taken from
+    // the platform map. The standalone cache-path DUT below also uses it.
+    input  logic        cache_en_i,
+
+    // ----------------------------------- standalone L1 cache path (directed)
+    // A second instance of the *same* wrapper the core uses, exposed directly so
+    // the directed control phases can drive refills, evictions, faults and a
+    // device address without threading them through a program. Its memory side
+    // is served by the driver, so it can fault a refill or drop a writeback on
+    // purpose.
+    input  logic        cb_cpu_req_valid_i,
+    input  logic        cb_cpu_req_we_i,
+    input  logic [TB_XLEN-1:0] cb_cpu_req_addr_i,
+    input  logic [2:0]  cb_cpu_req_size_i,
+    input  logic [7:0]  cb_cpu_req_wstrb_i,
+    input  logic [TB_XLEN-1:0] cb_cpu_req_wdata_i,
+    input  logic        cb_cpu_req_amo_i,
+    output logic        cb_cpu_req_ready_o,
+    output logic        cb_cpu_rsp_valid_o,
+    output logic [TB_XLEN-1:0] cb_cpu_rsp_rdata_o,
+    output logic        cb_cpu_rsp_fault_o,
+    input  logic        cb_flush_i,
+    output logic        cb_flush_done_o,
+    output logic        cb_mem_req_valid_o,
+    input  logic        cb_mem_req_ready_i,
+    output logic        cb_mem_req_we_o,
+    output logic [TB_XLEN-1:0] cb_mem_req_addr_o,
+    output logic [2:0]  cb_mem_req_size_o,
+    output logic [7:0]  cb_mem_req_wstrb_o,
+    output logic [TB_XLEN-1:0] cb_mem_req_wdata_o,
+    input  logic        cb_mem_rsp_valid_i,
+    output logic        cb_mem_rsp_ready_o,
+    input  logic [TB_XLEN-1:0] cb_mem_rsp_rdata_i,
+    input  logic        cb_mem_rsp_fault_i,
+    output logic        cb_hit_o,
+    output logic        cb_miss_o,
+    output logic        cb_refill_o,
+    output logic        cb_writeback_o,
+    output logic        cb_fault_o,
+    output logic [31:0] cb_cpu_txn_o,
+    output logic [31:0] cb_mem_beat_o,
+    output logic [31:0] cb_bypass_txn_o,
+    input  logic [2:0]  cb_dbg_index_i,
+    output logic        cb_dbg_valid_o,
+    output logic        cb_dbg_dirty_o,
+
     // ------------------------------------------------- instruction memory port
     input  logic        imem_req_ready_i,
     input  logic        imem_rsp_valid_i,
-    input  logic [31:0] imem_rsp_rdata_i,
+    // I-042: the instruction memory response is a full doubleword, because the
+    // integrated instruction cache refills whole lines (doubleword beats). The
+    // front end only ever reads [31:0], so a driver that drives a 32-bit value
+    // sees exactly the behaviour it saw before the cache existed.
+    input  logic [TB_XLEN-1:0] imem_rsp_rdata_i,
     input  logic        imem_rsp_fault_i,
     input  logic [TB_REQ_ID_W-1:0]  imem_rsp_id_i,
     input  logic [TB_EPOCH_W-1:0]   imem_rsp_epoch_i,
@@ -513,7 +566,7 @@ module mosaic_core_tb (
   mosaic_uop_pkg::mem_req_t dmem_req;
   mosaic_uop_pkg::mem_rsp_t dmem_rsp;
 
-  assign imem_rsp.rdata = {{(TB_XLEN-32){1'b0}}, imem_rsp_rdata_i};
+  assign imem_rsp.rdata = imem_rsp_rdata_i;
   assign imem_rsp.fault = imem_rsp_fault_i;
   assign dmem_rsp.rdata = dmem_rsp_rdata_i;
   assign dmem_rsp.fault = dmem_rsp_fault_i;
@@ -547,6 +600,7 @@ module mosaic_core_tb (
       .clk             (clk),
       .rst             (rst),
       .fab_dyn_i       (fab_dyn_i),
+      .cache_en_i      (cache_en_i),
       .irq_soft_i      (irq_soft_i),
       .irq_timer_i     (irq_timer_i),
       .irq_ext_i       (irq_ext_i),
@@ -968,6 +1022,91 @@ module mosaic_core_tb (
       .o_fault_ctr     (),
       .o_ad_ctr        (o_tlb_ad_ctr_o),
       .o_walk_cancel_ctr()
+  );
+
+  // ==========================================================================
+  // Standalone L1 cache path (I-042, directed control phases)
+  // ==========================================================================
+  // The same wrapper the core instantiates, driven directly. The directed
+  // phases use it because they must fault a refill, evict a dirty line on
+  // demand and present a device address -- conditions a bare-metal program
+  // cannot produce deterministically. Its memory side is served by the driver,
+  // which is why a refill can be made to fail.
+  mosaic_uop_pkg::mem_req_t cb_cpu_req;
+  mosaic_uop_pkg::mem_rsp_t cb_cpu_rsp;
+  mosaic_uop_pkg::mem_req_t cb_mem_req;
+  mosaic_uop_pkg::mem_rsp_t cb_mem_rsp;
+
+  always_comb begin
+    cb_cpu_req.we     = cb_cpu_req_we_i;
+    cb_cpu_req.addr   = cb_cpu_req_addr_i;
+    cb_cpu_req.size   = cb_cpu_req_size_i;
+    cb_cpu_req.wstrb  = cb_cpu_req_wstrb_i;
+    cb_cpu_req.wdata  = cb_cpu_req_wdata_i;
+    cb_cpu_req.amo    = cb_cpu_req_amo_i;
+    cb_cpu_req.amo_op = mosaic_pkg::AMO_ADD;
+    cb_cpu_req.aq     = 1'b0;
+    cb_cpu_req.rl     = 1'b0;
+  end
+  assign cb_cpu_rsp_rdata_o = cb_cpu_rsp.rdata;
+  assign cb_cpu_rsp_fault_o = cb_cpu_rsp.fault;
+
+  assign cb_mem_req_we_o    = cb_mem_req.we;
+  assign cb_mem_req_addr_o  = cb_mem_req.addr;
+  assign cb_mem_req_size_o  = cb_mem_req.size;
+  assign cb_mem_req_wstrb_o = cb_mem_req.wstrb;
+  assign cb_mem_req_wdata_o = cb_mem_req.wdata;
+  assign cb_mem_rsp.rdata   = cb_mem_rsp_rdata_i;
+  assign cb_mem_rsp.fault   = cb_mem_rsp_fault_i;
+
+  mosaic_l1_cache_path #(
+      .IS_FETCH      (1'b0),
+      .LINE_BYTES    (32),
+      .SETS          (8),
+      .ADDR_WIDTH    (64),
+      .CPU_DATA_WIDTH(64),
+      .ID_W          (1),
+      .EPOCH_W       (1)
+  ) u_tb_cache_path (
+      .clk             (clk),
+      .rst             (rst),
+      .en_i            (cache_en_i),
+      .flush_i         (cb_flush_i),
+      .flush_done      (cb_flush_done_o),
+      .cpu_req_valid_i (cb_cpu_req_valid_i),
+      .cpu_req_ready_o (cb_cpu_req_ready_o),
+      .cpu_req_i       (cb_cpu_req),
+      .cpu_req_id_i    (1'b0),
+      .cpu_req_epoch_i (1'b0),
+      .cpu_rsp_valid_o (cb_cpu_rsp_valid_o),
+      .cpu_rsp_ready_i (1'b1),
+      .cpu_rsp_o       (cb_cpu_rsp),
+      .cpu_rsp_id_o    (),
+      .cpu_rsp_epoch_o (),
+      .cpu_rsp_len_o   (),
+      .mem_req_valid_o (cb_mem_req_valid_o),
+      .mem_req_ready_i (cb_mem_req_ready_i),
+      .mem_req_o       (cb_mem_req),
+      .mem_req_id_o    (),
+      .mem_req_epoch_o (),
+      .mem_rsp_valid_i (cb_mem_rsp_valid_i),
+      .mem_rsp_ready_o (cb_mem_rsp_ready_o),
+      .mem_rsp_i       (cb_mem_rsp),
+      .mem_rsp_id_i    (1'b0),
+      .mem_rsp_epoch_i (1'b0),
+      .mem_rsp_len_i   (3'b0),
+      .o_hit           (cb_hit_o),
+      .o_miss          (cb_miss_o),
+      .o_refill        (cb_refill_o),
+      .o_writeback     (cb_writeback_o),
+      .o_fault         (cb_fault_o),
+      .o_cpu_txn       (cb_cpu_txn_o),
+      .o_mem_beat      (cb_mem_beat_o),
+      .o_line_txn      (),
+      .o_bypass_txn    (cb_bypass_txn_o),
+      .dbg_index_i     (cb_dbg_index_i),
+      .dbg_valid_o     (cb_dbg_valid_o),
+      .dbg_dirty_o     (cb_dbg_dirty_o)
   );
 
 endmodule : mosaic_core_tb

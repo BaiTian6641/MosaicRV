@@ -215,6 +215,37 @@ def render_sv_package(bundle: config_check.Bundle, advertised) -> str:
         add("  localparam logic [63:0] %-34s = %s;" % (base_name, _hex64(region["base"])))
         add("  localparam logic [63:0] %-34s = %s;" % (size_name, _hex64(region["size"])))
     add("")
+    # Cacheability is a property of the *platform map*, not of the RTL. The flag
+    # is emitted per region, straight from the region's own `cacheable` field, and
+    # `mosaic_pa_cacheable` answers for an address by asking the map. A predicate
+    # written into the RTL instead would be a second opinion about the map: it
+    # would keep caching a region the map had just declared volatile, which is
+    # exactly the class of defect the SoC's device decode already paid for once.
+    # An address no region covers is not cacheable -- it is a fault, and nothing
+    # about it may be cached.
+    add("  // Cacheability, from each region's own `cacheable` flag (config/memory/).")
+    for region in sorted(bundle.memory["regions"], key=lambda r: r["base"]):
+        cache_name = "MOSAIC_%s_CACHEABLE" % region["name"].upper()
+        add("  localparam bit %s = 1'b%d;" % (cache_name, 1 if region["cacheable"] else 0))
+    add("")
+    add("  // The cacheability predicate: the platform map, asked directly. The")
+    add("  // region bounds are emitted as whole literals so the comparison is one")
+    add("  // unsigned 64-bit compare with no arithmetic in the RTL.")
+    add("  function automatic logic mosaic_pa_cacheable(input logic [63:0] pa);")
+    add("    mosaic_pa_cacheable = 1'b0;")
+    for region in sorted(bundle.memory["regions"], key=lambda r: r["base"]):
+        name = region["name"].upper()
+        end = region["base"] + region["size"]
+        if region["base"] == 0:
+            # A region at address zero has a lower bound that is always true
+            # (`pa >= 0` is constant for an unsigned address), which the linter
+            # reports; only the upper bound is meaningful.
+            add("    if (pa < %s)" % _hex64(end))
+        else:
+            add("    if ((pa >= %s) && (pa < %s))" % (_hex64(region["base"]), _hex64(end)))
+        add("      mosaic_pa_cacheable = MOSAIC_%s_CACHEABLE;" % name)
+    add("  endfunction")
+    add("")
     add("  /* verilator lint_on UNUSEDPARAM */")
     add("")
     add("endpackage : mosaic_cfg_pkg")

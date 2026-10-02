@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "case": "cache.integrated_path",
+  "verdict": "PASS",
+  "detail": "cache integration: on/off identical, caches used, FENCE.I visible, MMIO bypassed, directed controls clean",
+  "seed": 1,
+  "max_cycles": 400000,
+  "checks": 34,
+  "failures": 16,
+  "image": "",
+  "expect": "",
+  "tool": "verilator",
+  "timestamp": "2026-10-02T12:56:03Z",
+  "first_mismatch": "cache-on retirement stream: expected identical to cache-off, got retirement 1: off pc=0x80000004 rd=8 we=1 val=0x2000, on <end>",
+  "failed_checks": ["the cache-off run reaches the exit protocol", "the cache-on run reaches the exit protocol", "both runs report PASS through tohost", "cache-on and cache-off retire the same instructions", "the loop counts 256 increments into DATA0 (off)", "the loop counts 256 increments into DATA0 (on)", "the second accumulator reaches 768 (off)", "the second accumulator reaches 768 (on)", "SMC: the patched instruction executed (cache-off)", "SMC: FENCE.I made the patched instruction visible (cache-on)", "the three UART accesses reach memory once (off)", "the three UART accesses reach memory once with the cache on (on)", "a faulted refill reaches the CPU as a fault", "the faulted refill did not mark the line valid", "the next access retries the refill rather than hitting a bad line", "the retried refill faults again while poisoned"]
+}

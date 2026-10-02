@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "case": "rvv.integer_mask_permute",
+  "verdict": "FAIL",
+  "detail": "checks=103220 cycles=2076074",
+  "seed": 1,
+  "max_cycles": 200000,
+  "checks": 103220,
+  "failures": 3150,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-02T13:05:14Z",
+  "first_mismatch": "",
+  "failed_checks": ["permute-order slidedown off1 lmul0 i7: access 0 expected 0", "permute-order slidedown off2 lmul0 i6: access 0 expected 0", "permute-order slidedown off2 lmul0 i7: access 0 expected 0", "permute-order slidedown off3 lmul0 i5: access 0 expected 0", "permute-order slidedown off3 lmul0 i6: access 0 expected 0", "permute-order slidedown off3 lmul0 i7: access 0 expected 0", "permute-order slidedown off1 lmul0 i3: access 0 expected 0", "permute-order slidedown off2 lmul0 i2: access 0 expected 0", "permute-order slidedown off2 lmul0 i3: access 0 expected 0", "permute-order slidedown off3 lmul0 i1: access 0 expected 0", "permute-order slidedown off3 lmul0 i2: access 0 expected 0", "permute-order slidedown off3 lmul0 i3: access 0 expected 0", "permute-order slidedown off1 lmul0 i1: access 0 expected 0", "permute-order slidedown off2 lmul0 i0: access 0 expected 0", "permute-order slidedown off2 lmul0 i1: access 0 expected 0", "permute-order slidedown off3 lmul0 i0: access 0 expected 0", "permute-order slidedown off3 lmul0 i1: access 0 expected 0", "permute-order slidedown off1 lmul1 i7: access 0 expected 0", "permute-order slidedown off2 lmul1 i6: access 0 expected 0", "permute-order slidedown off2 lmul1 i7: access 0 expected 0", "permute-order slidedown off3 lmul1 i5: access 0 expected 0", "permute-order slidedown off3 lmul1 i6: access 0 expected 0", "permute-order slidedown off3 lmul1 i7: access 0 expected 0", "permute-order slidedown off1 lmul1 i3: access 0 expected 0", "permute-order slidedown off2 lmul1 i2: access 0 expected 0", "permute-order slidedown off2 lmul1 i3: access 0 expected 0", "permute-order slidedown off3 lmul1 i1: access 0 expected 0", "permute-order slidedown off3 lmul1 i2: access 0 expected 0", "permute-order slidedown off3 lmul1 i3: access 0 expected 0", "permute-order slidedown off1 lmul2 i7: access 0 expected 0", "permute-order slidedown off2 lmul2 i6: access 0 expected 0", "permute-order slidedown off2 lmul2 i7: access 0 expected 0"]
+}

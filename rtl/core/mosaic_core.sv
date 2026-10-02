@@ -148,6 +148,18 @@ module mosaic_core (
     // resources: the same core, the same program, the same seed, one bit.
     input  logic                        fab_dyn_i,
 
+    // ------------------------------------------------- the L1 cache path (I-042)
+    // A *runtime* enable for the integrated L1 instruction and data caches,
+    // exactly as `fab_dyn_i` is a runtime strategy bit. Low is the machine this
+    // core has always been -- the caches are a wire and every access goes to the
+    // memory service unchanged, with no added cycle. High puts the caches in the
+    // path: a request goes to the cache only when the *platform map* says its
+    // address is cacheable, and every other access (MMIO, the boot ROM, an
+    // atomic) bypasses with its own size and strobes. `cache.integrated_path`
+    // runs one program with this low and again with it high and requires the
+    // architectural result to be identical.
+    input  logic                        cache_en_i,
+
     // ------------------------------------------------- instruction memory port
     output logic                        imem_req_valid,
     output mosaic_uop_pkg::mem_req_t    imem_req,
@@ -1305,7 +1317,10 @@ module mosaic_core (
   // The WFI halt stops the front end the same way a recovery does: there is no
   // instruction to fetch until the wake event, and fetching ahead of it would
   // execute past the halt.
-  assign want_imem_req      = !core_stop && !recovering && !wfi_halt;
+  // The front end is also held off while the cache fence (below) is writing the
+  // data cache back and invalidating the instruction cache: a fetch issued in
+  // that window would race the two steps it is ordering.
+  assign want_imem_req      = !core_stop && !recovering && !wfi_halt && !cache_fence_busy;
   // The sequential program counter. RISC-V instructions are 2 or 4 bytes, so the
   // byte after the instruction being answered is `its PC + its own length` --
   // and the length only exists in the answer. `fetch_rsp_live` is high in the
@@ -1341,21 +1356,61 @@ module mosaic_core (
                             (fetch_outstanding == {CORE_FETCH_CNT_W{1'b0}}) &&
                             !fetch_rsp_live && !pmp_fetch_allow;
 
-  assign imem_req_valid     = want_imem_req && fetch_slot_free && !fetch_pmp_deny_c &&
+  // ------------------------------------------------------- the L1 cache path
+  // The instruction side: fetch's request port is the wrapper's CPU side and the
+  // core's `imem` port is its memory side. The data side (below, at the memory
+  // path) is structured the same way. Both wrappers are a wire when
+  // `cache_en_i` is low.
+  logic                     ic_cpu_req_valid;
+  logic                     ic_cpu_req_ready;
+  mosaic_uop_pkg::mem_req_t ic_cpu_req;
+  logic [CORE_REQ_ID_W-1:0] ic_cpu_req_id;
+  logic [CORE_EPOCH_W-1:0]  ic_cpu_req_epoch;
+  logic                     ic_cpu_rsp_valid;
+  logic                     ic_cpu_rsp_ready;
+  mosaic_uop_pkg::mem_rsp_t ic_cpu_rsp;
+  logic [CORE_REQ_ID_W-1:0] ic_cpu_rsp_id;
+  logic [CORE_EPOCH_W-1:0]  ic_cpu_rsp_epoch;
+  logic [2:0]               ic_cpu_rsp_len;
+  logic                     icache_flush;
+  logic                     icache_flush_done;
+  logic                     dcache_flush;
+  logic                     dcache_flush_done;
+  logic                     cache_fence_busy;
+
+  // The data side: the LSU endpoint's memory port is the wrapper's CPU side and
+  // the endpoint's slot on the PTE/data arbiter is its memory side.
+  logic                     dc_cpu_req_valid;
+  logic                     dc_cpu_req_ready;
+  mosaic_uop_pkg::mem_req_t dc_cpu_req;
+  logic                     dc_cpu_rsp_valid;
+  logic                     dc_cpu_rsp_ready;
+  mosaic_uop_pkg::mem_rsp_t dc_cpu_rsp;
+  logic                     dc_mem_req_valid;
+  logic                     dc_mem_req_ready;
+  mosaic_uop_pkg::mem_req_t dc_mem_req;
+  logic                     dc_mem_rsp_valid;
+  logic                     dc_mem_rsp_ready;
+  mosaic_uop_pkg::mem_rsp_t dc_mem_rsp;
+
+  // The fetch request now goes to the L1 instruction cache path, which is a wire
+  // when `cache_en_i` is low. `ic_*` is the fetch side of that wrapper and the
+  // `imem_*` ports are its memory side (see the instance below).
+  assign ic_cpu_req_valid   = want_imem_req && fetch_slot_free && !fetch_pmp_deny_c &&
                               ((fetch_outstanding == {CORE_FETCH_CNT_W{1'b0}}) ||
                                fetch_rsp_live);
-  assign fetch_req_valid_int= imem_req_valid && imem_req_ready;
-  assign imem_req.we    = 1'b0;
-  assign imem_req.addr  = fetch_next_pc;
-  assign imem_req.size  = mosaic_pkg::SZ_WORD;
-  assign imem_req.wstrb = {(CORE_XLEN/8){1'b0}};
-  assign imem_req.wdata = {CORE_XLEN{1'b0}};
+  assign fetch_req_valid_int= ic_cpu_req_valid && ic_cpu_req_ready;
+  assign ic_cpu_req.we    = 1'b0;
+  assign ic_cpu_req.addr  = fetch_next_pc;
+  assign ic_cpu_req.size  = mosaic_pkg::SZ_WORD;
+  assign ic_cpu_req.wstrb = {(CORE_XLEN/8){1'b0}};
+  assign ic_cpu_req.wdata = {CORE_XLEN{1'b0}};
   // The instruction port is never atomic (I-039); the fields are driven so the
   // packet is never left half-assigned.
-  assign imem_req.amo    = 1'b0;
-  assign imem_req.amo_op = mosaic_pkg::AMO_ADD;
-  assign imem_req.aq     = 1'b0;
-  assign imem_req.rl     = 1'b0;
+  assign ic_cpu_req.amo    = 1'b0;
+  assign ic_cpu_req.amo_op = mosaic_pkg::AMO_ADD;
+  assign ic_cpu_req.aq     = 1'b0;
+  assign ic_cpu_req.rl     = 1'b0;
 
   always_ff @(posedge clk) begin
     if (rst) begin
@@ -1403,16 +1458,16 @@ module mosaic_core (
       .req_valid          (fetch_req_valid_int),
       .req_pc             (fetch_next_pc),
       .req_ready          (fetch_slot_free),
-      .req_id             (imem_req_id),
-      .req_epoch          (imem_req_epoch),
-      .rsp_valid          (imem_rsp_valid),
-      .rsp_ready          (imem_rsp_ready),
+      .req_id             (ic_cpu_req_id),
+      .req_epoch          (ic_cpu_req_epoch),
+      .rsp_valid          (ic_cpu_rsp_valid),
+      .rsp_ready          (ic_cpu_rsp_ready),
       .rsp_squashed       (),
-      .rsp_id             (imem_rsp_id),
-      .rsp_epoch          (imem_rsp_epoch),
-      .rsp_data           (imem_rsp.rdata[31:0]),
-      .rsp_len            (imem_rsp_len),
-      .rsp_fault          (imem_rsp.fault),
+      .rsp_id             (ic_cpu_rsp_id),
+      .rsp_epoch          (ic_cpu_rsp_epoch),
+      .rsp_data           (ic_cpu_rsp.rdata[31:0]),
+      .rsp_len            (ic_cpu_rsp_len),
+      .rsp_fault          (ic_cpu_rsp.fault),
       .redirect_valid     (fetch_redir_valid),
       .redirect_pc        (redirect_pc),
       .pred_valid         (1'b0),
@@ -1468,6 +1523,63 @@ module mosaic_core (
       .deny_count         (),
       .cancel_count       (),
       .fetch_pc           ()
+  );
+
+  // ==========================================================================
+  // 1b. The L1 cache path (I-042) -- instruction side
+  // ==========================================================================
+  // The instruction cache sits between fetch's request port and the core's
+  // instruction memory port. It is a wire until `cache_en_i` is high. The
+  // topology and the rules are in rtl/core/mosaic_l1_cache_path.sv's header;
+  // this is the wiring.
+  mosaic_l1_cache_path #(
+      .IS_FETCH      (1'b1),
+      .LINE_BYTES    (32),
+      .SETS          (8),
+      .ADDR_WIDTH    (64),
+      .CPU_DATA_WIDTH(64),
+      .ID_W          (CORE_REQ_ID_W),
+      .EPOCH_W       (CORE_EPOCH_W)
+  ) u_icache_path (
+      .clk             (clk),
+      .rst             (rst),
+      .en_i            (cache_en_i),
+      .flush_i         (icache_flush),
+      .flush_done      (icache_flush_done),
+      .cpu_req_valid_i (ic_cpu_req_valid),
+      .cpu_req_ready_o (ic_cpu_req_ready),
+      .cpu_req_i       (ic_cpu_req),
+      .cpu_req_id_i    (ic_cpu_req_id),
+      .cpu_req_epoch_i (ic_cpu_req_epoch),
+      .cpu_rsp_valid_o (ic_cpu_rsp_valid),
+      .cpu_rsp_ready_i (ic_cpu_rsp_ready),
+      .cpu_rsp_o       (ic_cpu_rsp),
+      .cpu_rsp_id_o    (ic_cpu_rsp_id),
+      .cpu_rsp_epoch_o (ic_cpu_rsp_epoch),
+      .cpu_rsp_len_o   (ic_cpu_rsp_len),
+      .mem_req_valid_o (imem_req_valid),
+      .mem_req_ready_i (imem_req_ready),
+      .mem_req_o       (imem_req),
+      .mem_req_id_o    (imem_req_id),
+      .mem_req_epoch_o (imem_req_epoch),
+      .mem_rsp_valid_i (imem_rsp_valid),
+      .mem_rsp_ready_o (imem_rsp_ready),
+      .mem_rsp_i       (imem_rsp),
+      .mem_rsp_id_i    (imem_rsp_id),
+      .mem_rsp_epoch_i (imem_rsp_epoch),
+      .mem_rsp_len_i   (imem_rsp_len),
+      .o_hit           (),
+      .o_miss          (),
+      .o_refill        (),
+      .o_writeback     (),
+      .o_fault         (),
+      .o_cpu_txn       (),
+      .o_mem_beat      (),
+      .o_line_txn      (),
+      .o_bypass_txn    (),
+      .dbg_index_i     (3'b0),
+      .dbg_valid_o     (),
+      .dbg_dirty_o     ()
   );
 
   // ==========================================================================
@@ -3398,6 +3510,48 @@ module mosaic_core (
   assign sys_wb_want  = sys_exec;
   assign port3_taken_sys = sys_wb_want;
   assign sys_wb_valid = sys_wb_want && lsu_wb_ready_int;
+
+  // ==========================================================================
+  // The cache fence (I-042): FENCE.I writes the D-cache back, then invalidates
+  // the I-cache
+  // ==========================================================================
+  // The caches are write-back and non-coherent, so the store a program patches
+  // its own code with can still be *dirty in the data cache* when the FENCE.I
+  // retires -- and the instruction cache, refilling from memory, would read the
+  // old bytes. The fence therefore does two things, in this order:
+  //
+  //   1. it writes the data cache back to memory (and invalidates it), so the
+  //      patched bytes are in memory;
+  //   2. it invalidates the instruction cache, so the next fetch refills.
+  //
+  // It holds the front end off for the whole window: `icache_flush` is a *level*
+  // asserted from the first step to the last, and the instruction cache path
+  // refuses requests while it is high. The two steps are ordered because step 2's
+  // refill must not read memory before step 1's bytes have been written there.
+  //
+  // The sequence starts in the cycle FENCE.I executes (`sys_exec`, which the
+  // existing drain rule has already gated on the memory path being idle) and only
+  // when the caches are enabled: with `cache_en_i` low there is nothing to flush
+  // and the machine's cycle timing is exactly what it was.
+  typedef enum logic [1:0] { CF_IDLE = 2'd0, CF_D = 2'd1, CF_I = 2'd2 } cf_state_e;
+  cf_state_e cf_state;
+
+  always_ff @(posedge clk) begin
+    if (rst) begin
+      cf_state <= CF_IDLE;
+    end else begin
+      case (cf_state)
+        CF_IDLE: if (cache_en_i && sys_exec && sys_fence_i_q) cf_state <= CF_D;
+        CF_D:    if (dcache_flush_done) cf_state <= CF_I;
+        CF_I:    if (icache_flush_done) cf_state <= CF_IDLE;
+        default: cf_state <= CF_IDLE;
+      endcase
+    end
+  end
+
+  assign dcache_flush     = (cf_state == CF_D);
+  assign icache_flush     = (cf_state != CF_IDLE);
+  assign cache_fence_busy = (cf_state != CF_IDLE);
   assign wb3_valid    = port3_taken_sys ? sys_wb_valid : lsu_wb_valid;
   assign wb3_ev       = port3_taken_sys ? sys_wb_ev : lsu_wb_ev;
   assign lsu_wb_ready = lsu_wb_ready_int && !port3_taken_sys;
@@ -4446,14 +4600,16 @@ module mosaic_core (
   assign ptw_mem_rdata     = dmem_rsp.rdata;
   assign ptw_mem_fault     = dmem_rsp.fault;
   assign ptw_mem_rsp_valid = dmem_rsp_valid && (mem_owner_q == MEM_OWN_PTW);
-  assign ep_mem_rsp_valid  = dmem_rsp_valid && (mem_owner_q == MEM_OWN_EP);
-  assign ep_mem_rsp        = dmem_rsp;
+  // The endpoint's slot on the arbiter is now the L1 data cache path's memory
+  // side (`dc_mem_*`); the endpoint itself talks to that path's CPU side.
+  assign dc_mem_rsp_valid  = dmem_rsp_valid && (mem_owner_q == MEM_OWN_EP);
+  assign dc_mem_rsp        = dmem_rsp;
 
   assign ptw_mem_req_ready = dmem_req_ready && (mem_owner_q == MEM_OWN_NONE);
-  assign ep_mem_req_ready  = dmem_req_ready && (mem_owner_q == MEM_OWN_NONE) &&
+  assign dc_mem_req_ready  = dmem_req_ready && (mem_owner_q == MEM_OWN_NONE) &&
                              !ptw_mem_req_valid;
   assign dmem_req_valid    = (mem_owner_q == MEM_OWN_NONE) &&
-                             (ptw_mem_req_valid || ep_mem_req_valid);
+                             (ptw_mem_req_valid || dc_mem_req_valid);
   always_comb begin
     if (ptw_mem_req_valid) begin
       // A PTE access is always an 8-byte access to the PTE's physical address.
@@ -4467,11 +4623,11 @@ module mosaic_core (
       dmem_req.aq     = 1'b0;
       dmem_req.rl     = 1'b0;
     end else begin
-      dmem_req = ep_mem_req;
+      dmem_req = dc_mem_req;
     end
   end
   assign dmem_rsp_ready = (mem_owner_q == MEM_OWN_PTW) ? ptw_mem_rsp_ready
-                        : (mem_owner_q == MEM_OWN_EP)  ? ep_mem_rsp_ready
+                        : (mem_owner_q == MEM_OWN_EP)  ? dc_mem_rsp_ready
                         : 1'b1;
 
   always_ff @(posedge clk) begin
@@ -4486,6 +4642,75 @@ module mosaic_core (
       end
     end
   end
+
+  // ===========================================================================
+  // The L1 cache path (I-042) -- data side
+  // ===========================================================================
+  // The data cache sits between the LSU endpoint's memory port and the
+  // endpoint's slot on the PTE/data arbiter. A cacheable access is served by the
+  // cache (a miss refills a line, a store allocates and dirties a line, a dirty
+  // eviction writes it back); a non-cacheable access -- MMIO, the boot ROM, any
+  // atomic -- bypasses with its own size and strobes. The PTE walker is *not*
+  // behind the cache: page tables are read directly, so a translation is never
+  // served from a stale line (see the report's "not covered").
+  mosaic_l1_cache_path #(
+      .IS_FETCH      (1'b0),
+      .LINE_BYTES    (32),
+      .SETS          (8),
+      .ADDR_WIDTH    (64),
+      .CPU_DATA_WIDTH(64),
+      .ID_W          (1),
+      .EPOCH_W       (1)
+  ) u_dcache_path (
+      .clk             (clk),
+      .rst             (rst),
+      .en_i            (cache_en_i),
+      .flush_i         (dcache_flush),
+      .flush_done      (dcache_flush_done),
+      .cpu_req_valid_i (dc_cpu_req_valid),
+      .cpu_req_ready_o (dc_cpu_req_ready),
+      .cpu_req_i       (dc_cpu_req),
+      .cpu_req_id_i    (1'b0),
+      .cpu_req_epoch_i (1'b0),
+      .cpu_rsp_valid_o (dc_cpu_rsp_valid),
+      .cpu_rsp_ready_i (dc_cpu_rsp_ready),
+      .cpu_rsp_o       (dc_cpu_rsp),
+      .cpu_rsp_id_o    (),
+      .cpu_rsp_epoch_o (),
+      .cpu_rsp_len_o   (),
+      .mem_req_valid_o (dc_mem_req_valid),
+      .mem_req_ready_i (dc_mem_req_ready),
+      .mem_req_o       (dc_mem_req),
+      .mem_req_id_o    (),
+      .mem_req_epoch_o (),
+      .mem_rsp_valid_i (dc_mem_rsp_valid),
+      .mem_rsp_ready_o (dc_mem_rsp_ready),
+      .mem_rsp_i       (dc_mem_rsp),
+      .mem_rsp_id_i    (1'b0),
+      .mem_rsp_epoch_i (1'b0),
+      .mem_rsp_len_i   (3'b0),
+      .o_hit           (),
+      .o_miss          (),
+      .o_refill        (),
+      .o_writeback     (),
+      .o_fault         (),
+      .o_cpu_txn       (),
+      .o_mem_beat      (),
+      .o_line_txn      (),
+      .o_bypass_txn    (),
+      .dbg_index_i     (3'b0),
+      .dbg_valid_o     (),
+      .dbg_dirty_o     ()
+  );
+
+  // The endpoint talks to the cache path's CPU side; the cache path's memory side
+  // takes the endpoint's slot on the arbiter.
+  assign dc_cpu_req_valid = ep_mem_req_valid;
+  assign dc_cpu_req       = ep_mem_req;
+  assign ep_mem_req_ready = dc_cpu_req_ready;
+  assign ep_mem_rsp_valid = dc_cpu_rsp_valid;
+  assign ep_mem_rsp       = dc_cpu_rsp;
+  assign dc_cpu_rsp_ready = ep_mem_rsp_ready;
 
   // ===========================================================================
   // The load translation stage

@@ -122,6 +122,7 @@ check-exclusions:
 # ------------------------------------------------------------- config -> RTL
 
 $(GEN_CFG) $(GEN_ID): config/profiles/$(PROFILE).json config/capability_ladder.json \
+                     config/memory/$(PROFILE).json \
                      config/contracts/interfaces.json config/contracts/counters.json \
                      config/csr/mode_m.json config/csr/mode_su.json \
                      config/csr/mode_pmp.json \

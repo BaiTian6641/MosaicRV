@@ -316,7 +316,16 @@ bool BitmapBit(uint64_t lo, uint64_t hi, int i) {
 class Dut {
  public:
   Dut(Vmosaic_vec_tb* d, ClockDriver* clk, Reporter* rep)
-      : d_(d), clk_(clk), rep_(rep) {}
+      : d_(d), clk_(clk), rep_(rep) {
+    // The I-054 ports are quiescent for every other case: the vector ALU must
+    // not start a packet because an undriven input happened to be set.
+    d_->mem_owner_i = 0;
+    d_->mem_rd_valid_i = 0;
+    d_->mem_wr_valid_i = 0;
+    d_->alu_exec_valid_i = 0;
+    d_->alu_caps_i = 0;
+    d_->el_valid_i = 0;
+  }
 
   void Masks(uint64_t rob, uint64_t gen, uint64_t uop) {
     rob_mask_ = rob;
@@ -1508,6 +1517,1397 @@ void RunVtypeLayoutCase(Vmosaic_vec_tb* dut, Dut* desc, ClockDriver* clk, Report
 
 }  // namespace
 
+
+// ============================================================================
+// I-054 -- the phase set for CASE=rvv.integer_mask_permute
+// ============================================================================
+// ============================================================================
+// I-054 -- vector integer, mask, permute and reduction
+//           (CASE=rvv.integer_mask_permute).
+//
+// The expectation is computed here, element by element, from the V
+// specification's rules: `OracleElem` is written from the operation table in
+// src/v-spec.adoc (fixpoint rounding from the vxrm table, saturation at the
+// signed/unsigned boundary, widening/narrowing at the source element's own
+// width), not from a second copy of the RTL's expressions. The register file
+// is modelled as 32 x 128-bit values and addressed with the same
+// (base, element, SEW, LMUL) rule the VRF implements, so an operation's
+// *element order* can be checked and not merely its arithmetic.
+//
+// Coverage is itself a check: every family the case claims to exercise must be
+// shown to have run at every element width and every LMUL in scope, and the
+// matrix is asserted to be complete at the end.
+// ============================================================================
+
+enum : int {
+  VF_ADDSUB = 0, VF_WIDE = 1, VF_MUL = 2, VF_MULW = 3, VF_SHIFT = 4,
+  VF_NARROW = 5, VF_LOGIC = 6, VF_MINMAX = 7, VF_CMP = 8, VF_SAT = 9,
+  VF_MASKLOG = 10, VF_MASKPFX = 11, VF_SLIDE = 12, VF_GATHER = 13,
+  VF_COMPRESS = 14, VF_REDUCE = 15, VF_REDWIDE = 16, VF_COUNT = 17
+};
+const uint64_t kAllCaps = (1ull << VF_COUNT) - 1ull;
+
+constexpr int kFormVv = 0, kFormVx = 1, kFormVi = 2;
+
+const char* VecFamilyName(int f) {
+  switch (f) {
+    case VF_ADDSUB: return "addsub";
+    case VF_WIDE: return "wide";
+    case VF_MUL: return "mul";
+    case VF_MULW: return "mulw";
+    case VF_SHIFT: return "shift";
+    case VF_NARROW: return "narrow";
+    case VF_LOGIC: return "logic";
+    case VF_MINMAX: return "minmax";
+    case VF_CMP: return "cmp";
+    case VF_SAT: return "sat";
+    case VF_MASKLOG: return "masklog";
+    case VF_MASKPFX: return "maskpfx";
+    case VF_SLIDE: return "slide";
+    case VF_GATHER: return "gather";
+    case VF_COMPRESS: return "compress";
+    case VF_REDUCE: return "reduce";
+    case VF_REDWIDE: return "redwide";
+    default: return "?";
+  }
+}
+
+int VecFamilyOps(int f) {
+  switch (f) {
+    case VF_ADDSUB: return 3;
+    case VF_WIDE: return 4;
+    case VF_MUL: return 4;
+    case VF_MULW: return 3;
+    case VF_SHIFT: return 3;
+    case VF_NARROW: return 4;
+    case VF_LOGIC: return 4;
+    case VF_MINMAX: return 4;
+    case VF_CMP: return 8;
+    case VF_SAT: return 8;
+    case VF_MASKLOG: return 8;
+    case VF_MASKPFX: return 3;
+    case VF_SLIDE: return 4;
+    case VF_GATHER: return 2;
+    case VF_COMPRESS: return 1;
+    case VF_REDUCE: return 8;
+    case VF_REDWIDE: return 2;
+    default: return 0;
+  }
+}
+
+// ------------------------------------------------------------------ width utils
+uint64_t MaskW(int w) { return w >= 64 ? ~0ull : ((1ull << w) - 1ull); }
+
+using u128 = unsigned __int128;
+using i128 = __int128;
+
+i128 SxW(uint64_t v, int w) {
+  uint64_t m = MaskW(w);
+  u128 t = static_cast<u128>(v & m);
+  if (w > 0 && w < 128 && ((t >> (w - 1)) & 1u) != 0) t |= (~static_cast<u128>(0)) << w;
+  return static_cast<i128>(t);
+}
+
+// The vxrm table: r depends on the rounded-off bits of the pre-rounding value.
+u128 RndUn(u128 v, int d, int rm) {
+  if (d <= 0) return v;
+  u128 base = v >> d;
+  u128 below = v & ((static_cast<u128>(1) << d) - 1);
+  bool vd = ((v >> d) & 1u) != 0;
+  bool vdm1 = ((v >> (d - 1)) & 1u) != 0;
+  u128 below2 = d >= 2 ? (v & ((static_cast<u128>(1) << (d - 1)) - 1)) : 0;
+  u128 r = 0;
+  switch (rm) {
+    case 0: r = vdm1 ? 1 : 0; break;
+    case 1: r = (vdm1 && (below2 != 0 || vd)) ? 1 : 0; break;
+    case 2: r = 0; break;
+    default: r = (!vd && below != 0) ? 1 : 0; break;
+  }
+  return base + r;
+}
+
+i128 RndSg(i128 v, int d, int rm) {
+  if (d <= 0) return v;
+  i128 base = v >> d;
+  u128 uv = static_cast<u128>(v);
+  u128 below = uv & ((static_cast<u128>(1) << d) - 1);
+  bool vd = ((uv >> d) & 1u) != 0;
+  bool vdm1 = ((uv >> (d - 1)) & 1u) != 0;
+  u128 below2 = d >= 2 ? (uv & ((static_cast<u128>(1) << (d - 1)) - 1)) : 0;
+  i128 r = 0;
+  switch (rm) {
+    case 0: r = vdm1 ? 1 : 0; break;
+    case 1: r = (vdm1 && (below2 != 0 || vd)) ? 1 : 0; break;
+    case 2: r = 0; break;
+    default: r = (!vd && below != 0) ? 1 : 0; break;
+  }
+  return base + r;
+}
+
+// ---------------------------------------------------------------- the oracle
+struct ElemVal {
+  uint64_t result = 0;
+  bool mres = false;
+  bool sat = false;
+  bool pfx = false;
+};
+
+// One destination element, computed from the operation's rule. `vs1` is the
+// vector second operand; `scalar` is used for the .vx/.vi forms.
+ElemVal OracleElem(int fam, int op, int sew, int form, uint64_t vs2, uint64_t vs1,
+                   uint64_t scalar, uint64_t acc, int vxrm, int index, bool pfx_in) {
+  ElemVal o;
+  uint64_t m = MaskW(sew);
+  uint64_t a = vs2 & m;
+  uint64_t b = (form == kFormVv) ? (vs1 & m) : (scalar & m);
+  int sh = 0;
+  switch (fam) {
+    case VF_ADDSUB:
+      if (op == 0) o.result = (a + b) & m;
+      else if (op == 1) o.result = (a - b) & m;
+      else o.result = (b - a) & m;                      // vrsub: scalar - vs2
+      break;
+    case VF_WIDE: {
+      bool sgn = (op == 1 || op == 3);
+      u128 av = sgn ? static_cast<u128>(SxW(a, sew)) : static_cast<u128>(a);
+      u128 bv = sgn ? static_cast<u128>(SxW(b, sew)) : static_cast<u128>(b);
+      u128 r = (op == 0 || op == 1) ? (av + bv) : (av - bv);
+      o.result = static_cast<uint64_t>(r) & MaskW(2 * sew);
+      break;
+    }
+    case VF_MUL:
+      if (op == 0) o.result = (a * b) & m;
+      else if (op == 1) o.result = static_cast<uint64_t>((SxW(a, sew) * SxW(b, sew)) >> sew) & m;
+      else if (op == 2) o.result = static_cast<uint64_t>((static_cast<u128>(a) * b) >> sew) & m;
+      else o.result = static_cast<uint64_t>((SxW(a, sew) * static_cast<i128>(b)) >> sew) & m;
+      break;
+    case VF_MULW: {
+      u128 r;
+      if (op == 0) r = static_cast<u128>(a) * b;
+      else if (op == 1) r = static_cast<u128>(SxW(a, sew) * static_cast<i128>(b));
+      else r = static_cast<u128>(SxW(a, sew) * SxW(b, sew));
+      o.result = static_cast<uint64_t>(r) & MaskW(2 * sew);
+      break;
+    }
+    case VF_SHIFT:
+      sh = static_cast<int>(b) & (sew - 1);
+      if (op == 0) o.result = (a << sh) & m;
+      else if (op == 1) o.result = (a >> sh) & m;
+      else o.result = static_cast<uint64_t>(SxW(a, sew) >> sh) & m;
+      break;
+    case VF_NARROW: {
+      sh = static_cast<int>(b) & (2 * sew - 1);
+      if (op == 0) o.result = static_cast<uint64_t>(static_cast<u128>(a) >> sh) & m;
+      else if (op == 1) o.result = static_cast<uint64_t>(SxW(a, 2 * sew) >> sh) & m;
+      else if (op == 2) {
+        u128 r = RndUn(a, sh, vxrm);
+        if (r > m) { o.sat = true; o.result = m; }
+        else o.result = static_cast<uint64_t>(r) & m;
+      } else {
+        i128 r = RndSg(SxW(a, 2 * sew), sh, vxrm);
+        i128 hi = (static_cast<i128>(1) << (sew - 1)) - 1;
+        i128 lo = -(static_cast<i128>(1) << (sew - 1));
+        if (r > hi) { o.sat = true; o.result = static_cast<uint64_t>(hi); }
+        else if (r < lo) { o.sat = true; o.result = static_cast<uint64_t>(lo) & m; }
+        else o.result = static_cast<uint64_t>(r) & m;
+      }
+      break;
+    }
+    case VF_LOGIC:
+      if (op == 0) o.result = a & b;
+      else if (op == 1) o.result = a | b;
+      else if (op == 2) o.result = a ^ b;
+      else o.result = (~a) & m;
+      break;
+    case VF_MINMAX: {
+      bool sgn = (op == 1 || op == 3);
+      bool gt = (op == 2 || op == 3);
+      bool take_a;
+      if (sgn) take_a = gt ? (SxW(a, sew) >= SxW(b, sew)) : (SxW(a, sew) <= SxW(b, sew));
+      else take_a = gt ? (a >= b) : (a <= b);
+      o.result = take_a ? a : b;
+      break;
+    }
+    case VF_CMP:
+      switch (op) {
+        case 0: o.mres = (a == b); break;
+        case 1: o.mres = (a != b); break;
+        case 2: o.mres = (a < b); break;
+        case 3: o.mres = (SxW(a, sew) < SxW(b, sew)); break;
+        case 4: o.mres = (a <= b); break;
+        case 5: o.mres = (SxW(a, sew) <= SxW(b, sew)); break;
+        case 6: o.mres = (a > b); break;
+        default: o.mres = (SxW(a, sew) > SxW(b, sew)); break;
+      }
+      break;
+    case VF_SAT: {
+      i128 hi = (static_cast<i128>(1) << (sew - 1)) - 1;
+      i128 lo = -(static_cast<i128>(1) << (sew - 1));
+      if (op == 0) {                       // vsaddu
+        u128 r = static_cast<u128>(a) + b;
+        if (r > m) { o.sat = true; o.result = m; } else o.result = static_cast<uint64_t>(r);
+      } else if (op == 1) {                // vsadd
+        i128 r = SxW(a, sew) + SxW(b, sew);
+        if (r > hi) { o.sat = true; o.result = static_cast<uint64_t>(hi); }
+        else if (r < lo) { o.sat = true; o.result = static_cast<uint64_t>(lo) & m; }
+        else o.result = static_cast<uint64_t>(r) & m;
+      } else if (op == 2) {                // vssubu
+        if (a < b) { o.sat = true; o.result = 0; } else o.result = (a - b) & m;
+      } else if (op == 3) {                // vssub
+        i128 r = SxW(a, sew) - SxW(b, sew);
+        if (r > hi) { o.sat = true; o.result = static_cast<uint64_t>(hi); }
+        else if (r < lo) { o.sat = true; o.result = static_cast<uint64_t>(lo) & m; }
+        else o.result = static_cast<uint64_t>(r) & m;
+      } else if (op == 4) {                // vaaddu
+        o.result = static_cast<uint64_t>(RndUn(static_cast<u128>(a) + b, 1, vxrm)) & m;
+      } else if (op == 5) {                // vaadd
+        o.result = static_cast<uint64_t>(
+            RndSg(SxW(a, sew) + SxW(b, sew), 1, vxrm)) & m;
+      } else if (op == 6) {                // vasubu
+        o.result = static_cast<uint64_t>(RndUn(static_cast<u128>(a) - b, 1, vxrm)) & m;
+      } else {                             // vasub
+        o.result = static_cast<uint64_t>(
+            RndSg(SxW(a, sew) - SxW(b, sew), 1, vxrm)) & m;
+      }
+      break;
+    }
+    case VF_MASKLOG: {
+      bool bb = ((vs2 >> (index & 7)) & 1u) != 0;
+      bool aa = ((vs1 >> (index & 7)) & 1u) != 0;
+      switch (op) {
+        case 0: o.mres = bb && aa; break;
+        case 1: o.mres = !(bb && aa); break;
+        case 2: o.mres = bb || aa; break;
+        case 3: o.mres = !(bb || aa); break;
+        case 4: o.mres = bb != aa; break;
+        case 5: o.mres = !(bb != aa); break;
+        case 6: o.mres = bb && !aa; break;
+        default: o.mres = bb || !aa; break;
+      }
+      break;
+    }
+    case VF_MASKPFX: {
+      bool bb = ((vs2 >> (index & 7)) & 1u) != 0;
+      if (op == 0) o.mres = !pfx_in;                 // vmsbf
+      else if (op == 1) o.mres = !pfx_in;            // vmsif
+      else o.mres = bb && !pfx_in;                   // vmsof
+      o.pfx = pfx_in || bb;
+      break;
+    }
+    case VF_REDUCE: {
+      // one fold of the ascending chain: acc op vs2[i]
+      switch (op) {
+        case 0: o.result = (acc + a) & m; break;                        // vredsum
+        case 1: o.result = (acc >= a) ? acc : a; break;                 // vredmaxu
+        case 2: o.result = (SxW(acc, sew) >= SxW(a, sew)) ? acc : a; break;
+        case 3: o.result = (acc <= a) ? acc : a; break;                 // vredminu
+        case 4: o.result = (SxW(acc, sew) <= SxW(a, sew)) ? acc : a; break;
+        case 5: o.result = (acc & a) & m; break;                        // vredand
+        case 6: o.result = (acc | a) & m; break;                        // vredor
+        default: o.result = (acc ^ a) & m; break;                       // vredxor
+      }
+      break;
+    }
+    case VF_REDWIDE: {
+      // 2*SEW accumulator, SEW-wide source
+      if (op == 0) {
+        o.result = static_cast<uint64_t>(static_cast<u128>(acc & MaskW(2 * sew)) +
+                                         static_cast<u128>(a)) & MaskW(2 * sew);
+      } else {
+        i128 sum = static_cast<i128>(SxW(acc, 2 * sew)) + SxW(a, sew);
+        o.result = static_cast<uint64_t>(static_cast<u128>(sum)) & MaskW(2 * sew);
+      }
+      break;
+    }
+    default:
+      break;
+  }
+  return o;
+}
+
+// --------------------------------------------------------------- host model
+struct HostVrf {
+  u128 r[32];
+  HostVrf() { for (int i = 0; i < 32; ++i) r[i] = 0; }
+};
+
+int HostGrpBase(int base, int lmul) {
+  int grp = lmul >= 0 ? (1 << lmul) : 1;
+  return base & ~(grp - 1);
+}
+
+uint64_t HostGet(const HostVrf& vf, int base, int elem, int sew_l, int lmul) {
+  int sew = 1 << sew_l;
+  int bit_off = elem * sew;
+  int reg = HostGrpBase(base, lmul) + bit_off / 128;
+  int bit = bit_off % 128;
+  u128 m = (static_cast<u128>(1) << sew) - 1;
+  return static_cast<uint64_t>((vf.r[reg] >> bit) & m);
+}
+
+void HostSet(HostVrf& vf, int base, int elem, int sew_l, int lmul, uint64_t val) {
+  int sew = 1 << sew_l;
+  int bit_off = elem * sew;
+  int reg = HostGrpBase(base, lmul) + bit_off / 128;
+  int bit = bit_off % 128;
+  u128 m = (static_cast<u128>(1) << sew) - 1;
+  vf.r[reg] = (vf.r[reg] & ~(m << bit)) | ((static_cast<u128>(val) & m) << bit);
+}
+
+// ------------------------------------------------------------- the harness
+
+struct VecStim {
+  bool mem_owner = true;
+  bool mem_rd_valid = false;
+  int mem_rd_base = 0, mem_rd_elem = 0, mem_rd_sew = 0, mem_rd_lmul = 0;
+  uint64_t mem_rd_tag = 0x5151;
+  bool mem_wr_valid = false;
+  int mem_wr_base = 0, mem_wr_elem = 0, mem_wr_sew = 0, mem_wr_lmul = 0;
+  uint64_t mem_wr_data = 0;
+
+  bool alu_exec_valid = false;
+  int alu_family = 0;
+  int alu_op = 0;
+  int alu_form = 0;
+  int alu_vd = 0, alu_vs1 = 0, alu_vs2 = 0;
+  uint64_t alu_scalar = 0;
+  bool alu_mask_en = false;
+  uint64_t alu_caps = kAllCaps;
+
+  bool el_valid = false;
+  int el_family = 0, el_op = 0, el_form = 0;
+  uint64_t el_vs2 = 0, el_vs1 = 0, el_acc = 0, el_scalar = 0;
+  bool el_mask = false;
+  int el_index = 0;
+  bool el_pfx = false;
+};
+
+struct VecObs {
+  bool mem_rd_gnt = false;
+  bool mem_rd_rsp_valid = false;
+  uint64_t mem_rd_rsp_data = 0;
+  uint64_t mem_rd_rsp_tag = 0;
+  bool mem_wr_gnt = false;
+
+  bool alu_busy = false, alu_done = false, alu_illegal = false, alu_trap = false;
+  bool alu_sat = false;
+  int alu_trap_elem = 0, alu_elems = 0, alu_cur = 0;
+  uint64_t alu_acc = 0;
+  bool trace_valid = false;
+  int trace_elem = 0;
+  int alu_state = 0, alu_step = 0;
+  bool alu_rd_valid = false, alu_wr_valid = false;
+  int alu_rd_base = 0, alu_rd_elem = 0, alu_rd_sew = 0, alu_rd_lmul = 0;
+  int src_rd_ctr = 0;
+
+  uint64_t el_result = 0;
+  bool el_mres = false, el_sat = false, el_illegal = false, el_trap = false;
+  bool el_access = false, el_write = false, el_pfx = false;
+  int el_rd2 = 0;
+
+  int rd_gnt_ctr = 0, rd_bad_ctr = 0, wr_gnt_ctr = 0, rd_latency = 0;
+  int rows = 0, banks = 0;
+};
+
+class Vec {
+ public:
+  Vec(Vmosaic_vec_tb* d, ClockDriver* clk) : d_(d), clk_(clk) {}
+
+  VecObs Cycle(const VecStim& s) {
+    d_->rst = 0;
+    // the configuration unit is quiescent while the ALU runs
+    d_->cfg_vset_valid = 0;
+    d_->cfg_snap_capture = 0;
+    d_->cfg_replay_valid = 0;
+    d_->cfg_exec_valid = 0;
+    d_->cfg_csr_valid = 0;
+
+    d_->mem_owner_i = s.mem_owner ? 1 : 0;
+    d_->mem_rd_valid_i = s.mem_rd_valid ? 1 : 0;
+    d_->mem_rd_base_i = static_cast<uint8_t>(s.mem_rd_base & 0x1F);
+    d_->mem_rd_elem_i = static_cast<uint8_t>(s.mem_rd_elem & 0x7F);
+    d_->mem_rd_sew_i = static_cast<uint8_t>(s.mem_rd_sew & 0x7);
+    d_->mem_rd_lmul_i = static_cast<uint8_t>(s.mem_rd_lmul & 0xF);
+    d_->mem_rd_tag_i = static_cast<uint16_t>(s.mem_rd_tag);
+    d_->mem_wr_valid_i = s.mem_wr_valid ? 1 : 0;
+    d_->mem_wr_base_i = static_cast<uint8_t>(s.mem_wr_base & 0x1F);
+    d_->mem_wr_elem_i = static_cast<uint8_t>(s.mem_wr_elem & 0x7F);
+    d_->mem_wr_sew_i = static_cast<uint8_t>(s.mem_wr_sew & 0x7);
+    d_->mem_wr_lmul_i = static_cast<uint8_t>(s.mem_wr_lmul & 0xF);
+    d_->mem_wr_data_i = s.mem_wr_data;
+
+    d_->alu_caps_i = static_cast<uint32_t>(s.alu_caps & 0x1FFFFull);
+    d_->alu_exec_valid_i = s.alu_exec_valid ? 1 : 0;
+    d_->alu_family_i = static_cast<uint8_t>(s.alu_family & 0x1F);
+    d_->alu_op_i = static_cast<uint8_t>(s.alu_op & 0xF);
+    d_->alu_form_i = static_cast<uint8_t>(s.alu_form & 0x3);
+    d_->alu_vd_i = static_cast<uint8_t>(s.alu_vd & 0x1F);
+    d_->alu_vs1_i = static_cast<uint8_t>(s.alu_vs1 & 0x1F);
+    d_->alu_vs2_i = static_cast<uint8_t>(s.alu_vs2 & 0x1F);
+    d_->alu_scalar_i = s.alu_scalar;
+    d_->alu_mask_en_i = s.alu_mask_en ? 1 : 0;
+
+    d_->el_valid_i = s.el_valid ? 1 : 0;
+    d_->el_family_i = static_cast<uint8_t>(s.el_family & 0x1F);
+    d_->el_op_i = static_cast<uint8_t>(s.el_op & 0xF);
+    d_->el_form_i = static_cast<uint8_t>(s.el_form & 0x3);
+    d_->el_vs2_i = s.el_vs2;
+    d_->el_vs1_i = s.el_vs1;
+    d_->el_acc_i = s.el_acc;
+    d_->el_mask_i = s.el_mask ? 1 : 0;
+    d_->el_scalar_i = s.el_scalar;
+    d_->el_index_i = static_cast<uint8_t>(s.el_index & 0xFF);
+    d_->el_pfx_i = s.el_pfx ? 1 : 0;
+
+    d_->eval();
+    d_->clk = 1;
+    d_->eval();
+    d_->clk = 0;
+    d_->eval();
+
+    VecObs o;
+    o.mem_rd_gnt = d_->mem_rd_gnt_o != 0;
+    o.mem_rd_rsp_valid = d_->mem_rd_rsp_valid_o != 0;
+    o.mem_rd_rsp_data = d_->mem_rd_rsp_data_o;
+    o.mem_rd_rsp_tag = d_->mem_rd_rsp_tag_o;
+    o.mem_wr_gnt = d_->mem_wr_gnt_o != 0;
+
+    o.alu_busy = d_->alu_busy_o != 0;
+    o.alu_done = d_->alu_done_o != 0;
+    o.alu_illegal = d_->alu_illegal_o != 0;
+    o.alu_trap = d_->alu_trap_o != 0;
+    o.alu_trap_elem = static_cast<int>(d_->alu_trap_elem_o);
+    o.alu_sat = d_->alu_sat_o != 0;
+    o.alu_elems = static_cast<int>(d_->alu_elems_o);
+    o.alu_cur = static_cast<int>(d_->alu_cur_o);
+    o.alu_acc = d_->alu_acc_o;
+    o.alu_rd_valid = d_->alu_rd_valid_o != 0;
+    o.alu_rd_base = static_cast<int>(d_->alu_rd_base_o);
+    o.alu_rd_elem = static_cast<int>(d_->alu_rd_elem_o);
+    o.alu_rd_sew = static_cast<int>(d_->alu_rd_sew_o);
+    o.alu_rd_lmul = Sgn4(static_cast<int>(d_->alu_rd_lmul_o));
+    o.alu_wr_valid = d_->alu_wr_valid_o != 0;
+    o.alu_state = static_cast<int>(d_->alu_state_o);
+    o.alu_step = static_cast<int>(d_->alu_step_o);
+    o.trace_valid = d_->alu_trace_valid_o != 0;
+    o.trace_elem = static_cast<int>(d_->alu_trace_elem_o);
+    o.src_rd_ctr = static_cast<int>(d_->alu_src_rd_ctr_o);
+
+    o.el_result = d_->el_result_o;
+    o.el_mres = d_->el_mres_o != 0;
+    o.el_sat = d_->el_sat_o != 0;
+    o.el_illegal = d_->el_illegal_o != 0;
+    o.el_trap = d_->el_trap_o != 0;
+    o.el_access = d_->el_access_o != 0;
+    o.el_write = d_->el_write_o != 0;
+    o.el_pfx = d_->el_pfx_o != 0;
+    o.el_rd2 = static_cast<int>(d_->el_rd2_o);
+
+    o.rd_gnt_ctr = static_cast<int>(d_->vrf_rd_gnt_ctr_o);
+    o.rd_bad_ctr = static_cast<int>(d_->vrf_rd_bad_ctr_o);
+    o.wr_gnt_ctr = static_cast<int>(d_->vrf_wr_gnt_ctr_o);
+    o.rd_latency = static_cast<int>(d_->vrf_rd_latency_o);
+    o.rows = static_cast<int>(d_->vrf_rows_o);
+    o.banks = static_cast<int>(d_->vrf_banks_o);
+
+    clk_->Tick();
+    return o;
+  }
+
+  // one memory read; the response is one cycle after the grant
+  uint64_t MemRead(int base, int elem, int sew_l, int lmul, bool* ok = nullptr) {
+    VecStim s;
+    s.mem_owner = true;
+    s.mem_rd_valid = true;
+    s.mem_rd_base = base; s.mem_rd_elem = elem;
+    s.mem_rd_sew = sew_l; s.mem_rd_lmul = lmul;
+    VecObs o = Cycle(s);
+    int guard = 0;
+    while (!o.mem_rd_gnt && ++guard < 16) o = Cycle(s);
+    VecStim w;
+    w.mem_owner = true;
+    guard = 0;
+    while (!o.mem_rd_rsp_valid && ++guard < 16) o = Cycle(w);
+    if (ok != nullptr) *ok = (guard < 16);
+    return o.mem_rd_rsp_data;
+  }
+
+  void MemWrite(int base, int elem, int sew_l, int lmul, uint64_t data) {
+    VecStim s;
+    s.mem_owner = true;
+    s.mem_wr_valid = true;
+    s.mem_wr_base = base; s.mem_wr_elem = elem;
+    s.mem_wr_sew = sew_l; s.mem_wr_lmul = lmul;
+    s.mem_wr_data = data;
+    VecObs o = Cycle(s);
+    int guard = 0;
+    while (!o.mem_wr_gnt && ++guard < 16) o = Cycle(s);
+  }
+
+  // Prime one source-element through the VRF and the host model together.
+  void Prime(HostVrf& vf, int base, int elem, int sew_l, int lmul, uint64_t val) {
+    MemWrite(base, elem, sew_l, lmul, val);
+    HostSet(vf, base, elem, sew_l, lmul, val);
+  }
+
+  uint64_t Peek(int base, int elem, int sew_l, int lmul) {
+    return MemRead(base, elem, sew_l, lmul);
+  }
+
+  VecObs RunPacket(int family, int op, int form, int vd, int vs1, int vs2,
+                   uint64_t scalar, bool mask_en, uint64_t caps,
+                   std::vector<int>* trace = nullptr) {
+    VecStim s;
+    s.mem_owner = false;
+    s.alu_exec_valid = true;
+    s.alu_family = family;
+    s.alu_op = op;
+    s.alu_form = form;
+    s.alu_vd = vd;
+    s.alu_vs1 = vs1;
+    s.alu_vs2 = vs2;
+    s.alu_scalar = scalar;
+    s.alu_mask_en = mask_en;
+    s.alu_caps = caps;
+    VecObs o = Cycle(s);
+
+    VecStim idle;
+    idle.mem_owner = false;
+    int guard = 0;
+    while (!o.alu_done && ++guard < 40000) {
+      if (trace != nullptr && o.trace_valid) trace->push_back(o.trace_elem);
+      o = Cycle(idle);
+    }
+    if (trace != nullptr && o.trace_valid) trace->push_back(o.trace_elem);
+    if (guard >= 40000 && getenv("MOSAIC_VEC_DEBUG") != nullptr) {
+      static int shown = 0;
+      if (shown < 6) {
+        std::fprintf(stderr, "GUARD fam=%d cur=%d st=%d step=%d rv=%d rb=%d re=%d rsw=%d rlm=%d bad=%d rdg=%d\n",
+                     family, o.alu_cur, o.alu_state, o.alu_step, (int)o.alu_rd_valid,
+                     o.alu_rd_base, o.alu_rd_elem, o.alu_rd_sew, o.alu_rd_lmul,
+                     o.rd_bad_ctr, (int)o.mem_rd_gnt);
+        ++shown;
+      }
+    }
+    return o;
+  }
+
+  int RdGnt() { return static_cast<int>(d_->vrf_rd_gnt_ctr_o); }
+  int WrGnt() { return static_cast<int>(d_->vrf_wr_gnt_ctr_o); }
+  int RdBad() { return static_cast<int>(d_->vrf_rd_bad_ctr_o); }
+
+ private:
+  Vmosaic_vec_tb* d_;
+  ClockDriver* clk_;
+};
+
+int LmulExpOf(int vlmul) {
+  switch (vlmul) {
+    case 0: return 0;
+    case 1: return 1;
+    case 2: return 2;
+    case 3: return 3;
+    case 5: return -3;
+    case 6: return -2;
+    case 7: return -1;
+    default: return 0;
+  }
+}
+int VlmulOfExp(int e) {
+  switch (e) {
+    case 0: return 0;
+    case 1: return 1;
+    case 2: return 2;
+    case 3: return 3;
+    case -3: return 5;
+    case -2: return 6;
+    case -1: return 7;
+    default: return 0;
+  }
+}
+
+const int kSewLogs[4] = {3, 4, 5, 6};
+const int kLmulExps[7] = {-3, -2, -1, 0, 1, 2, 3};
+
+int VlmaxOf2(int sew_l, int lmul_e) {
+  int e = 7 + lmul_e - sew_l;
+  return e < 0 ? 0 : (1 << e);
+}
+
+// element width and LMUL the *source(s)* and *destination* of a family use
+void FamilyWidths(int fam, int sew_l, int lmul_e, int* s1w, int* s1l, int* s2w,
+                  int* s2l, int* dw, int* dl) {
+  *s1w = sew_l; *s1l = lmul_e; *s2w = sew_l; *s2l = lmul_e;
+  *dw = sew_l; *dl = lmul_e;
+  if (fam == VF_CMP || fam == VF_MASKLOG || fam == VF_MASKPFX) {
+    *dw = 3; *dl = 0;
+  }
+  if (fam == VF_MASKLOG || fam == VF_MASKPFX) { *s2w = 3; *s2l = 0; }
+  if (fam == VF_MASKLOG) { *s1w = 3; *s1l = 0; }
+  if (fam == VF_COMPRESS) { *s1w = 3; *s1l = 0; }
+  if (fam == VF_NARROW) { *s2w = sew_l + 1; *s2l = lmul_e + 1; }
+  if (fam == VF_WIDE || fam == VF_MULW || fam == VF_REDWIDE) { *dw = sew_l + 1; *dl = lmul_e + 1; }
+}
+
+bool FamilySupportsSew(int fam, int sew) {
+  if (fam == VF_WIDE || fam == VF_MULW || fam == VF_NARROW || fam == VF_REDWIDE) {
+    return sew <= 32;
+  }
+  return true;
+}
+
+// ------------------------------------------------------------------- coverage
+struct Coverage {
+  bool cell[VF_COUNT][4][7] = {};
+  int  cells = 0;
+};
+
+// Configure the I-052 unit and capture the snapshot the ALU executes from.
+void ConfigureVec(Cfg* cfg, int vsew, int vlmul, int vta, int vma, uint64_t avl) {
+  (void)RunVset(cfg, VSETVLI, 5, 6, avl, Vtypei(vsew, vlmul, vta, vma));
+  CfgStim cap;
+  cap.snap_capture = true;
+  cfg->Cycle(cap);
+}
+
+uint64_t Pat(int seed) {
+  uint64_t x = static_cast<uint64_t>(seed) * 0x9E3779B97F4A7C15ull + 0x2545F4914F6CDD1Dull;
+  x ^= x >> 33;
+  x *= 0xff51afd7ed558ccdull;
+  x ^= x >> 29;
+  return x;
+}
+
+bool MaskBit(const HostVrf& vf, int i) {
+  return ((HostGet(vf, 0, i / 8, 3, 0) >> (i % 8)) & 1u) != 0;
+}
+
+void BoundaryValues(int sew, std::vector<uint64_t>* out) {
+  uint64_t m = MaskW(sew);
+  uint64_t sign = 1ull << (sew - 1);
+  out->clear();
+  out->push_back(0);
+  out->push_back(1);
+  out->push_back(m);
+  out->push_back(m - 1);
+  out->push_back(sign);
+  out->push_back(sign - 1);
+  out->push_back(sign + 1);
+  out->push_back(0xAAAA5555AAAA5555ull & m);
+}
+
+// ------------------------------------------------------- the element lane
+void PhaseElementLane(Cfg* cfg, Vec* vec, Reporter* rep) {
+  const int fams[] = {VF_ADDSUB, VF_WIDE, VF_MUL, VF_MULW, VF_SHIFT,
+                      VF_NARROW, VF_LOGIC, VF_MINMAX, VF_CMP, VF_SAT};
+  for (int fam : fams) {
+    for (int sew_l = 3; sew_l <= 6; ++sew_l) {
+      int sew = 1 << sew_l;
+      if (!FamilySupportsSew(fam, sew)) continue;
+      ConfigureVec(cfg, sew_l, 0, 0, 0, 64);
+      (void)CsrWrite(cfg, kCsrVxrm, 2);
+      std::vector<uint64_t> vals;
+      BoundaryValues(sew, &vals);
+      const int rms[2] = {2, 0};
+      int nrms = (fam == VF_SAT) ? 2 : 1;
+      for (int op = 0; op < VecFamilyOps(fam); ++op) {
+        for (int form = kFormVv; form <= kFormVx; ++form) {
+          for (int ri = 0; ri < nrms; ++ri) {
+            (void)CsrWrite(cfg, kCsrVxrm, rms[ri]);
+            for (size_t xi = 0; xi < vals.size(); ++xi) {
+              for (size_t yi = 0; yi < vals.size(); ++yi) {
+                uint64_t vs2 = vals[xi];
+                uint64_t vs1 = vals[yi];
+                VecStim s;
+                s.el_valid = true;
+                s.el_family = fam;
+                s.el_op = op;
+                s.el_form = form;
+                s.el_vs2 = vs2;
+                s.el_vs1 = vs1;
+                s.el_scalar = vs1;
+                s.el_index = 0;
+                s.el_mask = true;
+                VecObs o = vec->Cycle(s);
+                ElemVal e = OracleElem(fam, op, sew, form, vs2, vs1, vs1, 0, rms[ri], 0, false);
+                const char* tag = (fam == VF_SAT) ? "sat-boundary" :
+                                  ((fam == VF_WIDE || fam == VF_MULW || fam == VF_NARROW) ?
+                                       "wide-width" : "element-lane");
+                std::string name = std::string(tag) + " " + VecFamilyName(fam) + " op" +
+                                   Dec(op) + " sew" + Dec(sew) + " form" + Dec(form) +
+                                   " vxrm" + Dec(rms[ri]);
+                if (fam == VF_CMP) {
+                  rep->Check(o.el_mres == e.mres,
+                             name + ": mask " + Dec(o.el_mres) + " expected " + Dec(e.mres));
+                } else {
+                  uint64_t cm = (fam == VF_WIDE || fam == VF_MULW || fam == VF_REDWIDE)
+                                    ? MaskW(2 * sew) : MaskW(sew);
+                  rep->Check((o.el_result & cm) == (e.result & cm),
+                             name + ": got " + mosaic::Hex(o.el_result & cm, 16) +
+                                 " expected " + mosaic::Hex(e.result & cm, 16) +
+                                 " [a=" + mosaic::Hex(vs2, 16) + " b=" + mosaic::Hex(vs1, 16) + "]");
+                }
+                rep->Check((o.el_sat != 0) == e.sat,
+                           name + ": vxsat " + Dec(o.el_sat) + " expected " + Dec(e.sat));
+                rep->Check(o.el_illegal == 0, name + ": an undeclared family was refused");
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+// mask logical and mask prefix, which take their operands from mask registers
+void PhaseMaskLane(Cfg* cfg, Vec* vec, Reporter* rep) {
+  for (int sew_l = 3; sew_l <= 6; ++sew_l) {
+    ConfigureVec(cfg, sew_l, 0, 0, 0, 64);
+    for (int idx = 0; idx < 8; ++idx) {
+      for (int a = 0; a < 4; ++a) {
+        for (int b = 0; b < 4; ++b) {
+          uint64_t va = (static_cast<uint64_t>(a) * 0x11u) & 0xFFull;
+          uint64_t vb = (static_cast<uint64_t>(b) * 0x37u) & 0xFFull;
+          for (int op = 0; op < 8; ++op) {
+            VecStim s;
+            s.el_valid = true;
+            s.el_family = VF_MASKLOG;
+            s.el_op = op;
+            s.el_form = kFormVx;
+            s.el_vs2 = vb;
+            s.el_vs1 = va;
+            s.el_index = static_cast<uint8_t>(idx);
+            s.el_mask = true;
+            VecObs o = vec->Cycle(s);
+            ElemVal e = OracleElem(VF_MASKLOG, op, 8, kFormVv, vb, va, 0, 0, 0, idx, false);
+            rep->Check(o.el_mres == e.mres,
+                       std::string("mask-logic op") + Dec(op) + " a=" + Dec(a) + " b=" +
+                           Dec(b) + " bit" + Dec(idx) + ": mask " + Dec(o.el_mres) +
+                           " expected " + Dec(e.mres));
+          }
+        }
+      }
+    }
+    // the prefix family carries state from element to element
+    for (int op = 0; op < 3; ++op) {
+      for (int pattern = 0; pattern < 16; ++pattern) {
+        bool pfx = false;
+        for (int idx = 0; idx < 8; ++idx) {
+          uint64_t src = static_cast<uint64_t>((pattern >> (idx / 2)) & 3u) ? 0x01u : 0x00u;
+          VecStim s;
+          s.el_valid = true;
+          s.el_family = VF_MASKPFX;
+          s.el_op = op;
+          s.el_form = kFormVv;
+          s.el_vs2 = src;
+          s.el_index = static_cast<uint8_t>(idx);
+          s.el_pfx = pfx;
+          s.el_mask = true;
+          VecObs o = vec->Cycle(s);
+          ElemVal e = OracleElem(VF_MASKPFX, op, 8, kFormVv, src, 0, 0, 0, 0, idx, pfx);
+          rep->Check(o.el_mres == e.mres,
+                     std::string("mask-prefix op") + Dec(op) + " pattern" + Dec(pattern) +
+                         " bit" + Dec(idx) + ": mask " + Dec(o.el_mres) + " expected " +
+                         Dec(e.mres));
+          rep->Check(o.el_pfx == e.pfx,
+                     std::string("mask-prefix op") + Dec(op) + " pattern" + Dec(pattern) +
+                         " bit" + Dec(idx) + ": state " + Dec(o.el_pfx) + " expected " +
+                         Dec(e.pfx));
+          pfx = e.pfx;
+        }
+      }
+    }
+  }
+}
+
+// --------------------------------------------- permute: the element ordering
+// The permute's contract is *which* source element each destination element
+// names. `e_rd2_o` is that index, so the ordering is checked directly rather
+// than inferred from a value that a wrong order could still produce.
+void PhasePermuteLane(Cfg* cfg, Vec* vec, Reporter* rep) {
+  for (int lmul_e = 0; lmul_e <= 2; ++lmul_e) {
+    for (int sew_l = 3; sew_l <= 6; ++sew_l) {
+      int vlmax = VlmaxOf2(sew_l, lmul_e);
+      if (vlmax == 0) continue;
+      ConfigureVec(cfg, sew_l, VlmulOfExp(lmul_e), 0, 0, vlmax);
+      int n = vlmax < 12 ? vlmax : 12;
+      // vslideup / vslidedown with an offset
+      for (int off = 0; off <= 3; ++off) {
+        for (int i = 0; i < n; ++i) {
+          VecStim s;
+          s.el_valid = true;
+          s.el_family = VF_SLIDE;
+          s.el_op = 0;
+          s.el_form = kFormVx;
+          s.el_scalar = static_cast<uint64_t>(off);
+          s.el_index = static_cast<uint8_t>(i);
+          s.el_mask = true;
+          s.el_vs2 = 0x1234;
+          VecObs o = vec->Cycle(s);
+          int exp_rd2 = (i - off) & 0xFF;
+          bool exp_access = (i >= off) && (i - off) < vlmax;
+          bool rd_ok = (!exp_access) || (o.el_rd2 == exp_rd2);
+          rep->Check(rd_ok && ((o.el_access != 0) == exp_access),
+                     "permute-order slideup off" + Dec(off) + " lmul" + Dec(lmul_e) +
+                         " i" + Dec(i) + ": rd2 " + Dec(o.el_rd2) + " access " +
+                         Dec(o.el_access) + ", expected source " + Dec(exp_rd2) + " access " +
+                         Dec(exp_access));
+
+          VecStim d;
+          d.el_valid = true;
+          d.el_family = VF_SLIDE;
+          d.el_op = 1;
+          d.el_form = kFormVx;
+          d.el_scalar = static_cast<uint64_t>(off);
+          d.el_index = static_cast<uint8_t>(i);
+          d.el_mask = true;
+          d.el_vs2 = 0x1234;
+          VecObs od = vec->Cycle(d);
+          int exp_d = i + off;
+          bool exp_da = exp_d < vlmax;
+          rep->Check((od.el_rd2 == 0 || exp_da) && ((od.el_access != 0) == exp_da),
+                     "permute-order slidedown off" + Dec(off) + " lmul" + Dec(lmul_e) +
+                         " i" + Dec(i) + ": access " + Dec(od.el_access) + " expected " +
+                         Dec(exp_da));
+          if (exp_da) {
+            rep->Check(od.el_rd2 == exp_d,
+                       "permute-order slidedown off" + Dec(off) + " lmul" + Dec(lmul_e) +
+                           " i" + Dec(i) + ": rd2 " + Dec(od.el_rd2) + " expected " +
+                           Dec(exp_d));
+          }
+        }
+      }
+      // vrgather: the index comes from the data, so the ordering is data-driven
+      for (int i = 0; i < n; ++i) {
+        for (int k = 0; k <= 3; ++k) {
+          uint64_t index = (k == 3) ? static_cast<uint64_t>(vlmax + 5) : static_cast<uint64_t>(k);
+          VecStim s;
+          s.el_valid = true;
+          s.el_family = VF_GATHER;
+          s.el_op = 0;
+          s.el_form = kFormVv;
+          s.el_vs1 = index;
+          s.el_index = static_cast<uint8_t>(i);
+          s.el_mask = true;
+          s.el_vs2 = 0x55;
+          VecObs o = vec->Cycle(s);
+          bool exp_a = index < static_cast<uint64_t>(vlmax);
+          rep->Check((o.el_access != 0) == exp_a,
+                     "permute-order gather lmul" + Dec(lmul_e) + " i" + Dec(i) + " idx" +
+                         Dec(index) + ": access " + Dec(o.el_access) + " expected " +
+                         Dec(exp_a));
+          if (exp_a) {
+            rep->Check(o.el_rd2 == static_cast<int>(index),
+                       "permute-order gather lmul" + Dec(lmul_e) + " i" + Dec(i) +
+                           ": rd2 " + Dec(o.el_rd2) + " expected " + Dec(index));
+          }
+          rep->Check(o.el_trap == 0, "permute-order gather: an in-range index trapped");
+        }
+      }
+      // vcompress walks the source in order
+      for (int i = 0; i < n; ++i) {
+        VecStim s;
+        s.el_valid = true;
+        s.el_family = VF_COMPRESS;
+        s.el_op = 0;
+        s.el_form = kFormVv;
+        s.el_index = static_cast<uint8_t>(i);
+        s.el_mask = true;
+        VecObs o = vec->Cycle(s);
+        rep->Check(o.el_rd2 == i && o.el_access != 0,
+                   "permute-order compress lmul" + Dec(lmul_e) + " i" + Dec(i) +
+                       ": rd2 " + Dec(o.el_rd2) + " access " + Dec(o.el_access));
+      }
+    }
+  }
+}
+
+// ------------------------------------------------ reduction: the fold order
+// A reduction is a strictly left-to-right chain starting from vs1[0]; the
+// running accumulator after each element is compared with the specification's
+// fold, and the order itself is checked through the engine's trace below.
+void PhaseReduceLane(Cfg* cfg, Vec* vec, Reporter* rep) {
+  for (int sew_l = 3; sew_l <= 6; ++sew_l) {
+    int sew = 1 << sew_l;
+    ConfigureVec(cfg, sew_l, 0, 0, 0, 64);
+    std::vector<uint64_t> vals;
+    BoundaryValues(sew, &vals);
+    for (int op = 0; op < 8; ++op) {
+      for (size_t si = 0; si < vals.size(); ++si) {
+        for (size_t ai = 0; ai < vals.size(); ++ai) {
+          uint64_t acc = vals[ai];
+          for (int k = 0; k < 4; ++k) {
+            uint64_t src = vals[(k * 3 + 1) % vals.size()];
+            VecStim s;
+            s.el_valid = true;
+            s.el_family = VF_REDUCE;
+            s.el_op = op;
+            s.el_form = kFormVv;
+            s.el_vs2 = src;
+            s.el_acc = acc;
+            s.el_mask = true;
+            s.el_index = static_cast<uint8_t>(k);
+            VecObs o = vec->Cycle(s);
+            ElemVal e = OracleElem(VF_REDUCE, op, sew, kFormVv, src, 0, 0, acc, 0, 0, false);
+            rep->Check((o.el_result & MaskW(sew)) == (e.result & MaskW(sew)),
+                       std::string("reduce-order ") + VecFamilyName(VF_REDUCE) + " op" + Dec(op) + " sew" +
+                           Dec(sew) + " step" + Dec(k) + ": " +
+                           mosaic::Hex(o.el_result & MaskW(sew), 16) + " expected " +
+                           mosaic::Hex(e.result & MaskW(sew), 16));
+            acc = e.result & MaskW(sew);
+          }
+        }
+      }
+    }
+    // widening reductions
+    if (sew <= 32) {
+      for (int op = 0; op < 2; ++op) {
+        for (size_t ai = 0; ai < vals.size(); ++ai) {
+          uint64_t acc = vals[ai] & MaskW(2 * sew);
+          for (int k = 0; k < 4; ++k) {
+            uint64_t src = vals[(k * 5 + 2) % vals.size()];
+            VecStim s;
+            s.el_valid = true;
+            s.el_family = VF_REDWIDE;
+            s.el_op = op;
+            s.el_form = kFormVv;
+            s.el_vs2 = src;
+            s.el_acc = acc;
+            s.el_mask = true;
+            s.el_index = static_cast<uint8_t>(k);
+            VecObs o = vec->Cycle(s);
+            ElemVal e = OracleElem(VF_REDWIDE, op, sew, kFormVv, src, 0, 0, acc, 0, 0, false);
+            rep->Check((o.el_result & MaskW(2 * sew)) == (e.result & MaskW(2 * sew)),
+                       std::string("reduce-order redwide op") + Dec(op) + " sew" + Dec(sew) +
+                           " step" + Dec(k) + ": " +
+                           mosaic::Hex(o.el_result & MaskW(2 * sew), 16) + " expected " +
+                           mosaic::Hex(e.result & MaskW(2 * sew), 16));
+            acc = e.result & MaskW(2 * sew);
+          }
+        }
+      }
+    }
+  }
+}
+
+// ------------------------------------------------------- capability gating
+void PhaseCapabilityGate(Cfg* cfg, Vec* vec, Reporter* rep) {
+  ConfigureVec(cfg, 3, 0, 0, 0, 4);
+  for (int fam = 0; fam < VF_COUNT; ++fam) {
+    // with the family declared, it must execute
+    int before_rd = vec->RdGnt();
+    int before_wr = vec->WrGnt();
+    VecObs ok = vec->RunPacket(fam, 0, kFormVv, 4, 5, 6, 3, false, kAllCaps);
+    rep->Check(!ok.alu_illegal,
+               std::string("capability-gate ") + VecFamilyName(fam) +
+                   ": a declared family was refused");
+    (void)before_rd;
+    (void)before_wr;
+
+    // with the family's bit clear, it must be refused and touch nothing
+    int rd0 = vec->RdGnt();
+    int wr0 = vec->WrGnt();
+    uint64_t caps = kAllCaps & ~(1ull << fam);
+    VecObs bad = vec->RunPacket(fam, 0, kFormVv, 4, 5, 6, 3, false, caps);
+    rep->Check(bad.alu_illegal,
+               std::string("capability-gate ") + VecFamilyName(fam) +
+                   ": an undeclared family was executed");
+    rep->Check(!bad.alu_trap, std::string("capability-gate ") + VecFamilyName(fam) +
+                                  ": a refused family raised a trap");
+    rep->Check(vec->RdGnt() == rd0 && vec->WrGnt() == wr0,
+               std::string("capability-gate ") + VecFamilyName(fam) +
+                   ": a refused family touched the register file");
+  }
+
+  // an unknown family id is refused too
+  int rd0 = vec->RdGnt();
+  VecObs unk = vec->RunPacket(31, 0, kFormVv, 4, 5, 6, 0, false, kAllCaps);
+  rep->Check(unk.alu_illegal, "capability-gate: an unknown family id was executed");
+  rep->Check(vec->RdGnt() == rd0, "capability-gate: an unknown family id touched the VRF");
+}
+
+// A destination group's element value after a packet.
+uint64_t DstElem(const HostVrf& vf, int vd, int i, int sew_l, int lmul_e) {
+  return HostGet(vf, vd, i, sew_l, lmul_e);
+}
+
+// --------------------------------------------------------------- group layout
+int GrpSizeE(int lmul_e) { return lmul_e >= 0 ? (1 << lmul_e) : 1; }
+
+struct Layout {
+  int vd = 0, vs1 = 0, vs2 = 0;
+  bool mask = false;
+};
+
+Layout PlanLayout(int fam, int lmul_e, bool want_mask) {
+  int s1w, s1l, s2w, s2l, dw, dl;
+  FamilyWidths(fam, 3, lmul_e, &s1w, &s1l, &s2w, &s2l, &dw, &dl);
+  int n1 = GrpSizeE(s1l), n2 = GrpSizeE(s2l), nd = GrpSizeE(dl);
+  int maxn = n1 > n2 ? n1 : n2;
+  if (nd > maxn) maxn = nd;
+  bool usemask = want_mask && (maxn <= 2);
+  int chunk = usemask ? 1 : 0;
+  chunk = (chunk + n2 - 1) & ~(n2 - 1);
+  int b2 = chunk; chunk += n2;
+  chunk = (chunk + n1 - 1) & ~(n1 - 1);
+  int b1 = chunk; chunk += n1;
+  chunk = (chunk + nd - 1) & ~(nd - 1);
+  int bd = chunk;
+  Layout L;
+  L.vd = bd; L.vs1 = b1; L.vs2 = b2; L.mask = usemask;
+  return L;
+}
+
+// Prime a whole group through the VRF and the host model together.
+void PrimeGroup(Vec* vec, HostVrf* vf, int base, int n, int sew_l, int lmul_e, int seed) {
+  for (int i = 0; i < n; ++i) {
+    vec->Prime(*vf, base, i, sew_l, lmul_e, Pat(seed * 131 + i));
+  }
+}
+
+void PrimeMaskReg(Vec* vec, HostVrf* vf, int base, int nbits, int seed) {
+  for (int b = 0; b * 8 < nbits; ++b) {
+    uint64_t byte = 0;
+    for (int k = 0; k < 8; ++k) {
+      int bit = b * 8 + k;
+      if (bit < 128 && (Pat(seed * 977 + bit) & 3ull) != 0) byte |= (1ull << k);
+    }
+    vec->Prime(*vf, base, b, 3, 0, byte);
+  }
+}
+
+// ------------------------------------------------------- expected destination
+void ComputeExpected(int fam, int op, int form, int sew_l, int lmul_e, int vstart, int vl,
+                     int vta, int vma, bool mask_en, const HostVrf& vf, const Layout& L,
+                     uint64_t scalar, int vxrm, int n, std::vector<uint64_t>* ev,
+                     std::vector<bool>* mv) {
+  int sew = 1 << sew_l;
+  int vlmax = VlmaxOf2(sew_l, lmul_e);
+  int s1w, s1l, s2w, s2l, dw, dl;
+  FamilyWidths(fam, sew_l, lmul_e, &s1w, &s1l, &s2w, &s2l, &dw, &dl);
+  int ds = 1 << dw;
+  uint64_t ones = ds >= 64 ? ~0ull : ((1ull << ds) - 1ull);
+  bool maskdst = (fam == VF_CMP || fam == VF_MASKLOG || fam == VF_MASKPFX);
+  ev->assign(static_cast<size_t>(n), 0);
+  mv->assign(static_cast<size_t>(n), false);
+
+  if (fam == VF_COMPRESS) {
+    for (int i = 0; i < n; ++i) {
+      bool indis = ((HostGet(vf, L.vs1, i / 8, 3, 0) >> (i % 8)) & 1u) != 0;
+      ev->at(static_cast<size_t>(i)) = HostGet(vf, L.vd, i, dw, dl);
+      (void)indis;
+    }
+    int count = 0;
+    for (int i = 0; i < vl; ++i) {
+      bool on = ((HostGet(vf, L.vs1, i / 8, 3, 0) >> (i % 8)) & 1u) != 0;
+      if (on && count < n) {
+        ev->at(static_cast<size_t>(count)) = HostGet(vf, L.vs2, i, s2w, s2l);
+        count++;
+      }
+    }
+    for (int i = count; i < n; ++i) {
+      if (vta) ev->at(static_cast<size_t>(i)) = ones;
+    }
+    return;
+  }
+
+  if (fam == VF_REDUCE || fam == VF_REDWIDE) {
+    int acc_w = (fam == VF_REDWIDE) ? 2 * sew : sew;
+    uint64_t acc = HostGet(vf, L.vs1, 0, sew_l, lmul_e);
+    if (fam == VF_REDWIDE) {
+      acc = (op == 0) ? (acc & MaskW(sew)) : static_cast<uint64_t>(SxW(acc, sew)) & MaskW(acc_w);
+    }
+    for (int i = vstart; i < vl; ++i) {
+      uint64_t src = HostGet(vf, L.vs2, i, s2w, s2l);
+      ElemVal e = OracleElem(fam, op, sew, kFormVv, src, 0, 0, acc, vxrm, i, false);
+      acc = e.result & MaskW(acc_w);
+    }
+    uint64_t pv = HostGet(vf, L.vd, 0, dw, dl);
+    ev->at(0) = (vstart < vl) ? acc : pv;
+    return;
+  }
+
+  bool pfx = false;
+  for (int i = 0; i < n; ++i) {
+    bool mbit = mask_en ? MaskBit(vf, i) : true;
+    uint64_t undis = maskdst ? (static_cast<uint64_t>(((HostGet(vf, L.vd, i / 8, 3, 0) >>
+                                                         (i % 8)) & 1u) != 0))
+                             : HostGet(vf, L.vd, i, dw, dl);
+    uint64_t dval = undis;
+    bool dbit = (undis & 1ull) != 0;
+    if (i < vstart) {
+      // unchanged
+    } else if (i >= vl) {
+      if (vta) { dval = ones; dbit = true; }
+    } else if (!mbit) {
+      if (vma) { dval = ones; dbit = true; }
+    } else {
+      uint64_t a = HostGet(vf, L.vs2, i, s2w, s2l);
+      uint64_t b = (form == kFormVv) ? HostGet(vf, L.vs1, i, s1w, s1l) : scalar;
+      if (fam == VF_CMP || fam == VF_MASKLOG) {
+        ElemVal e = OracleElem(fam, op, sew, form, a, b, scalar, 0, vxrm, i, false);
+        dbit = e.mres;
+        dval = dbit ? 1 : 0;
+      } else if (fam == VF_MASKPFX) {
+        ElemVal e = OracleElem(fam, op, sew, kFormVv, a, 0, 0, 0, vxrm, i, pfx);
+        dbit = e.mres;
+        dval = dbit ? 1 : 0;
+        pfx = e.pfx;
+      } else if (fam == VF_SLIDE) {
+        int off = (op <= 1) ? static_cast<int>(scalar) : 1;
+        if (op == 0) {
+          dval = (i < off) ? undis : HostGet(vf, L.vs2, i - off, s2w, s2l);
+          dbit = true;
+          if (i < off) { dval = undis; dbit = (undis & 1ull) != 0; }
+        } else if (op == 1) {
+          dval = (i + off) < vlmax ? HostGet(vf, L.vs2, i + off, s2w, s2l) : 0;
+          dbit = true;
+        } else if (op == 2) {
+          dval = (i == vstart) ? scalar : HostGet(vf, L.vs2, i - 1, s2w, s2l);
+          dbit = true;
+        } else {
+          dval = (i == (vl - 1)) ? scalar : HostGet(vf, L.vs2, i + 1, s2w, s2l);
+          dbit = true;
+        }
+        dval &= MaskW(ds);
+      } else if (fam == VF_GATHER) {
+        uint64_t idx = (form == kFormVv) ? HostGet(vf, L.vs1, i, s1w, s1l) : scalar;
+        dval = (idx < static_cast<uint64_t>(vlmax))
+                   ? HostGet(vf, L.vs2, static_cast<int>(idx), s2w, s2l)
+                   : 0;
+        dbit = true;
+      } else {
+        ElemVal e = OracleElem(fam, op, sew, form, a, b, scalar, 0, vxrm, 0, false);
+        dval = e.result & MaskW(ds);
+        dbit = true;
+      }
+    }
+    ev->at(static_cast<size_t>(i)) = dval & MaskW(ds);
+    mv->at(static_cast<size_t>(i)) = dbit;
+  }
+}
+
+bool MaskDstFamily(int fam) {
+  return fam == VF_CMP || fam == VF_MASKLOG || fam == VF_MASKPFX;
+}
+
+// --------------------------------------------------------------- the phases
+void PhaseCoverage(Cfg* cfg, Vec* vec, Reporter* rep, Coverage* cov) {
+  int expected_cells = 0;
+  for (int fam = 0; fam < VF_COUNT; ++fam) {
+    for (int sew_l = 0; sew_l < 4; ++sew_l) {
+      int sew = 8 << sew_l;
+      if (!FamilySupportsSew(fam, sew)) continue;
+      for (int li = 0; li < 7; ++li) {
+        int lmul_e = kLmulExps[li];
+        if (lmul_e + 6 < sew_l) continue;
+        int vlmax = VlmaxOf2(sew_l, lmul_e);
+        if (vlmax == 0) continue;
+        ++expected_cells;
+        int vl = vlmax < 8 ? vlmax : 8;
+        int form = kFormVv;
+        uint64_t scalar = 0;
+        if (fam == VF_SLIDE) { form = kFormVx; scalar = 2; }
+        if (fam == VF_SHIFT) { form = kFormVx; scalar = 3; }
+        if (fam == VF_GATHER) { form = kFormVv; }
+        bool want_mask = !(fam == VF_MASKLOG || fam == VF_MASKPFX || fam == VF_COMPRESS);
+        Layout L = PlanLayout(fam, lmul_e, want_mask);
+        bool mask_en = L.mask;
+        ConfigureVec(cfg, sew_l, VlmulOfExp(lmul_e), 0, 0, static_cast<uint64_t>(vl));
+        (void)CsrWrite(cfg, kCsrVxrm, 2);
+        HostVrf vf;
+        int np = vlmax < (vl + 4) ? vlmax : (vl + 4);
+        if (mask_en) PrimeMaskReg(vec, &vf, 0, np, fam * 7 + li + 1);
+        PrimeGroup(vec, &vf, L.vs2, np, sew_l, lmul_e, fam * 31 + li + 3);
+        PrimeGroup(vec, &vf, L.vs1, np, sew_l, lmul_e, fam * 17 + li + 5);
+        int nd = vlmax < 16 ? vlmax : 16;
+        PrimeGroup(vec, &vf, L.vd, nd, sew_l, lmul_e, fam * 11 + li + 7);
+
+        std::vector<int> trace;
+        VecObs o = vec->RunPacket(fam, 0, form, L.vd, L.vs1, L.vs2, scalar, mask_en, kAllCaps,
+                                  &trace);
+        std::string name = std::string("coverage ") + VecFamilyName(fam) + " sew" + Dec(sew) +
+                           " lmul" + std::to_string(lmul_e);
+        rep->Check(!o.alu_illegal, name + ": a declared family was refused");
+        rep->Check(!o.alu_trap, name + ": the packet trapped");
+        rep->Check(!o.alu_busy, name + ": the packet never completed");
+
+        std::vector<uint64_t> ev;
+        std::vector<bool> mv;
+        ComputeExpected(fam, 0, form, sew_l, lmul_e, 0, vl, 0, 0, mask_en, vf, L, scalar, 2, nd,
+                        &ev, &mv);
+        for (int i = 0; i < nd; ++i) {
+          if (MaskDstFamily(fam)) {
+            bool got = ((vec->MemRead(L.vd, i / 8, 3, 0) >> (i % 8)) & 1u) != 0;
+            rep->Check(got == mv[static_cast<size_t>(i)],
+                       name + " bit" + Dec(i) + ": " + Dec(got) + " expected " +
+                           Dec(mv[static_cast<size_t>(i)]));
+          } else {
+            int dw, dl;
+            int t1, t2, t3, t4;
+            FamilyWidths(fam, sew_l, lmul_e, &t1, &t2, &t3, &t4, &dw, &dl);
+            uint64_t got = vec->MemRead(L.vd, i, dw, dl);
+            rep->Check(got == ev[static_cast<size_t>(i)],
+                       name + " elem" + Dec(i) + ": " + mosaic::Hex(got, 16) + " expected " +
+                           mosaic::Hex(ev[static_cast<size_t>(i)], 16));
+          }
+        }
+        cov->cell[fam][sew_l][li] = true;
+        ++cov->cells;
+        if (mask_en) {
+          rep->Check(o.src_rd_ctr <= np, name + ": the packet read beyond its sources");
+        }
+      }
+    }
+  }
+  rep->Check(cov->cells == expected_cells,
+             "coverage: " + Dec(cov->cells) + " cells ran, expected " + Dec(expected_cells));
+}
+
+// A masked-off element must neither trap nor access. The gather index of a
+// masked-off element is deliberately out of range: an implementation that
+// computed the address before consulting the mask would issue a bad demand.
+void PhaseMaskedOff(Cfg* cfg, Vec* vec, Reporter* rep) {
+  for (int vma = 0; vma < 2; ++vma) {
+    ConfigureVec(cfg, 3, 0, 0, vma, 8);
+    HostVrf vf;
+    Layout L;
+    L.vd = 8; L.vs1 = 24; L.vs2 = 16; L.mask = true;
+    const int active[8] = {0, 0, 1, 1, 0, 0, 1, 1};
+    uint64_t byte = 0;
+    for (int k = 0; k < 8; ++k) {
+      if (active[k]) byte |= (1ull << k);
+      uint64_t idx = active[k] ? static_cast<uint64_t>(7 - k) : 250ull;
+      vec->Prime(vf, L.vs1, k, 3, 0, idx);
+      vec->Prime(vf, L.vs2, k, 3, 0, 0x40u + static_cast<uint64_t>(k));
+      vec->Prime(vf, L.vd, k, 3, 0, 0xC0u + static_cast<uint64_t>(k));
+    }
+    vec->Prime(vf, 0, 0, 3, 0, byte);
+
+    int rd0 = vec->RdGnt();
+    int bad0 = vec->RdBad();
+    int active_count = 0;
+    for (int k = 0; k < 8; ++k) active_count += active[k];
+    std::vector<int> trace;
+    VecObs o = vec->RunPacket(VF_GATHER, 0, kFormVv, L.vd, L.vs1, L.vs2, 0, true, kAllCaps,
+                              &trace);
+    std::string name = std::string("masked-off vma") + Dec(vma);
+    rep->Check(!o.alu_trap, name + ": a masked-off element raised a trap");
+    rep->Check(vec->RdBad() == bad0, name + ": a masked-off element made a bad access");
+    rep->Check(o.src_rd_ctr == active_count,
+               name + ": " + Dec(o.src_rd_ctr) + " source reads for " + Dec(active_count) +
+                   " active elements");
+    rep->Check(static_cast<int>(trace.size()) == active_count,
+               name + ": the access trace lists " + Dec(static_cast<int>(trace.size())) +
+                   " elements, expected " + Dec(active_count));
+    rep->Check(vec->RdGnt() >= rd0, name + ": the read counter went backwards");
+    for (int k = 0; k < 8; ++k) {
+      uint64_t got = vec->MemRead(L.vd, k, 3, 0);
+      uint64_t exp;
+      if (active[k]) {
+        exp = 0x40u + static_cast<uint64_t>(7 - k);
+      } else if (vma) {
+        exp = 0xFFu;
+      } else {
+        exp = 0xC0u + static_cast<uint64_t>(k);
+      }
+      rep->Check(got == exp, name + " elem" + Dec(k) + ": " + mosaic::Hex(got, 2) +
+                                 " expected " + mosaic::Hex(exp, 2));
+    }
+    (void)active;
+  }
+
+  // An *active* element whose gather index leaves the group reads nothing and
+  // its result is zero: the range check, not a fault.
+  ConfigureVec(cfg, 3, 0, 0, 0, 4);
+  {
+    HostVrf vf;
+    Layout L;
+    L.vd = 8; L.vs1 = 24; L.vs2 = 16; L.mask = false;
+    for (int k = 0; k < 4; ++k) {
+      vec->Prime(vf, L.vs1, k, 3, 0, static_cast<uint64_t>(16 + k));  // >= VLMAX
+      vec->Prime(vf, L.vs2, k, 3, 0, 0x30u + static_cast<uint64_t>(k));
+      vec->Prime(vf, L.vd, k, 3, 0, 0xE0u + static_cast<uint64_t>(k));
+    }
+    int bad0 = vec->RdBad();
+    VecObs o = vec->RunPacket(VF_GATHER, 0, kFormVv, L.vd, L.vs1, L.vs2, 0, false, kAllCaps);
+    rep->Check(!o.alu_trap, "masked-off: an out-of-range gather index trapped");
+    rep->Check(vec->RdBad() == bad0, "masked-off: an out-of-range gather index accessed");
+    for (int k = 0; k < 4; ++k) {
+      uint64_t got = vec->MemRead(L.vd, k, 3, 0);
+      rep->Check(got == 0, "masked-off: out-of-range gather elem" + Dec(k) + " gave " +
+                               mosaic::Hex(got, 2) + ", expected 0");
+    }
+  }
+}
+
+// The reduction's order, observed through the engine's element trace: the
+// declared order is ascending from vstart, with no reassociation.
+void PhaseReductionOrder(Cfg* cfg, Vec* vec, Reporter* rep) {
+  ConfigureVec(cfg, 3, 0, 0, 0, 8);
+  HostVrf vf;
+  Layout L;
+  L.vd = 8; L.vs1 = 24; L.vs2 = 16; L.mask = false;
+  for (int i = 0; i < 8; ++i) {
+    vec->Prime(vf, L.vs2, i, 3, 0, Pat(700 + i) & 0xFFull);
+  }
+  vec->Prime(vf, L.vs1, 0, 3, 0, 0x11u);
+  vec->Prime(vf, L.vd, 0, 3, 0, 0x99u);
+
+  for (int op = 0; op < 8; ++op) {
+    HostVrf vf2 = vf;
+    std::vector<int> trace;
+    VecObs o = vec->RunPacket(VF_REDUCE, op, kFormVv, L.vd, L.vs1, L.vs2, 0, false, kAllCaps,
+                              &trace);
+    std::string name = std::string("reduce-order packet op") + Dec(op);
+    bool ascending = (trace.size() == 8);
+    for (size_t k = 0; k < trace.size(); ++k) {
+      if (trace[k] != static_cast<int>(k)) ascending = false;
+    }
+    rep->Check(ascending, name + ": the fold order was not ascending from vstart");
+    uint64_t acc = HostGet(vf2, L.vs1, 0, 3, 0);
+    for (int i = 0; i < 8; ++i) {
+      uint64_t src = HostGet(vf2, L.vs2, i, 3, 0);
+      ElemVal e = OracleElem(VF_REDUCE, op, 8, kFormVv, src, 0, 0, acc, 0, i, false);
+      acc = e.result;
+    }
+    rep->Check(o.alu_acc == acc, name + ": accumulator " + mosaic::Hex(o.alu_acc, 2) +
+                                     " expected " + mosaic::Hex(acc, 2));
+    uint64_t got = vec->MemRead(L.vd, 0, 3, 0);
+    rep->Check(got == acc, name + ": vd[0] " + mosaic::Hex(got, 2) + " expected " +
+                               mosaic::Hex(acc, 2));
+  }
+}
+
+void RunVecIntCase(Vmosaic_vec_tb* dut, ClockDriver* clk, Reporter* rep, Coverage* cov) {
+  Cfg cfg(dut, clk);
+  Vec vec(dut, clk);
+  if (getenv("MOSAIC_VEC_TRACE") != nullptr) {
+    ConfigureVec(&cfg, 3, VlmulOfExp(-3), 0, 0, 2);
+    struct P { int b, e, sw, lm; };
+    const P probes[] = {{2,0,3,-3},{1,0,3,-3},{2,0,3,0},{8,0,3,-3},{2,1,3,-3},{2,0,4,-3}};
+    for (const P& p : probes) {
+      VecStim r;
+      r.mem_owner = true;
+      r.mem_rd_valid = true;
+      r.mem_rd_base = p.b; r.mem_rd_elem = p.e; r.mem_rd_sew = p.sw; r.mem_rd_lmul = p.lm;
+      VecObs o = vec.Cycle(r);
+      std::printf("probe b=%d e=%d sw=%d lm=%d gnt=%d rsp=%d data=%02llx bad=%d\n",
+                  p.b, p.e, p.sw, p.lm, (int)o.mem_rd_gnt, (int)o.mem_rd_rsp_valid,
+                  (unsigned long long)o.mem_rd_rsp_data, o.rd_bad_ctr);
+    }
+    return;
+  }
+  PhaseElementLane(&cfg, &vec, rep);
+  PhaseMaskLane(&cfg, &vec, rep);
+  PhasePermuteLane(&cfg, &vec, rep);
+  PhaseReduceLane(&cfg, &vec, rep);
+  PhaseCapabilityGate(&cfg, &vec, rep);
+  PhaseCoverage(&cfg, &vec, rep, cov);
+  PhaseMaskedOff(&cfg, &vec, rep);
+  PhaseReductionOrder(&cfg, &vec, rep);
+}
+
 int main(int argc, char** argv) {
   mosaic::Options options;
   std::string error;
@@ -1526,6 +2926,7 @@ int main(int argc, char** argv) {
   Dut unit(&dut, &clk, &reporter);
   VsetCounts vset_counts;
   LayoutCounts layout_counts;
+  Coverage vec_cov;
 
   std::string detail;
   bool aborted = false;
@@ -1547,6 +2948,8 @@ int main(int argc, char** argv) {
 
     if (options.case_id == "rvv.vset_boundaries") {
       RunVsetCase(&dut, &unit, &clk, &reporter, &vset_counts);
+    } else if (options.case_id == "rvv.integer_mask_permute") {
+      RunVecIntCase(&dut, &clk, &reporter, &vec_cov);
     } else if (options.case_id == "rvv.vtype_layout") {
       RunVtypeLayoutCase(&dut, &unit, &clk, &reporter, &layout_counts);
     } else {
@@ -1586,6 +2989,11 @@ int main(int argc, char** argv) {
                                        Dec(layout_counts.words) + " descriptors=" +
                                        Dec(layout_counts.descriptors) + " cycles=" +
                                        Dec(cycles));
+  }
+  if (options.case_id == "rvv.integer_mask_permute") {
+    return reporter.Finish("PASS", "checks=" + Dec(reporter.checks()) + " cells=" +
+                                       Dec(vec_cov.cells) + " families=" + Dec(VF_COUNT) +
+                                       " cycles=" + Dec(cycles));
   }
   return reporter.Finish("PASS", "checks=" + Dec(reporter.checks()) + " combos=" +
                                      Dec(VOP_COUNT * 64 * 4 * 2 + 64 + 4) +

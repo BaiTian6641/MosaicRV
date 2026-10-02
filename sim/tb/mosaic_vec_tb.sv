@@ -161,7 +161,92 @@ module mosaic_vec_tb (
     // read-back of the elaborated identity widths
     output logic [31:0]                o_rob_index_w,
     output logic [31:0]                o_rob_gen_w,
-    output logic [31:0]                o_uop_index_w
+    output logic [31:0]                o_uop_index_w,
+
+    // ------------- vector execution unit (I-054) ---------------------------
+    /* verilator lint_off UNUSEDSIGNAL */
+    input  logic [16:0]                alu_caps_i,
+    input  logic                       alu_exec_valid_i,
+    input  logic [4:0]                 alu_family_i,
+    input  logic [3:0]                 alu_op_i,
+    input  logic [1:0]                 alu_form_i,
+    input  logic [4:0]                 alu_vd_i,
+    input  logic [4:0]                 alu_vs1_i,
+    input  logic [4:0]                 alu_vs2_i,
+    input  logic [63:0]                alu_scalar_i,
+    input  logic                       alu_mask_en_i,
+    /* verilator lint_on UNUSEDSIGNAL */
+    output logic                       alu_busy_o,
+    output logic                       alu_done_o,
+    output logic                       alu_illegal_o,
+    output logic                       alu_trap_o,
+    output logic [6:0]                 alu_trap_elem_o,
+    output logic                       alu_sat_o,
+    output logic [7:0]                 alu_elems_o,
+    output logic [7:0]                 alu_cur_o,
+    output logic [2:0]                 alu_state_o,
+    output logic [3:0]                 alu_step_o,
+    output logic                       alu_rd_valid_o,
+    output logic [4:0]                 alu_rd_base_o,
+    output logic [6:0]                 alu_rd_elem_o,
+    output logic [2:0]                 alu_rd_sew_o,
+    output logic [3:0]                 alu_rd_lmul_o,
+    output logic [63:0]                alu_acc_o,
+    output logic                       alu_trace_valid_o,
+    output logic [7:0]                 alu_trace_elem_o,
+    output logic [31:0]                alu_src_rd_ctr_o,
+
+    // direct element lane
+    /* verilator lint_off UNUSEDSIGNAL */
+    input  logic                       el_valid_i,
+    input  logic [4:0]                 el_family_i,
+    input  logic [3:0]                 el_op_i,
+    input  logic [1:0]                 el_form_i,
+    input  logic [63:0]                el_vs2_i,
+    input  logic [63:0]                el_vs1_i,
+    input  logic [63:0]                el_acc_i,
+    input  logic                       el_mask_i,
+    input  logic [63:0]                el_scalar_i,
+    input  logic [7:0]                 el_index_i,
+    input  logic                       el_pfx_i,
+    /* verilator lint_on UNUSEDSIGNAL */
+    output logic [63:0]                el_result_o,
+    output logic                       el_mres_o,
+    output logic                       el_sat_o,
+    output logic                       el_illegal_o,
+    output logic                       el_trap_o,
+    output logic                       el_access_o,
+    output logic                       el_write_o,
+    output logic [7:0]                 el_rd2_o,
+    output logic                       el_pfx_o,
+
+    // driver-owned VRF port
+    input  logic                       mem_owner_i,
+    input  logic                       mem_rd_valid_i,
+    input  logic [4:0]                 mem_rd_base_i,
+    input  logic [6:0]                 mem_rd_elem_i,
+    input  logic [2:0]                 mem_rd_sew_i,
+    input  logic [3:0]                 mem_rd_lmul_i,
+    input  logic [15:0]                mem_rd_tag_i,
+    output logic                       mem_rd_gnt_o,
+    output logic                       mem_rd_rsp_valid_o,
+    output logic [15:0]                mem_rd_rsp_tag_o,
+    output logic [63:0]                mem_rd_rsp_data_o,
+    input  logic                       mem_wr_valid_i,
+    input  logic [4:0]                 mem_wr_base_i,
+    input  logic [6:0]                 mem_wr_elem_i,
+    input  logic [2:0]                 mem_wr_sew_i,
+    input  logic [3:0]                 mem_wr_lmul_i,
+    input  logic [63:0]                mem_wr_data_i,
+    output logic                       mem_wr_gnt_o,
+
+    // VRF status read-back
+    output logic [31:0]                vrf_rd_gnt_ctr_o,
+    output logic [31:0]                vrf_rd_bad_ctr_o,
+    output logic [31:0]                vrf_wr_gnt_ctr_o,
+    output logic [31:0]                vrf_rd_latency_o,
+    output logic [31:0]                vrf_rows_o,
+    output logic [31:0]                vrf_banks_o
 );
 
   logic [127:0] elem_bitmap;
@@ -310,6 +395,266 @@ module mosaic_vec_tb (
       .csr_illegal_o     (cfg_csr_illegal),
       .csr_rdata_o       (cfg_csr_rdata),
       .csr_commit_o      (cfg_csr_commit)
+  );
+
+  // ==========================================================================
+  // I-054: the vector execution unit. `mosaic_vec_alu` reads and writes the
+  // banked VRF through one read slot and one write slot; the driver borrows
+  // that same slot through `mem_owner_i` so it can prime and inspect the file
+  // without a second copy of the storage. The two owners are never active at
+  // once: the ALU is idle whenever the driver owns the slot.
+  //
+  // The ALU's configuration is the snapshot I-052 hands out (`snap_*`), not a
+  // second decode of `vtype`: SEW/LMUL, vl, vstart and vxrm all arrive from the
+  // configuration unit.
+  // ==========================================================================
+
+  localparam int unsigned TB_LANES = 8;
+
+  /* verilator lint_off UNUSEDSIGNAL */
+  logic [TB_LANES-1:0]       vrf_rd_valid_f;
+  logic [TB_LANES*5-1:0]     vrf_rd_base_f;
+  logic [TB_LANES*7-1:0]     vrf_rd_elem_f;
+  logic [TB_LANES*3-1:0]     vrf_rd_sew_f;
+  logic [TB_LANES*4-1:0]     vrf_rd_lmul_f;
+  logic [TB_LANES*16-1:0]    vrf_rd_tag_f;
+  logic [TB_LANES-1:0]       vrf_wr_valid_f;
+  logic [TB_LANES*5-1:0]     vrf_wr_base_f;
+  logic [TB_LANES*7-1:0]     vrf_wr_elem_f;
+  logic [TB_LANES*3-1:0]     vrf_wr_sew_f;
+  logic [TB_LANES*4-1:0]     vrf_wr_lmul_f;
+  logic [TB_LANES*64-1:0]    vrf_wr_data_f;
+  logic [TB_LANES-1:0]       vrf_rd_gnt_f;
+  logic [TB_LANES-1:0]       vrf_rd_rsp_valid_f;
+  logic [TB_LANES*16-1:0]    vrf_rd_rsp_tag_f;
+  logic [TB_LANES*64-1:0]    vrf_rd_rsp_data_f;
+  logic [TB_LANES-1:0]       vrf_wr_gnt_f;
+  /* verilator lint_on UNUSEDSIGNAL */
+
+  logic        unused_q_valid;
+  logic [4:0]  unused_q_phys, unused_q_bank0, unused_q_bank1;
+  logic [1:0]  unused_q_row, unused_q_nbanks;
+  logic [6:0]  unused_q_lo;
+  logic [7:0]  unused_q_hi;
+  logic [31:0] unused_rd_conf, unused_wr_conf, unused_wr_hazard, unused_wr_bad;
+  logic        unused_vrf_busy;
+  logic [31:0] unused_vlen, unused_elen, unused_vregs, unused_bank_w, unused_regs_per_row;
+  logic [31:0] unused_lane_max, unused_rd_ports, unused_wr_ports, unused_plat;
+  logic        alu_rd_valid;
+  logic [4:0]  alu_rd_base;
+  logic [6:0]  alu_rd_elem;
+  logic [2:0]  alu_rd_sew;
+  logic [3:0]  alu_rd_lmul;
+  logic [15:0] alu_rd_tag;
+  logic        alu_rd_gnt;
+  logic        alu_rd_rsp_valid;
+  logic [15:0] alu_rd_rsp_tag;
+  logic [63:0] alu_rd_rsp_data;
+  logic        alu_wr_valid;
+  logic [4:0]  alu_wr_base;
+  logic [6:0]  alu_wr_elem;
+  logic [2:0]  alu_wr_sew;
+  logic [3:0]  alu_wr_lmul;
+  logic [63:0] alu_wr_data;
+  logic        alu_wr_gnt;
+
+  always_comb begin
+    vrf_rd_valid_f          = '0;
+    vrf_rd_base_f           = '0;
+    vrf_rd_elem_f           = '0;
+    vrf_rd_sew_f            = '0;
+    vrf_rd_lmul_f           = '0;
+    vrf_rd_tag_f            = '0;
+    vrf_wr_valid_f          = '0;
+    vrf_wr_base_f           = '0;
+    vrf_wr_elem_f           = '0;
+    vrf_wr_sew_f            = '0;
+    vrf_wr_lmul_f           = '0;
+    vrf_wr_data_f           = '0;
+
+    vrf_rd_valid_f[0]       = mem_owner_i ? mem_rd_valid_i : alu_rd_valid;
+    vrf_rd_base_f[4:0]      = mem_owner_i ? mem_rd_base_i  : alu_rd_base;
+    vrf_rd_elem_f[6:0]      = mem_owner_i ? mem_rd_elem_i  : alu_rd_elem;
+    vrf_rd_sew_f[2:0]       = mem_owner_i ? mem_rd_sew_i   : alu_rd_sew;
+    vrf_rd_lmul_f[3:0]      = mem_owner_i ? mem_rd_lmul_i  : alu_rd_lmul;
+    vrf_rd_tag_f[15:0]      = mem_owner_i ? mem_rd_tag_i   : alu_rd_tag;
+
+    vrf_wr_valid_f[0]       = mem_owner_i ? mem_wr_valid_i : alu_wr_valid;
+    vrf_wr_base_f[4:0]      = mem_owner_i ? mem_wr_base_i  : alu_wr_base;
+    vrf_wr_elem_f[6:0]      = mem_owner_i ? mem_wr_elem_i  : alu_wr_elem;
+    vrf_wr_sew_f[2:0]       = mem_owner_i ? mem_wr_sew_i   : alu_wr_sew;
+    vrf_wr_lmul_f[3:0]      = mem_owner_i ? mem_wr_lmul_i  : alu_wr_lmul;
+    vrf_wr_data_f[63:0]     = mem_owner_i ? mem_wr_data_i  : alu_wr_data;
+  end
+
+  assign alu_rd_gnt       = vrf_rd_gnt_f[0];
+  assign alu_rd_rsp_valid = vrf_rd_rsp_valid_f[0];
+  assign alu_rd_rsp_tag   = vrf_rd_rsp_tag_f[15:0];
+  assign alu_rd_rsp_data  = vrf_rd_rsp_data_f[63:0];
+  assign alu_wr_gnt       = vrf_wr_gnt_f[0];
+
+  assign mem_rd_gnt_o       = vrf_rd_gnt_f[0];
+  assign mem_rd_rsp_valid_o = vrf_rd_rsp_valid_f[0];
+  assign mem_rd_rsp_tag_o   = vrf_rd_rsp_tag_f[15:0];
+  assign mem_rd_rsp_data_o  = vrf_rd_rsp_data_f[63:0];
+  assign mem_wr_gnt_o       = vrf_wr_gnt_f[0];
+  assign alu_rd_valid_o     = alu_rd_valid;
+  assign alu_rd_base_o      = alu_rd_base;
+  assign alu_rd_elem_o      = alu_rd_elem;
+  assign alu_rd_sew_o       = alu_rd_sew;
+  assign alu_rd_lmul_o      = alu_rd_lmul;
+  assign alu_wr_valid_o     = alu_wr_valid;
+
+  mosaic_vrf #(
+      .VLEN       (128),
+      .ELEN       (64),
+      .VREGS      (32),
+      .BANK_W     (32),
+      .BANKS      (32),
+      .LANES_MAX  (TB_LANES),
+      .RD_PORTS   (2),
+      .WR_PORTS   (1),
+      .RD_LATENCY (1)
+  ) u_vec_vrf (
+      .clk_i            (clk),
+      .rst_i            (rst),
+
+      .lane_count_i     (4'd1),
+      .plat_i           (2'd0),
+
+      .rd_valid_i       (vrf_rd_valid_f),
+      .rd_base_i        (vrf_rd_base_f),
+      .rd_elem_i        (vrf_rd_elem_f),
+      .rd_sew_i         (vrf_rd_sew_f),
+      .rd_lmul_i        (vrf_rd_lmul_f),
+      .rd_tag_i         (vrf_rd_tag_f),
+      .rd_gnt_o         (vrf_rd_gnt_f),
+      .rd_rsp_valid_o   (vrf_rd_rsp_valid_f),
+      .rd_rsp_tag_o     (vrf_rd_rsp_tag_f),
+      .rd_rsp_data_o    (vrf_rd_rsp_data_f),
+
+      .wr_valid_i       (vrf_wr_valid_f),
+      .wr_base_i        (vrf_wr_base_f),
+      .wr_elem_i        (vrf_wr_elem_f),
+      .wr_sew_i         (vrf_wr_sew_f),
+      .wr_lmul_i        (vrf_wr_lmul_f),
+      .wr_data_i        (vrf_wr_data_f),
+      .wr_gnt_o         (vrf_wr_gnt_f),
+
+      .q_valid_i        (1'b0),
+      .q_base_i         (5'd0),
+      .q_elem_i         (7'd0),
+      .q_sew_i          (3'd0),
+      .q_lmul_i         (4'd0),
+      .o_q_valid_o      (unused_q_valid),
+      .o_q_phys_reg_o   (unused_q_phys),
+      .o_q_row_o        (unused_q_row),
+      .o_q_lo_bit_o     (unused_q_lo),
+      .o_q_hi_bit_o     (unused_q_hi),
+      .o_q_nbanks_o     (unused_q_nbanks),
+      .o_q_bank0_o      (unused_q_bank0),
+      .o_q_bank1_o      (unused_q_bank1),
+
+      .o_rd_gnt_ctr     (vrf_rd_gnt_ctr_o),
+      .o_rd_conflict_ctr (unused_rd_conf),
+      .o_rd_bad_ctr     (vrf_rd_bad_ctr_o),
+      .o_wr_gnt_ctr     (vrf_wr_gnt_ctr_o),
+      .o_wr_conflict_ctr (unused_wr_conf),
+      .o_wr_hazard_ctr  (unused_wr_hazard),
+      .o_wr_bad_ctr     (unused_wr_bad),
+      .o_busy           (unused_vrf_busy),
+
+      .o_vlen_o         (unused_vlen),
+      .o_elen_o         (unused_elen),
+      .o_vregs_o        (unused_vregs),
+      .o_banks_o        (vrf_banks_o),
+      .o_bank_w_o       (unused_bank_w),
+      .o_rows_o         (vrf_rows_o),
+      .o_regs_per_row_o (unused_regs_per_row),
+      .o_lane_max_o     (unused_lane_max),
+      .o_rd_latency_o   (vrf_rd_latency_o),
+      .o_rd_ports_o     (unused_rd_ports),
+      .o_wr_ports_o     (unused_wr_ports),
+      .o_plat_o         (unused_plat)
+  );
+
+  mosaic_vec_alu #(
+      .VLEN (128),
+      .ELEN (64),
+      .NFAM (17)
+  ) u_vec_alu (
+      .clk_i              (clk),
+      .rst_i              (rst),
+      .caps_i             (alu_caps_i),
+
+      .cfg_vtype_i        (cfg_snap_vtype),
+      .cfg_vl_i           (cfg_snap_vl[7:0]),
+      .cfg_vstart_i       (cfg_snap_vstart[6:0]),
+      .cfg_vxrm_i         (cfg_vxrm[1:0]),
+
+      .e_valid_i          (el_valid_i),
+      .e_family_i         (el_family_i),
+      .e_op_i             (el_op_i),
+      .e_form_i           (el_form_i),
+      .e_vs2_i            (el_vs2_i),
+      .e_vs1_i            (el_vs1_i),
+      .e_acc_i            (el_acc_i),
+      .e_mask_i           (el_mask_i),
+      .e_scalar_i         (el_scalar_i),
+      .e_index_i          (el_index_i),
+      .e_pfx_i            (el_pfx_i),
+      .e_result_o         (el_result_o),
+      .e_mres_o           (el_mres_o),
+      .e_sat_o            (el_sat_o),
+      .e_illegal_o        (el_illegal_o),
+      .e_trap_o           (el_trap_o),
+      .e_access_o         (el_access_o),
+      .e_write_o          (el_write_o),
+      .e_rd2_o            (el_rd2_o),
+      .e_pfx_o            (el_pfx_o),
+
+      .exec_valid_i       (alu_exec_valid_i),
+      .exec_family_i      (alu_family_i),
+      .exec_op_i          (alu_op_i),
+      .exec_form_i        (alu_form_i),
+      .exec_vd_i          (alu_vd_i),
+      .exec_vs1_i         (alu_vs1_i),
+      .exec_vs2_i         (alu_vs2_i),
+      .exec_scalar_i      (alu_scalar_i),
+      .exec_mask_en_i     (alu_mask_en_i),
+      .exec_busy_o        (alu_busy_o),
+      .exec_done_o        (alu_done_o),
+      .exec_illegal_o     (alu_illegal_o),
+      .exec_trap_o        (alu_trap_o),
+      .exec_trap_elem_o   (alu_trap_elem_o),
+      .exec_sat_o         (alu_sat_o),
+      .exec_elems_o       (alu_elems_o),
+      .exec_cur_o         (alu_cur_o),
+      .exec_state_o       (alu_state_o),
+      .exec_step_o        (alu_step_o),
+      .exec_acc_o         (alu_acc_o),
+      .exec_trace_valid_o (alu_trace_valid_o),
+      .exec_trace_elem_o  (alu_trace_elem_o),
+      .exec_src_rd_ctr_o  (alu_src_rd_ctr_o),
+
+      .vrf_rd_valid_o     (alu_rd_valid),
+      .vrf_rd_base_o      (alu_rd_base),
+      .vrf_rd_elem_o      (alu_rd_elem),
+      .vrf_rd_sew_o       (alu_rd_sew),
+      .vrf_rd_lmul_o      (alu_rd_lmul),
+      .vrf_rd_tag_o       (alu_rd_tag),
+      .vrf_rd_gnt_i       (alu_rd_gnt),
+      .vrf_rd_rsp_valid_i (alu_rd_rsp_valid),
+      .vrf_rd_rsp_tag_i   (alu_rd_rsp_tag),
+      .vrf_rd_rsp_data_i  (alu_rd_rsp_data),
+
+      .vrf_wr_valid_o     (alu_wr_valid),
+      .vrf_wr_base_o      (alu_wr_base),
+      .vrf_wr_elem_o      (alu_wr_elem),
+      .vrf_wr_sew_o       (alu_wr_sew),
+      .vrf_wr_lmul_o      (alu_wr_lmul),
+      .vrf_wr_data_o      (alu_wr_data),
+      .vrf_wr_gnt_i       (alu_wr_gnt)
   );
 
 endmodule : mosaic_vec_tb
