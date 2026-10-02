@@ -451,7 +451,8 @@ module mosaic_vec_lsu #(
 
     active_c    = !mask_en_q || (!is_whole && !is_mask &&
                   ((mask_byte_q >> elem_q[2:0]) & 8'd1) != 8'd0);
-    need_mask_c = mask_en_q && (!mask_valid_q || (mask_byte_idx_q != elem_q[6:3]));
+    need_mask_c = mask_en_q && (!mask_valid_q ||
+                  (mask_byte_idx_q != 5'(elem_q[6:3])));
 
     limit_c = (we_q || ordered_q) ? 3'd1 : 3'(OUT_MAX);
 `ifdef MOSAIC_VEC_LSU_MUTANT_ORDERED_REORDER
@@ -462,9 +463,10 @@ module mosaic_vec_lsu #(
     limit_hit_c = (outstanding_q + 3'd1) >= limit_c;
 
     // the store-data / load-destination register demand, one rule per mode
+    rdw_grp_base = 4'd0;
     if (is_seg) begin
       rdw_grp_base = lmul_exp_q[3] ? data_q
-                   : (data_q & ~(5'(emul_regs) - 5'd1));
+                   : 4'(data_q & ~(5'(emul_regs) - 5'd1));
       rdw_base_c = rdw_grp_base + 5'(field_q) * 5'(emul_regs);
       rdw_elem_c = elem_q[6:0];
       rdw_sew_c  = eew_log2_q;
@@ -514,7 +516,7 @@ module mosaic_vec_lsu #(
 
     if (state_q == ST_MASK) begin
       rd_valid_c = 1'b1;
-      rd_elem_c  = elem_q[6:3];
+      rd_elem_c  = {3'b000, elem_q[6:3]};
       rd_sew_c   = 3'd3;
       rd_lmul_c  = 4'd0;
       rd_tag_c   = TAG_MASK;
