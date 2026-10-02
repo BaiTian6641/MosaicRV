@@ -2739,3 +2739,69 @@ legacy control scripts 3/3 — and one **real coherence defect the larger L1 exp
 masked by a stale clean copy, fixed with a targeted line-invalidate. `locality.integrated_path`'s
 remaining failures are the program's 256 B-L1 address plan and are being updated, which is a program
 fact rather than a design fault and is being recorded as such.
+
+---
+
+## 2026-10-02 — the deeper queue found a latent dispatch-rule violation, and the scalability rules landed
+
+**The front-end width work is real, and the bug it exposed is the useful part.** `mmio.exactly_once`
+broke at p0 and p1 the moment the decoded-instruction queue went from 2 entries to 8, and the cause is
+worth more than the fix: `mosaic_dispatch` refused an **unarmed** ECALL/EBREAK at the decode input by
+judging it against `mtvec`, which is written at **retirement** — a test that is only valid when the
+macro is the architectural next instruction. With a 2-entry buffer, "not yet architecturally next" was
+an accident of depth, so the wrong test never fired on the wrong macro; the deeper queue removed the
+accident and the latent violation became a trap. The fix is the rule `mosaic_dispatch`'s own header
+already stated — `l0_refused = l0_unsupported && !branch_in_flight && (!l0_trap_unarmed || rob_empty_i)`
+— with `rob_empty_i` taken from the ROB's occupancy. **A queue depth is not a performance knob when a
+rule is being enforced by accident of that depth**, and this is now the second time this project has
+paid for a rule that was true for the wrong reason.
+
+**Also green under my own re-run, not only the lane's**: `frontend.width_buffering` (p1, 22 s, the
+case the exclusion ledger was missing), `mmio.exactly_once` (p0, p1), `core.act_dut` (127/127),
+`core.corpus_sweep`, `perf.equal_resource_compare`, `rename.same_cycle_chain`,
+`rob.out_of_order_children`, `iq.wakeup_insert_select`, `core.corpus_branch`. The measured headline is
+**unchanged and still negative**: two-wide allocation never engages, because every workload is
+fetch-bound (response rate 22–25 %, `alloc/cyc == frsp%`); a purpose-built backlog workload
+(`pair_burst`, via the slow shared MUL/DIV) does fill the queues and the two-wide insert fired 3 times,
+but allocation stayed one-wide because the backlog pins the queue at 7–8 entries where the head cannot
+insert. Three mutants were built with hashes and first failures; one is reported **inert** on the pair
+path (it swaps pair order, and no pair is ever allocated) and is not counted as a control.
+
+**`retire.width_and_order` (p0) is red and attributed away from the front end.** It passes at clean
+HEAD and fails in the tree (`event 110 pc expected 0x800001c0, got 0x80000114 lane 1 at cycle 527`).
+Five attribution builds — pair path disabled, queue depth forced back to 2, the unarmed-trap refusal
+reverted, a purge-gated delivery handshake, and **the memory lane's own `MOSAIC_MEM_SMALL_CACHE`
+switch** — all fail identically, so reverting the L1 geometry does not fix it either. A
+"HEAD + only the front-end files" binary is not constructible, because the tree's `mosaic_core.sv`
+also carries the cache-path instantiation changes (new ports and parameters); the bisect is with the
+memory lane and is the one thing blocking the commit of this work.
+
+**The lint gate was red and is fixed.** The new measurement outputs on `mosaic_core` (11 counters:
+`alloc2`, `pair`, `pair_offer`, `recover`, `iqueue_occ_sum`, `iq_occ_sum`, `disp_occ_sum`,
+`fetch_req/rsp`, `l1_elig`, `barrier`) were unnamed in `mosaic_multihart.sv`'s two core instances — 22
+`PINMISSING` warnings. They are now named-and-unconnected in the file's existing style, with a comment
+saying why (the single-core testbench taps them; the wrapper is a two-hart container). **`lint_rtl` is
+65/65 clean on both profiles.** The wrapper fix cannot be committed before the core's ports, so it
+lands in the same commit as the front-end RTL — the commit that is waiting on the retire bisect.
+
+**S-4 landed: the configuration constraint rules are real.** `ScalabilityRules` added **15 rules with
+15 negative controls** to the profile gate (rejected 61/61, 52/52, 48/48, 43/43 across the profiles),
+and declared the five keys that the scalability plan's §2 table lists as literals —
+`frontend.decode_width`, `frontend.idec_queue_entries`, `rob.commit_width`, `fabric.fp_units`,
+`fabric.vec_units` — as **declared, not yet consumed**. Two findings came out of it and both are
+recorded rather than smoothed over: **F1**, the shipping profiles' *effective* decode width (the RTL's
+one-control-word-per-cycle literal) is below `rename_width = 2`, so the configuration is internally
+inconsistent in exactly the way the measurement already showed — the two-wide path is declared and
+cannot engage; the rule is not weakened (any configuration that *declares* decode < rename is rejected,
+with a control proving it) and it closes when S-1 makes the key consumed. **F2**, the plan's fabric
+disjunction ("ALU per cluster or MUL/DIV non-zero") is not independently satisfiable because the schema
+requires each ≥ 1; the per-key minimums are not relaxed, because a zero-ALU cluster is not something
+the RTL can build.
+
+**And the documentation gate now admits the new plan document without rewriting the frozen checker.**
+`docs/` is append-only, so `tools/check_docs.py`'s single declared deviation — which already governed
+"the set of markdown files the inventory considers" — was extended to *append* `docs/scalability-plan.md`
+to the inventory, printed on every run, with the added document held to every remaining check (local
+links, git tracking, whitespace). `check_docs` passes. The alternative, editing the embedded checker
+inside `docs/verification.md`, was rejected: the wrapper's whole design is that the deviation is
+visible where it is applied.
