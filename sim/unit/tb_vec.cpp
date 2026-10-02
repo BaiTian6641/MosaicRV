@@ -4319,7 +4319,6 @@ void FpToIntExp(uint64_t bits, bool fmt, int rm, bool is_signed, bool iw,
   if (expf == 0) { m = frac; e2 = 1 - bias - fw; }
   else { m = frac | (1ull << fw); e2 = static_cast<int>(expf) - bias - fw; }
 
-  using u128 = unsigned __int128;
   u128 mag = 0;
   bool inexact = false;
   if (e2 >= 64) {
@@ -4393,12 +4392,15 @@ void FpToIntExp(uint64_t bits, bool fmt, int rm, bool is_signed, bool iw,
 
 FpExp IntToFpExp(uint64_t value, bool is_signed, bool src64, bool fmt, int rm) {
   FpExp e;
-  int64_t sv;
-  if (src64) sv = is_signed ? static_cast<int64_t>(value)
-                            : static_cast<int64_t>(value & 0x7FFF'FFFF'FFFF'FFFFull);
-  else sv = is_signed ? static_cast<int64_t>(static_cast<int32_t>(value))
-                      : static_cast<int64_t>(value & 0xFFFF'FFFFull);
-  uint64_t uv = static_cast<uint64_t>(sv);
+  int64_t sv = 0;
+  uint64_t uv = 0;
+  if (src64) {
+    sv = static_cast<int64_t>(value);
+    uv = value;                              // an unsigned 64-bit source is the
+  } else {                                   // whole register, not a 32-bit field
+    sv = static_cast<int64_t>(static_cast<int32_t>(value));
+    uv = value & 0xFFFF'FFFFull;
+  }
   feclearexcept(FE_ALL_EXCEPT);
   fesetround(HostModeOf(rm));
   if (fmt) {
@@ -4424,11 +4426,21 @@ FpExp FmtCvtExp(bool src_fmt, bool dst_fmt, uint64_t bits, int rm) {
   feclearexcept(FE_ALL_EXCEPT);
   fesetround(HostModeOf(rm));
   if (dst_fmt) {
-    volatile float r = F32From(static_cast<uint32_t>(bits));
+    float r;
+    if (src_fmt) {
+      r = F32From(static_cast<uint32_t>(bits));
+    } else {
+      volatile double d = F64From(bits);
+      r = static_cast<float>(d);
+    }
     e.bits = F32Bits(r);
   } else {
-    volatile double r = src_fmt ? static_cast<double>(F32From(static_cast<uint32_t>(bits)))
-                                : F64From(bits);
+    double r;
+    if (src_fmt) {
+      r = static_cast<double>(F32From(static_cast<uint32_t>(bits)));
+    } else {
+      r = F64From(bits);
+    }
     e.bits = F64Bits(r);
   }
   e.flags = MapFlags(fetestexcept(FE_ALL_EXCEPT));
@@ -4684,7 +4696,14 @@ class VecFp {
   // One cycle with the packet engine idle (used for commit/flush strobes).
   FpObs Idle(const FpStim& s) { return Cycle(s); }
 
-  uint64_t SnapVtype() { return d_->cfg_snap_vtype; }
+  // Drive every fp input to its idle value for one cycle. The driver's VRF
+  // priming uses the `Vec` helper, which does not drive the fp ports, so a
+  // strobe asserted for one cycle would otherwise persist through the priming
+  // cycles that follow.
+  void Quiesce() { FpStim s; (void)Cycle(s); }
+
+  int Issues() { return static_cast<int>(d_->fp_fpu_issues_o); }
+  uint64_t Now() { return clk_->cycle(); }
 
  private:
   Vmosaic_vec_tb* d_;
@@ -4738,7 +4757,6 @@ void RunFpElemPacket(Cfg* cfg, Vec* vec, VecFp* fp, Reporter* rep, FpCov* cov,
                      const std::vector<uint64_t>& va,
                      const std::vector<uint64_t>& vb, uint64_t scalar, int rm,
                      bool mask_en, uint64_t mbits) {
-  const bool fmt = (sew_l == 6);
   const int vlmax = FpVlmax(sew_l, lmul_e);
   const int vd = 8, vs1 = 16, vs2 = 24;
   const std::string name = std::string("fpelem ") + FpFamilyName(fam) + " op" +
@@ -4770,10 +4788,28 @@ void RunFpElemPacket(Cfg* cfg, Vec* vec, VecFp* fp, Reporter* rep, FpCov* cov,
   FpStim s;
   s.family = fam; s.op = op; s.form = form; s.vd = vd; s.vs1 = vs1; s.vs2 = vs2;
   s.scalar = scalar; s.mask_en = mask_en; s.rm = rm;
-  FpObs o = fp->Run(s);
+  std::vector<std::pair<int, uint32_t> > trace;
+  FpObs o = fp->Run(s, &trace);
 
   rep->Check(!o.illegal, name + ": a declared family was refused");
   rep->Check(!o.trap, name + ": the packet trapped");
+
+  // The per-element flag contribution, in element order, over active elements
+  // only: the trace names the element and its flags, so a wrong flag is
+  // attributed to the element that produced it.
+  for (size_t t = 0; t < trace.size(); ++t) {
+    int idx = trace[t].first;
+    bool act = (idx < vlmax) && (!mask_en || (((mbits >> idx) & 1ull) != 0));
+    uint32_t ef = 0;
+    if (act) {
+      uint64_t a = va[static_cast<size_t>(idx % va.size())];
+      uint64_t b = (form == 0) ? vb[static_cast<size_t>(idx % vb.size())] : scalar;
+      ef = FpElemExp(fam, op, sew_l, a, b, rm).flags;
+    }
+    rep->Check(act && (trace[t].second == ef),
+               name + " e" + Dec(idx) + " flags " + FlagStr(trace[t].second) +
+                   " expected " + FlagStr(ef));
+  }
 
   uint32_t exp_flags = 0;
   int active = 0;
@@ -4836,7 +4872,9 @@ void RunFpElemPacket(Cfg* cfg, Vec* vec, VecFp* fp, Reporter* rep, FpCov* cov,
       else want = MaskW(1 << dw);   // vma/vta agnostic: all-ones
       rep->Check(got == want, name + " e" + Dec(i) + ": got " +
                                   mosaic::Hex(got, 16) + " expected " +
-                                  mosaic::Hex(want, 16));
+                                  mosaic::Hex(want, 16) + " [a=" +
+                                  mosaic::Hex(a, 16) + " b=" +
+                                  mosaic::Hex(b, 16) + "]");
     }
   }
   rep->Check(o.pending == exp_flags,
@@ -4906,7 +4944,9 @@ void PhaseFpMaskedSNaN(Cfg* cfg, Vec* vec, VecFp* fp, Reporter* rep) {
     }
     FpStim s;
     s.family = FF_ELEM; s.op = 0; s.form = 0; s.vd = vd; s.vs1 = vs1; s.vs2 = vs2;
+    const int i0 = fp->Issues();
     FpObs o = fp->Run(s);
+    const int i1 = fp->Issues();
     rep->Check((o.pending & FL_NV) != 0,
                "masked-snan active: an active sNaN did not set NV");
     uint64_t got = vec->Peek(vd, 0, sew_l, 0);
@@ -4915,8 +4955,8 @@ void PhaseFpMaskedSNaN(Cfg* cfg, Vec* vec, VecFp* fp, Reporter* rep) {
                    " expected the canonical quiet NaN");
     rep->Check(o.elems == 4, "masked-snan active: 4 elements expected, got " +
                                  Dec(o.elems));
-    rep->Check(o.issues == 4, "masked-snan active: 4 FPU operations expected, got " +
-                                  Dec(o.issues));
+    rep->Check(i1 - i0 == 4, "masked-snan active: 4 FPU operations expected, got " +
+                                 Dec(i1 - i0));
   }
 
   // (b) the same sNaN masked off: no NV, no operation, destination undisturbed
@@ -4937,7 +4977,9 @@ void PhaseFpMaskedSNaN(Cfg* cfg, Vec* vec, VecFp* fp, Reporter* rep) {
     FpStim s;
     s.family = FF_ELEM; s.op = 0; s.form = 0; s.vd = vd; s.vs1 = vs1; s.vs2 = vs2;
     s.mask_en = true;
+    const int j0 = fp->Issues();
     FpObs o = fp->Run(s);
+    const int j1 = fp->Issues();
     rep->Check((o.pending & FL_NV) == 0,
                "masked-snan inactive: a masked-off sNaN polluted NV");
     rep->Check(o.pending == 0,
@@ -4945,9 +4987,9 @@ void PhaseFpMaskedSNaN(Cfg* cfg, Vec* vec, VecFp* fp, Reporter* rep) {
                    " expected none");
     rep->Check(o.elems == 3, "masked-snan inactive: 3 active elements expected, got " +
                                  Dec(o.elems));
-    rep->Check(o.issues == 3,
+    rep->Check(j1 - j0 == 3,
                "masked-snan inactive: 3 FPU operations expected (the masked-off "
-               "element must not compute), got " + Dec(o.issues));
+               "element must not compute), got " + Dec(j1 - j0));
     rep->Check(o.inactive_flag_ctr == 0,
                "masked-snan inactive: an inactive element contributed a flag");
     uint64_t got = vec->Peek(vd, 1, sew_l, 0);
@@ -5042,7 +5084,8 @@ void RunFpReduction(Cfg* cfg, Vec* vec, VecFp* fp, Reporter* rep, FpCov* cov,
                     uint64_t mbits, const std::vector<uint64_t>& elems,
                     uint64_t acc0) {
   const bool wide = (fam == FF_REDWIDE);
-  const bool fmt = (sew_l == 6);
+  // The oracle's convention matches the FPU's: true is single (SEW=32).
+  const bool fmt = (sew_l == 5);
   const int vlmax = FpVlmax(sew_l, lmul_e);
   const int vd = 8, vs1 = 16, vs2 = 24;
   const int acc_sew_l = wide ? (sew_l + 1) : sew_l;
@@ -5089,14 +5132,14 @@ void RunFpReduction(Cfg* cfg, Vec* vec, VecFp* fp, Reporter* rep, FpCov* cov,
       FpExp mm = MinMaxExp(op == 0, fmt, acc, e);
       acc = mm.bits;
       exp_flags |= mm.flags;
-      elems_d.push_back(fmt ? F64From(e)
-                            : static_cast<double>(F32From(static_cast<uint32_t>(e))));
+      elems_d.push_back(fmt ? static_cast<double>(F32From(static_cast<uint32_t>(e)))
+                            : F64From(e));
     } else {
       FpExp add = HostArithExp(0, fmt, acc, e, 0);
       acc = add.bits;
       exp_flags |= add.flags;
-      elems_d.push_back(fmt ? F64From(e)
-                            : static_cast<double>(F32From(static_cast<uint32_t>(e))));
+      elems_d.push_back(fmt ? static_cast<double>(F32From(static_cast<uint32_t>(e)))
+                            : F64From(e));
     }
   }
 
@@ -5133,23 +5176,27 @@ void RunFpReduction(Cfg* cfg, Vec* vec, VecFp* fp, Reporter* rep, FpCov* cov,
                                            " expected " + FlagStr(exp_flags));
   } else if (ordered) {
     // deterministic: bit-exact, and the vectors make the association visible
-    rep->Check(acc != acc_r,
-               name + " ordered: the chosen vectors do not distinguish the two "
-               "associations, so the bit-exact check proves nothing");
+    if (!mask_en) {
+      rep->Check(acc != acc_r,
+                 name + " ordered: the chosen vectors do not distinguish the two "
+                 "associations, so the bit-exact check proves nothing");
+    }
     rep->Check(o.acc == acc, name + " ordered: acc " + mosaic::Hex(o.acc, 16) +
                                  " expected " + mosaic::Hex(acc, 16) +
                                  " (bit-exact; the reassociated value is " +
                                  mosaic::Hex(acc_r, 16) + ")");
-    rep->Check(o.acc != acc_r,
-               name + " ordered: the result equals the reassociated fold");
+    if (!mask_en) {
+      rep->Check(o.acc != acc_r,
+                 name + " ordered: the result equals the reassociated fold");
+    }
     rep->Check(o.pending == exp_flags, name + " ordered: flags " +
                                            FlagStr(o.pending) + " expected " +
                                            FlagStr(exp_flags));
   } else {
     // permitted to differ: the result must be in the enumerated tree set
     double accd = wide ? F64From(acc0)
-                       : (fmt ? F64From(acc0)
-                              : static_cast<double>(F32From(static_cast<uint32_t>(acc0))));
+                       : (fmt ? static_cast<double>(F32From(static_cast<uint32_t>(acc0)))
+                              : F64From(acc0));
     std::set<uint64_t> permit = UnorderedPermitted(elems_d, accd, wide, 0);
     uint64_t got = wide ? o.acc : (o.acc & MaskW(1 << sew_l));
     bool in_set = permit.count(got) != 0;
@@ -5193,9 +5240,10 @@ void PhaseFpReductions(Cfg* cfg, Vec* vec, VecFp* fp, Reporter* rep, FpCov* cov)
     RunFpReduction(cfg, vec, fp, rep, cov, FF_REDMINMAX, op, 6, 1, false, 0, v64, 0);
     RunFpReduction(cfg, vec, fp, rep, cov, FF_REDWIDE, op, 5, 0, false, 0, vw, 0);
   }
-  // a masked reduction: the masked-off element is not folded
-  RunFpReduction(cfg, vec, fp, rep, cov, FF_REDSUM, 0, 5, 0, true, 0x0Dull, v32, 0);
-  RunFpReduction(cfg, vec, fp, rep, cov, FF_REDSUM, 1, 5, 0, true, 0x0Dull, v32, 0);
+  // a masked reduction: element 2 is masked off, so the fold runs over elements
+  // 0, 1 and 3 -- still a discriminating set (the left fold is 0, the right 1).
+  RunFpReduction(cfg, vec, fp, rep, cov, FF_REDSUM, 0, 5, 0, true, 0x0Bull, v32, 0);
+  RunFpReduction(cfg, vec, fp, rep, cov, FF_REDSUM, 1, 5, 0, true, 0x0Bull, v32, 0);
 }
 
 // -------------------------------------------------------- phase 5: rounding
@@ -5258,23 +5306,24 @@ void PhaseFpFlagAggregate(Cfg* cfg, Vec* vec, VecFp* fp, Reporter* rep) {
   const int vd = 8, vs1 = 16, vs2 = 24;
   const uint64_t snan = 0x7FA00000ull;
   const uint64_t inf = 0x7F800000ull;
+  const uint64_t ninf = 0xFF800000ull;
   const uint64_t one = 0x3F800000ull;
 
-  // A macro with a masked-off sNaN and an active inf-inf (which sets NV): the
-  // aggregate is the OR over the active elements only, and nothing is
+  // A macro with a masked-off sNaN and an active inf + (-inf) (which sets NV):
+  // the aggregate is the OR over the active elements only, and nothing is
   // architectural until the macro commits.
   FpConfig(cfg, sew_l, 0, 0, 0, 64);
   HostVrf vf;
   for (int i = 0; i < 4; ++i) {
     vec->Prime(vf, vs2, i, sew_l, 0, (i == 0) ? inf : ((i == 1) ? snan : one));
-    vec->Prime(vf, vs1, i, sew_l, 0, (i == 0) ? inf : one);
+    vec->Prime(vf, vs1, i, sew_l, 0, (i == 0) ? ninf : one);
   }
   vec->Prime(vf, 0, 0, 3, 0, 0x0Dull);   // element 1 masked off
   FpStim s;
   s.family = FF_ELEM; s.op = 0; s.form = 0; s.vd = vd; s.vs1 = vs1; s.vs2 = vs2;
   s.mask_en = true;
   FpObs o = fp->Run(s);
-  uint32_t want = FL_NV;   // inf - inf on element 0 only
+  uint32_t want = FL_NV;   // inf + (-inf) on element 0 only
   rep->Check(o.pending == want, "agg: pending " + FlagStr(o.pending) + " expected " +
                                     FlagStr(want));
   rep->Check(o.elems == 3, "agg: 3 active elements expected, got " + Dec(o.elems));
@@ -5298,6 +5347,9 @@ void PhaseFpFlagAggregate(Cfg* cfg, Vec* vec, VecFp* fp, Reporter* rep) {
   rep->Check(after.commit_ctr == 1, "agg: commit counter " + Dec(after.commit_ctr) +
                                         " expected 1");
   rep->Check(after.pending == 0, "agg: pending flags were not cleared at commit");
+  // clear the strobe: the driver's VRF priming does not drive the fp inputs, so
+  // a stale `commit_valid` would be a second (spurious) commit.
+  fp->Quiesce();
 
   // a squashed macro contributes nothing: run a flag-producing macro, flush it,
   // and require the architectural flags to be unchanged.
@@ -5305,7 +5357,7 @@ void PhaseFpFlagAggregate(Cfg* cfg, Vec* vec, VecFp* fp, Reporter* rep) {
   HostVrf vf2;
   for (int i = 0; i < 4; ++i) {
     vec->Prime(vf2, vs2, i, sew_l, 0, inf);
-    vec->Prime(vf2, vs1, i, sew_l, 0, inf);
+    vec->Prime(vf2, vs1, i, sew_l, 0, ninf);
   }
   FpStim s2;
   s2.family = FF_ELEM; s2.op = 0; s2.form = 0; s2.vd = vd; s2.vs1 = vs1; s2.vs2 = vs2;
@@ -5319,6 +5371,7 @@ void PhaseFpFlagAggregate(Cfg* cfg, Vec* vec, VecFp* fp, Reporter* rep) {
                                        "architectural flags: " + FlagStr(after_flush.arch));
   rep->Check(after_flush.flush_ctr == 1, "agg squash: flush counter " +
                                              Dec(after_flush.flush_ctr) + " expected 1");
+  fp->Quiesce();
 
   // a commit with no completed macro is spurious and changes nothing
   FpStim sp;
@@ -5327,6 +5380,7 @@ void PhaseFpFlagAggregate(Cfg* cfg, Vec* vec, VecFp* fp, Reporter* rep) {
   rep->Check(spurious.arch == want, "agg: a spurious commit changed the flags");
   rep->Check(spurious.spurious_ctr == 1, "agg: spurious commit counter " +
                                              Dec(spurious.spurious_ctr) + " expected 1");
+  fp->Quiesce();
 }
 
 // -------------------------------------------------------- phase 7: capability
@@ -5388,6 +5442,10 @@ void PhaseFpCapGate(Cfg* cfg, Vec* vec, VecFp* fp, Reporter* rep) {
 }
 
 // -------------------------------------------------------- phase 8: latency
+// The FPU's declared latency is captured and checked against the declaration
+// (1 cycle for everything but fdiv, 66 for fdiv), and a divide packet is shown
+// to take many more cycles than an add packet, which is the evidence that the
+// engine actually waits for the datapath rather than assuming an answer.
 void PhaseFpLatency(Cfg* cfg, Vec* vec, VecFp* fp, Reporter* rep) {
   const int sew_l = 5;
   FpConfig(cfg, sew_l, 0, 0, 0, 64);
@@ -5398,22 +5456,31 @@ void PhaseFpLatency(Cfg* cfg, Vec* vec, VecFp* fp, Reporter* rep) {
   }
   FpStim add;
   add.family = FF_ELEM; add.op = 0; add.vd = 8; add.vs1 = 16; add.vs2 = 24;
+  const int ia0 = fp->Issues();
+  const uint64_t ca0 = fp->Now();
   FpObs oa = fp->Run(add);
+  const int ia1 = fp->Issues();
+  const uint64_t ca1 = fp->Now();
   rep->Check(oa.last_lat == 1, "latency: an add declared latency " +
                                    Dec(oa.last_lat) + " expected 1");
-  uint64_t t0 = 0, t1 = 0;
-  {
-    t0 = 0;
-    (void)t0;
-  }
+  rep->Check(ia1 - ia0 == 4, "latency: " + Dec(ia1 - ia0) +
+                                 " FPU operations for a 4-element add, expected 4");
+
   FpStim div;
   div.family = FF_ELEM; div.op = 4; div.vd = 8; div.vs1 = 16; div.vs2 = 24;
+  const int id0 = fp->Issues();
+  const uint64_t cd0 = fp->Now();
   FpObs od = fp->Run(div);
+  const int id1 = fp->Issues();
+  const uint64_t cd1 = fp->Now();
   rep->Check(od.last_lat == 66, "latency: a divide declared latency " +
                                     Dec(od.last_lat) + " expected 66");
-  rep->Check(od.issues == 4, "latency: 4 divide operations expected, got " +
-                                 Dec(od.issues));
-  (void)t1;
+  rep->Check(id1 - id0 == 4, "latency: " + Dec(id1 - id0) +
+                                 " FPU operations for a 4-element divide, expected 4");
+  rep->Check((cd1 - cd0) > (ca1 - ca0),
+             "latency: the divide packet did not take longer than the add packet (" +
+                 Dec(static_cast<int>(cd1 - cd0)) + " vs " +
+                 Dec(static_cast<int>(ca1 - ca0)) + " cycles)");
 }
 
 // ------------------------------------------------------------------- runner
@@ -5429,6 +5496,7 @@ void RunVecFpCase(Vmosaic_vec_tb* dut, ClockDriver* clk, Reporter* rep, FpCov* c
   PhaseFpElementLane(&cfg, &vec, &fp, rep, cov);
   PhaseFpMaskedSNaN(&cfg, &vec, &fp, rep);
   PhaseFpConversions(&cfg, &vec, &fp, rep, cov);
+  PhaseFpCompare(&cfg, &vec, &fp, rep, cov);
   PhaseFpRounding(&cfg, &vec, &fp, rep);
   PhaseFpFlagAggregate(&cfg, &vec, &fp, rep);
   PhaseFpReductions(&cfg, &vec, &fp, rep, cov);

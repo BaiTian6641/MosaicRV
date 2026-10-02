@@ -26,9 +26,10 @@
 // unit whose throughput is bounded elsewhere (I-027/I-059). That decision is
 // recorded in results/reports/I-055-vector-fp.md.
 //
-// The FPU's own declared latency (`o_latency_o`) is captured at every accept
-// and exposed as `o_last_latency_o`, so the case can check the declaration
-// (1 cycle for everything but `fdiv`, 66 for `fdiv`) rather than hard-code it.
+// The FPU's own declared latency (`o_latency_o`) is captured with every
+// response and exposed as `o_last_latency_o`, so the case can check the
+// declaration (1 cycle for everything but `fdiv`, 66 for `fdiv`) rather than
+// hard-code it.
 //
 // ------------------------------------------------------------ the flag rule
 //
@@ -299,6 +300,36 @@ module mosaic_vec_fp #(
   localparam logic [4:0] S_FINAL = 5'd21;
   localparam logic [4:0] S_DONE  = 5'd22;
 
+  // ---------------------------------------------------------- configuration
+  // Decoded from the I-052 snapshot at the ratified positions, and declared
+  // here because the operation plan below reads them.
+  localparam int unsigned VFP_VLEN_LOG2 = $clog2(VLEN);
+
+  logic [2:0]        sew_l;
+  logic signed [3:0] lmul;
+  logic              vta;
+  logic              vma;
+  logic              sew64;
+  logic              sew32;
+
+  always_comb begin
+    sew_l = cfg_vtype_i[5:3];
+    case (cfg_vtype_i[2:0])
+      3'd0:    lmul = 4'sd0;
+      3'd1:    lmul = 4'sd1;
+      3'd2:    lmul = 4'sd2;
+      3'd3:    lmul = 4'sd3;
+      3'd5:    lmul = -4'sd3;
+      3'd6:    lmul = -4'sd2;
+      3'd7:    lmul = -4'sd1;
+      default: lmul = 4'sd0;
+    endcase
+    vta   = cfg_vtype_i[6];
+    vma   = cfg_vtype_i[7];
+    sew64 = (sew_l == 3'd6);
+    sew32 = (sew_l == 3'd5);
+  end
+
   // ------------------------------------------------------------- the plan
   typedef struct packed {
     logic       swap;      // FPU operand order (a = the vs2 element)
@@ -334,7 +365,7 @@ module mosaic_vec_fp #(
   // FPU's (a, b): vfsub is vs2 - vs1 and vfdiv is vs2 / vs1, while vfrsub and
   // vfrdiv put the scalar first; vfsgnj* take the magnitude from vs2.
   function automatic fp_plan_t fp_plan(input logic [4:0] fam, input logic [3:0] op,
-                                       input logic sew64, input logic [2:0] rm_instr);
+                                       input logic is64, input logic [2:0] rm_instr);
     fp_plan_t p;
     begin
       p.swap     = 1'b0;
@@ -343,7 +374,7 @@ module mosaic_vec_fp #(
       // The FPU's `req_fmt_i` is 1 for single and 0 for double, so the format
       // follows the element width: SEW=32 is single, SEW=64 is double.
       p.fmt      = sew32;
-      p.iw       = sew64;
+      p.iw       = is64;
       p.is       = 1'b0;
       p.rm       = rm_instr;
       p.two      = 1'b0;
@@ -381,10 +412,10 @@ module mosaic_vec_fp #(
         end
         F_CVT: begin
           case (op)
-            4'd0: begin p.fop = mosaic_pkg::FP_CVT_FI; p.iw = sew64; p.is = 1'b0; end
-            4'd1: begin p.fop = mosaic_pkg::FP_CVT_FI; p.iw = sew64; p.is = 1'b1; end
-            4'd2: begin p.fop = mosaic_pkg::FP_CVT_IF; p.iw = sew64; p.is = 1'b0; end
-            default: begin p.fop = mosaic_pkg::FP_CVT_IF; p.iw = sew64; p.is = 1'b1; end
+            4'd0: begin p.fop = mosaic_pkg::FP_CVT_FI; p.iw = is64; p.is = 1'b0; end
+            4'd1: begin p.fop = mosaic_pkg::FP_CVT_FI; p.iw = is64; p.is = 1'b1; end
+            4'd2: begin p.fop = mosaic_pkg::FP_CVT_IF; p.iw = is64; p.is = 1'b0; end
+            default: begin p.fop = mosaic_pkg::FP_CVT_IF; p.iw = is64; p.is = 1'b1; end
           endcase
         end
         F_WIDE: begin
@@ -441,34 +472,6 @@ module mosaic_vec_fp #(
     end
   endfunction
 
-  // ---------------------------------------------------------- configuration
-  localparam int unsigned VFP_VLEN_LOG2 = $clog2(VLEN);
-
-  logic [2:0]        sew_l;
-  logic signed [3:0] lmul;
-  logic              vta;
-  logic              vma;
-  logic              sew64;
-  logic              sew32;
-
-  always_comb begin
-    sew_l = cfg_vtype_i[5:3];
-    case (cfg_vtype_i[2:0])
-      3'd0:    lmul = 4'sd0;
-      3'd1:    lmul = 4'sd1;
-      3'd2:    lmul = 4'sd2;
-      3'd3:    lmul = 4'sd3;
-      3'd5:    lmul = -4'sd3;
-      3'd6:    lmul = -4'sd2;
-      3'd7:    lmul = -4'sd1;
-      default: lmul = 4'sd0;
-    endcase
-    vta   = cfg_vtype_i[6];
-    vma   = cfg_vtype_i[7];
-    sew64 = (sew_l == 3'd6);
-    sew32 = (sew_l == 3'd5);
-  end
-
   // ------------------------------------------------------------- engine state
   logic [4:0]        state_q;
   logic [4:0]        op_f_q;
@@ -523,6 +526,8 @@ module mosaic_vec_fp #(
   logic [7:0]        last_lat_r;
 
   // -------------------------------------------------------- derived classes
+  logic [2:0]        plan_rm;
+  fp_plan_t          plan_c;
   logic is_red_c;
   logic is_redwide_c;
   logic dst_mask_c;
@@ -532,6 +537,14 @@ module mosaic_vec_fp #(
   logic need_vs1_c;
   logic [3:0] op_count_c;
   logic legal_c;
+
+  always_comb begin
+    plan_rm = rm_eff_q;
+    if (MutRmIgnore) begin
+      plan_rm = 3'b000;                     // MUTANT: always round to nearest-even
+    end
+    plan_c = fp_plan(op_f_q, op_op_q, (sew_l_q == 3'd6), plan_rm);
+  end
 
   always_comb begin
     is_red_c     = (op_f_q == F_REDSUM) || (op_f_q == F_REDMINMAX) ||
@@ -567,16 +580,6 @@ module mosaic_vec_fp #(
         legal_c = 1'b0;
       end
     end
-  end
-
-  logic [2:0]        plan_rm;
-  fp_plan_t          plan_c;
-  always_comb begin
-    plan_rm = rm_eff_q;
-    if (MutRmIgnore) begin
-      plan_rm = 3'b000;                     // MUTANT: always round to nearest-even
-    end
-    plan_c = fp_plan(op_f_q, op_op_q, (sew_l_q == 3'd6), plan_rm);
   end
 
   logic [2:0]        src_sew_l;
@@ -677,7 +680,7 @@ module mosaic_vec_fp #(
       .rst_i           (rst_i),
       .req_valid_i     (fpu_req_c),
       .req_ready_o     (fpu_req_ready),
-      .req_op_i        (fpu_op_c),
+      .req_op_i        (mosaic_pkg::fp_op_e'(fpu_op_c)),
       .req_fmt_i       (fpu_fmt_c),
       .req_rm_i        (plan_c.rm),
       .req_iw_i        (plan_c.iw),
@@ -937,7 +940,8 @@ module mosaic_vec_fp #(
             illegal_r <= 1'b1;
             state_q   <= S_DONE;
           end else begin
-            cur_q    <= MutReduceReassoc ? (vl_q - 8'd1) : {1'b0, vstart_q};
+            cur_q    <= (MutReduceReassoc && is_red_c) ? (vl_q - 8'd1)
+                                                       : {1'b0, vstart_q};
             sub_q    <= 2'd0;
             acc_q    <= 64'd0;
             if (is_red_c) begin
