@@ -2905,3 +2905,44 @@ caught). The mutant is kept, not deleted; the suite is being changed so its requ
 and self-describing — it must be caught **iff the same run exercised the two-wide group**, the run prints
 the inert count in its RESULT line, and the report records that the mutant *was* caught with the insert
 present, so its value is held with the feature rather than lost with it.
+
+---
+
+## 2026-10-02 — the coverage gap, named package by package
+
+`python3 tools/check_coverage.py --verbose` is the goal's headline gate, and it now prints the whole
+remaining distance in one screen: 16 capabilities advertisable, **17 not**, each with the packages it
+waits on. Recorded here because a blocked capability with no named blocker is indistinguishable from a
+forgotten one.
+
+| capability | waiting on |
+|---|---|
+| Zicntr | I-076 |
+| Sv48 | I-097, V-090 |
+| **F, D** | **V-060, V-061** |
+| **V** | **V-062, V-063, V-064** |
+| **Zve64d** | **V-062** |
+| Zkt, Zvkt | I-093, V-085 (+V-086) |
+| Zicfilp, Zicfiss | I-095, V-088 |
+| Zimop, Zcmop, Sha | I-093, V-086 / V-085 |
+| Zicond, Zmmul | V-086 |
+| PMLEN0, PMLEN7 | I-094, V-087 |
+| CMO | V-085 |
+
+**The short path is verification, not implementation.** F and D need no new RTL — their implementation
+tasks (I-049/I-050) are delivered and it is V-060 and V-061 that hold them; V and Zve64d likewise wait
+only on V-062..V-064. So V-061 (LLB freshness, invalidation, ownership) and V-062 (coalescer split/merge
+and address-domain boundaries) are dispatched now, on disjoint testbenches, because the LLB and the
+coalescing non-blocking MSHR both landed this week and their cards' inputs finally exist.
+
+**And V-060 has a blocker of a different kind, recorded rather than worked around.** Its card asks for
+"2/4/8 lane research configurations" and "64 vector programs". Measured today: **no geometry profile
+carries a lane-count key at all** (`config/geometry/p{0,1,2,3}.json` have no lane axis — lanes are an
+*attribution* the lane broker hands out, not a number of parallel datapaths), and **`tests/programs/src/`
+contains no vector program** (p01..p13 are scalar). So V-060 cannot be delivered as written: it needs
+two things that do not exist — a lane-count configuration axis (which is also item S-3's "vector ALU /
+lane count" row in `docs/scalability-plan.md`, i.e. the same work seen from the other side) and a vector
+program corpus with golden signatures. That is the honest form of "blocked": not "not attempted", but
+"its declared inputs are absent, and here is exactly which ones". It is also the item that would turn
+the lane broker's verified protocol into a measured aggregation benefit, so it is the largest remaining
+piece of the project's actual research claim.
