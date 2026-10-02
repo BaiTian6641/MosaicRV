@@ -2368,6 +2368,45 @@
    ],
    "max_cycles": 200000,
    "seed": 1
+  },
+  "memory.qos_no_starvation": {
+   "task": "I-062",
+   "top": "mosaic_qos_tb",
+   "rtl": [
+    "rtl/core/mosaic_pkg.sv",
+    "rtl/core/mosaic_arbiter.sv",
+    "rtl/core/mosaic_mem_qos.sv"
+   ],
+   "sv": [
+    "sim/tb/mosaic_qos_tb.sv"
+   ],
+   "cpp": [
+    "sim/unit/tb_qos.cpp"
+   ],
+   "max_cycles": 200000,
+   "seed": 1,
+   "pending": true
+  },
+  "rvv.stop_path_inflight": {
+   "task": "I-057",
+   "top": "mosaic_vec_tb",
+   "rtl": [
+    "rtl/core/mosaic_pkg.sv",
+    "rtl/core/mosaic_vec_desc.sv",
+    "rtl/core/mosaic_vec_cfg.sv",
+    "rtl/core/mosaic_vrf.sv",
+    "rtl/core/mosaic_vec_lsu.sv",
+    "rtl/core/mosaic_vec_restart.sv"
+   ],
+   "sv": [
+    "sim/tb/mosaic_vec_tb.sv"
+   ],
+   "cpp": [
+    "sim/unit/tb_vec.cpp"
+   ],
+   "max_cycles": 200000,
+   "seed": 1,
+   "pending": true
   }
  }
 }
