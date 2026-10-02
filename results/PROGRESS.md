@@ -2587,3 +2587,56 @@ it: vector register renaming and **real parallel lanes** (what would turn the la
 protocol into a measured aggregation benefit), multi-hart/cohort/pod (I-064..I-075), the measurement and
 release gates (I-076..I-086), the RVA23S64 mandatory matrix (I-092..I-098), the core-level `vstart` illegal
 routing test and the mask-prefix capability advertisement, and the `tb_vec.cpp` reset-traffic follow-up.
+
+---
+
+## 2026-10-01 — the measured comparison is done, and the hard part was making it falsifiable (79 entries)
+
+**I-084 is delivered, and with it the plan's actual success criterion for this project's differentiated
+half**: the dynamic-versus-fixed question answered by a measurement, one variable at a time, on equal
+resources — not a feature list. Three workloads across seven configurations (baseline, +steering,
++locality, +prefetch, +both, +coalescing, +lane quota), with exactly one variable changed per
+configuration:
+
+| workload | baseline | the cells that moved |
+|---|---|---|
+| `stream` | 3088 cyc / 0.103 IPC | +locality **2308**; +prefetch **3231** (13 issued, **0 useful**); +both **2295** (**13/13 useful**) |
+| `vec_stream` | 466 cyc | +coalescing **471** although dmem falls 40 → 22 (6 elements merged); +lanequota 0 cyc with the attribution moved |
+| `alu_chain` | 2389 cyc | +steering exactly neutral (396 grants) |
+
+**The three things that make the table evidence rather than a claim**, each proved falsifiable by its own
+mutant:
+
+1. **Resources asserted equal per cell and byte-identical across all 21 cells, read from the core's own
+   evidence ports** (64 ROB entries, 8 issue entries, 96 PRF entries in 4 banks, 2 clusters, a 32-byte
+   8-set 1-way L1, 8 lanes, an 8-entry reset window, vlenb 16). The card's fail mode — a comparison that
+   secretly changes the resource count so the dynamic side looks better — is now *detectable*, and a
+   mutant that drifts a resource is what proves the check fires.
+2. **Architectural identity in all seven configurations** (the retire stream field by field plus all four
+   signature words plus the memory result), with an architecture-drift mutant as the control.
+3. **Engagement per configuration** with the `NO_DELTA` idea inherited from the fabric measurement: each
+   configuration's own counter must be non-zero on its primary workload and the baseline's must be inert.
+
+**The negatives are in the table, and they are the point.** The prefetcher **alone** is 143 cycles slower
+than the baseline with **zero of thirteen** prefetches useful, while **with** the LLB it is 793 cycles
+faster with **thirteen of thirteen** useful. Coalescing *costs* five cycles on the vector workload even
+though the data-memory count falls from 40 to 22. Steering is exactly neutral on a short chain. A table
+averaged over configurations would have hidden the prefetcher-alone pessimisation completely — which is
+precisely why the card says one variable at a time, and it is the same lesson as the locality step table
+arriving from a different direction.
+
+**And the limit is stated in the same breath as the result**, because a reader could otherwise over-read
+it: **I-031's dynamic-ownership FSM is compiled but deliberately not instantiated**, so *resource
+reconfiguration and ownership change are not part of this comparison*; there is no area, Fmax, power,
+network-bytes or tail-latency claim; it is one seed on one profile; the steering cell is a single toggle
+gating three structures, with per-structure isolation living in I-090's own step table; and the
+coalescing negative rests on one short workload.
+
+**State**: 79 ledger entries delivered, 16 capabilities advertised, ACT4 127/127, `make check` and every
+gate green, lint 63/63 on both profiles, exclusion ledger 18 open / 36 covered. The measured-comparison
+criterion is met; what remains is **capability depth rather than methodology**: vector register renaming
+and **real parallel lanes** (which would turn the lane broker's verified protocol into a measured
+aggregation benefit and give the comparison a dynamic-ownership dimension to measure), multi-hart/cohort/pod
+(I-064..I-075), the measurement and release gates (I-076..I-086), the RVA23S64 mandatory matrix
+(I-092..I-098), the core-level `vstart` routing test plus the mask-prefix capability advertisement (the
+unit supports what the core refuses), and the `tb_vec.cpp` reset-traffic follow-up.
