@@ -10,6 +10,6 @@
   "image": "/Users/flare/mosaic-ref/act4-mosaic-p1-work/mosaic-p1/elfs/rv64i/I/I-lbu-00.elf",
   "expect": "",
   "tool": "Verilator 5.052 2026-09-05",
-  "timestamp": "2026-10-02T08:50:17Z",
+  "timestamp": "2026-10-02T10:08:02Z",
   "first_mismatch": ""
 }

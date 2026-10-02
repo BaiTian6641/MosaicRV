@@ -132,10 +132,18 @@ module mosaic_fp_unit (
                                         input logic     is_fp,
                                         input logic     fmt);
     begin
+`ifdef MOSAIC_CORE_MUTANT_FP_NO_UNBOX
+      // MUTANT (control for CASE=fp.precise_flags_and_boxing): the NaN-boxing
+      // operand rule is not applied, so a single-precision operand whose upper
+      // 32 bits are not all ones is treated as a number instead of the
+      // canonical quiet NaN.
+      unbox = v;
+`else
       unbox = v;
       if (is_fp && fmt && (v[63:32] != 32'hFFFF_FFFF)) begin
         unbox = {32'h0000_0000, FPU_CANON_NAN_S};
       end
+`endif
     end
   endfunction
 
@@ -144,10 +152,18 @@ module mosaic_fp_unit (
                                       input logic     dst_fp,
                                       input logic     fmt);
     begin
+`ifdef MOSAIC_CORE_MUTANT_FP_NO_BOX
+      // MUTANT (control for CASE=fp.precise_flags_and_boxing): a
+      // single-precision result is NOT NaN-boxed, so the machine writes an
+      // f-register whose upper half is not all ones -- a value the register-file
+      // rule itself would then read back as the canonical NaN.
+      box = v;
+`else
       box = v;
       if (dst_fp && fmt) begin
         box = {32'hFFFF_FFFF, v[31:0]};
       end
+`endif
     end
   endfunction
 
@@ -167,6 +183,19 @@ module mosaic_fp_unit (
   end
 
   // ------------------------------------------------------------ the datapath
+  // A redirect or trap cancels the operation in flight and invalidates the
+  // latched destination identity, so a squashed operation publishes no
+  // writeback. MOSAIC_CORE_MUTANT_FP_SQUASH_WRITES removes that cancellation:
+  // the operation completes after the squash and its (now stale) completion is
+  // published to the register file.
+`ifdef MOSAIC_CORE_MUTANT_FP_SQUASH_WRITES
+  localparam logic FPU_FLUSH_ENABLE = 1'b0;
+`else
+  localparam logic FPU_FLUSH_ENABLE = 1'b1;
+`endif
+  logic        flush_eff;
+  assign flush_eff = flush_i && FPU_FLUSH_ENABLE;
+
   logic        fpu_req_ready;
   logic        fpu_res_valid;
   logic        fpu_res_ready;
@@ -194,7 +223,7 @@ module mosaic_fp_unit (
       .req_rob_index_i (req_rob_index),
       .req_rob_gen_i   (req_rob_gen),
       .req_uop_index_i (req_uop_index),
-      .flush_i         (flush_i),
+      .flush_i         (flush_eff),
       .res_valid_o     (fpu_res_valid),
       .res_ready_i     (fpu_res_ready),
       .res_data_o      (fpu_res_data),
@@ -246,7 +275,7 @@ module mosaic_fp_unit (
       // integer-destination instruction whose rd is x0; it names no physical
       // register.
       dst_x0_q    <= (req_dst_tag == {FPU_TAG_W{1'b0}});
-    end else if (flush_i) begin
+    end else if (flush_eff) begin
       dst_valid_q <= 1'b0;
     end
   end

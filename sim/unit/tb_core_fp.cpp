@@ -52,13 +52,18 @@
 //   3. cvt          conversion overflow/saturation and NV/NX
 //   4. mem          flw/fsw/fld/fsd through the memory path
 //   5. wrong-path   a squashed FP operation contributes no flags and no
-//                   destination
+//                   destination. The wrong path is a synchronous trap (a
+//                   misaligned load) with a completed-and-flagged multiply and
+//                   an in-flight divide younger than it -- not a mispredicted
+//                   branch, because dispatch's allocation barrier means nothing
+//                   younger than an unresolved branch ever executes
 //   6. fs-dirty     mstatus.FS dirtying on a write, not on a read
 //   7. frm          a tie resolved by the instruction's rm field, and by frm
 //                   when the field says "dynamic"
 //
-// Controls: tools/run_fp_controls.py injects exactly one defect per build and
-// requires the named check to be the first failure. See
+// Controls: tools/run_fp_controls.py injects exactly one defect per build,
+// requires the mutant binary to differ from the shipping one and to exit 1, and
+// requires the named check to appear in its log. See
 // results/reports/I-050-fp-state.md.
 //
 // `--seed` is accepted and unused: every vector here is directed, and a random
@@ -393,6 +398,9 @@ class Asm {
   // The M extension's `div`: a long-latency INTEGER operation, used below as a
   // delay that does not occupy the shared floating-point unit.
   void Div(uint32_t rd, uint32_t rs1, uint32_t rs2) { Emit(R(0x01, rs2, rs1, 4, rd, 0x33)); }
+  // The M extension's 32-bit `divw` (OP-32): half the divide's iterations, so a
+  // shorter fixed-latency integer delay than `div`.
+  void Divw(uint32_t rd, uint32_t rs1, uint32_t rs2) { Emit(R(0x01, rs2, rs1, 4, rd, 0x3B)); }
   void Csrrw(uint32_t rd, uint32_t csr, uint32_t rs1) { Emit(I(csr, rs1, 1, rd, 0x73)); }
   void Csrrs(uint32_t rd, uint32_t csr, uint32_t rs1) { Emit(I(csr, rs1, 2, rd, 0x73)); }
   void Csrr(uint32_t rd, uint32_t csr) { Csrrs(rd, csr, 0); }
@@ -1179,95 +1187,167 @@ void PhaseMem(Vmosaic_core_tb* dut, mosaic::Reporter* reporter,
 // ============================================================================
 // Phase 5: a squashed FP operation contributes nothing.
 // ============================================================================
+// How the wrong path is constructed, and why it is a *trap* and not a branch.
+//
+// The obvious construction -- an FP operation fetched behind a mispredicted
+// branch -- cannot execute in this machine, and that is a property of the
+// machine, not of the stimulus. `mosaic_dispatch`'s `barrier` is driven by
+// `br_inflight` (mosaic_core.sv: `.barrier(br_inflight | wfi_halt)`), and the
+// barrier holds allocation for every instruction younger than an unresolved
+// branch. So while a branch is in flight *nothing younger than it is allocated*,
+// which means nothing younger than it can issue, execute, complete or flag. The
+// first version of this phase drove exactly that and observed zero flagged
+// completions: not a stimulus that was too short, but a machine in which a
+// branch mispredict can only ever discard *fetched-but-unallocated* work.
+//
+// A synchronous trap has no such barrier. The faulting instruction is
+// allocated, issued and (for a load fault) carries its exception on its ROB
+// entry; younger instructions allocate, issue and execute normally, and the
+// trap is taken when the faulting instruction reaches the head. Everything
+// younger is then squashed by the same `rob_flush_pulse` a redirect uses. So the
+// wrong path here is:
+//
+//   * an OLDER load to an unmapped address (0), whose precise access fault is
+//     taken at retire;
+//   * an OLDER, 64-iteration integer divide in front of it, so the faulting load
+//     cannot reach the head -- and therefore cannot trap -- for ~65 cycles;
+//   * a YOUNGER `fmul.s f5, f1, f2` (FLT_MAX * 2 = +inf, OF|NX) that is
+//     allocated, issued, executed and COMPLETES, producing and recording its
+//     flags, well inside that window;
+//   * the trap at the load's retire, which squashes the multiply and clears the
+//     recorded flags before its slot can retire.
+//
+// The phase then proves, in the trap handler, that the architectural `fflags`
+// and `f5` are exactly as they were before the multiply -- and the anti-vacuity
+// check requires the multiply to have *completed with flags*, so a machine that
+// merely never ran it cannot pass.
 void PhaseWrongPath(Vmosaic_core_tb* dut, mosaic::Reporter* reporter,
                     const Geometry& g, const std::string& name) {
   Scenario sc;
   Asm asm_(g.reset_vector);
+  // The trap handler lives at a fixed offset past the main body, so the
+  // `LaAbs` that loads its address into `mtvec` can name it before it is
+  // emitted. The main body ends in its own exit spin and never falls into it.
+  const uint64_t handler_pc = g.reset_vector + 0x400;
+  Asm handler_(handler_pc);
   asm_.LaAbs(31, kDataBase);
   asm_.LaAbs(30, kSlotBase);
-  // FLT_MAX, 2.0, 1.0 and 0.0 as *boxed* singles. The zero must be boxed: an
-  // unboxed zero is not a single-precision number, it is the canonical NaN, so
-  // using f0 (the never-written register, which reads as zero) as a single
-  // operand would make the gating divide produce a NaN and the branch below
-  // would never be taken.
+  asm_.LaAbs(28, handler_pc);
+  asm_.Csrrw(0, 0x305, 28);                 // mtvec <- handler (direct mode)
+  // FLT_MAX and 2.0 as *boxed* singles, and the two integer operands of the
+  // gating divide. The single operands must be boxed: an unboxed value is not a
+  // single-precision number, it is the canonical NaN.
   sc.Put64(0, 0xFFFF'FFFF'7F7F'FFFFull);   // FLT_MAX
   sc.Put64(8, 0xFFFF'FFFF'4000'0000ull);   // 2.0
-  sc.Put64(16, 0xFFFF'FFFF'3F80'0000ull);  // 1.0
-  sc.Put64(24, 0xFFFF'FFFF'0000'0000ull);  // +0.0
-  sc.Put64(32, 0);                          // the integer zero
-  sc.Put64(40, 1);                          // the integer one
+  sc.Put64(16, 0);                          // the integer zero
+  sc.Put64(24, 1);                          // the integer one
 
   asm_.Fld(1, 31, 0);       // f1 = FLT_MAX
   asm_.Fld(2, 31, 8);       // f2 = 2.0
-  asm_.Fld(3, 31, 16);      // f3 = 1.0
-  asm_.Fld(4, 31, 24);      // f4 = +0.0
-  asm_.Csrrw(0, 0x001, 0);
-  asm_.FmvXW(7, 5);
-  asm_.Sd(7, 30, 24);       // slot 3: f5 before the branch
+  asm_.Csrrw(0, 0x001, 0);  // fflags <- 0
   asm_.Csrr(7, 0x001);
-  asm_.Sd(7, 30, 16);       // slot 2: fflags before the branch, must be 0
-  // The branch is gated on a long-latency *integer* divide, so that it cannot
-  // resolve until well after an instruction behind it has had time to execute.
-  // The delay must not be an FP operation: the shared FP unit would then hold the
-  // wrong-path operation behind it in the queue, and the redirect would discard
-  // it before it ever ran -- which is what makes this phase vacuous, not what
-  // makes it pass. 0 / 1 is 0 and raises nothing.
-  asm_.Ld(2, 31, 32);
-  asm_.Ld(3, 31, 40);
-  asm_.Div(1, 2, 3);                         // x1 = 0, after the divide latency
-  // beq x1, x0, +8: taken, and predicted not-taken (the predictor has no entry
-  // for this branch), so the instruction at +4 is fetched, dispatched and
-  // executed speculatively -- and then squashed by the redirect.
-  asm_.Beq(1, 0, 8);
-  // The wrong path: FLT_MAX * 2 = +inf with OF|NX. The value is deliberately
-  // not the canonical NaN, so "the squashed operation wrote its destination"
-  // is distinguishable from "the destination was never written" (the latter
-  // reads as the canonical NaN because the never-written register is zero and
-  // an unboxed zero *is* the canonical NaN as a single operand).
-  asm_.Farith(2, true, 5, 1, 2, 0);
-  // The correct path resumes here.
-  asm_.Csrr(7, 0x001);
-  asm_.Sd(7, 30, 0);        // slot 0: fflags after the redirect, must be 0
+  asm_.Sd(7, 30, 0);        // slot 0: fflags before the wrong path, must be 0
   asm_.FmvXW(7, 5);
-  asm_.Sd(7, 30, 8);        // slot 1: f5 after the redirect
+  asm_.Sd(7, 30, 8);        // slot 1: f5 before the wrong path
+  // The delay: a 32-iteration `divw`. It is an *integer* operation, so it does
+  // not occupy the shared FP unit, and it is older than the faulting load, so
+  // retirement order keeps the load -- and its trap -- behind it. Its latency is
+  // chosen so the trap lands after the multiply below has completed but well
+  // before the long FP divide below that has completed: the window is where the
+  // squash has something completed to discard *and* something in flight to
+  // cancel.
+  asm_.Ld(2, 31, 16);
+  asm_.Ld(3, 31, 24);
+  asm_.Divw(1, 2, 3);                       // x1 = 0, after the divide latency
+  // The faulting instruction: a *misaligned* load. The core decides a load's
+  // misalignment from the address alone, before the memory map is consulted, so
+  // the fault is deterministic and does not depend on the harness's map or on
+  // the device path. (Address 0 would not do: it is the boot ROM, which is
+  // readable, so a load there does not fault.)
+  const uint64_t fault_pc = asm_.pc();
+  asm_.Ld(5, 31, 1);        // ld x5, 1(x31): misaligned -> precise load fault
+  // The wrong-path FP operations, younger, and free to allocate and execute
+  // because a load is not an allocation barrier.
+  //
+  //   1. `fmul.s f5, f1, f2` is short. It issues first, COMPLETES inside the
+  //      divide's window and produces OF|NX -- the completed-and-flagged
+  //      operation the phase's anti-vacuity check requires.
+  //   2. `fdiv.s f6, f1, f2` is 65 iterative steps. It issues behind the
+  //      multiply and is still IN FLIGHT when the trap fires, so the shipping
+  //      machine cancels it: no writeback is published for it. The
+  //      FP_SQUASH_WRITES control removes that cancellation, and the operation
+  //      then completes after the squash and publishes a stale writeback.
+  //
+  // The multiply's result is deliberately not the canonical NaN, so "the
+  // squashed operation wrote its destination" is distinguishable from "the
+  // destination was never written" (the latter reads as the canonical NaN).
+  asm_.Farith(2, true, 5, 1, 2, 0);         // fmul.s f5 = FLT_MAX * 2 = +inf
+  asm_.Farith(3, true, 6, 1, 2, 0);         // fdiv.s f6, in flight at the trap
+  // The no-trap path: reachable only if the load above did NOT trap. It writes
+  // the same two slots the handler does, so the claim checks below read a real
+  // observation either way -- and a machine that never trapped fails them
+  // explicitly (its fflags would be OF|NX and its f5 would be +inf) rather than
+  // passing on unwritten memory.
+  asm_.Csrr(7, 0x001);
+  asm_.Sd(7, 30, 16);       // slot 2
+  asm_.FmvXW(7, 5);
+  asm_.Sd(7, 30, 24);       // slot 3
   asm_.Exit();
+  // The handler observes the architectural state *after* the trap's squash.
+  handler_.Csrr(7, 0x001);
+  handler_.Sd(7, 30, 16);   // slot 2: fflags after the trap, must be 0
+  handler_.FmvXW(7, 5);
+  handler_.Sd(7, 30, 24);   // slot 3: f5 after the trap
+  handler_.Exit();
   for (size_t i = 0; i < asm_.words().size(); i++) {
     sc.image.Put(g.reset_vector + 4ull * i, asm_.words()[i]);
+  }
+  for (size_t i = 0; i < handler_.words().size(); i++) {
+    sc.image.Put(handler_pc + 4ull * i, handler_.words()[i]);
   }
 
   RunResult run = Execute(dut, reporter, g, name, sc);
   const uint64_t unwritten_single = 0x0000'0000'7FC0'0000ull;  // f5 as a single
-  Check(reporter, run.traps.empty(), name + ": no trap");
+  // The trap happened, and it is the load's -- not a stray trap from the
+  // handler or the reset path.
+  Check(reporter, run.traps.size() == 1 && run.traps[0] == fault_pc,
+                  name + ": exactly the faulting load trapped at " + U64(fault_pc) +
+                      " (got " + Dec(run.traps.size()) + " trap(s))");
   // The state the phase starts from.
-  Check(reporter, run.Slot(2) == 0, name + ": fflags are clear before the branch");
-  Check(reporter, run.Slot(3) == unwritten_single,
-                  name + ": f5 is architecturally unwritten before the branch "
+  Check(reporter, run.Slot(0) == 0, name + ": fflags are clear before the wrong path");
+  Check(reporter, run.Slot(1) == unwritten_single,
+                  name + ": f5 is architecturally unwritten before the wrong path "
                          "(reading as the canonical NaN single): got " +
-                      U64(run.Slot(3)));
+                      U64(run.Slot(1)));
   // The anti-vacuity checks. These are what make the phase evidence: the
-  // squashed operation must have EXECUTED and produced its OF|NX, and the
-  // branch must really have redirected. "No flags appeared" is otherwise also
-  // true of a machine that never ran the instruction.
+  // squashed operation must have EXECUTED and produced its OF|NX, and the trap
+  // must really have redirected. "No flags appeared" is otherwise also true of a
+  // machine that never ran the instruction.
   Check(reporter, run.fp_flags >= 1,
                   name + ": the wrong-path operation executed and produced its "
                          "flags (" + Dec(run.fp_flags) + " flagged completions); "
                          "without this the phase would prove nothing");
   Check(reporter, run.redirects >= 1,
-                  name + ": the mispredicted branch redirected (" +
-                      Dec(run.redirects) + ")");
+                  name + ": the trap redirected (" + Dec(run.redirects) + ")");
+  // Anti-vacuity for the cancellation half: the long FP divide must have been
+  // ACCEPTED by the FP unit (issued) but never completed -- so at the flush the
+  // unit really held an operation in flight. If it had completed too, the
+  // FP_SQUASH_WRITES control below would have nothing to catch.
+  Check(reporter, run.fp_issue >= run.fp_commit + 1,
+                  name + ": an FP operation was in flight at the squash (" +
+                      Dec(run.fp_issue) + " issued, " + Dec(run.fp_commit) +
+                      " completed)");
   // The claim.
-  Check(reporter, run.Slot(0) == 0,
+  Check(reporter, run.Slot(2) == 0,
                   name + ": a squashed FP operation contributes no fflags -- got " +
-                      FlagStr(static_cast<uint32_t>(run.Slot(0) & 0x1F)));
-  Check(reporter, run.Slot(1) == unwritten_single,
+                      FlagStr(static_cast<uint32_t>(run.Slot(2) & 0x1F)));
+  Check(reporter, run.Slot(3) == unwritten_single,
                   name + ": a squashed FP operation writes no destination -- f5 "
-                         "reads " + U64(run.Slot(1)) + ", and +inf would mean the "
+                         "reads " + U64(run.Slot(3)) + ", and +inf would mean the "
                          "squashed multiply had installed its result");
   // The mechanism: the squashed operation's result must not be handed to the
-  // register file at all. On the shipping build the redirect cancels the unit's
-  // in-flight operation and invalidates its latched destination, so no
-  // writeback is published for it and the stale-writeback counter does not move
-  // in this window -- the only instruction on the wrong path is the one above.
+  // register file at all. The trap cancels the unit's in-flight operation and
+  // invalidates its latched destination, so no stale writeback is published.
   Check(reporter, run.wb_stale == 0,
                   name + ": no writeback is published for a squashed operation "
                          "(stale " + Dec(run.wb_stale) + ")");

@@ -1133,7 +1133,13 @@ module mosaic_csr (
     // MIE/MPIE/MPP (and SIE/SPIE/SPP), so FS has exactly this one writer besides
     // software.
     if (fp_fs_dirty_i) begin
+`ifdef MOSAIC_CSR_MUTANT_FS_NO_DIRTY
+      // MUTANT (control for CASE=fp.precise_flags_and_boxing): an instruction
+      // that modifies FP state does NOT set mstatus.FS to Dirty, so the machine
+      // claims its FP state is clean after an FP write.
+`else
       mstatus_d = mstatus_d | MSTATUS_FS;
+`endif
     end
   end
 

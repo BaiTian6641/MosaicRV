@@ -289,3 +289,199 @@ Both profiles' manifests were regenerated (`gen_manifest.py --profile p0` and
   127 ELFs never execute an FP instruction. Covering FP externally needs an
   F/D-enabled ACT4 configuration (and a reference model that executes F/D), or an
   external FP conformance suite; neither exists in this tree.
+
+---
+
+# I-050 attempt 3 (FpStateFinal): the case is delivered
+
+**Status: DELIVERED.** `fp.precise_flags_and_boxing` passes (`RESULT PASS ... checks=106
+phases=7`), the wrong-path phase is non-vacuous, five controls each rebuild from an empty
+directory, differ from the shipping binary and exit 1 on a named failure, and all eleven
+required cases were re-run. The two defects attempt 2 found are still fixed; this attempt
+changed no shipping RTL behaviour (every RTL edit is inside an `ifdef` that no shipping
+build defines).
+
+## 1. The wrong-path phase: why it is a trap and not a branch
+
+The first thing to establish is that the branch construction the card suggested **cannot
+work in this machine**, and that this is a property of the machine rather than of the
+stimulus. `mosaic_dispatch`'s allocation gate includes a `barrier` input, and
+`rtl/core/mosaic_core.sv` drives it as `.barrier(br_inflight | wfi_halt)`. The barrier
+holds allocation for **every instruction younger than an unresolved branch**. So while a
+branch is in flight, nothing younger than it is allocated -- and therefore nothing younger
+than it can issue, execute, complete or produce flags. A mispredicted branch in this design
+can only discard *fetched-but-unallocated* work.
+
+That is exactly what the previous stimulus hit. Instrumenting the old phase showed
+`fp_issue=2 fp_flags=0`: the only two FP operations that issued were the two `fmv.x.w`
+moves, and the squashed `fmul.s` never reached the FP unit at all. It was not a stimulus
+that was too short; there is no branch-based stimulus that would have worked. (This is the
+conservative recovery the core's own header documents: "a branch is a barrier".)
+
+A **synchronous trap has no such barrier.** The faulting instruction is allocated, issued,
+and (for a load fault) carries its exception on its ROB entry; younger instructions
+allocate, issue and execute normally, and the trap is taken when the faulting instruction
+reaches the head. Everything younger is then squashed by the same `rob_flush_pulse` a
+redirect uses. The phase is therefore built as:
+
+1. `mtvec` is pointed at a handler at a fixed offset (`reset_vector + 0x400`) so the
+   post-trap architectural state can be read.
+2. `f1 = FLT_MAX`, `f2 = 2.0` (both NaN-boxed singles), `fflags <- 0`, and the
+   pre-state (`fflags`, `f5`) is stored.
+3. An older 32-step integer `divw` (0 / 1) is the delay. It is not an FP operation, so it
+   does not occupy the shared FP unit, and being older than the faulting load it keeps the
+   load -- and its trap -- behind it in retirement order.
+4. `ld x5, 1(x31)` -- a **misaligned** load -- is the faulting instruction. The core decides
+   a load's misalignment from the address alone, before the memory map is consulted, so the
+   fault is deterministic. (An unmapped address would not do: address 0 is the boot ROM and
+   is readable, so a load there does not fault.)
+5. Younger than the load, `fmul.s f5, f1, f2` (FLT_MAX * 2 = +inf, `OF|NX`) **completes and
+   flags** inside the divide's window, and `fdiv.s f6, f1, f2` (65 iterative steps) is
+   **still in flight** when the trap fires.
+6. The trap at the load's retire squashes both and clears the recorded flags.
+7. The handler reads `fflags` and `f5` and exits. A no-trap path writes the same two slots,
+   so a machine that never trapped fails the claim checks explicitly instead of passing on
+   unwritten memory.
+
+Observed on the shipping build: `fp_issue=4 fp_commit=3 fp_flags=1 fp_merges=2 traps=1
+redirects=2 wb_stale=0`, architectural `fflags=0`, `f5` = the canonical NaN single. That is
+one FP operation completed with flags and never merged, and one cancelled in flight.
+
+**The anti-vacuity checks were not relaxed; one was added.** The phase now requires:
+`fp_flags >= 1` (the squashed multiply really executed and produced its `OF|NX`),
+`traps.size() == 1` at the faulting load's PC (the trap is the load's), and
+`fp_issue >= fp_commit + 1` (an FP operation was accepted by the unit and never completed,
+so the flush really had something in flight to cancel). The last one is what makes the
+`FP_SQUASH_WRITES` control meaningful: without it, that control would have nothing to
+catch.
+
+## 2. The controls
+
+`tools/run_fp_controls.py` (new) rebuilds the case from an empty directory per defect, with
+the `-D` on the recorded command line, requires the mutant binary to differ from the
+shipping one (`cmp`), and requires exit 1. Each mutant's first failure is printed.
+
+| define | file | exit | first failure |
+|---|---|---|---|
+| `MOSAIC_CORE_MUTANT_FFLAGS_EARLY` | `rtl/core/mosaic_core.sv` | 1 | `arith vector 0 ...: fflags -- got -, host NX` |
+| `MOSAIC_CORE_MUTANT_FP_SQUASH_WRITES` | `rtl/core/mosaic_fp_unit.sv` | 1 | `wrong-path: an FP operation was in flight at the squash (4 issued, 4 completed)` |
+| `MOSAIC_CORE_MUTANT_FP_NO_UNBOX` | `rtl/core/mosaic_fp_unit.sv` | 1 | `box-nan slot 3 (an unboxed operand is the canonical quiet NaN)` |
+| `MOSAIC_CORE_MUTANT_FP_NO_BOX` | `rtl/core/mosaic_fp_unit.sv` | 1 | `arith vector 0 ...: bits -- got 0x000000007fc00000, host 0x000000003f800000` |
+| `MOSAIC_CSR_MUTANT_FS_NO_DIRTY` | `rtl/core/mosaic_csr.sv` | 1 | `fs-dirty: an FP write sets mstatus.FS = Dirty: reads 0x0000000000003800` |
+
+| binary | sha256 |
+|---|---|
+| shipping (controls build) | `3c84a43d2a556bdaac77ad0df0a0ce3c932cbaa4a28bd917774d640db0b469fc` |
+| `MOSAIC_CORE_MUTANT_FFLAGS_EARLY` | `595662b3fa9b80a1a52c559f96b3b88ff6e947345219fc05161c461f2309cabe` |
+| `MOSAIC_CORE_MUTANT_FP_SQUASH_WRITES` | `a104234de56a97033bc69826914a0c3b2fe06f2d993c447ea0efa0b11c82e417` |
+| `MOSAIC_CORE_MUTANT_FP_NO_UNBOX` | `da372c81ef5e248e0295cc3cc5da920179f4199fef3d9910821b3cfea26fa375` |
+| `MOSAIC_CORE_MUTANT_FP_NO_BOX` | `408d762e707b3a5f926c16a9dbd75827bad5ed6fe9d7b9dc555836c89d7ce6f7` |
+| `MOSAIC_CSR_MUTANT_FS_NO_DIRTY` | `c8e952df0131deb2d393851bde9bb6852b0694739170d01958463c135e51f343` |
+
+What each control means, and where the intended check fires:
+
+* **`FFLAGS_EARLY`** is the card's fail mode: the completion's flags are ORed into `fcsr`
+  when the FP unit signals done, not when the operation retires. Its *first* failure is in
+  `arith`, where the early OR races an older `csrw fflags, 0` and the flags are then
+  cleared -- the early write makes the flags imprecise in program order. The wrong-path
+  phase also catches it, with exactly the intended message: `wrong-path: a squashed FP
+  operation contributes no fflags -- got OF|NX`. So the card's fail mode is caught both by
+  an independent oracle (the host FPU) and by the squashed-operation claim.
+* **`FP_SQUASH_WRITES`** removes the flush's cancellation of the operation in flight. Both
+  the in-flight anti-vacuity check and the mechanism check fire; the latter reports
+  `no writeback is published for a squashed operation (stale 1)`, i.e. the squashed divide
+  completes after the squash and publishes a stale completion, which the writeback path
+  refuses and counts. This is the evidence that "a squashed FP operation writes its
+  destination" is a real, observable fail mode of the shipped design.
+* **`FP_NO_UNBOX`** drops the single-precision operand rule; `box-nan` catches the unboxed
+  operand no longer being the canonical NaN.
+* **`FP_NO_BOX`** drops the single-precision *result* rule; `arith` catches the unboxed
+  result bits. This is the **fifth control**: none of the four named in the card covers
+  result NaN-boxing, and the case claims it, so the claim needed a control.
+* **`FS_NO_DIRTY`** drops the `mstatus.FS = Dirty` set; `fs-dirty` catches the FP write
+  leaving FS at Initial.
+
+**No driver-level control was needed.** Every rule this case claims is a machine rule and is
+expressible as an RTL `-D`; the driver's anti-vacuity checks are guards on the *stimulus*,
+not claims, and `FP_SQUASH_WRITES` exercises the one of them that could otherwise be
+vacuous. A control that lived only in the driver would be a control on the test, not on the
+DUT, which is not what the card asks for.
+
+## 3. The eleven cases, re-run
+
+All four profiles' manifests were regenerated first. p0 and p1 regenerate cleanly; p2 and p3
+fail manifest generation for a **pre-existing** reason unrelated to this work
+(`csr vtype (0xc21): the table declares it writable but the address encodes a read-only
+register`, from `config/csr/vector.json`; `tools/check_profile.py --all` still passes for
+all four profiles, so no gate is affected).
+
+| case | profile | result |
+|---|---|---|
+| `core.act_dut` | p1 | **PASS 127/127** (`RESULT PASS core.act_dut ran=127 passed=127 expected=127`) |
+| `core.corpus_sweep` | p0 | PASS |
+| `core.mem_program` | p0 | PASS |
+| `privilege.permission_matrix` | p1 | PASS |
+| `fp.operation_matrix` | p0 | PASS |
+| `trap.precise_state` | p0 | PASS |
+| `compressed.cross_boundary` | p0 | PASS |
+| `sv39.walk_and_faults` | p1 | PASS |
+| `csr.rule_ledger` | p0 | PASS |
+| `csr.precise_trap_mret` | p0 | PASS |
+| `core.unwritten_reg_read` | p0 | PASS |
+| `fp.precise_flags_and_boxing` | p0 | PASS (checks=106) |
+
+`core.act_dut` was run with `--no-generate`, reusing the pinned ELF set
+(`act_commit 96493a91448ca50780013fd892daec2c204487ba`) the same way the recorded run did;
+the runner still executed all 127 ELFs against the DUT and recorded PASS 127/127 in
+`results/unit/core.act_dut/result.json`. Note that
+`results/unit/core.act_dut/run.log` is a **stale** artifact from an older failing run
+(passed=122 failed=5) that this runner does not write -- it writes `results/v043/run.log` --
+so a reader should trust `result.json`/`results/v043/run.log` and not that file.
+
+Gates re-run and green: `make check` (exit 0), `tools/lint_rtl.py --profile p0` and
+`--profile p1` (47 sources clean each), `slang-tidy` (exit 0), `check_records`,
+`check_exclusions` and `check_exclusions --negative`.
+
+## 4. Files changed this attempt
+
+* `sim/unit/tb_core_fp.cpp` -- the wrong-path phase rebuilt on the trap construction; a
+  `Divw` assembler helper; the header's phase table.
+* `rtl/core/mosaic_core.sv` -- `MOSAIC_CORE_MUTANT_FFLAGS_EARLY` `ifdef` at `fp_fflags_or`.
+* `rtl/core/mosaic_fp_unit.sv` -- `MOSAIC_CORE_MUTANT_FP_SQUASH_WRITES` (`flush_eff`),
+  `MOSAIC_CORE_MUTANT_FP_NO_UNBOX` and `MOSAIC_CORE_MUTANT_FP_NO_BOX` `ifdef`s.
+* `rtl/core/mosaic_csr.sv` -- `MOSAIC_CSR_MUTANT_FS_NO_DIRTY` `ifdef`.
+* `tools/run_fp_controls.py` -- new; the five controls.
+
+No shipping RTL behaviour changed: every RTL edit is inside an `ifdef` no shipping build
+defines, and `make check`, both profiles' lint, `slang-tidy` and every re-run case are
+green.
+
+## 5. Not covered (carried forward, with the new findings)
+
+* `fsqrt` and the fmadd family remain absent (I-049 declared them).
+* `frm` is not renamed, so a dynamically-rounded operation younger than a pending `frm`
+  write may use the old mode. The `frm` phase makes its ordering deterministic by indexing
+  the operand pool with the value the `frm` read-back returned, so the test is not a race --
+  but the machine's limitation stands.
+* RMM is not driven by this case: this platform's `<fenv.h>` has no
+  `FE_TONEARESTFROMZERO`. `fp.operation_matrix` owns it with a derived tie expectation.
+* **No external suite covers FP.** The p1 ACT4 configuration excludes F/D (`DEFERRED_REASONS`
+  in `tools/run_act_dut.py` names F and D "not in the p1 profile"), so its 127 ELFs execute
+  no FP instruction and the 127/127 above is not FP evidence. Covering FP externally would
+  take either an F/D-enabled ACT4 configuration -- the same UDB/Sail flow, with F and D added
+  to the advertised set and a Sail build that executes them (Sail 0.14.1 does support F/D, so
+  this is configuration and generation work, not a new reference model) -- or a dedicated FP
+  conformance suite. Neither exists in this tree, and adding one is outside I-050's
+  ownership.
+* **New, and a machine finding rather than a gap:** a mispredicted branch cannot produce an
+  executed-and-squashed operation, because dispatch's `barrier` (`br_inflight`) stops
+  allocation for everything younger than an unresolved branch. The wrong-path phase therefore
+  proves the precise-`fflags` rule through a trap. If a future change removes the barrier
+  (the saved-map recovery the core header describes), the branch construction becomes
+  available and this phase should gain it as a second wrong path -- but it is not a defect
+  today, it is the documented conservative recovery.
+* The wrong-path phase's timing uses directed instruction latencies (a 32-step `divw` for the
+  delay, a 65-step `fdiv.s` for the in-flight operation). It is deterministic for the fixed
+  program the phase builds, and the `fp_issue >= fp_commit + 1` check fails loudly if a future
+  latency change moved the in-flight operation out of the window rather than passing
+  vacuously.

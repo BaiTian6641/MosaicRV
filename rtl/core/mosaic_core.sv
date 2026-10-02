@@ -4065,7 +4065,16 @@ module mosaic_core (
                         fp_flag_v_mem[rob_head1_index] &&
                         (fp_flag_gen_mem[rob_head1_index] == rob_head1_gen);
   assign fp_merge1    = fp_merge1_v ? fp_flag_mem[rob_head1_index] : 5'd0;
+`ifdef MOSAIC_CORE_MUTANT_FFLAGS_EARLY
+  // MUTANT (control for CASE=fp.precise_flags_and_boxing): the operation's flags
+  // are written into the architectural fcsr when the FP unit signals done,
+  // instead of when the operation retires. This is the card's fail mode: an
+  // operation that is executed and then squashed has already leaked its flags,
+  // so a trap or a redirect no longer makes `fflags` precise.
+  assign fp_fflags_or = (fp_wb_valid && fp_wb_ready) ? fp_wb_fflags : 5'd0;
+`else
   assign fp_fflags_or = fp_merge0 | fp_merge1;
+`endif
   assign fp_fs_dirty  = (rob_retire_ack && fp_state_wr_mem[rob_head_index]) ||
                         (rob_retire_ack_next && rob_retire_ack &&
                          fp_state_wr_mem[rob_head1_index]);
