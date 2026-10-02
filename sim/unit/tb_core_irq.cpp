@@ -445,7 +445,7 @@ class Harness {
   Harness(Vmosaic_core_tb* dut, mosaic::Reporter* reporter, uint64_t max_cycles,
           const ProgImage* img, mosaic::MemoryModel* mem)
       : dut_(dut), reporter_(reporter), max_cycles_(max_cycles), imem_(img),
-        dmem_mem_(mem), dmem_(mem, 1) {}
+        dmem_(mem, 1) {}
 
   void Configure(const Geometry& g) { g_ = g; }
   void Phase(const std::string& name) { phase_ = name; }
@@ -710,7 +710,6 @@ class Harness {
   mosaic::Reporter* reporter_;
   uint64_t max_cycles_;
   Imem imem_;
-  mosaic::MemoryModel* dmem_mem_;
   DataMem dmem_;
   Geometry g_;
   std::string phase_;
