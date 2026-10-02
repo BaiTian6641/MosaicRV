@@ -49,7 +49,8 @@
     "I-041",
     "I-031",
     "I-040",
-    "V-016"
+    "V-016",
+    "I-032"
   ],
   "evidence": {
     "I-001": {
@@ -601,6 +602,17 @@
       "verdict": "PASS",
       "notes": "PC transfer, fetch boundaries and FENCE.I visibility, compared per instruction against an ISA-derived expectation. Case PASS from a clean build: 93 checks over 6 runs, 85 retires, 805 cycles. Every situation the card names is produced with its specifics recorded: a JAL link value checked as a register value; two not-taken branches falling through to pc+4 and a taken branch reaching its target; a JALR whose computed target has bit 0 set (0x8000003D) cleared to 0x8000003C with the link at 0x80000034; positive and negative branch displacements across the 4 KiB page front (0x80000008 -> 0x80001004 and 0x80001008 -> 0x80000FD0); a 32-bit instruction at 0x80000FFE whose four bytes cross the harness's 8-byte line *and* the 4 KiB page front at 0x80001000 (line_straddles=2, page_straddles=1, and the event record still carries the instruction's own bits and a pc_after of +4); FENCE.I after a code patch with the patched word and its effect being what is fetched and executed; and a wrong-path fetch in which eight fetches faulted inside regions that were never executed, leaving no record, no stop, no refusal and no trap. Five controls: two harness-level (a PC masked to the line front; JALR's target served from the uncleared odd address) and three RTL mutants (FENCE.I not invalidating; a wrong-path undecodable macro leaking past the redirect; a branch-target mutant), of which the last was verified UNOBSERVABLE in the integrated core because the cluster recomputes the JALR target itself -- reported as a finding rather than counted as a control. Regression-checked here: the case passes and fence.code_and_data_order and core.corpus_branch pass after clean rebuilds. NOT covered, stated by the lane: 'page boundary' is only an address boundary because p0 has no MMU or cache; the integrated core produces no instruction-address-misaligned trap (only the bring-up core does), so a fault cannot be produced for a 2-mod-4 target -- an unaligned target is instead shown to execute, which is correct for C/IALIGN=16 but means the fault path is untested here; a fetch fault is a stop rather than a trap in p0; mepc on a 2-mod-4 PC is not exercised because the p0 CSR config declares IALIGN=32 (the same cross-package item I-041 raised for p1); there is no cache-line refill (no L1I), interrupts are tied off, the ISA reference implements only the RV64IM subset the six programs use, and there is no second-ISS differential.",
       "report": "results/reports/V-016-pc.md"
+    },
+    "I-032": {
+      "cases": [
+        "rename.bank_bias_exhaustion"
+      ],
+      "commands": [
+        "python3 tools/run_unit.py --profile p0 --case rename.bank_bias_exhaustion"
+      ],
+      "verdict": "PASS",
+      "notes": "Bank-aware physical allocation, closing the fabric chain. Case PASS: 11 checks, 10195 shadow comparisons over 10275 cycles. Two new inputs (alloc_bias_en, alloc_bias_bank) make the allocation scan prefer the free tags of one bank and fall back to the full free set when that bank is empty, and acceptance still requires free_count >= need -- which is what makes the card's two fail modes impossible rather than merely untested: the bias cannot deadlock (a preference never removes a legal allocation), cannot leak a register and cannot steal one. The card's requirement that a gain be MEASURED rather than assumed is met: on 240 identical cycles with the bias off versus on, same-bank source-tag read-port conflicts fall 313 -> 259 with the accepted-allocation count, the stall count and the per-cycle free-count trajectory asserted identical, 75 preferred-bank hits and 53 fallbacks, and the bank histogram moving [31,55,42,0] -> [0,75,53,0]. The case asserts that the bias actually took effect, so a no-op policy cannot pass. Ten controls rebuild from deleted directories with their -D present, differ in hash and exit 1 naming the broken check: three new (BIAS_DEADLOCK, BIAS_UNRELEASED, BIAS_ARCH) and seven pre-existing ones in the edited regions, including the ten two-wide rules. The new stream also exposed and fixed a latent defect in the case's own random phase (a release aimed at a live identity after a tag recycle). NOT verified: the read-port delta is a same-bank source-tag proxy because the rename testbench does not instantiate the register file (prf.read_bank_collision owns that path), and the bias has no consumer in the p0 core, so its core-level effect is not measured; only p0 was built. CAVEAT recorded rather than smoothed over: the blast-radius core cases (both retire/commit head-block cases, core.trap_csr_program, core.mem_program, core.unwritten_reg_read, fabric.fixed_two_cluster, trap.precise_state, core.corpus_sweep, core.corpus_branch) were re-run and passed on the pre-final-cosmetic revision, but could not be re-run after it because a concurrent lane (I-044) left the core mid-edit and non-elaborating; the integration lead re-runs them once I-044 lands, and if any fails, this entry is amended rather than left standing.",
+      "report": "results/reports/I-032-bank.md"
     }
   }
 }

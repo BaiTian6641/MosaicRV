@@ -187,6 +187,18 @@ def render_sv_package(bundle: config_check.Bundle, advertised) -> str:
     add("  localparam int unsigned MOSAIC_PMP_GRAIN_BYTES = %d;" % grain)
     add("  localparam int unsigned MOSAIC_PMP_G           = %d;" % g)
     add("  localparam int unsigned MOSAIC_PMP_CFG_COUNT   = %d;" % ((entries + 7) // 8))
+    add("  // Flat observability widths for the entry arrays. One bit when the profile")
+    add("  // implements no entries, because a zero-width vector is not a vector.")
+    add("  localparam int unsigned MOSAIC_PMP_ENTRY_CFG_W  = %d;"
+        % (1 if entries == 0 else entries * 8))
+    add("  localparam int unsigned MOSAIC_PMP_ENTRY_ADDR_W = %d;"
+        % (1 if entries == 0 else entries * 64))
+    add("  // The CSR numbers are fixed by the ISA (priv-csrs.tex, \"CSR number")
+    add("  // assignments\": 0x3A0 & MRW & pmpcfg0, 0x3B0 & MRW & pmpaddr0), so they")
+    add("  // are emitted here rather than written into the RTL. On RV64 only the")
+    add("  // even-numbered pmpcfg registers are legal, so entry group k is 0x3A0+2k.")
+    add("  localparam logic [11:0] MOSAIC_PMPCFG_ADDR_BASE  = 12'h3a0;")
+    add("  localparam logic [11:0] MOSAIC_PMPADDR_ADDR_BASE = 12'h3b0;")
     add("")
 
     add("  // Physical memory map")
@@ -557,6 +569,7 @@ def render_sv_csr_package(bundle: config_check.Bundle) -> str:
     profile = bundle.profile
     less_privileged = bool([mode for mode in profile["privilege_modes"] if mode in ("S", "U")])
     csrs = collect_csrs(bundle)
+    modes_list = list(profile["privilege_modes"])
 
     lines = []
     add = lines.append
@@ -581,6 +594,18 @@ def render_sv_csr_package(bundle: config_check.Bundle) -> str:
     add("`ifndef MOSAIC_CSR_PKG_SV_")
     add("`define MOSAIC_CSR_PKG_SV_")
     add("")
+    # The RTL has to *compile out* the registers a profile does not have: a
+    # reference to a constant the package does not declare is a compile error,
+    # not a zero. So which modes exist also travels as a preprocessor flag, from
+    # the same profile list the masks above are narrowed from.
+    add("// Which privilege modes this profile implements. Both the flags and the")
+    add("// MOSAIC_CSR_HAS_S/HAS_U localparams below come from the same list, so the")
+    add("// RTL cannot be built for a profile whose registers it names.")
+    if "S" in modes_list:
+        add("`define MOSAIC_CSR_HAS_S")
+    if "U" in modes_list:
+        add("`define MOSAIC_CSR_HAS_U")
+    add("")
     add("package mosaic_csr_pkg;")
     add("")
     add("  // This package is compiled into every file that includes it, and a warning is")
@@ -593,7 +618,6 @@ def render_sv_csr_package(bundle: config_check.Bundle) -> str:
     add("")
     add("  localparam int unsigned MOSAIC_CSR_COUNT = %d;" % len(csrs))
     add("")
-    modes_list = list(profile["privilege_modes"])
     add("  // Privilege levels, and which of them this profile implements. The RTL reads")
     add("  // \"is there a mode below M\" from here rather than naming a profile.")
     add("  localparam logic [1:0] MOSAIC_PRIV_U = 2'd0;")

@@ -155,6 +155,15 @@
 // no-op rather than a duplicate package definition.
 `include "mosaic_pkg.sv"
 
+// The generated CSR table, for the one number this module shares with the CSR
+// file: which mip bits software may write. Including it is what removes the
+// hand-kept copy the old comment here warned about.
+/* verilator lint_off UNUSEDPARAM */
+/* verilator lint_off UNUSEDSIGNAL */
+`include "mosaic_csr_pkg.svh"
+/* verilator lint_on UNUSEDSIGNAL */
+/* verilator lint_on UNUSEDPARAM */
+
 module mosaic_interrupt (
     input  logic                 clk_i,
     input  logic                 rst_i,
@@ -172,6 +181,11 @@ module mosaic_interrupt (
     input  logic [63:0]          mie_i,
     input  logic [63:0]          mideleg_i,
     input  logic                 mstatus_mie_i,
+    // The privilege the trap would be taken *from*, and the supervisor global
+    // enable. Both are needed to decide whether an interrupt may be taken at all
+    // once delegation can send one to a mode other than M (I-044).
+    input  logic [1:0]           priv_i,
+    input  logic                 mstatus_sie_i,
 
     // Software writes to mip[7]/mip[3], forwarded from mosaic_csr. They take
     // effect on the same clock edge the CSR file's own write does, which is the
@@ -209,25 +223,31 @@ module mosaic_interrupt (
   // Interrupt cause codes. These are ISA constants from the privileged spec's
   // mcause table, not geometry, so they are not in the generated package. Bit 63
   // is mcause's Interrupt bit; the code sits in bits 62:0.
+  localparam logic [5:0]  IRQ_CODE_SSI = 6'd1;   // supervisor software interrupt
   localparam logic [5:0]  IRQ_CODE_MSI = 6'd3;   // machine software interrupt
   localparam logic [5:0]  IRQ_CODE_MTI = 6'd7;   // machine timer interrupt
   localparam logic [5:0]  IRQ_CODE_MEI = 6'd11;  // machine external interrupt
 
   // Built by concatenation from the codes above, so the code is written down
   // once: bit 63 set, bits 62:6 zero, the code in bits 5:0.
+  localparam logic [63:0] CAUSE_SSI = {1'b1, 57'd0, IRQ_CODE_SSI};
   localparam logic [63:0] CAUSE_MSI = {1'b1, 57'd0, IRQ_CODE_MSI};
   localparam logic [63:0] CAUSE_MTI = {1'b1, 57'd0, IRQ_CODE_MTI};
   localparam logic [63:0] CAUSE_MEI = {1'b1, 57'd0, IRQ_CODE_MEI};
 
   // mip/mie bit positions, from the mcause table (cause number i is bit i in
   // both registers).
+  localparam int unsigned BIT_SSIP = 1;
   localparam int unsigned BIT_MSIP = 3;
   localparam int unsigned BIT_MTIP = 7;
   localparam int unsigned BIT_MEIP = 11;
 
-  // The software-writable mip bits: config/csr/mode_m.json, mip
-  // "writable_fields": ["7", "3"]. Bits outside this mask are read-only here.
-  localparam logic [63:0] MIP_WRITABLE_MASK = 64'h0000_0000_0000_0088;
+  // The software-writable mip bits. This used to be a literal with a comment
+  // saying that a profile which made another bit writable would have to move
+  // both it and the CSR table together; I-044 is that profile, so the literal is
+  // gone and the mask is the generated one -- the same number the CSR file masks
+  // its own reads with, so the two cannot disagree.
+  localparam logic [63:0] MIP_WRITABLE_MASK = mosaic_csr_pkg::MOSAIC_CSR_WMASK_MIP;
 
   // Index of each source inside the synchroniser vector, named so the packing
   // below and the unpacking further down cannot drift apart.
@@ -284,8 +304,10 @@ module mosaic_interrupt (
   // MTIP and never clears it keeps seeing a pending timer interrupt, which is
   // what makes it a testable path rather than a nudge.
   // --------------------------------------------------------------------------
+  logic sw_ssip_q;
   logic sw_msip_q;
   logic sw_mtip_q;
+  logic sw_ssip_d;
   logic sw_msip_d;
   logic sw_mtip_d;
   logic [63:0] mip_write_data;
@@ -296,19 +318,23 @@ module mosaic_interrupt (
   assign mip_write_data = mip_wdata_i & MIP_WRITABLE_MASK;
 
   always_comb begin
+    sw_ssip_d = sw_ssip_q;
     sw_msip_d = sw_msip_q;
     sw_mtip_d = sw_mtip_q;
     if (mip_we_i) begin
       case (mip_op_i)
         mosaic_pkg::CSR_RW: begin
+          sw_ssip_d = mip_write_data[BIT_SSIP];
           sw_msip_d = mip_write_data[BIT_MSIP];
           sw_mtip_d = mip_write_data[BIT_MTIP];
         end
         mosaic_pkg::CSR_RS: begin
+          sw_ssip_d = sw_ssip_q | mip_write_data[BIT_SSIP];
           sw_msip_d = sw_msip_q | mip_write_data[BIT_MSIP];
           sw_mtip_d = sw_mtip_q | mip_write_data[BIT_MTIP];
         end
         mosaic_pkg::CSR_RC: begin
+          sw_ssip_d = sw_ssip_q & ~mip_write_data[BIT_SSIP];
           sw_msip_d = sw_msip_q & ~mip_write_data[BIT_MSIP];
           sw_mtip_d = sw_mtip_q & ~mip_write_data[BIT_MTIP];
         end
@@ -321,15 +347,18 @@ module mosaic_interrupt (
 
   always_ff @(posedge clk_i) begin
     if (rst_i) begin
+      sw_ssip_q <= 1'b0;
       sw_msip_q <= 1'b0;
       sw_mtip_q <= 1'b0;
     end else begin
 `ifdef MOSAIC_INTERRUPT_MUTANT_IGNORE_SW_WRITE
       // Mutant: the write is decoded and then dropped, so software can no
       // longer raise a pending interrupt.
+      sw_ssip_q <= sw_ssip_q;
       sw_msip_q <= sw_msip_q;
       sw_mtip_q <= sw_mtip_q;
 `else
+      sw_ssip_q <= sw_ssip_d;
       sw_msip_q <= sw_msip_d;
       sw_mtip_q <= sw_mtip_d;
 `endif
@@ -347,6 +376,7 @@ module mosaic_interrupt (
 
   always_comb begin
     mip_comb = 64'd0;
+    mip_comb[BIT_SSIP] = sw_ssip_q;
     mip_comb[BIT_MSIP] = platform_msip | sw_msip_q;
     mip_comb[BIT_MTIP] = platform_mtip | sw_mtip_q;
     mip_comb[BIT_MEIP] = platform_meip;
@@ -359,76 +389,163 @@ module mosaic_interrupt (
   assign o_irq_ext_pending   = mip_comb[BIT_MEIP];
 
   // --------------------------------------------------------------------------
-  // The decision. `take_pending` is the set of interrupts that both a platform
-  // or software has raised and software has enabled and has not delegated; the
-  // highest-priority member of that set wins.
+  // The decision. Delegation does not remove an interrupt from the set that must
+  // be taken; it changes *where* it is taken. So the candidate set is every
+  // enabled pending bit -- `mideleg` no longer subtracts from it -- and whether a
+  // candidate may be taken now depends on the delegation target and on the mode
+  // the trap would be taken from:
+  //
+  //   * a non-delegated interrupt is taken in M-mode: it requires mstatus.MIE
+  //     when the hart is in M-mode and nothing when the hart is in a less
+  //     privileged mode ("interrupts for a more privileged mode are always
+  //     enabled when executing in a less privileged mode");
+  //   * a delegated interrupt is taken in S-mode: it requires mstatus.SIE when
+  //     the hart is in S-mode, nothing in U-mode, and it is *not taken at all*
+  //     in M-mode ("Delegated interrupts result in the interrupt being masked at
+  //     the delegator privilege level. For example, if the supervisor timer
+  //     interrupt (STI) is delegated to S-mode by setting mideleg[5], STIs will
+  //     not be taken when executing in M-mode").
+  //
+  // With p0's M-only profile `priv_i` is always M and `mideleg_i` is always
+  // zero, so the expression below reduces to `mstatus_mie_i & any_take` -- the
+  // rule this module shipped with. The reduction is a consequence of the
+  // profile, not a special case in the code.
   // --------------------------------------------------------------------------
   logic [63:0] enabled_pending;
+  // `cand_pending` is the set of interrupts that have a mode to be taken into at
+  // all -- everything enabled, except a delegated interrupt while the hart is in
+  // M-mode, which "will not be taken when executing in M-mode". `take_pending`
+  // adds the *global enable* of that mode. The two are separate because the
+  // reported cause is a property of the candidate set: it stays stable across a
+  // window in which the global enable is clear, which is what lets a core that
+  // latches the cause when its boundary opens latch a value that is still true.
+  logic [63:0] cand_pending;
   logic [63:0] take_pending;
-  logic        take_mei;
-  logic        take_msi;
-  logic        take_mti;
+  logic        cand_mei;
+  logic        cand_msi;
+  logic        cand_mti;
+  logic        cand_ssi;
   logic        any_take;
+  logic        taken_in_m;
+  logic        taken_in_s;
+  logic        m_priv;
+  logic        s_priv;
+  logic        u_priv;
 
   assign enabled_pending = mip_comb & mie_i;
-  assign take_pending    = enabled_pending & ~mideleg_i;
 
-  assign take_mei = take_pending[BIT_MEIP];
-  assign take_msi = take_pending[BIT_MSIP];
-  assign take_mti = take_pending[BIT_MTIP];
-  assign any_take = take_mei | take_msi | take_mti;
+  // The two gates, named per candidate below so that the priority chain reads
+  // like the specification's list rather than like a boolean expression.
+  // A profile with no less-privileged mode has no "trap taken from below" case
+  // to consider: the hart is always in M, so the enable is mstatus.MIE and
+  // nothing else. Naming that here rather than relying on the profile to drive
+  // `priv_i` keeps the M-only build's decision exactly what it was before this
+  // port existed -- the same reason the module no longer carries a hand-kept mip
+  // mask.
+  `ifdef MOSAIC_CSR_HAS_U
+    assign m_priv = (priv_i == mosaic_csr_pkg::MOSAIC_PRIV_M);
+    assign s_priv = (priv_i == mosaic_csr_pkg::MOSAIC_PRIV_S);
+    assign u_priv = (priv_i == mosaic_csr_pkg::MOSAIC_PRIV_U);
+    assign taken_in_m = m_priv ? mstatus_mie_i : (s_priv | u_priv);
+    assign taken_in_s = s_priv ? mstatus_sie_i : u_priv;
+  `else
+    // An M-only profile has nothing to consult: the mode is always M, and the
+    // supervisor enable has no trap to gate. Saying so here -- rather than
+    // letting an undriven `priv_i` supply the answer -- is what keeps this
+    // build's decision exactly the one it made before the port existed: a
+    // delegated bit is not a candidate, and the enable is mstatus.MIE.
+    logic unused_priv_c;
+    /* verilator lint_off UNUSEDSIGNAL */
+    assign unused_priv_c  = ^{priv_i, mstatus_sie_i, s_priv, u_priv};
+    /* verilator lint_on UNUSEDSIGNAL */
+    assign m_priv = 1'b1;
+    assign s_priv = 1'b0;
+    assign u_priv = 1'b0;
+    assign taken_in_m = mstatus_mie_i;
+    assign taken_in_s = 1'b0;
+  `endif
 
-  // MEI > MSI > MTI, per the privileged spec's standard priority order. The
-  // cause is the winning *candidate* -- zero when no enabled, non-delegated
-  // pending bit exists at all -- and it deliberately does not depend on
-  // mstatus.MIE or on core_can_trap_i. Those two are the gates that decide
-  // whether a trap may be taken now (`irq_valid_o`), while the cause stays
-  // stable across a blocked window, so a core that latches the cause when the
-  // boundary opens cannot latch a value that was invalidated by the wait.
+  always_comb begin
+    cand_pending = 64'd0;
+    take_pending = 64'd0;
+    // One bit at a time: `mideleg` picks both the mode gate and whether the bit
+    // can be a candidate in M-mode at all.
+    for (int unsigned b = 0; b < 64; b++) begin
+      cand_pending[b] = enabled_pending[b] & (mideleg_i[b] ? ~m_priv : 1'b1);
+      take_pending[b] = cand_pending[b] & (mideleg_i[b] ? taken_in_s : taken_in_m);
+    end
+  end
+
+  assign cand_mei = cand_pending[BIT_MEIP];
+  assign cand_msi = cand_pending[BIT_MSIP];
+  assign cand_mti = cand_pending[BIT_MTIP];
+  assign cand_ssi = cand_pending[BIT_SSIP];
+  assign any_take = take_pending[BIT_MEIP] | take_pending[BIT_MSIP] |
+                    take_pending[BIT_MTIP] | take_pending[BIT_SSIP];
+
+  // MEI > MSI > MTI > SSI, per the privileged spec's standard priority order
+  // (MEI, MSI, MTI, SEI, SSI, STI -- SEI and STI have no source in this
+  // platform, so the three that remain keep their relative order). The cause is
+  // the winning *candidate*: it deliberately does not depend on mstatus.MIE or
+  // on core_can_trap_i. Those are the gates that decide whether a trap may be
+  // taken now (`irq_valid_o`), while the cause stays stable across a blocked
+  // window, so a core that latches the cause when the boundary opens cannot
+  // latch a value that was invalidated by the wait.
   always_comb begin
     irq_cause_o = 64'd0;
 `ifdef MOSAIC_INTERRUPT_MUTANT_PRIORITY_REVERSED
     // Mutant: the order is inverted.
-    if (take_mti) begin
+    if (cand_ssi) begin
+      irq_cause_o = CAUSE_SSI;
+    end else if (cand_mti) begin
       irq_cause_o = CAUSE_MTI;
-    end else if (take_msi) begin
+    end else if (cand_msi) begin
       irq_cause_o = CAUSE_MSI;
-    end else if (take_mei) begin
+    end else if (cand_mei) begin
       irq_cause_o = CAUSE_MEI;
     end
 `else
-    if (take_mei) begin
+    if (cand_mei) begin
       irq_cause_o = CAUSE_MEI;
-    end else if (take_msi) begin
+    end else if (cand_msi) begin
       irq_cause_o = CAUSE_MSI;
-    end else if (take_mti) begin
+    end else if (cand_mti) begin
       irq_cause_o = CAUSE_MTI;
+    end else if (cand_ssi) begin
+      irq_cause_o = CAUSE_SSI;
     end
 `endif
   end
 
 `ifdef MOSAIC_INTERRUPT_MUTANT_IGNORE_MIDELEG
   // Mutant: the delegation gate is dropped, so a delegated interrupt is taken
-  // as if it were not delegated.
+  // in the delegator's own mode -- an interrupt taken into M-mode that software
+  // asked to be handled in S-mode.
   logic [63:0] take_pending_gated;
-  assign take_pending_gated = enabled_pending;
-  logic        any_take_gated;
+  always_comb begin
+    take_pending_gated = 64'd0;
+    for (int unsigned b = 0; b < 64; b++) begin
+      take_pending_gated[b] = enabled_pending[b] & taken_in_m;
+    end
+  end
+  logic any_take_gated;
   assign any_take_gated = take_pending_gated[BIT_MEIP]
                         | take_pending_gated[BIT_MSIP]
-                        | take_pending_gated[BIT_MTIP];
+                        | take_pending_gated[BIT_MTIP]
+                        | take_pending_gated[BIT_SSIP];
 `endif
 
 `ifdef MOSAIC_INTERRUPT_MUTANT_MIE_IGNORED
   // Mutant: the global enable is dropped, so a masked interrupt is offered.
   assign irq_valid_o = core_can_trap_i & any_take;
 `elsif MOSAIC_INTERRUPT_MUTANT_IGNORE_MIDELEG
-  assign irq_valid_o = core_can_trap_i & mstatus_mie_i & any_take_gated;
+  assign irq_valid_o = core_can_trap_i & any_take_gated;
 `elsif MOSAIC_INTERRUPT_MUTANT_IRQ_OUTSIDE_BOUNDARY
   // Mutant: the architectural boundary is ignored and a trap is offered as
   // soon as an enabled interrupt is pending.
   assign irq_valid_o = mstatus_mie_i & any_take;
 `else
-  assign irq_valid_o = core_can_trap_i & mstatus_mie_i & any_take;
+  assign irq_valid_o = core_can_trap_i & any_take;
 `endif
 
   // --------------------------------------------------------------------------

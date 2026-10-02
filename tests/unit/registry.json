@@ -1252,8 +1252,7 @@
     "sim/unit/tb_rename.cpp"
    ],
    "max_cycles": 200000,
-   "seed": 1,
-   "pending": true
+   "seed": 1
   },
   "pc.branch_and_fetch_visibility": {
    "task": "V-016",

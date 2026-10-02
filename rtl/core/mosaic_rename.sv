@@ -697,6 +697,8 @@ module mosaic_rename (
   // has.
   localparam int unsigned REN_ROW_W     = (REN_ENTRIES / REN_BANKS) <= 1
                                            ? 1 : $clog2(REN_ENTRIES / REN_BANKS);
+  // The bank field's mask, for the shift-form decode of a tag's home bank.
+  localparam int unsigned REN_BANK_MASK = (1 << REN_BANK_W) - 1;
   localparam int unsigned REN_ARCH_W    = (REN_ARCH_REGS <= 1) ? 1 : $clog2(REN_ARCH_REGS);
   localparam int unsigned REN_MAP_W     = REN_TAG_W + REN_GEN_W;
   localparam int unsigned REN_SCAN_W    = REN_TAG_W + 1;  // address into the doubled mask
@@ -881,16 +883,13 @@ module mosaic_rename (
   assign lane0_wants_tag = alloc_req && (alloc_rd != 5'd0);
 
   // The home bank of a tag, exactly as the header's decode states it: the bank
-  // field is `tag[TAG_W-1:ROW_W]`. A set, not a lookup, so the preference below
-  // is one AND with the free set and cannot drift from the decode.
-  function automatic logic [REN_BANK_W-1:0] bank_of(input logic [REN_TAG_W-1:0] tag);
-    bank_of = tag[REN_TAG_W-1 -: REN_BANK_W];
-  endfunction
-
+  // field is `tag[TAG_W-1:ROW_W]`, which is `tag >> ROW_W` masked to the bank
+  // width. Written as a shift of the loop index rather than as a function over a
+  // tag so the whole tag participates and no lint sees an unused argument slice.
   always_comb begin
     bias_bank_mask = {REN_ENTRIES{1'b0}};
     for (int unsigned t = 0; t < REN_ENTRIES; t++) begin
-      if (bank_of(REN_TAG_W'(t)) == alloc_bias_bank) begin
+      if (((t >> REN_ROW_W) & REN_BANK_MASK) == int'(alloc_bias_bank)) begin
         bias_bank_mask[t] = 1'b1;
       end
     end

@@ -306,7 +306,6 @@ class ShadowRename {
         gen_w_(gen_w),
         arch_regs_(arch_regs),
         journal_(journal),
-        banks_(banks),
         row_w_(CeilLog2((banks == 0) ? 1u : (entries / banks))),
         gen_mask_((gen_w >= 32) ? 0xffffffffu : ((1u << gen_w) - 1u)) {
     Reset();
@@ -822,7 +821,6 @@ class ShadowRename {
   uint32_t gen_w_;
   uint32_t arch_regs_;
   uint32_t journal_;
-  uint32_t banks_;
   uint32_t row_w_;
   uint32_t gen_mask_;
 
@@ -2500,11 +2498,28 @@ void PhaseRandom(Harness* h, mosaic::Reporter* reporter, uint32_t entries, uint3
       s.free_valid = true;
       if (!handed.empty() && rng.Chance(70)) {
         s.free_ = handed[rng.Below(static_cast<uint32_t>(handed.size()))];
-        // Nudge the generation off the tag's current value, so the release is
-        // aimed at a superseded identity rather than the live one.
-        s.free_.gen = (s.free_.gen + 1 + rng.Below(3)) & h->shadow_gen_mask();
+        // Aim the release at a *superseded* identity. Stepping the generation off
+        // the tag's *current* value (not off the handed value) is what makes that
+        // true whatever the tag has done since it was handed out: if the tag has
+        // been recycled, an offset added to the handed generation can land exactly
+        // on the current generation, and the module would then correctly accept a
+        // release of a live register -- a caller bug the campaign's own contract
+        // says it never drives. Reading the current generation from the shadow
+        // makes the release stale by construction.
+        const uint32_t cur = h->shadow_gen_of(s.free_.tag);
+        s.free_.gen = (cur + 1 + rng.Below(3)) & h->shadow_gen_mask();
       } else {
-        s.free_ = Dest{rng.Below(entries + 8), rng.Below(128)};
+        // The same two draws the campaign made before this fix, so the random
+        // stream is unchanged; the generation is then forced off the tag's current
+        // value for an in-range tag, so this branch cannot aim at a live identity
+        // either.
+        const uint32_t tag = rng.Below(entries + 8);
+        const uint32_t raw = rng.Below(128);
+        const uint32_t gen = (tag >= entries)
+                                 ? raw
+                                 : ((h->shadow_gen_of(tag) + 1 + (raw % 3)) &
+                                    h->shadow_gen_mask());
+        s.free_ = Dest{tag, gen};
       }
     }
 
@@ -4114,19 +4129,20 @@ void PhaseBankBias(Harness* h, mosaic::Reporter* reporter, uint32_t entries,
       // It does not touch the free-count trajectory, which is what the two runs
       // are compared on.
       if (i % 16 == 0) s.ckpt_valid = true;
-      s.alloc_req = true;
-      s.alloc_rd = 1 + (i % (arch_regs - 1));
-      if (i % 3 == 0) {
-        s.alloc2_req = true;
-        s.alloc2_rd = 1 + ((i * 5 + 7) % (arch_regs - 1));
-      }
       s.rs1_addr = 1 + ((i * 3) % (arch_regs - 1));
       s.rs2_addr = 1 + ((i * 11 + 5) % (arch_regs - 1));
       s.rs3_addr = 1 + ((i * 7 + 1) % (arch_regs - 1));
       s.rs4_addr = 1 + ((i * 13 + 3) % (arch_regs - 1));
-      // Retire the oldest uncommitted mapping of some register every few cycles,
-      // so tags are recycled and the file is not simply filled once.
-      if (i % 7 == 3) {
+      // Closed-loop occupancy. Below 40 free tags the campaign retires the oldest
+      // uncommitted mapping of some register; above it, it allocates one lane (two
+      // every other cycle). Keeping roughly 40 tags free is what keeps the
+      // preferred bank available for most of the campaign, so the run measures what
+      // the preference does when it *can* be honoured rather than drowning it in
+      // the fallback path. The decisions depend only on the free count and on the
+      // per-register FIFOs, never on which tag was chosen, so the two runs make
+      // identical decisions -- which is exactly what the free-count comparison
+      // below asserts.
+      if (h->free_count() < 40) {
         for (uint32_t k = 0; k < arch_regs; k++) {
           const uint32_t r = 1 + ((rr + k) % (arch_regs - 1));
           if (!pend[r].empty()) {
@@ -4137,11 +4153,35 @@ void PhaseBankBias(Harness* h, mosaic::Reporter* reporter, uint32_t entries,
             break;
           }
         }
+      } else {
+        s.alloc_req = true;
+        s.alloc_rd = 1 + (i % (arch_regs - 1));
+        if (i % 2 == 0) {
+          s.alloc2_req = true;
+          s.alloc2_rd = 1 + ((i * 5 + 7) % (arch_regs - 1));
+        }
       }
       s.alloc_bias_en = bias_on;
       s.alloc_bias_bank = preferred;
 
+      // Pre-edge availability of the preferred bank, so the bias can be held to
+      // its contract inside the campaign as well as in the directed phase above.
+      bool pref_free = false;
+      for (uint32_t t = 0; t < entries; t++) {
+        if (h->shadow_is_free(t) && bank_of(t) == preferred) {
+          pref_free = true;
+          break;
+        }
+      }
+
       Outputs o = h->Cycle(s);
+
+      if (bias_on && o.alloc_new_valid && pref_free) {
+        Require(bank_of(o.alloc_new.tag) == preferred, "bank-bias",
+                "the bias was on and the preferred bank " + Dec(preferred) +
+                    " had a free tag, but the allocation took tag " +
+                    Dec(o.alloc_new.tag) + " in bank " + Dec(bank_of(o.alloc_new.tag)));
+      }
 
       if (o.alloc_new_valid) {
         st.accepted0++;
@@ -4203,6 +4243,14 @@ void PhaseBankBias(Harness* h, mosaic::Reporter* reporter, uint32_t entries,
           "the preferred bank was never exhausted over " + Dec(DELTA_CYCLES) +
               " cycles: the fallback path was not exercised");
 
+  const auto hist = [&](const Stats& st) {
+    std::string s = "[";
+    for (uint32_t b = 0; b < banks; b++) {
+      s += Dec(st.bank_hist[b]);
+      if (b + 1 < banks) s += ",";
+    }
+    return s + "]";
+  };
   reporter->Check(true,
                   "bank-bias: the preference was honoured for every bank with a free tag "
                   "and fell back for the bank with none; a fully emptied preferred bank "
@@ -4213,7 +4261,8 @@ void PhaseBankBias(Harness* h, mosaic::Reporter* reporter, uint32_t entries,
                   Dec(on.read_conflicts) + ", lane-pair bank conflicts " +
                   Dec(off.lane_pair_conflicts) + "->" + Dec(on.lane_pair_conflicts) +
                   ", with " + Dec(on.bias_hits) + " preferred-bank hits and " +
-                  Dec(on.fallbacks) + " fallbacks and an identical free-count trajectory");
+                  Dec(on.fallbacks) + " fallbacks, bank histogram " + hist(off) + "->" +
+                  hist(on) + ", and an identical free-count trajectory");
 }
 
 }  // namespace
@@ -4351,7 +4400,7 @@ int main(int argc, char** argv) {
       fresh();
       harness.Phase("bank-bias-random");
       PhaseRandom(&harness, &reporter, entries, arch_regs,
-                  static_cast<uint32_t>(options.seed) + 1, 4000, /*bank_bias=*/false, banks,
+                  static_cast<uint32_t>(options.seed) + 1, 4000, /*bank_bias=*/true, banks,
                   CeilLog2(entries / banks));
     }
 

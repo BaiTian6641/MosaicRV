@@ -1,0 +1,348 @@
+{
+  "schema_version": 1,
+  "profiles": [
+    "p1",
+    "p2",
+    "p3"
+  ],
+  "comment": "Physical Memory Protection CSRs. They are M-mode registers (csr[9:8]=3 in every address here), so they live in an M-mode block, and they are a separate table because a profile without a less-privileged mode implements no PMP entries at all and must not be given these numbers.",
+  "modes": [
+    {
+      "mode": "M",
+      "csrs": [
+        {
+          "name": "pmpcfg0",
+          "address": 928,
+          "width": 64,
+          "access": "rw",
+          "behavior": "warl",
+          "reset": 0,
+          "unmodifiable_bits": [
+            "6:5",
+            "14:13",
+            "22:21",
+            "30:29",
+            "38:37",
+            "46:45",
+            "54:53",
+            "62:61"
+          ],
+          "writable_fields": [
+            "7",
+            "4:0",
+            "15",
+            "12:8",
+            "23",
+            "20:16",
+            "31",
+            "28:24",
+            "39",
+            "36:32",
+            "47",
+            "44:40",
+            "55",
+            "52:48",
+            "63",
+            "60:56"
+          ],
+          "wpri_fields": [],
+          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. src/machine.tex section 'Physical Memory Protection' L3336 and '2.7.1 Physical Memory Protection CSRs' L3396: 'The PMP configuration registers are densely packed into CSRs... For RV64, eight even-numbered CSRs, pmpcfg0, pmpcfg2, ..., pmpcfg14, hold the configurations for the 64 PMP entries... For RV64, the odd-numbered configuration registers, pmpcfg1, pmpcfg3, ..., pmpcfg15, are illegal.' Address 0x3A0 (pmpcfg0) and 0x3A2 (pmpcfg2) from src/priv-csrs.tex Table 'CSR number assignments' ('0x3A0 & MRW & pmpcfg0', '0x3A2 & MRW & pmpcfg2') with the profile's own entry count of 16 from config/geometry/p1.json. Field layout Figure 'PMP configuration register format': per byte, bit 7 L, bit 6:5 reserved, bit 4:3 A, bit 2 X, bit 1 W, bit 0 R; 'All PMP CSR fields are WARL and may be read-only zero'. The reserved bits are declared unmodifiable (they read zero) and every other bit is writable subject to the lock rule, which is dynamic and therefore not expressible as a static mask: 'If PMP entry i is locked, writes to pmp_i cfg and pmpaddr_i are ignored', and 'The R, W, and X fields form a collective WARL field for which the combinations with R=0 and W=1 are reserved'. rtl/core/mosaic_pmp.sv is the one place that rule lives. Entries 0-7 live in this register."
+        },
+        {
+          "name": "pmpcfg2",
+          "address": 930,
+          "width": 64,
+          "access": "rw",
+          "behavior": "warl",
+          "reset": 0,
+          "unmodifiable_bits": [
+            "6:5",
+            "14:13",
+            "22:21",
+            "30:29",
+            "38:37",
+            "46:45",
+            "54:53",
+            "62:61"
+          ],
+          "writable_fields": [
+            "7",
+            "4:0",
+            "15",
+            "12:8",
+            "23",
+            "20:16",
+            "31",
+            "28:24",
+            "39",
+            "36:32",
+            "47",
+            "44:40",
+            "55",
+            "52:48",
+            "63",
+            "60:56"
+          ],
+          "wpri_fields": [],
+          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. src/machine.tex section 'Physical Memory Protection' L3336 and '2.7.1 Physical Memory Protection CSRs' L3396: 'The PMP configuration registers are densely packed into CSRs... For RV64, eight even-numbered CSRs, pmpcfg0, pmpcfg2, ..., pmpcfg14, hold the configurations for the 64 PMP entries... For RV64, the odd-numbered configuration registers, pmpcfg1, pmpcfg3, ..., pmpcfg15, are illegal.' Address 0x3A0 (pmpcfg0) and 0x3A2 (pmpcfg2) from src/priv-csrs.tex Table 'CSR number assignments' ('0x3A0 & MRW & pmpcfg0', '0x3A2 & MRW & pmpcfg2') with the profile's own entry count of 16 from config/geometry/p1.json. Field layout Figure 'PMP configuration register format': per byte, bit 7 L, bit 6:5 reserved, bit 4:3 A, bit 2 X, bit 1 W, bit 0 R; 'All PMP CSR fields are WARL and may be read-only zero'. The reserved bits are declared unmodifiable (they read zero) and every other bit is writable subject to the lock rule, which is dynamic and therefore not expressible as a static mask: 'If PMP entry i is locked, writes to pmp_i cfg and pmpaddr_i are ignored', and 'The R, W, and X fields form a collective WARL field for which the combinations with R=0 and W=1 are reserved'. rtl/core/mosaic_pmp.sv is the one place that rule lives. Entries 8-15 live in this register."
+        },
+        {
+          "name": "pmpaddr0",
+          "address": 944,
+          "width": 64,
+          "access": "rw",
+          "behavior": "warl",
+          "reset": 0,
+          "unmodifiable_bits": [
+            "63:54"
+          ],
+          "writable_fields": [
+            "53:0"
+          ],
+          "wpri_fields": [],
+          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. src/machine.tex '2.7.1 Physical Memory Protection CSRs' L3418: 'The PMP address registers are CSRs named pmpaddr0-pmpaddr63. ... For RV64, each PMP address register encodes bits 55-2 of a 56-bit physical address ... Not all physical address bits may be implemented, and so the pmpaddr registers are WARL.' Addresses 0x3B0-0x3BF from src/priv-csrs.tex Table 'CSR number assignments'. Bits 53:0 are the 54 encoded address bits and bits 63:54 read zero; the grain is 4 bytes (G=0, config/geometry/p1.json), so no low bit is hardwired and NA4 is selectable ('When G >= 1, the NA4 mode is not selectable')."
+        },
+        {
+          "name": "pmpaddr1",
+          "address": 945,
+          "width": 64,
+          "access": "rw",
+          "behavior": "warl",
+          "reset": 0,
+          "unmodifiable_bits": [
+            "63:54"
+          ],
+          "writable_fields": [
+            "53:0"
+          ],
+          "wpri_fields": [],
+          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. src/machine.tex '2.7.1 Physical Memory Protection CSRs' L3418: 'The PMP address registers are CSRs named pmpaddr0-pmpaddr63. ... For RV64, each PMP address register encodes bits 55-2 of a 56-bit physical address ... Not all physical address bits may be implemented, and so the pmpaddr registers are WARL.' Addresses 0x3B0-0x3BF from src/priv-csrs.tex Table 'CSR number assignments'. Bits 53:0 are the 54 encoded address bits and bits 63:54 read zero; the grain is 4 bytes (G=0, config/geometry/p1.json), so no low bit is hardwired and NA4 is selectable ('When G >= 1, the NA4 mode is not selectable')."
+        },
+        {
+          "name": "pmpaddr2",
+          "address": 946,
+          "width": 64,
+          "access": "rw",
+          "behavior": "warl",
+          "reset": 0,
+          "unmodifiable_bits": [
+            "63:54"
+          ],
+          "writable_fields": [
+            "53:0"
+          ],
+          "wpri_fields": [],
+          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. src/machine.tex '2.7.1 Physical Memory Protection CSRs' L3418: 'The PMP address registers are CSRs named pmpaddr0-pmpaddr63. ... For RV64, each PMP address register encodes bits 55-2 of a 56-bit physical address ... Not all physical address bits may be implemented, and so the pmpaddr registers are WARL.' Addresses 0x3B0-0x3BF from src/priv-csrs.tex Table 'CSR number assignments'. Bits 53:0 are the 54 encoded address bits and bits 63:54 read zero; the grain is 4 bytes (G=0, config/geometry/p1.json), so no low bit is hardwired and NA4 is selectable ('When G >= 1, the NA4 mode is not selectable')."
+        },
+        {
+          "name": "pmpaddr3",
+          "address": 947,
+          "width": 64,
+          "access": "rw",
+          "behavior": "warl",
+          "reset": 0,
+          "unmodifiable_bits": [
+            "63:54"
+          ],
+          "writable_fields": [
+            "53:0"
+          ],
+          "wpri_fields": [],
+          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. src/machine.tex '2.7.1 Physical Memory Protection CSRs' L3418: 'The PMP address registers are CSRs named pmpaddr0-pmpaddr63. ... For RV64, each PMP address register encodes bits 55-2 of a 56-bit physical address ... Not all physical address bits may be implemented, and so the pmpaddr registers are WARL.' Addresses 0x3B0-0x3BF from src/priv-csrs.tex Table 'CSR number assignments'. Bits 53:0 are the 54 encoded address bits and bits 63:54 read zero; the grain is 4 bytes (G=0, config/geometry/p1.json), so no low bit is hardwired and NA4 is selectable ('When G >= 1, the NA4 mode is not selectable')."
+        },
+        {
+          "name": "pmpaddr4",
+          "address": 948,
+          "width": 64,
+          "access": "rw",
+          "behavior": "warl",
+          "reset": 0,
+          "unmodifiable_bits": [
+            "63:54"
+          ],
+          "writable_fields": [
+            "53:0"
+          ],
+          "wpri_fields": [],
+          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. src/machine.tex '2.7.1 Physical Memory Protection CSRs' L3418: 'The PMP address registers are CSRs named pmpaddr0-pmpaddr63. ... For RV64, each PMP address register encodes bits 55-2 of a 56-bit physical address ... Not all physical address bits may be implemented, and so the pmpaddr registers are WARL.' Addresses 0x3B0-0x3BF from src/priv-csrs.tex Table 'CSR number assignments'. Bits 53:0 are the 54 encoded address bits and bits 63:54 read zero; the grain is 4 bytes (G=0, config/geometry/p1.json), so no low bit is hardwired and NA4 is selectable ('When G >= 1, the NA4 mode is not selectable')."
+        },
+        {
+          "name": "pmpaddr5",
+          "address": 949,
+          "width": 64,
+          "access": "rw",
+          "behavior": "warl",
+          "reset": 0,
+          "unmodifiable_bits": [
+            "63:54"
+          ],
+          "writable_fields": [
+            "53:0"
+          ],
+          "wpri_fields": [],
+          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. src/machine.tex '2.7.1 Physical Memory Protection CSRs' L3418: 'The PMP address registers are CSRs named pmpaddr0-pmpaddr63. ... For RV64, each PMP address register encodes bits 55-2 of a 56-bit physical address ... Not all physical address bits may be implemented, and so the pmpaddr registers are WARL.' Addresses 0x3B0-0x3BF from src/priv-csrs.tex Table 'CSR number assignments'. Bits 53:0 are the 54 encoded address bits and bits 63:54 read zero; the grain is 4 bytes (G=0, config/geometry/p1.json), so no low bit is hardwired and NA4 is selectable ('When G >= 1, the NA4 mode is not selectable')."
+        },
+        {
+          "name": "pmpaddr6",
+          "address": 950,
+          "width": 64,
+          "access": "rw",
+          "behavior": "warl",
+          "reset": 0,
+          "unmodifiable_bits": [
+            "63:54"
+          ],
+          "writable_fields": [
+            "53:0"
+          ],
+          "wpri_fields": [],
+          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. src/machine.tex '2.7.1 Physical Memory Protection CSRs' L3418: 'The PMP address registers are CSRs named pmpaddr0-pmpaddr63. ... For RV64, each PMP address register encodes bits 55-2 of a 56-bit physical address ... Not all physical address bits may be implemented, and so the pmpaddr registers are WARL.' Addresses 0x3B0-0x3BF from src/priv-csrs.tex Table 'CSR number assignments'. Bits 53:0 are the 54 encoded address bits and bits 63:54 read zero; the grain is 4 bytes (G=0, config/geometry/p1.json), so no low bit is hardwired and NA4 is selectable ('When G >= 1, the NA4 mode is not selectable')."
+        },
+        {
+          "name": "pmpaddr7",
+          "address": 951,
+          "width": 64,
+          "access": "rw",
+          "behavior": "warl",
+          "reset": 0,
+          "unmodifiable_bits": [
+            "63:54"
+          ],
+          "writable_fields": [
+            "53:0"
+          ],
+          "wpri_fields": [],
+          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. src/machine.tex '2.7.1 Physical Memory Protection CSRs' L3418: 'The PMP address registers are CSRs named pmpaddr0-pmpaddr63. ... For RV64, each PMP address register encodes bits 55-2 of a 56-bit physical address ... Not all physical address bits may be implemented, and so the pmpaddr registers are WARL.' Addresses 0x3B0-0x3BF from src/priv-csrs.tex Table 'CSR number assignments'. Bits 53:0 are the 54 encoded address bits and bits 63:54 read zero; the grain is 4 bytes (G=0, config/geometry/p1.json), so no low bit is hardwired and NA4 is selectable ('When G >= 1, the NA4 mode is not selectable')."
+        },
+        {
+          "name": "pmpaddr8",
+          "address": 952,
+          "width": 64,
+          "access": "rw",
+          "behavior": "warl",
+          "reset": 0,
+          "unmodifiable_bits": [
+            "63:54"
+          ],
+          "writable_fields": [
+            "53:0"
+          ],
+          "wpri_fields": [],
+          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. src/machine.tex '2.7.1 Physical Memory Protection CSRs' L3418: 'The PMP address registers are CSRs named pmpaddr0-pmpaddr63. ... For RV64, each PMP address register encodes bits 55-2 of a 56-bit physical address ... Not all physical address bits may be implemented, and so the pmpaddr registers are WARL.' Addresses 0x3B0-0x3BF from src/priv-csrs.tex Table 'CSR number assignments'. Bits 53:0 are the 54 encoded address bits and bits 63:54 read zero; the grain is 4 bytes (G=0, config/geometry/p1.json), so no low bit is hardwired and NA4 is selectable ('When G >= 1, the NA4 mode is not selectable')."
+        },
+        {
+          "name": "pmpaddr9",
+          "address": 953,
+          "width": 64,
+          "access": "rw",
+          "behavior": "warl",
+          "reset": 0,
+          "unmodifiable_bits": [
+            "63:54"
+          ],
+          "writable_fields": [
+            "53:0"
+          ],
+          "wpri_fields": [],
+          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. src/machine.tex '2.7.1 Physical Memory Protection CSRs' L3418: 'The PMP address registers are CSRs named pmpaddr0-pmpaddr63. ... For RV64, each PMP address register encodes bits 55-2 of a 56-bit physical address ... Not all physical address bits may be implemented, and so the pmpaddr registers are WARL.' Addresses 0x3B0-0x3BF from src/priv-csrs.tex Table 'CSR number assignments'. Bits 53:0 are the 54 encoded address bits and bits 63:54 read zero; the grain is 4 bytes (G=0, config/geometry/p1.json), so no low bit is hardwired and NA4 is selectable ('When G >= 1, the NA4 mode is not selectable')."
+        },
+        {
+          "name": "pmpaddr10",
+          "address": 954,
+          "width": 64,
+          "access": "rw",
+          "behavior": "warl",
+          "reset": 0,
+          "unmodifiable_bits": [
+            "63:54"
+          ],
+          "writable_fields": [
+            "53:0"
+          ],
+          "wpri_fields": [],
+          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. src/machine.tex '2.7.1 Physical Memory Protection CSRs' L3418: 'The PMP address registers are CSRs named pmpaddr0-pmpaddr63. ... For RV64, each PMP address register encodes bits 55-2 of a 56-bit physical address ... Not all physical address bits may be implemented, and so the pmpaddr registers are WARL.' Addresses 0x3B0-0x3BF from src/priv-csrs.tex Table 'CSR number assignments'. Bits 53:0 are the 54 encoded address bits and bits 63:54 read zero; the grain is 4 bytes (G=0, config/geometry/p1.json), so no low bit is hardwired and NA4 is selectable ('When G >= 1, the NA4 mode is not selectable')."
+        },
+        {
+          "name": "pmpaddr11",
+          "address": 955,
+          "width": 64,
+          "access": "rw",
+          "behavior": "warl",
+          "reset": 0,
+          "unmodifiable_bits": [
+            "63:54"
+          ],
+          "writable_fields": [
+            "53:0"
+          ],
+          "wpri_fields": [],
+          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. src/machine.tex '2.7.1 Physical Memory Protection CSRs' L3418: 'The PMP address registers are CSRs named pmpaddr0-pmpaddr63. ... For RV64, each PMP address register encodes bits 55-2 of a 56-bit physical address ... Not all physical address bits may be implemented, and so the pmpaddr registers are WARL.' Addresses 0x3B0-0x3BF from src/priv-csrs.tex Table 'CSR number assignments'. Bits 53:0 are the 54 encoded address bits and bits 63:54 read zero; the grain is 4 bytes (G=0, config/geometry/p1.json), so no low bit is hardwired and NA4 is selectable ('When G >= 1, the NA4 mode is not selectable')."
+        },
+        {
+          "name": "pmpaddr12",
+          "address": 956,
+          "width": 64,
+          "access": "rw",
+          "behavior": "warl",
+          "reset": 0,
+          "unmodifiable_bits": [
+            "63:54"
+          ],
+          "writable_fields": [
+            "53:0"
+          ],
+          "wpri_fields": [],
+          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. src/machine.tex '2.7.1 Physical Memory Protection CSRs' L3418: 'The PMP address registers are CSRs named pmpaddr0-pmpaddr63. ... For RV64, each PMP address register encodes bits 55-2 of a 56-bit physical address ... Not all physical address bits may be implemented, and so the pmpaddr registers are WARL.' Addresses 0x3B0-0x3BF from src/priv-csrs.tex Table 'CSR number assignments'. Bits 53:0 are the 54 encoded address bits and bits 63:54 read zero; the grain is 4 bytes (G=0, config/geometry/p1.json), so no low bit is hardwired and NA4 is selectable ('When G >= 1, the NA4 mode is not selectable')."
+        },
+        {
+          "name": "pmpaddr13",
+          "address": 957,
+          "width": 64,
+          "access": "rw",
+          "behavior": "warl",
+          "reset": 0,
+          "unmodifiable_bits": [
+            "63:54"
+          ],
+          "writable_fields": [
+            "53:0"
+          ],
+          "wpri_fields": [],
+          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. src/machine.tex '2.7.1 Physical Memory Protection CSRs' L3418: 'The PMP address registers are CSRs named pmpaddr0-pmpaddr63. ... For RV64, each PMP address register encodes bits 55-2 of a 56-bit physical address ... Not all physical address bits may be implemented, and so the pmpaddr registers are WARL.' Addresses 0x3B0-0x3BF from src/priv-csrs.tex Table 'CSR number assignments'. Bits 53:0 are the 54 encoded address bits and bits 63:54 read zero; the grain is 4 bytes (G=0, config/geometry/p1.json), so no low bit is hardwired and NA4 is selectable ('When G >= 1, the NA4 mode is not selectable')."
+        },
+        {
+          "name": "pmpaddr14",
+          "address": 958,
+          "width": 64,
+          "access": "rw",
+          "behavior": "warl",
+          "reset": 0,
+          "unmodifiable_bits": [
+            "63:54"
+          ],
+          "writable_fields": [
+            "53:0"
+          ],
+          "wpri_fields": [],
+          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. src/machine.tex '2.7.1 Physical Memory Protection CSRs' L3418: 'The PMP address registers are CSRs named pmpaddr0-pmpaddr63. ... For RV64, each PMP address register encodes bits 55-2 of a 56-bit physical address ... Not all physical address bits may be implemented, and so the pmpaddr registers are WARL.' Addresses 0x3B0-0x3BF from src/priv-csrs.tex Table 'CSR number assignments'. Bits 53:0 are the 54 encoded address bits and bits 63:54 read zero; the grain is 4 bytes (G=0, config/geometry/p1.json), so no low bit is hardwired and NA4 is selectable ('When G >= 1, the NA4 mode is not selectable')."
+        },
+        {
+          "name": "pmpaddr15",
+          "address": 959,
+          "width": 64,
+          "access": "rw",
+          "behavior": "warl",
+          "reset": 0,
+          "unmodifiable_bits": [
+            "63:54"
+          ],
+          "writable_fields": [
+            "53:0"
+          ],
+          "wpri_fields": [],
+          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. src/machine.tex '2.7.1 Physical Memory Protection CSRs' L3418: 'The PMP address registers are CSRs named pmpaddr0-pmpaddr63. ... For RV64, each PMP address register encodes bits 55-2 of a 56-bit physical address ... Not all physical address bits may be implemented, and so the pmpaddr registers are WARL.' Addresses 0x3B0-0x3BF from src/priv-csrs.tex Table 'CSR number assignments'. Bits 53:0 are the 54 encoded address bits and bits 63:54 read zero; the grain is 4 bytes (G=0, config/geometry/p1.json), so no low bit is hardwired and NA4 is selectable ('When G >= 1, the NA4 mode is not selectable')."
+        }
+      ]
+    }
+  ]
+}

@@ -142,8 +142,13 @@
 `include "mosaic_pkg.sv"
 
 // The generated implementation table: one address, reset value, write mask and
-// write-legality flag per CSR, decoded from config/csr/mode_m.json.
+// write-legality flag per CSR, decoded from the profile's CSR tables, plus the
+// profile's PMP geometry (the CSR numbers of the PMP registers are fixed by the
+// ISA; whether they exist at all is the profile's `pmp` block).
 `include "mosaic_csr_pkg.svh"
+/* verilator lint_off UNUSEDPARAM */
+`include "mosaic_cfg_pkg.svh"
+/* verilator lint_on UNUSEDPARAM */
 /* verilator lint_on UNUSEDPARAM */
 
 module mosaic_csr (
@@ -175,6 +180,60 @@ module mosaic_csr (
     input  logic                   mret_valid_i,
     output logic                   mret_commit_o,
     output logic [63:0]            mret_target_o,
+    // SRET, the supervisor return (I-044). Committed exactly like MRET: the
+    // system unit resolves it at the ROB head and strobes it in the cycle the
+    // instruction retires.
+    input  logic                   sret_valid_i,
+    output logic                   sret_commit_o,
+    output logic [63:0]            sret_target_o,
+    // Whether the *requested* return is legal in the current mode. The core
+    // turns a false into the illegal-instruction exception the spec names:
+    // "SRET should also raise an illegal instruction exception when TSR=1 in
+    // mstatus", "an xRET instruction can be executed in privilege mode x or
+    // higher", and "executing WFI in U-mode causes an illegal instruction
+    // exception" is the same rule applied to the halt below.
+    output logic                   mret_illegal_o,
+    output logic                   sret_illegal_o,
+    // WFI's own legality. "When S-mode is implemented, then executing WFI in
+    // U-mode causes an illegal instruction exception, unless it completes within
+    // an implementation-specific, bounded time limit" -- this profile's WFI
+    // halts until an interrupt, which is unbounded -- and TW intercepts S-mode's
+    // WFI the way TSR intercepts its SRET.
+    output logic                   wfi_illegal_o,
+
+    // ------------------------------------------------------ privilege (I-044)
+    // The CSR file owns the architectural privilege mode: it is the state that
+    // the trap entry, MRET and SRET change, and no other module keeps a copy.
+    // The memory path reads it here for the fetch permission check and for the
+    // ECALL cause, and it is a *combinational* read of the register, so an
+    // instruction younger than a return cannot see the return's new mode: the
+    // return redirects, and everything younger is flushed.
+    output logic [1:0]             o_priv_o,
+    output logic [63:0]            o_medeleg_o,
+    output logic [63:0]            o_mideleg_o,
+
+    // ------------------------------------------------------- PMP CSR hand-off
+    // The PMP entries and their lock/WARL rules live in mosaic_pmp; this file
+    // decides only whether an address selects them and whether the access is
+    // legal, and forwards the operation's already-applied write operand.
+    output logic                   pmp_sel_o,
+    input  logic [63:0]            pmp_rdata_i,
+    output logic                   pmp_we_o,
+    output logic [63:0]            pmp_wdata_o,
+
+    // --------------------------------------------------------- supervisor view
+    output logic [63:0]            o_sstatus_o,
+    output logic [63:0]            o_stvec_o,
+    output logic [63:0]            o_sepc_o,
+    output logic [63:0]            o_scause_o,
+    output logic [63:0]            o_stval_o,
+    output logic [63:0]            o_sscratch_o,
+    output logic [63:0]            o_sie_o,
+    output logic [63:0]            o_sip_o,
+    output logic [63:0]            o_satp_o,
+    output logic [63:0]            o_senvcfg_o,
+    output logic [63:0]            o_scounteren_o,
+    output logic [63:0]            o_mcounteren_o,
 
     // interrupt pending view owned by mosaic_interrupt (I-020)
     input  logic [63:0]            mip_i,
@@ -200,7 +259,11 @@ module mosaic_csr (
     output logic [31:0]            o_wr_ctr,
     output logic [31:0]            o_illegal_wr_ctr,
     output logic [31:0]            o_trap_ctr,
-    output logic [31:0]            o_mret_ctr
+    output logic [31:0]            o_mret_ctr,
+    output logic [31:0]            o_sret_ctr,
+    output logic [31:0]            o_trap_s_ctr,
+    output logic [31:0]            o_priv_illegal_ctr,
+    output logic [31:0]            o_priv_change_ctr
 );
 
   // --------------------------------------------------------------- constants
@@ -211,6 +274,49 @@ module mosaic_csr (
   localparam logic [63:0] MSTATUS_MIE  = 64'h0000_0000_0000_0008;
   localparam logic [63:0] MSTATUS_MPIE = 64'h0000_0000_0000_0080;
   localparam logic [63:0] MSTATUS_MPP  = 64'h0000_0000_0000_1800;
+
+  // The rest of the mstatus fields this profile makes real (I-044). Positions
+  // are the RV64 layout the clause cites; writability still comes from the
+  // generated mask, so a profile without S or U zeros exactly these bits.
+  localparam logic [63:0] MSTATUS_SIE  = 64'h0000_0000_0000_0002;
+  localparam logic [63:0] MSTATUS_SPIE = 64'h0000_0000_0000_0020;
+  localparam logic [63:0] MSTATUS_SPP  = 64'h0000_0000_0000_0100;
+  localparam logic [63:0] MSTATUS_MPRV = 64'h0000_0000_0002_0000;
+  // TVM and TSR only have a meaning where S-mode does, so they are named only
+  // in the profiles that implement it -- a constant nothing can consult would be
+  // a declaration, not a rule.
+  `ifdef MOSAIC_CSR_HAS_S
+    localparam logic [63:0] MSTATUS_TVM  = 64'h0000_0000_0010_0000;
+  `endif
+  localparam logic [63:0] MSTATUS_TW   = 64'h0000_0000_0020_0000;
+  `ifdef MOSAIC_CSR_HAS_S
+    localparam logic [63:0] MSTATUS_TSR  = 64'h0000_0000_0040_0000;
+  `endif
+
+
+  // sstatus is a *view* of mstatus, not a register. The bits it exposes are the
+  // fields the supervisor-status figure names: SD (63), UXL (33:32), MXR (19),
+  // SUM (18), XS (16:15), FS (14:13), VS (10:9), SPP (8), UBE (6), SPIE (5),
+  // SIE (1). This mask is the layout; which of those bits software may change is
+  // the generated `MOSAIC_CSR_WMASK_SSTATUS`, and the two are used together:
+  //   read  -> mstatus & SSTATUS_FIELDS
+  //   write -> mstatus = (mstatus & ~WMASK) | (operand & WMASK)
+  // A second register would be a second answer to "what is sstatus.SIE", which
+  // is exactly the failure this file's header says it exists to avoid.
+  localparam logic [63:0] SSTATUS_FIELDS = 64'h8000_0003_000d_e722;
+
+  // The supervisor interrupt bits inside mie/mip, and the writable parts of the
+  // sie/sip views, from the same generated table the registers come from.
+  localparam logic [63:0] SIE_VIEW_MASK = 64'h0000_0000_0000_0222;  // SEIE, STIE, SSIE
+  localparam logic [63:0] SIP_VIEW_MASK = 64'h0000_0000_0000_0222;  // SEIP, STIP, SSIP
+
+  // The U-level counter addresses this profile implements, and the mcounteren/
+  // scounteren bit each one is gated by ("Interrupt cause number i ... bit i"):
+  // cycle = 0xC00 -> CY (bit 0), time = 0xC01 -> TM (bit 1), instret = 0xC02 ->
+  // IR (bit 2).
+  localparam logic [11:0] CSR_CYCLE   = 12'hC00;
+  localparam logic [11:0] CSR_TIME    = 12'hC01;
+  localparam logic [11:0] CSR_INSTRET = 12'hC02;
 
   // ------------------------------------------------------------------- state
   //
@@ -240,6 +346,50 @@ module mosaic_csr (
   logic [63:0] mcycle_d;
   logic [63:0] minstret_d;
 
+  // --------------------------------------------- the supervisor state (I-044)
+  //
+  // sstatus, sie and sip are deliberately absent: they are views of mstatus and
+  // of mie/mip, and a register of their own would be a second copy of a bit that
+  // already has an owner. What does live here is the state the supervisor
+  // controller would own if it existed, which is the trap frame and the
+  // configuration registers with no M-mode equivalent.
+  // The delegation registers exist in every profile: they are M-mode registers
+  // whose every bit is WARL, and a profile with no less-privileged mode gives
+  // them a write mask of 0 rather than removing them (a write is still accepted
+  // and canonicalises to zero, so the register is not a trap).
+  logic [63:0] medeleg_q;
+  logic [63:0] mideleg_q;
+  logic [63:0] mcounteren_q;
+
+  logic [63:0] medeleg_d;
+  logic [63:0] mideleg_d;
+  logic [63:0] mcounteren_d;
+
+  `ifdef MOSAIC_CSR_HAS_S
+    logic [63:0] stvec_q;
+    logic [63:0] sscratch_q;
+    logic [63:0] sepc_q;
+    logic [63:0] scause_q;
+    logic [63:0] stval_q;
+    logic [63:0] satp_q;
+    logic [63:0] senvcfg_q;
+    logic [63:0] scounteren_q;
+
+    logic [63:0] stvec_d;
+    logic [63:0] sscratch_d;
+    logic [63:0] sepc_d;
+    logic [63:0] scause_d;
+    logic [63:0] stval_d;
+    logic [63:0] satp_d;
+    logic [63:0] senvcfg_d;
+    logic [63:0] scounteren_d;
+  `endif
+
+  // The architectural privilege mode. Two bits, with the encoding the
+  // specification uses in mstatus.MPP/SPP: 0 = U, 1 = S, 3 = M.
+  logic [1:0]  priv_q;
+  logic [1:0]  priv_d;
+
   // ------------------------------------------------------------------ decode
   //
   // One decode answers both port questions: is the address implemented at all
@@ -248,6 +398,27 @@ module mosaic_csr (
   // the table marks read-only cannot become writable by editing this file.
   logic addr_impl;
   logic wr_legal;
+
+  // PMP CSR selection: base + span from the generated config package, so a
+  // profile with no PMP entries (MOSAIC_PMP_ENTRIES == 0) selects nothing and
+  // every PMP number stays an illegal instruction there.
+  logic [11:0] pmp_cfg_off_c;
+  logic [11:0] pmp_addr_off_c;
+  logic        pmp_cfg_sel_c;
+  logic        pmp_addr_sel_c;
+
+  always_comb begin
+    pmp_cfg_off_c  = csr_addr_i - mosaic_cfg_pkg::MOSAIC_PMPCFG_ADDR_BASE;
+    pmp_addr_off_c = csr_addr_i - mosaic_cfg_pkg::MOSAIC_PMPADDR_ADDR_BASE;
+    pmp_cfg_sel_c  = (mosaic_cfg_pkg::MOSAIC_PMP_ENTRIES != 0) && (csr_addr_i[0] == 1'b0) &&
+                     (csr_addr_i >= mosaic_cfg_pkg::MOSAIC_PMPCFG_ADDR_BASE) &&
+                     (pmp_cfg_off_c < 12'(2 * mosaic_cfg_pkg::MOSAIC_PMP_CFG_COUNT));
+    pmp_addr_sel_c = (mosaic_cfg_pkg::MOSAIC_PMP_ENTRIES != 0) &&
+                     (csr_addr_i >= mosaic_cfg_pkg::MOSAIC_PMPADDR_ADDR_BASE) &&
+                     (pmp_addr_off_c < 12'(mosaic_cfg_pkg::MOSAIC_PMP_ENTRIES));
+  end
+
+  assign pmp_sel_o = pmp_cfg_sel_c | pmp_addr_sel_c;
 
   always_comb begin
     addr_impl = 1'b1;
@@ -277,6 +448,30 @@ module mosaic_csr (
       default:                    addr_impl = 1'b0;
     endcase
 
+    // The supervisor registers. They come from a second table that only the
+    // profiles with S-mode load, so the addresses exist in every profile that
+    // has them and this arm is compiled out of the ones that do not.
+    `ifdef MOSAIC_CSR_HAS_S
+      case (csr_addr_i)
+        mosaic_csr_pkg::MOSAIC_CSR_ADDR_SSTATUS:    wr_legal = mosaic_csr_pkg::MOSAIC_CSR_WRITE_LEGAL_SSTATUS;
+        mosaic_csr_pkg::MOSAIC_CSR_ADDR_SIE:        wr_legal = mosaic_csr_pkg::MOSAIC_CSR_WRITE_LEGAL_SIE;
+        mosaic_csr_pkg::MOSAIC_CSR_ADDR_SIP:        wr_legal = mosaic_csr_pkg::MOSAIC_CSR_WRITE_LEGAL_SIP;
+        mosaic_csr_pkg::MOSAIC_CSR_ADDR_STVEC:      wr_legal = mosaic_csr_pkg::MOSAIC_CSR_WRITE_LEGAL_STVEC;
+        mosaic_csr_pkg::MOSAIC_CSR_ADDR_SCOUNTEREN: wr_legal = mosaic_csr_pkg::MOSAIC_CSR_WRITE_LEGAL_SCOUNTEREN;
+        mosaic_csr_pkg::MOSAIC_CSR_ADDR_SENVCFG:    wr_legal = mosaic_csr_pkg::MOSAIC_CSR_WRITE_LEGAL_SENVCFG;
+        mosaic_csr_pkg::MOSAIC_CSR_ADDR_SSCRATCH:   wr_legal = mosaic_csr_pkg::MOSAIC_CSR_WRITE_LEGAL_SSCRATCH;
+        mosaic_csr_pkg::MOSAIC_CSR_ADDR_SEPC:       wr_legal = mosaic_csr_pkg::MOSAIC_CSR_WRITE_LEGAL_SEPC;
+        mosaic_csr_pkg::MOSAIC_CSR_ADDR_SCAUSE:     wr_legal = mosaic_csr_pkg::MOSAIC_CSR_WRITE_LEGAL_SCAUSE;
+        mosaic_csr_pkg::MOSAIC_CSR_ADDR_STVAL:      wr_legal = mosaic_csr_pkg::MOSAIC_CSR_WRITE_LEGAL_STVAL;
+        mosaic_csr_pkg::MOSAIC_CSR_ADDR_SATP:       wr_legal = mosaic_csr_pkg::MOSAIC_CSR_WRITE_LEGAL_SATP;
+        default: ;
+      endcase
+    `endif
+
+    // PMP registers are read/write M-mode registers.
+    if (pmp_sel_o) addr_impl = 1'b1;
+    if (pmp_sel_o) wr_legal  = 1'b1;
+
     `ifdef MOSAIC_CSR_MUTANT_RO_WRITE_ACCEPTED
       // MUTANT: every implemented CSR is treated as writable, so a write to a
       // read-only register stops raising csr_wr_illegal_o.
@@ -292,13 +487,84 @@ module mosaic_csr (
     `endif
   end
 
-  assign csr_illegal_o    = ~addr_impl;
-  assign csr_wr_illegal_o = csr_we_i & (~addr_impl | ~wr_legal);
+  // ------------------------------------------------------ the access check
+  //
+  // Privileged spec v1.12, "CSR Address Mapping Conventions": "The next two bits
+  // (csr[9:8]) encode the lowest privilege level that can access the CSR", and
+  // "The top two bits (csr[11:10]) indicate whether the register is read/write
+  // (00, 01, or 10) or read-only (11)". So the rule is read straight out of the
+  // address rather than from a second table here, and the generated package
+  // carries the same decoding as a constant so the testbench model and this file
+  // cannot disagree about it.
+  logic [1:0] csr_min_priv_r;
+  logic [1:0] csr_min_priv_w;
+  logic       csr_priv_ok;
+  logic       csr_counter_ok;
+  logic [5:0] csr_counter_bit;
+  logic       csr_is_counter;
+  logic [63:0] scounteren_view;
+
+  assign csr_min_priv_r = csr_addr_i[9:8];
+  assign csr_min_priv_w = (csr_addr_i[11:10] == 2'b11) ? mosaic_csr_pkg::MOSAIC_PRIV_M
+                                                       : csr_addr_i[9:8];
+
+  // The counter gate. "When the CY, TM, IR, or HPMn bit in the mcounteren
+  // register is clear, attempts to read the cycle, time, instret, or hpmcounter_n
+  // register while executing in U-mode will cause an illegal instruction
+  // exception"; S-mode reads are gated by mcounteren alone ("When the ... bit in
+  // mcounteren is clear, attempts to read ... while executing in S-mode will
+  // cause an illegal instruction exception"). The bit is the counter's own
+  // number, which for the three this profile implements is 0, 1 and 2.
+  assign csr_is_counter  = (csr_addr_i == CSR_CYCLE) || (csr_addr_i == CSR_TIME) ||
+                           (csr_addr_i == CSR_INSTRET);
+  assign csr_counter_bit = (csr_addr_i == CSR_CYCLE)   ? 6'd0 :
+                           (csr_addr_i == CSR_TIME)    ? 6'd1 : 6'd2;
+
+  // A profile without S-mode has no scounteren, so the U-mode half of the gate
+  // has nothing to consult; it reads zero, which is the same answer a register
+  // that is entirely read-only zero would give.
+  `ifdef MOSAIC_CSR_HAS_S
+    assign scounteren_view = scounteren_q;
+  `else
+    assign scounteren_view = 64'd0;
+  `endif
+
+  always_comb begin
+    csr_counter_ok = 1'b1;
+    if (csr_is_counter) begin
+      if (priv_q == mosaic_csr_pkg::MOSAIC_PRIV_M) begin
+        csr_counter_ok = 1'b1;
+      end else if (priv_q == mosaic_csr_pkg::MOSAIC_PRIV_S) begin
+        csr_counter_ok = mcounteren_q[csr_counter_bit];
+      end else begin
+        csr_counter_ok = mcounteren_q[csr_counter_bit] && scounteren_view[csr_counter_bit];
+      end
+    end
+  end
+
+  // TVM: "When TVM=1, attempts to read or write the satp CSR while executing in
+  // S-mode will raise an illegal instruction exception."
+  logic satp_tvm_illegal;
+
+  `ifdef MOSAIC_CSR_HAS_S
+    assign satp_tvm_illegal = (csr_addr_i == mosaic_csr_pkg::MOSAIC_CSR_ADDR_SATP) &&
+                              (priv_q == mosaic_csr_pkg::MOSAIC_PRIV_S) &&
+                              ((mstatus_q & MSTATUS_TVM) != 64'd0);
+  `else
+    assign satp_tvm_illegal = 1'b0;
+  `endif
+
+  assign csr_priv_ok = (priv_q >= csr_min_priv_r) && (priv_q >= csr_min_priv_w);
+
+  assign csr_illegal_o    = ~addr_impl | ~csr_priv_ok | ~csr_counter_ok | satp_tvm_illegal;
+  assign csr_wr_illegal_o = csr_we_i & (~addr_impl | ~wr_legal | ~csr_priv_ok |
+                                        ~csr_counter_ok | satp_tvm_illegal);
 
   // A write that is accepted by the ports and not pre-empted by the boundary.
   // The trap/mret terms are what make a trap outrank a retiring CSR instruction.
   logic wr_accept;
-  assign wr_accept = csr_we_i & addr_impl & wr_legal & ~trap_valid_i & ~mret_valid_i;
+  assign wr_accept = csr_we_i & addr_impl & wr_legal & ~trap_valid_i & ~mret_valid_i &
+                     ~sret_valid_i;
 
   // The two boundary events cannot both be true at one architectural boundary.
   // The hardware resolves a simultaneous request in favour of the trap (below);
@@ -306,6 +572,8 @@ module mosaic_csr (
   // the resolution hide it.
   always_comb begin
     assert (!(trap_valid_i & mret_valid_i));
+    assert (!(trap_valid_i & sret_valid_i));
+    assert (!(mret_valid_i & sret_valid_i));
   end
 
   // -------------------------------------------------------------------- read
@@ -315,11 +583,11 @@ module mosaic_csr (
     case (csr_addr_i)
       mosaic_csr_pkg::MOSAIC_CSR_ADDR_MSTATUS:    csr_rdata_stored = mstatus_q;
       mosaic_csr_pkg::MOSAIC_CSR_ADDR_MISA:       csr_rdata_stored = mosaic_csr_pkg::MOSAIC_CSR_RESET_MISA;
-      mosaic_csr_pkg::MOSAIC_CSR_ADDR_MEDELEG:    csr_rdata_stored = mosaic_csr_pkg::MOSAIC_CSR_RESET_MEDELEG;
-      mosaic_csr_pkg::MOSAIC_CSR_ADDR_MIDELEG:    csr_rdata_stored = mosaic_csr_pkg::MOSAIC_CSR_RESET_MIDELEG;
+      mosaic_csr_pkg::MOSAIC_CSR_ADDR_MEDELEG:    csr_rdata_stored = medeleg_q;
+      mosaic_csr_pkg::MOSAIC_CSR_ADDR_MIDELEG:    csr_rdata_stored = mideleg_q;
       mosaic_csr_pkg::MOSAIC_CSR_ADDR_MIE:        csr_rdata_stored = mie_q;
       mosaic_csr_pkg::MOSAIC_CSR_ADDR_MTVEC:      csr_rdata_stored = mtvec_q;
-      mosaic_csr_pkg::MOSAIC_CSR_ADDR_MCOUNTEREN: csr_rdata_stored = mosaic_csr_pkg::MOSAIC_CSR_RESET_MCOUNTEREN;
+      mosaic_csr_pkg::MOSAIC_CSR_ADDR_MCOUNTEREN: csr_rdata_stored = mcounteren_q;
       mosaic_csr_pkg::MOSAIC_CSR_ADDR_MSCRATCH:   csr_rdata_stored = mscratch_q;
       mosaic_csr_pkg::MOSAIC_CSR_ADDR_MEPC:       csr_rdata_stored = mepc_q;
       mosaic_csr_pkg::MOSAIC_CSR_ADDR_MCAUSE:     csr_rdata_stored = mcause_q;
@@ -338,6 +606,29 @@ module mosaic_csr (
       mosaic_csr_pkg::MOSAIC_CSR_ADDR_INSTRET:    csr_rdata_stored = minstret_q; // read-only shadow
       default:                    csr_rdata_stored = 64'b0;
     endcase
+
+    // The supervisor view. sstatus, sie and sip are views of state that already
+    // has an owner -- mstatus, mie and mip -- masked to the bits the supervisor
+    // layout exposes, so there is one copy of every one of them.
+    `ifdef MOSAIC_CSR_HAS_S
+      case (csr_addr_i)
+        mosaic_csr_pkg::MOSAIC_CSR_ADDR_SSTATUS:    csr_rdata_stored = mstatus_q & SSTATUS_FIELDS;
+        mosaic_csr_pkg::MOSAIC_CSR_ADDR_SIE:        csr_rdata_stored = mie_q & SIE_VIEW_MASK;
+        mosaic_csr_pkg::MOSAIC_CSR_ADDR_SIP:        csr_rdata_stored = mip_i & SIP_VIEW_MASK;
+        mosaic_csr_pkg::MOSAIC_CSR_ADDR_STVEC:      csr_rdata_stored = stvec_q;
+        mosaic_csr_pkg::MOSAIC_CSR_ADDR_SCOUNTEREN: csr_rdata_stored = scounteren_q;
+        mosaic_csr_pkg::MOSAIC_CSR_ADDR_SENVCFG:    csr_rdata_stored = senvcfg_q;
+        mosaic_csr_pkg::MOSAIC_CSR_ADDR_SSCRATCH:   csr_rdata_stored = sscratch_q;
+        mosaic_csr_pkg::MOSAIC_CSR_ADDR_SEPC:       csr_rdata_stored = sepc_q;
+        mosaic_csr_pkg::MOSAIC_CSR_ADDR_SCAUSE:     csr_rdata_stored = scause_q;
+        mosaic_csr_pkg::MOSAIC_CSR_ADDR_STVAL:      csr_rdata_stored = stval_q;
+        mosaic_csr_pkg::MOSAIC_CSR_ADDR_SATP:       csr_rdata_stored = satp_q;
+        default: ;
+      endcase
+    `endif
+
+    // The PMP registers live in mosaic_pmp; this port is their read value.
+    if (pmp_sel_o) csr_rdata_stored = pmp_rdata_i;
   end
 
   `ifdef MOSAIC_CSR_MUTANT_READ_AFTER_WRITE
@@ -374,26 +665,107 @@ module mosaic_csr (
 
   // ------------------------------------------------------- trap / mret targets
   assign trap_commit_o = trap_valid_i;
-  assign mret_commit_o = mret_valid_i & ~trap_valid_i;
+  assign mret_commit_o = mret_valid_i & ~trap_valid_i & ~sret_valid_i;
+  assign sret_commit_o = sret_valid_i & ~trap_valid_i & ~mret_valid_i;
 
   // MRET targets mepc exactly; the low bits are already zero by construction.
   assign mret_target_o = mepc_q;
+  // SRET resumes at sepc exactly, the same rule as MRET and mepc. A profile
+  // with no S-mode has no sepc; there is also no SRET it could execute, and the
+  // target reads zero rather than a register that does not exist.
+  `ifdef MOSAIC_CSR_HAS_S
+    assign sret_target_o = sepc_q;
+  `else
+    assign sret_target_o = 64'd0;
+  `endif
+
+  // ---------------------------------------------------------------------------
+  // Delegation. The cause's low bits index the delegation register and bit 63
+  // says which of the two it is; the delegated bit only applies from S or U.
+  // ---------------------------------------------------------------------------
+  logic trap_deleg_o;
+  logic [5:0] trap_code_c;
+
+  assign trap_code_c  = trap_cause_i[5:0];
+  assign trap_deleg_o = (trap_cause_i[63] ? mideleg_q[trap_code_c] : medeleg_q[trap_code_c]) &&
+                        (priv_q != mosaic_csr_pkg::MOSAIC_PRIV_M);
+
+  // ---------------------------------------------------------------------------
+  // The legality of the two returns, evaluated in the mode the hart is in.
+  // "An xRET instruction can be executed in privilege mode x or higher":
+  // MRET in M-mode always, SRET in S-mode or higher; and "SRET should also raise
+  // an illegal instruction exception when TSR=1 in mstatus" applies to S-mode
+  // only ("When TSR=1, attempts to execute SRET while executing in S-mode will
+  // raise an illegal instruction exception").
+  // ---------------------------------------------------------------------------
+  assign mret_illegal_o = (priv_q != mosaic_csr_pkg::MOSAIC_PRIV_M);
+  assign wfi_illegal_o  = (priv_q == mosaic_csr_pkg::MOSAIC_PRIV_U) ||
+                          ((priv_q == mosaic_csr_pkg::MOSAIC_PRIV_S) &&
+                           ((mstatus_q & MSTATUS_TW) != 64'd0));
+  // TSR is a field of a profile that has S-mode; a profile that does not has the
+  // bit read-only zero, so the "TSR is set" test is a constant there rather than
+  // a reference to a constant the package does not declare.
+  `ifdef MOSAIC_CSR_HAS_S
+    logic tsr_set_c;
+    assign tsr_set_c = ((mstatus_q & MSTATUS_TSR) != 64'd0);
+  `else
+    logic tsr_set_c;
+    assign tsr_set_c = 1'b0;
+  `endif
+
+  assign sret_illegal_o = (priv_q == mosaic_csr_pkg::MOSAIC_PRIV_U) ||
+                          ((priv_q == mosaic_csr_pkg::MOSAIC_PRIV_S) && tsr_set_c);
 
   // An interrupt (mcause[63] set) taken in Vectored mode enters at
   // base + 4 * cause code; every other trap enters at the base (Table mtvec MODE
-  // and the table's direct/vectored description).
+  // and the table's direct/vectored description). A trap delegated to S-mode
+  // enters through the supervisor vector by the same rule.
+  logic [63:0] trap_vec_c;
+
   always_comb begin
-    if ((mtvec_q[1:0] == 2'b01) && trap_cause_i[63]) begin
-      trap_target_o = {mtvec_q[63:2], 2'b00} + {trap_cause_i[61:0], 2'b00};
+    trap_vec_c = mtvec_q;
+    `ifdef MOSAIC_CSR_HAS_S
+      if (trap_deleg_o) trap_vec_c = stvec_q;
+    `endif
+  end
+
+  always_comb begin
+    if ((trap_vec_c[1:0] == 2'b01) && trap_cause_i[63]) begin
+      trap_target_o = {trap_vec_c[63:2], 2'b00} + {trap_cause_i[61:0], 2'b00};
     end else begin
-      trap_target_o = {mtvec_q[63:2], 2'b00};
+      trap_target_o = {trap_vec_c[63:2], 2'b00};
     end
   end
 
   // -------------------------------------------------------------- mip forward
-  assign mip_we_o    = wr_accept & (csr_addr_i == mosaic_csr_pkg::MOSAIC_CSR_ADDR_MIP);
+  // mip and sip are the same pending state seen through two addresses, so a
+  // write to either reaches the interrupt unit, masked to the bits that
+  // register may change. sie is the same relationship with mie and needs no
+  // forwarding at all: it is applied to mie below.
+  // The interrupt unit is the owner of the mask a mip write is filtered by, and
+  // it applies the *mip* one to everything offered on this port. That is right
+  // for mip and wrong for sip, whose writable set is a smaller subset, so the
+  // difference is taken here: sip's operand is narrowed by sip's own mask before
+  // it is forwarded, and mip's is passed exactly as the retired instruction
+  // presented it.
+  logic mip_alias_c;
+
+  always_comb begin
+    mip_alias_c = (csr_addr_i == mosaic_csr_pkg::MOSAIC_CSR_ADDR_MIP);
+    `ifdef MOSAIC_CSR_HAS_S
+      if (csr_addr_i == mosaic_csr_pkg::MOSAIC_CSR_ADDR_SIP) mip_alias_c = 1'b1;
+    `endif
+  end
+
+  assign mip_we_o    = wr_accept & mip_alias_c;
   assign mip_op_o    = csr_op_i;
-  assign mip_wdata_o = csr_wdata_i;
+  `ifdef MOSAIC_CSR_HAS_S
+    assign mip_wdata_o = (csr_addr_i == mosaic_csr_pkg::MOSAIC_CSR_ADDR_SIP)
+                         ? (csr_wdata_i & mosaic_csr_pkg::MOSAIC_CSR_WMASK_SIP)
+                         : csr_wdata_i;
+  `else
+    assign mip_wdata_o = csr_wdata_i;
+  `endif
 
   // ----------------------------------------------------------- next-state view
   //
@@ -410,25 +782,81 @@ module mosaic_csr (
     mtval_d    = mtval_q;
     mcycle_d   = mcycle_q;
     minstret_d = minstret_q;
+    medeleg_d  = medeleg_q;
+    mideleg_d  = mideleg_q;
+    mcounteren_d = mcounteren_q;
+    `ifdef MOSAIC_CSR_HAS_S
+      stvec_d    = stvec_q;
+      sscratch_d = sscratch_q;
+      sepc_d     = sepc_q;
+      scause_d   = scause_q;
+      stval_d    = stval_q;
+      satp_d     = satp_q;
+      senvcfg_d  = senvcfg_q;
+      scounteren_d = scounteren_q;
+    `endif
+    priv_d     = priv_q;
 
     if (trap_valid_i) begin
-      // Trap entry: MPIE <- MIE, MIE <- 0, MPP <- current privilege (M = 3,
-      // which is also what the read-only MPP field must hold); mepc <- the
-      // interrupted PC with its read-only low bits forced zero; mcause <- the
-      // cause; mtval <- the trap value.
-      mstatus_d = (mstatus_q & ~(MSTATUS_MIE | MSTATUS_MPIE))
-                | (mstatus_q[3] ? MSTATUS_MPIE : 64'd0)
-                | MSTATUS_MPP;
-      mepc_d    = trap_epc_i & mosaic_csr_pkg::MOSAIC_CSR_WMASK_MEPC;
-      mcause_d  = trap_cause_i;
-      mtval_d   = trap_tval_i;
+      // ---------------------------------------------------------- trap entry
+      //
+      // Where the trap goes is decided here, because the delegation registers
+      // live here: "setting a bit in medeleg or mideleg will delegate the
+      // corresponding trap, when occurring in S-mode or U-mode, to the S-mode
+      // trap handler", and "Traps never transition from a more-privileged mode
+      // to a less-privileged mode. For example, if M-mode has delegated
+      // illegal-instruction exceptions to S-mode, and M-mode software later
+      // executes an illegal instruction, the trap is taken in M-mode". So the
+      // delegation bit only applies when the trap is taken from S or U.
+      `ifdef MOSAIC_CSR_HAS_S
+      if (trap_deleg_o) begin
+        // Trap into S-mode: SPP <- the mode the trap was taken from (one bit),
+        // SPIE <- SIE, SIE <- 0, and the trap frame is the supervisor's.
+        mstatus_d = (mstatus_q & ~(MSTATUS_SIE | MSTATUS_SPIE | MSTATUS_SPP))
+                  | (mstatus_q[1] ? MSTATUS_SPIE : 64'd0)
+                  | (priv_q[0] ? MSTATUS_SPP : 64'd0);
+        sepc_d    = trap_epc_i & mosaic_csr_pkg::MOSAIC_CSR_WMASK_SEPC;
+        scause_d  = trap_cause_i;
+        stval_d   = trap_tval_i;
+        priv_d    = mosaic_csr_pkg::MOSAIC_PRIV_S;
+      end else
+      `endif
+      begin
+        // Trap into M-mode: MPIE <- MIE, MIE <- 0, MPP <- the mode the trap was
+        // taken from; mepc <- the interrupted PC with its read-only low bits
+        // forced zero; mcause <- the cause; mtval <- the trap value.
+        mstatus_d = (mstatus_q & ~(MSTATUS_MIE | MSTATUS_MPIE | MSTATUS_MPP))
+                  | (mstatus_q[3] ? MSTATUS_MPIE : 64'd0)
+                  | ({{62{1'b0}}, priv_q} << 11);
+        mepc_d    = trap_epc_i & mosaic_csr_pkg::MOSAIC_CSR_WMASK_MEPC;
+        mcause_d  = trap_cause_i;
+        mtval_d   = trap_tval_i;
+        priv_d    = mosaic_csr_pkg::MOSAIC_PRIV_M;
+      end
     end else if (mret_valid_i) begin
-      // MRET: MIE <- MPIE, MPIE <- 1, MPP <- the least-privileged supported mode
-      // (M = 3 in p0). L2.1.6.1 of the privileged spec for the field rules.
-      mstatus_d = (mstatus_q & ~(MSTATUS_MIE | MSTATUS_MPIE))
+      // ------------------------------------------------------------- MRET
+      //
+      // "When executing an xRET instruction, supposing xPP holds the value y,
+      // xIE is set to xPIE; the privilege mode is changed to y; xPIE is set to
+      // 1; and xPP is set to the least-privileged supported mode (U if U-mode is
+      // implemented, else M). If y != M, xRET also sets MPRV=0."
+      mstatus_d = (mstatus_q & ~(MSTATUS_MIE | MSTATUS_MPIE | MSTATUS_MPP | MSTATUS_MPRV))
                 | (mstatus_q[7] ? MSTATUS_MIE : 64'd0)
                 | MSTATUS_MPIE
-                | MSTATUS_MPP;
+                | ({{62{1'b0}}, mosaic_csr_pkg::MOSAIC_PRIV_LEAST} << 11)
+                | ((mstatus_q[12:11] != mosaic_csr_pkg::MOSAIC_PRIV_M) ? 64'd0 : (mstatus_q & MSTATUS_MPRV));
+      priv_d    = mstatus_q[12:11];
+    end else if (sret_valid_i) begin
+      // ------------------------------------------------------------- SRET
+      //
+      // Same field rule with the supervisor stack: SIE <- SPIE, SPIE <- 1,
+      // SPP <- the least-privileged supported mode, and MPRV is cleared because
+      // SRET always returns to a mode less privileged than M.
+      mstatus_d = (mstatus_q & ~(MSTATUS_SIE | MSTATUS_SPIE | MSTATUS_SPP | MSTATUS_MPRV))
+                | (mstatus_q[5] ? MSTATUS_SIE : 64'd0)
+                | MSTATUS_SPIE
+                | (mosaic_csr_pkg::MOSAIC_PRIV_LEAST[0] ? MSTATUS_SPP : 64'd0);
+      priv_d    = {1'b0, mstatus_q[8]};   // SPP is one bit: 0 = U, 1 = S
     end else if (wr_accept) begin
       case (csr_addr_i)
 `ifdef MOSAIC_CSR_MUTANT_NO_FIELD_MASK
@@ -456,6 +884,46 @@ module mosaic_csr (
         mosaic_csr_pkg::MOSAIC_CSR_ADDR_MTVAL:   mtval_d = csr_op_result;
         mosaic_csr_pkg::MOSAIC_CSR_ADDR_MCYCLE:  mcycle_d = csr_op_result;
         mosaic_csr_pkg::MOSAIC_CSR_ADDR_MINSTRET: minstret_d = csr_op_result;
+        mosaic_csr_pkg::MOSAIC_CSR_ADDR_MEDELEG:
+          medeleg_d = (medeleg_q & ~mosaic_csr_pkg::MOSAIC_CSR_WMASK_MEDELEG)
+                    | (csr_op_result & mosaic_csr_pkg::MOSAIC_CSR_WMASK_MEDELEG);
+        mosaic_csr_pkg::MOSAIC_CSR_ADDR_MIDELEG:
+          mideleg_d = (mideleg_q & ~mosaic_csr_pkg::MOSAIC_CSR_WMASK_MIDELEG)
+                    | (csr_op_result & mosaic_csr_pkg::MOSAIC_CSR_WMASK_MIDELEG);
+        mosaic_csr_pkg::MOSAIC_CSR_ADDR_MCOUNTEREN:
+          mcounteren_d = (mcounteren_q & ~mosaic_csr_pkg::MOSAIC_CSR_WMASK_MCOUNTEREN)
+                       | (csr_op_result & mosaic_csr_pkg::MOSAIC_CSR_WMASK_MCOUNTEREN);
+        `ifdef MOSAIC_CSR_HAS_S
+          // sstatus and sie are views of mstatus and mie: the write lands in the
+          // register that owns the bit, masked by the view's own writable set.
+          mosaic_csr_pkg::MOSAIC_CSR_ADDR_SSTATUS:
+            mstatus_d = (mstatus_q & ~mosaic_csr_pkg::MOSAIC_CSR_WMASK_SSTATUS)
+                      | (csr_op_result & mosaic_csr_pkg::MOSAIC_CSR_WMASK_SSTATUS);
+          mosaic_csr_pkg::MOSAIC_CSR_ADDR_SIE:
+            mie_d = (mie_q & ~mosaic_csr_pkg::MOSAIC_CSR_WMASK_SIE)
+                  | (csr_op_result & mosaic_csr_pkg::MOSAIC_CSR_WMASK_SIE);
+          mosaic_csr_pkg::MOSAIC_CSR_ADDR_STVEC:
+            stvec_d = {csr_op_result[63:2], mtvec_mode_canon(csr_op_result[1:0])};
+          mosaic_csr_pkg::MOSAIC_CSR_ADDR_SCOUNTEREN:
+            scounteren_d = (scounteren_q & ~mosaic_csr_pkg::MOSAIC_CSR_WMASK_SCOUNTEREN)
+                         | (csr_op_result & mosaic_csr_pkg::MOSAIC_CSR_WMASK_SCOUNTEREN);
+          mosaic_csr_pkg::MOSAIC_CSR_ADDR_SENVCFG:
+            senvcfg_d = (senvcfg_q & ~mosaic_csr_pkg::MOSAIC_CSR_WMASK_SENVCFG)
+                      | (csr_op_result & mosaic_csr_pkg::MOSAIC_CSR_WMASK_SENVCFG);
+          mosaic_csr_pkg::MOSAIC_CSR_ADDR_SSCRATCH: sscratch_d = csr_op_result;
+          mosaic_csr_pkg::MOSAIC_CSR_ADDR_SEPC:
+            sepc_d = csr_op_result & mosaic_csr_pkg::MOSAIC_CSR_WMASK_SEPC;
+          mosaic_csr_pkg::MOSAIC_CSR_ADDR_SCAUSE: scause_d = csr_op_result;
+          mosaic_csr_pkg::MOSAIC_CSR_ADDR_STVAL:  stval_d  = csr_op_result;
+          // satp is WARL, and the only MODE this profile can execute is Bare
+          // (0): translation is I-045's, and a register that read back "Sv39"
+          // for a machine that translates nothing would be a claim, not a
+          // configuration. So the MODE field canonicalises to Bare on every
+          // write, which is the same shape of rule mtvec's reserved encodings
+          // get above.
+          mosaic_csr_pkg::MOSAIC_CSR_ADDR_SATP:
+            satp_d = csr_op_result & ~(64'hF000_0000_0000_0000);
+        `endif
         `ifdef MOSAIC_CSR_MUTANT_CYCLE_WRITABLE
           // MUTANT: the read-only shadows write through to the counters.
           mosaic_csr_pkg::MOSAIC_CSR_ADDR_CYCLE:    mcycle_d = csr_op_result;
@@ -521,10 +989,31 @@ module mosaic_csr (
       mtval_q    <= mosaic_csr_pkg::MOSAIC_CSR_RESET_MTVAL;
       mcycle_q   <= mosaic_csr_pkg::MOSAIC_CSR_RESET_MCYCLE;
       minstret_q <= mosaic_csr_pkg::MOSAIC_CSR_RESET_MINSTRET;
+      medeleg_q  <= mosaic_csr_pkg::MOSAIC_CSR_RESET_MEDELEG;
+      mideleg_q  <= mosaic_csr_pkg::MOSAIC_CSR_RESET_MIDELEG;
+      mcounteren_q <= mosaic_csr_pkg::MOSAIC_CSR_RESET_MCOUNTEREN;
+      // The hart starts in M-mode: reset is M-mode by definition ("M-mode is
+      // used for low-level access to a hardware platform and is the first mode
+      // entered at reset").
+      priv_q     <= mosaic_csr_pkg::MOSAIC_PRIV_M;
       o_wr_ctr         <= 32'd0;
       o_illegal_wr_ctr <= 32'd0;
       o_trap_ctr       <= 32'd0;
       o_mret_ctr       <= 32'd0;
+      o_sret_ctr       <= 32'd0;
+      o_trap_s_ctr     <= 32'd0;
+      o_priv_illegal_ctr <= 32'd0;
+      o_priv_change_ctr  <= 32'd0;
+      `ifdef MOSAIC_CSR_HAS_S
+        stvec_q      <= mosaic_csr_pkg::MOSAIC_CSR_RESET_STVEC;
+        sscratch_q   <= mosaic_csr_pkg::MOSAIC_CSR_RESET_SSCRATCH;
+        sepc_q       <= mosaic_csr_pkg::MOSAIC_CSR_RESET_SEPC;
+        scause_q     <= mosaic_csr_pkg::MOSAIC_CSR_RESET_SCAUSE;
+        stval_q      <= mosaic_csr_pkg::MOSAIC_CSR_RESET_STVAL;
+        satp_q       <= mosaic_csr_pkg::MOSAIC_CSR_RESET_SATP;
+        senvcfg_q    <= mosaic_csr_pkg::MOSAIC_CSR_RESET_SENVCFG;
+        scounteren_q <= mosaic_csr_pkg::MOSAIC_CSR_RESET_SCOUNTEREN;
+      `endif
     end else begin
       mstatus_q  <= mstatus_d;
       mie_q      <= mie_d;
@@ -533,6 +1022,20 @@ module mosaic_csr (
       mepc_q     <= mepc_d;
       mcause_q   <= mcause_d;
       mtval_q    <= mtval_d;
+      medeleg_q  <= medeleg_d;
+      mideleg_q  <= mideleg_d;
+      mcounteren_q <= mcounteren_d;
+      priv_q     <= priv_d;
+      `ifdef MOSAIC_CSR_HAS_S
+        stvec_q      <= stvec_d;
+        sscratch_q   <= sscratch_d;
+        sepc_q       <= sepc_d;
+        scause_q     <= scause_d;
+        stval_q      <= stval_d;
+        satp_q       <= satp_d;
+        senvcfg_q    <= senvcfg_d;
+        scounteren_q <= scounteren_d;
+      `endif
       // A write supplies the value at this edge and the edge's own tick is added
       // on top, so a counter never loses a cycle to an instruction.
       mcycle_q   <= mcycle_d + {63'b0, cnt_cycle_i};
@@ -542,10 +1045,54 @@ module mosaic_csr (
       if (csr_wr_illegal_o) o_illegal_wr_ctr <= o_illegal_wr_ctr + 32'd1;
       if (trap_valid_i)     o_trap_ctr       <= o_trap_ctr + 32'd1;
       if (mret_commit_o)    o_mret_ctr       <= o_mret_ctr + 32'd1;
+      if (sret_commit_o)    o_sret_ctr       <= o_sret_ctr + 32'd1;
+      if (trap_valid_i && trap_deleg_o) o_trap_s_ctr <= o_trap_s_ctr + 32'd1;
+      // A CSR access refused because the mode is too low is counted apart from
+      // one refused because the address is unimplemented: the two are different
+      // findings, and a test that could not tell them apart would not be evidence
+      // of a privilege check at all. The port has no "this is a CSR instruction"
+      // qualifier, so the count is of *writes*; a read refused for privilege is
+      // visible in the trap it raises and in `o_illegal_wr_ctr` is not counted
+      // here.
+      if (csr_we_i && addr_impl && !csr_priv_ok)
+        o_priv_illegal_ctr <= o_priv_illegal_ctr + 32'd1;
+      if (priv_d != priv_q) o_priv_change_ctr <= o_priv_change_ctr + 32'd1;
     end
   end
 
+  assign pmp_we_o     = wr_accept & pmp_sel_o;
+  assign pmp_wdata_o  = csr_op_result;
+
   // ------------------------------------------------------------ observability
+  assign o_priv_o     = priv_q;
+  assign o_medeleg_o  = medeleg_q;
+  assign o_mideleg_o  = mideleg_q;
+  assign o_sstatus_o  = mstatus_q & SSTATUS_FIELDS;
+  assign o_sie_o      = mie_q & SIE_VIEW_MASK;
+  assign o_sip_o      = mip_i & SIP_VIEW_MASK;
+  assign o_mcounteren_o = mcounteren_q;
+  `ifdef MOSAIC_CSR_HAS_S
+    assign o_stvec_o    = stvec_q;
+    assign o_sepc_o     = sepc_q;
+    assign o_scause_o   = scause_q;
+    assign o_stval_o    = stval_q;
+    assign o_sscratch_o = sscratch_q;
+    assign o_satp_o     = satp_q;
+    assign o_senvcfg_o  = senvcfg_q;
+    assign o_scounteren_o = scounteren_q;
+  `else
+    // A profile with no S-mode has no supervisor trap frame and no satp. The
+    // outputs exist because the port list does, and they read as zero rather
+    // than as a stale value from a register that does not exist.
+    assign o_stvec_o    = 64'd0;
+    assign o_sepc_o     = 64'd0;
+    assign o_scause_o   = 64'd0;
+    assign o_stval_o    = 64'd0;
+    assign o_sscratch_o = 64'd0;
+    assign o_satp_o     = 64'd0;
+    assign o_senvcfg_o  = 64'd0;
+    assign o_scounteren_o = 64'd0;
+  `endif
   assign o_mstatus_o  = mstatus_q;
   assign o_mtvec_o    = mtvec_q;
   assign o_mepc_o     = mepc_q;

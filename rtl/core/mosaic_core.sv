@@ -375,6 +375,38 @@ module mosaic_core (
     // MRET: the pulse the CSR file saw and the PC it returns to.
     output logic                        o_mret_valid,
     output logic [CORE_XLEN-1:0]        o_mret_target,
+    // ------------------------------------------------- privilege evidence (I-044)
+    output logic [1:0]                  o_priv,
+    output logic [63:0]                 o_medeleg,
+    output logic [63:0]                 o_mideleg,
+    output logic                        o_sret_valid,
+    output logic [CORE_XLEN-1:0]        o_sret_target,
+    output logic [63:0]                 o_sstatus,
+    output logic [63:0]                 o_stvec,
+    output logic [63:0]                 o_sepc,
+    output logic [63:0]                 o_scause,
+    output logic [63:0]                 o_stval,
+    output logic [63:0]                 o_sscratch,
+    output logic [63:0]                 o_satp,
+    output logic [31:0]                 o_csr_sret_ctr,
+    output logic [31:0]                 o_csr_trap_s_ctr,
+    output logic [31:0]                 o_csr_priv_illegal_ctr,
+    output logic [31:0]                 o_csr_priv_change_ctr,
+    output logic [31:0]                 o_pmp_query_ctr,
+    output logic [31:0]                 o_pmp_deny_ctr,
+    output logic [31:0]                 o_pmp_fetch_deny_ctr,
+    output logic [31:0]                 o_pmp_locked_ctr,
+    // The shape of each decision, so a case can require *which* answer it got
+    // rather than only whether the machine trapped: a denial that came from a
+    // locked entry is a different fact from one that came from a low-numbered
+    // unlocked entry above a broader region.
+    output logic                        o_pmp_data_matched,
+    output logic                        o_pmp_data_locked,
+    output logic                        o_pmp_fetch_matched,
+    output logic                        o_pmp_fetch_locked,
+    output logic                        o_csr_pmp_sel,
+    output logic [mosaic_cfg_pkg::MOSAIC_PMP_ENTRY_CFG_W-1:0]  o_pmp_cfg,
+    output logic [mosaic_cfg_pkg::MOSAIC_PMP_ENTRY_ADDR_W-1:0] o_pmp_addr,
     // The interrupt decision and the WFI halt, straight from mosaic_interrupt.
     output logic                        o_irq_valid,
     output logic [CORE_XLEN-1:0]        o_irq_cause,
@@ -828,6 +860,31 @@ module mosaic_core (
   logic                       csr_mip_we;
   logic [1:0]                 csr_mip_op;
   logic [63:0]                csr_mip_wdata;
+  // I-044: privilege, the supervisor frame, SRET and the PMP hand-off.
+  logic [1:0]                 csr_priv;
+  logic [63:0]                csr_medeleg, csr_mideleg;
+  logic                       csr_sret_valid;
+  logic                       csr_sret_commit;
+  logic [CORE_XLEN-1:0]       csr_sret_target;
+  logic                       csr_mret_illegal, csr_sret_illegal, csr_wfi_illegal;
+  logic                       csr_pmp_sel, csr_pmp_we;
+  logic [63:0]                csr_pmp_rdata, csr_pmp_wdata;
+  logic [63:0]                csr_sstatus, csr_stvec, csr_sepc, csr_scause, csr_stval;
+  logic [63:0]                csr_sscratch, csr_satp;
+  logic [31:0]                csr_sret_ctr, csr_trap_s_ctr;
+  logic [31:0]                csr_priv_illegal_ctr, csr_priv_change_ctr;
+  // The PMP unit's answer to the two questions asked of it each cycle: may the
+  // data path make this access, and may the front end read this address.
+  logic                       pmp_data_allow, pmp_data_matched, pmp_data_locked;
+  logic                       pmp_fetch_allow, pmp_fetch_matched, pmp_fetch_locked;
+  logic [63:0]                lsu_req_addr_c;
+  logic                       lsu_req_r_c, lsu_req_w_c;
+  logic [3:0]                 lsu_req_bytes_c;
+  logic [1:0]                 eff_priv_c;
+  logic                       ep_pmp_deny_c;
+  logic                       fetch_pmp_deny_c;
+  logic [31:0]                pmp_deny_ctr, pmp_fetch_deny_ctr, pmp_query_ctr;
+  logic [31:0]                pmp_locked_ctr;
   logic [63:0]                irq_mip;
   logic                       irq_valid;
   logic [63:0]                irq_cause;
@@ -845,6 +902,7 @@ module mosaic_core (
   mosaic_pkg::csr_op_e        sys_csr_op_q;
   logic                       sys_csr_reads_q, sys_csr_writes_q;
   logic                       sys_ecall_q, sys_ebreak_q, sys_mret_q, sys_wfi_q;
+  logic                       sys_sret_q, sys_fetch_fault_q;
   // The two fence class bits, staged exactly like the rest of the system
   // payload. They are the whole of what the fence rule reads: this profile
   // treats fence's fm/pred/succ fields conservatively and does not distinguish
@@ -868,6 +926,12 @@ module mosaic_core (
   logic [63:0]                sys_exc_cause;
   logic                       sys_trap_q;
   logic [63:0]                sys_trap_cause_q;
+  logic [63:0]                sys_trap_tval_q;
+  // A staged system macro that writes mstatus. It is the only state change that
+  // can alter the *effective* privilege of a later memory access without
+  // redirecting, so it is named once here and used both to hold younger memory
+  // macros off and to make the write wait for the memory path to drain.
+  logic                       sys_priv_wr_q;
   logic                       port3_taken_sys;
   logic                       lsu_wb_ready_int;
   mosaic_uop_pkg::wb_event_t  wb3_ev;
@@ -902,7 +966,8 @@ module mosaic_core (
   logic [1:0]                 disp_sys_csr_op;
   logic                       disp_sys_csr_reads, disp_sys_csr_writes;
   logic                       disp_sys_is_ecall, disp_sys_is_ebreak;
-  logic                       disp_sys_is_mret, disp_sys_is_wfi;
+  logic                       disp_sys_is_mret, disp_sys_is_sret, disp_sys_is_wfi;
+  logic                       disp_sys_is_fetch_fault;
   logic                       disp_sys_is_fence, disp_sys_is_fence_i;
   logic [CORE_XLEN-1:0]       disp_sys_src1_val;
   logic [CORE_TAG_W-1:0]      disp_sys_dst_tag;
@@ -965,7 +1030,27 @@ module mosaic_core (
   assign fetch_next_pc      = fetch_rsp_live
                               ? (fetch_pc_q + CORE_XLEN'(fetch_rsp_len))
                               : fetch_pc_q;
-  assign imem_req_valid     = want_imem_req && fetch_slot_free &&
+  // ---------------------------------------------------- the fetch permission
+  //
+  // The physical memory protection check on an instruction access is made
+  // *before* the request leaves, so a denied address is never presented to the
+  // memory system at all -- the same structural statement the data path makes by
+  // refusing in ST_IDLE. It is gated to the cycle in which no request is in
+  // flight and none is being answered, because a denied fetch is delivered to
+  // the front end as a fault macro rather than as a response, and one delivery
+  // per cycle is all the decode buffer has room for. The cost is that a deny is
+  // noticed one cycle later than it could be; the alternative is a second
+  // delivery port.
+  //
+  // Instruction address translation does not exist in this profile (I-045), and
+  // neither does MPRV for fetch ("Instruction address-translation and protection
+  // are unaffected by the setting of MPRV"), so the privilege the check uses is
+  // the current one.
+  assign fetch_pmp_deny_c = want_imem_req && fetch_slot_free &&
+                            (fetch_outstanding == {CORE_FETCH_CNT_W{1'b0}}) &&
+                            !fetch_rsp_live && !pmp_fetch_allow;
+
+  assign imem_req_valid     = want_imem_req && fetch_slot_free && !fetch_pmp_deny_c &&
                               ((fetch_outstanding == {CORE_FETCH_CNT_W{1'b0}}) ||
                                fetch_rsp_live);
   assign fetch_req_valid_int= imem_req_valid && imem_req_ready;
@@ -995,6 +1080,15 @@ module mosaic_core (
 `else
       fetch_pc_q <= redirect_pc;
 `endif
+    end else if (fetch_pmp_deny_c) begin
+      // A denied fetch never becomes an instruction. The PC advances by four --
+      // the length of the instruction the machine never saw -- and the value is
+      // never architecturally visible: the macro this delivery creates is an
+      // instruction access fault, and the trap it raises redirects the front end
+      // before anything fetched behind it can execute. Guessing 4 for an
+      // instruction whose length is unreadable is therefore safe *because* the
+      // instruction traps, and that is the reason rather than an approximation.
+      fetch_pc_q <= fetch_pc_q + CORE_XLEN'(4);
     end else if (fetch_rsp_live) begin
       // The PC advances by the instruction's *own* length -- 4 for a 32-bit
       // instruction, 2 for a compressed one -- in the cycle the answer is taken,
@@ -1117,6 +1211,12 @@ module mosaic_core (
   // its owner asserts it. `is_wfi` in the decode control is set here and
   // nowhere else; the decoder never produces it.
   localparam logic [31:0] WFI_WORD = 32'h1050_0073;
+  // SRET (I-044) is recognised here for exactly the same reason WFI is: the
+  // decoder's case owns the reserved-encoding enumeration and this profile would
+  // otherwise have to tell it that 0x102 is legal. Funct12 0x102 with rd = rs1 =
+  // 0 and funct3 000 is one word, so the recognition is a comparison against the
+  // word rather than a second decode of fields that are all zero.
+  localparam logic [31:0] SRET_WORD = 32'h1020_0073;
 
   // A-extension decode (I-039), also done here rather than in mosaic_decoder and
   // for the same ownership reason as WFI: the decoder's case asserts every
@@ -1162,7 +1262,18 @@ module mosaic_core (
 
   always_comb begin
     dbuf_ctl_new = dec_ctl_comb;
-    if (fetch_out_illegal || fetch_out_fault) begin
+    if (fetch_pmp_deny_c) begin
+      // The front end was not allowed to read this address, so there is no
+      // instruction to decode and no encoding to refuse: the macro is a system
+      // instruction whose whole effect is an instruction access fault at its own
+      // PC. It is *not* an illegal instruction (the machine has not even seen
+      // the bits), which is why it does not take the refusal path above; the
+      // system unit raises cause 1 with the PC as the trap value.
+      dbuf_ctl_new.valid          = 1'b1;
+      dbuf_ctl_new.illegal        = 1'b0;
+      dbuf_ctl_new.is_system      = 1'b1;
+      dbuf_ctl_new.is_fetch_fault = 1'b1;
+    end else if (fetch_out_illegal || fetch_out_fault) begin
       dbuf_ctl_new.valid   = 1'b0;
       dbuf_ctl_new.illegal = 1'b1;
     end else if (fetch_out_bits == WFI_WORD) begin
@@ -1173,6 +1284,13 @@ module mosaic_core (
       dbuf_ctl_new.illegal   = 1'b0;
       dbuf_ctl_new.is_system = 1'b1;
       dbuf_ctl_new.is_wfi    = 1'b1;
+    end else if (fetch_out_bits == SRET_WORD) begin
+      // SRET is a system instruction with no operands and no destination, so it
+      // is stated here the same way WFI is and for the same ownership reason.
+      dbuf_ctl_new.valid     = 1'b1;
+      dbuf_ctl_new.illegal   = 1'b0;
+      dbuf_ctl_new.is_system = 1'b1;
+      dbuf_ctl_new.is_sret   = 1'b1;
     end else if ((fetch_out_bits[6:0] == mosaic_pkg::OP_AMO) &&
                  (amo_op_ok_c || lr_c || sc_c)) begin
       // A legal AMO/lr/sc always overwrites the illegal constant's fields; the
@@ -1220,7 +1338,8 @@ module mosaic_core (
   // fully illegal, so dispatch refuses it and the machine stops *at that
   // instruction* with its PC rather than skipping over it. A delivery that is
   // never pushed is an instruction the machine silently executed past.
-  assign dbuf_push = (fetch_out_valid || fetch_out_illegal || fetch_out_fault) &&
+  assign dbuf_push = (fetch_out_valid || fetch_out_illegal || fetch_out_fault ||
+                      fetch_pmp_deny_c) &&
                      dbuf_room && !core_stop && !wfi_halt;
   assign fetch_out_ready = dbuf_room && !core_stop && !wfi_halt;
 
@@ -1277,7 +1396,9 @@ module mosaic_core (
     end
     if (dbuf_push) begin
       dbuf_valid_n[dbuf_push_at] = 1'b1;
-      dbuf_pc_n[dbuf_push_at]    = fetch_out_pc;
+      // A denied fetch carries no response, so its PC is the one the request was
+      // about to be issued for.
+      dbuf_pc_n[dbuf_push_at]    = fetch_pmp_deny_c ? fetch_next_pc : fetch_out_pc;
       dbuf_ctl_n[dbuf_push_at]   = dbuf_ctl_new;
       // The instruction's own length and its own bits travel with it, so the
       // retire event can report what the instruction *was*, not what the
@@ -1957,7 +2078,9 @@ module mosaic_core (
       .sys_ins_is_ecall (disp_sys_is_ecall),
       .sys_ins_is_ebreak(disp_sys_is_ebreak),
       .sys_ins_is_mret  (disp_sys_is_mret),
+      .sys_ins_is_sret  (disp_sys_is_sret),
       .sys_ins_is_wfi   (disp_sys_is_wfi),
+      .sys_ins_is_fetch_fault (disp_sys_is_fetch_fault),
       .sys_ins_is_fence (disp_sys_is_fence),
       .sys_ins_is_fence_i(disp_sys_is_fence_i),
       .sys_ins_src1_val (disp_sys_src1_val),
@@ -2083,6 +2206,35 @@ module mosaic_core (
       .mret_valid_i       (csr_mret_valid),
       .mret_commit_o      (o_mret_valid),
       .mret_target_o      (csr_mret_target),
+      .sret_valid_i       (csr_sret_valid),
+      .sret_commit_o      (csr_sret_commit),
+      .sret_target_o      (csr_sret_target),
+      .mret_illegal_o     (csr_mret_illegal),
+      .sret_illegal_o     (csr_sret_illegal),
+      .wfi_illegal_o      (csr_wfi_illegal),
+      .o_priv_o           (csr_priv),
+      .o_medeleg_o        (csr_medeleg),
+      .o_mideleg_o        (csr_mideleg),
+      .pmp_sel_o          (csr_pmp_sel),
+      .pmp_rdata_i        (csr_pmp_rdata),
+      .pmp_we_o           (csr_pmp_we),
+      .pmp_wdata_o        (csr_pmp_wdata),
+      .o_sstatus_o        (csr_sstatus),
+      .o_stvec_o          (csr_stvec),
+      .o_sepc_o           (csr_sepc),
+      .o_scause_o         (csr_scause),
+      .o_stval_o          (csr_stval),
+      .o_sscratch_o       (csr_sscratch),
+      .o_sie_o            (),
+      .o_sip_o            (),
+      .o_satp_o           (csr_satp),
+      .o_senvcfg_o        (),
+      .o_scounteren_o     (),
+      .o_mcounteren_o     (),
+      .o_sret_ctr         (csr_sret_ctr),
+      .o_trap_s_ctr       (csr_trap_s_ctr),
+      .o_priv_illegal_ctr (csr_priv_illegal_ctr),
+      .o_priv_change_ctr  (csr_priv_change_ctr),
       .mip_i              (irq_mip),
       .mip_we_o           (csr_mip_we),
       .mip_op_o           (csr_mip_op),
@@ -2118,8 +2270,10 @@ module mosaic_core (
       .irq_timer_i        (irq_timer_i),
       .irq_ext_i          (irq_ext_i),
       .mie_i              (o_csr_mie),
-      .mideleg_i          ({CORE_XLEN{1'b0}}),
+      .mideleg_i          (csr_mideleg),
       .mstatus_mie_i      (o_csr_mstatus[3]),
+      .priv_i             (csr_priv),
+      .mstatus_sie_i      (o_csr_mstatus[1]),
       .mip_we_i           (csr_mip_we),
       // mosaic_csr publishes the mip write operation as the 2-bit encoding;
       // the interrupt unit takes the csr_op_e the rest of the core uses.
@@ -2234,7 +2388,15 @@ module mosaic_core (
   // the data-ordering program reads a device register one access too early.
   assign fence_mem_ok = 1'b1;
 `else
-  assign fence_mem_ok = !fence_like_q || mem_path_idle;
+  // A write to mstatus is in the same class as a fence for the memory path, and
+  // for a reason that is about *this* profile: mstatus.MPRV and MPP select the
+  // effective privilege of loads and stores, and a CSR write does not redirect.
+  // The write is resolved at the ROB head, so an access younger than it would
+  // otherwise be checked against a privilege the instruction that made it did
+  // not execute under. Draining the memory path before the write executes, and
+  // refusing younger memory macros while it is staged (below), is what makes the
+  // sampled value the architectural one.
+  assign fence_mem_ok = (!fence_like_q && !sys_priv_wr_q) || mem_path_idle;
 `endif
 
 `ifdef MOSAIC_CORE_MUTANT_FENCE_ACCESS_PAST
@@ -2248,7 +2410,7 @@ module mosaic_core (
   assign fence_block_younger_c = fence_pending && disp_mem_is_store;
 `else
   logic fence_block_younger_c;
-  assign fence_block_younger_c = fence_pending;
+  assign fence_block_younger_c = fence_pending || sys_priv_wr_q;
 `endif
 
   // The one thing that makes a system macro trap rather than complete. `csr_illegal`
@@ -2265,13 +2427,40 @@ module mosaic_core (
     sys_exc       = 1'b0;
     sys_exc_cause = {CORE_XLEN{1'b0}};
     if (sys_head && !rob_head_complete) begin
-      if (sys_ecall_q) begin
+      if (sys_fetch_fault_q) begin
+        // The front end was not allowed to read this address. The cause is the
+        // instruction *access* fault (1), not the illegal-instruction exception
+        // (2): the machine never saw an encoding to call illegal, and the value
+        // the memory system would have refused is the PC, which is what
+        // mtval/stval receive for this cause.
         sys_exc       = 1'b1;
-        sys_exc_cause = mosaic_pkg::EXC_ECALL_M;
+        sys_exc_cause = mosaic_pkg::EXC_INSN_ACCESS;
+      end else if (sys_ecall_q) begin
+        // ECALL has one encoding and three causes: the code identifies the mode
+        // the call was made *from*, which is the architectural privilege at the
+        // boundary -- the system unit resolves the macro at the ROB head, so
+        // that is the instruction's own mode and not a speculative guess.
+        sys_exc       = 1'b1;
+        sys_exc_cause = (csr_priv == mosaic_csr_pkg::MOSAIC_PRIV_M) ? mosaic_pkg::EXC_ECALL_M
+                      : (csr_priv == mosaic_csr_pkg::MOSAIC_PRIV_S) ? mosaic_pkg::EXC_ECALL_S
+                                                                   : mosaic_pkg::EXC_ECALL_U;
       end else if (sys_ebreak_q) begin
         sys_exc       = 1'b1;
         sys_exc_cause = mosaic_pkg::EXC_BREAKPOINT;
       end else if (csr_access_illegal) begin
+        sys_exc       = 1'b1;
+        sys_exc_cause = mosaic_pkg::EXC_ILLEGAL_INSN;
+      end else if (sys_mret_q && csr_mret_illegal) begin
+        // "An xRET instruction can be executed in privilege mode x or higher":
+        // MRET below M-mode is an illegal instruction.
+        sys_exc       = 1'b1;
+        sys_exc_cause = mosaic_pkg::EXC_ILLEGAL_INSN;
+      end else if (sys_sret_q && csr_sret_illegal) begin
+        // SRET in U-mode, or in S-mode with mstatus.TSR set.
+        sys_exc       = 1'b1;
+        sys_exc_cause = mosaic_pkg::EXC_ILLEGAL_INSN;
+      end else if (sys_wfi_q && csr_wfi_illegal) begin
+        // WFI in U-mode, or in S-mode with mstatus.TW set.
         sys_exc       = 1'b1;
         sys_exc_cause = mosaic_pkg::EXC_ILLEGAL_INSN;
       end
@@ -2337,7 +2526,19 @@ module mosaic_core (
   // would, and its redirect is requested from the cycle its entry is complete --
   // the arbiter's head-retire gate is what makes it act in the cycle the MRET
   // instruction actually retires.
+  // A staged system macro that writes mstatus. See the fence rule above for what
+  // this buys: the write cannot execute until the memory path is idle, and no
+  // younger memory macro may allocate while it is staged, so no access can be
+  // checked against a privilege its instruction did not execute under.
+  assign sys_priv_wr_q = sys_valid_q && sys_csr_writes_q &&
+                         (sys_csr_addr_q == mosaic_csr_pkg::MOSAIC_CSR_ADDR_MSTATUS);
+
   assign csr_mret_valid = sys_wb_valid && sys_mret_q;
+  // SRET is strobed exactly like MRET: the CSR file performs the supervisor
+  // return in the cycle the instruction's completion is accepted by the
+  // writeback arbiter, and the redirect that follows restarts the front end at
+  // sepc.
+  assign csr_sret_valid = sys_wb_valid && sys_sret_q;
 
   // ------------------------------------------------------- the trap controller
   // Two things can trap from the head, and they are the same event as far as
@@ -2408,7 +2609,14 @@ module mosaic_core (
   assign trap_epc   = trap_is_irq ? trap_epc_irq : trap_epc_sync;
   assign trap_cause = head_exc_trap ? exc_cause_head
                       : (sys_trap_q ? sys_trap_cause_q : irq_cause);
-  assign trap_tval  = head_exc_trap ? exc_tval_head : {CORE_XLEN{1'b0}};
+  // A memory fault carries its own tval through the ROB's exception record; a
+  // synchronous system trap carries one only when the ISA defines it -- the
+  // instruction access fault of a denied fetch names the address that could not
+  // be read, and every other system trap (ECALL, EBREAK, the illegal returns)
+  // has no informative value, which this profile writes as zero rather than
+  // guessing an encoding.
+  assign trap_tval  = head_exc_trap ? exc_tval_head
+                      : (sys_trap_q ? sys_trap_tval_q : {CORE_XLEN{1'b0}});
 
   assign csr_trap_valid = trap_decision;
 
@@ -2455,26 +2663,31 @@ module mosaic_core (
   // retirement stream, not a hang.
   assign sys_redir_pc = trap_decision ? csr_trap_target
                                       : (sys_fence_i_q ? (rob_head_pc + CORE_XLEN'(8))
-                                                       : csr_mret_target);
+                                                       : (sys_sret_q ? csr_sret_target
+                                                                     : csr_mret_target));
 `elsif MOSAIC_CORE_MUTANT_MRET_PC_WRONG
   // NEGATIVE CONTROL: MRET returns to the instruction after mepc. The failing
   // program's interrupt round trip then resumes one instruction late.
   assign sys_redir_pc = trap_decision ? csr_trap_target
                                       : (sys_fence_i_q ? (rob_head_pc + CORE_XLEN'(4))
-                                                       : (csr_mret_target + CORE_XLEN'(4)));
+                                                       : (sys_sret_q ? (csr_sret_target + CORE_XLEN'(4))
+                                                                     : (csr_mret_target + CORE_XLEN'(4))));
 `else
   assign sys_redir_pc = trap_decision ? csr_trap_target
                                       : (sys_fence_i_q ? (rob_head_pc + CORE_XLEN'(4))
-                                                       : csr_mret_target);
+                                                       : (sys_sret_q ? csr_sret_target
+                                                                     : csr_mret_target));
 `endif
 `ifdef MOSAIC_CORE_MUTANT_FENCEI_NO_INVALIDATE
   // NEGATIVE CONTROL: FENCE.I completes like a plain fence and does *not*
   // redirect, so the front end keeps the instruction view it delivered before
   // the publishing store. The stale bytes the program patched execute, which is
   // the card's first failure mode.
-  assign sys_redir_req_valid = trap_decision || (sys_head && sys_mret_q);
+  assign sys_redir_req_valid = trap_decision || (sys_head && sys_mret_q) ||
+                               (sys_head && sys_sret_q);
 `else
   assign sys_redir_req_valid = trap_decision || (sys_head && sys_mret_q) ||
+                               (sys_head && sys_sret_q) ||
                                (sys_head && sys_fence_i_q);
 `endif
   assign sys_redir_act_now   = trap_decision;
@@ -2567,7 +2780,9 @@ module mosaic_core (
         sys_ecall_q      <= disp_sys_is_ecall;
         sys_ebreak_q     <= disp_sys_is_ebreak;
         sys_mret_q       <= disp_sys_is_mret;
+        sys_sret_q       <= disp_sys_is_sret;
         sys_wfi_q        <= disp_sys_is_wfi;
+        sys_fetch_fault_q <= disp_sys_is_fetch_fault;
         sys_fence_q      <= disp_sys_is_fence;
         sys_fence_i_q    <= disp_sys_is_fence_i;
         sys_src1_q       <= disp_sys_src1_val;
@@ -2591,6 +2806,9 @@ module mosaic_core (
       end else if (sys_wb_valid && sys_trap_now) begin
         sys_trap_q       <= 1'b1;
         sys_trap_cause_q <= sys_exc_cause;
+        // The staged macro is the ROB head here, so its PC is the faulting
+        // address the trap value must carry.
+        sys_trap_tval_q  <= sys_fetch_fault_q ? rob_head_pc : {CORE_XLEN{1'b0}};
       end
 
       if (sys_wb_valid)     sys_exec_ctr <= sys_exec_ctr + 32'd1;
@@ -2614,6 +2832,31 @@ module mosaic_core (
   assign o_trap_epc            = trap_epc;
   assign o_trap_target         = csr_trap_target;
   assign o_mret_target         = csr_mret_target;
+  assign o_priv                = csr_priv;
+  assign o_medeleg             = csr_medeleg;
+  assign o_mideleg             = csr_mideleg;
+  assign o_sret_valid          = csr_sret_commit;
+  assign o_sret_target         = csr_sret_target;
+  assign o_sstatus             = csr_sstatus;
+  assign o_stvec               = csr_stvec;
+  assign o_sepc                = csr_sepc;
+  assign o_scause              = csr_scause;
+  assign o_stval               = csr_stval;
+  assign o_sscratch            = csr_sscratch;
+  assign o_satp                = csr_satp;
+  assign o_csr_sret_ctr        = csr_sret_ctr;
+  assign o_csr_trap_s_ctr      = csr_trap_s_ctr;
+  assign o_csr_priv_illegal_ctr = csr_priv_illegal_ctr;
+  assign o_csr_priv_change_ctr = csr_priv_change_ctr;
+  assign o_pmp_query_ctr       = pmp_query_ctr;
+  assign o_pmp_deny_ctr        = pmp_deny_ctr;
+  assign o_pmp_fetch_deny_ctr  = pmp_fetch_deny_ctr;
+  assign o_pmp_locked_ctr      = pmp_locked_ctr;
+  assign o_pmp_data_matched    = pmp_data_matched;
+  assign o_pmp_data_locked     = pmp_data_locked;
+  assign o_pmp_fetch_matched   = pmp_fetch_matched;
+  assign o_pmp_fetch_locked    = pmp_fetch_locked;
+  assign o_csr_pmp_sel         = csr_pmp_sel;
   assign o_irq_valid           = irq_valid;
   assign o_irq_cause           = irq_cause;
   assign o_irq_ctr             = irq_ctr;
@@ -3404,6 +3647,66 @@ module mosaic_core (
       .busy_o         (amo_busy)
   );
 
+  // ==========================================================================
+  // 14b. Physical memory protection (I-044)
+  // ==========================================================================
+  // One unit, two questions per cycle. The entries and their WARL/lock rules
+  // live in mosaic_pmp; this section states only what an access *is* -- which
+  // privilege it executes at and whether it reads or writes -- and what a refusal
+  // means on each side.
+  //
+  // The effective privilege comes from mstatus: "When MPRV=1, load and store
+  // memory addresses are translated and protected ... as though the current
+  // privilege mode were set to MPP", and it applies to loads and stores only
+  // ("Instruction address-translation and protection are unaffected by the
+  // setting of MPRV"), which is why the fetch query is given the current mode.
+  //
+  // The class of the access is the specification's, not a guess: "Attempting to
+  // execute a load or load-reserved instruction ... without read permissions
+  // raises a load access-fault exception. Attempting to execute a store,
+  // store-conditional, or AMO instruction ... without write permissions raises a
+  // store access-fault exception". Those five instruction forms are exactly the
+  // five this endpoint carries, and the same predicate the endpoint uses to pick
+  // the cause (we || is_amo || is_sc) picks the class here.
+  assign lsu_req_bytes_c = 4'(mosaic_uop_pkg::size_bytes(ser_req.size));
+  assign lsu_req_w_c     = ser_req.we | ser_req.is_amo | ser_req.is_sc;
+  assign lsu_req_r_c     = ~lsu_req_w_c;
+  assign eff_priv_c      = ((csr_priv == mosaic_csr_pkg::MOSAIC_PRIV_M) &&
+                            (o_csr_mstatus[17] == 1'b1))
+                           ? o_csr_mstatus[12:11] : csr_priv;
+
+  assign ep_pmp_deny_c = ser_req_valid && !pmp_data_allow;
+
+  mosaic_pmp u_pmp (
+      .clk_i              (clk),
+      .rst_i              (rst),
+      .csr_addr_i         (csr_addr),
+      .csr_rdata_o        (csr_pmp_rdata),
+      .csr_we_i           (csr_pmp_we),
+      .csr_wdata_i        (csr_pmp_wdata),
+      .req_addr_i         (lsu_req_addr_c),
+      .req_bytes_i        (lsu_req_bytes_c),
+      .req_r_i            (lsu_req_r_c),
+      .req_w_i            (lsu_req_w_c),
+      .req_x_i            (1'b0),
+      .req_priv_i         (eff_priv_c),
+      .allow_o            (pmp_data_allow),
+      .matched_o          (pmp_data_matched),
+      .locked_o           (pmp_data_locked),
+      .f_req_addr_i       (fetch_next_pc),
+      .f_req_bytes_i      (4'd4),
+      .f_req_priv_i       (csr_priv),
+      .f_allow_o          (pmp_fetch_allow),
+      .f_matched_o        (pmp_fetch_matched),
+      .f_locked_o         (pmp_fetch_locked),
+      .o_query_ctr        (pmp_query_ctr),
+      .o_deny_ctr         (pmp_deny_ctr),
+      .o_locked_ctr       (pmp_locked_ctr),
+      .o_fetch_deny_ctr   (pmp_fetch_deny_ctr),
+      .o_entry_cfg_o      (o_pmp_cfg),
+      .o_entry_addr_o     (o_pmp_addr)
+  );
+
   mosaic_lsu_endpoint u_lsu (
       .clk                  (clk),
       .rst                  (rst),
@@ -3411,6 +3714,12 @@ module mosaic_core (
       .req_ready_o          (ser_ep_req_ready),
       .req_i                (ser_req),
       .req_dev_i            (ser_out_dev_c),
+      // The permission answer for the request being offered. The refusal is
+      // taken inside the endpoint, in the same place the misalignment refusal
+      // is, so a denied access never enters ST_REQ and the memory system never
+      // sees it.
+      .o_req_addr_o         (lsu_req_addr_c),
+      .pmp_deny_i           (ep_pmp_deny_c),
       .rsp_valid_o          (ep_rsp_valid),
       .rsp_ready_o          (ep_rsp_ready),
       .rsp_o                (ep_rsp),

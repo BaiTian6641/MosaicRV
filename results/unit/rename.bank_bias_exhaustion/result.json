@@ -1,16 +1,15 @@
 {
   "schema_version": 1,
   "case": "rename.bank_bias_exhaustion",
-  "verdict": "FAIL",
-  "detail": "contract violated: bank-bias-random: cycle 7016: x14 maps to tag 68, which is also in the free set: one physical register has two owners",
+  "verdict": "PASS",
+  "detail": "rename contract holds: 10195 shadow comparisons over 10275 cycles, 96 entries / 4 banks, seed 1",
   "seed": 1,
   "max_cycles": 200000,
-  "checks": 10,
-  "failures": 1,
+  "checks": 11,
+  "failures": 0,
   "image": "",
   "expect": "",
   "tool": "Verilator 5.052 2026-09-05",
-  "timestamp": "2026-10-02T04:14:06Z",
-  "first_mismatch": "bank-bias-random: cycle 7016: x14 maps to tag 68, which is also in the free set: one physical register has two owners: expected contract holds, got contract violated",
-  "failed_checks": ["no contract violation in any phase"]
+  "timestamp": "2026-10-02T04:25:20Z",
+  "first_mismatch": ""
 }

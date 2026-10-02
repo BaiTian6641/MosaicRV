@@ -72,12 +72,14 @@
           "access": "rw",
           "behavior": "warl",
           "reset": 0,
-          "unmodifiable_bits": [],
+          "unmodifiable_bits": [
+            "63:10"
+          ],
           "writable_fields": [
-            "63:0"
+            "9:0"
           ],
           "wpri_fields": [],
-          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033, src/machine.tex: section 'Machine Trap Delegation Registers (medeleg and mideleg)' L1237; Fig. medelegreg L1310-L1324 (the entire MXLEN field is labelled 'Synchronous Exceptions (WARL)'); 'medeleg has a bit position allocated for every synchronous exception ... with the index of the bit position equal to the value returned in the mcause register' L1326-L1329; 'For exceptions that cannot occur in less privileged modes, the corresponding medeleg bits should be read-only zero. In particular, medeleg[11] is read-only zero' L1354-L1356. Address and privilege: src/priv-csrs.tex L305 '0x302 & MRW & medeleg'. p0 is M-only (config/profiles/p0.json privilege_modes ['M']), so no synchronous exception can occur in a less privileged mode and every bit is WARL whose only legal value is 0. The register exists at 0x302 and accepts writes, but each written bit canonicalises to 0, so a read always returns 0."
+          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033, src/machine.tex: section 'Machine Trap Delegation Registers (medeleg and mideleg)' L1237; Fig. medelegreg L1310-L1324 (the entire MXLEN field is labelled 'Synchronous Exceptions (WARL)'); 'medeleg has a bit position allocated for every synchronous exception ... with the index of the bit position equal to the value returned in the mcause register' L1326-L1329; 'For exceptions that cannot occur in less privileged modes, the corresponding medeleg bits should be read-only zero. In particular, medeleg[11] is read-only zero' L1354-L1356. Address and privilege: src/priv-csrs.tex L305 '0x302 & MRW & medeleg'. p0 is M-only (config/profiles/p0.json privilege_modes ['M']), so no synchronous exception can occur in a less privileged mode and every bit is WARL whose only legal value is 0. The register exists at 0x302 and accepts writes, but each written bit canonicalises to 0, so a read always returns 0. Implementation choice, permitted by 'An implementation shall not have any bits of medeleg be read-only one': only the exceptions this profile can actually raise in S or U mode are delegatable -- bits 9:0, the instruction/load/store misaligned and access faults, the breakpoint, the illegal instruction and the two lower-mode environment calls. Bit 11 (ECALL from M-mode) is read-only zero, because an exception taken in M-mode is never delegated ('Traps never transition from a more-privileged mode to a less-privileged mode'), and the page-fault bits 12/13/15 belong to I-045, which will widen this mask when it lands."
         },
         {
           "name": "mideleg",

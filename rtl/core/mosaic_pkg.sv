@@ -154,6 +154,8 @@ package mosaic_pkg;
   localparam logic [63:0] EXC_LOAD_ACCESS     = 64'd5;
   localparam logic [63:0] EXC_STORE_MISALIGNED = 64'd6;
   localparam logic [63:0] EXC_STORE_ACCESS    = 64'd7;
+  localparam logic [63:0] EXC_ECALL_U         = 64'd8;
+  localparam logic [63:0] EXC_ECALL_S         = 64'd9;
   localparam logic [63:0] EXC_ECALL_M         = 64'd11;
 
   // ------------------------------------------------------------- decode ctrl
@@ -214,6 +216,16 @@ package mosaic_pkg;
     logic        is_ecall;
     logic        is_ebreak;
     logic        is_mret;
+    // SRET (I-044): the supervisor return, funct12 0x102. Decoded by the decoder
+    // exactly as MRET is, because unlike WFI it is a real instruction whose
+    // encoding the reserved-value enumeration must account for.
+    logic        is_sret;
+    // A fetch the physical memory protection unit refused (I-044). The front end
+    // could not read the instruction, so there is nothing to decode: the macro
+    // is a system instruction whose whole architectural effect is an instruction
+    // access fault at its own PC, which is what makes the fault precise instead
+    // of a machine that stops.
+    logic        is_fetch_fault;
     // WFI is decoded by the *core's* front end rather than by mosaic_decoder:
     // the decoder's case (CASE=decode.rv64im_reserved) pins every funct3-000
     // imm12 other than 000/001/302 as reserved, and that enumeration belongs to

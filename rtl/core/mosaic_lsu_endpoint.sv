@@ -135,7 +135,16 @@ module mosaic_lsu_endpoint (
     // system to carry the attribute its address's region demands -- the signal a
     // coalescer keys on when it refuses to merge an MMIO access with RAM.
     input  logic                          req_dev_i,
-
+    // Physical Memory Protection (I-044). The permission decision is made
+    // outside this module -- the entries and the privilege state live in
+    // mosaic_pmp and mosaic_csr -- but the *refusal* is taken here, in the same
+    // place the misalignment refusal is taken: the response is built from the
+    // address alone and the transaction never enters ST_REQ, which is the
+    // structural statement of "a denied access has no side effect". The address
+    // travels back out on `o_req_addr_o` so the check is made on this module's
+    // own effective address rather than on a second copy of `base + imm`.
+    output logic [63:0]                   o_req_addr_o,
+    input  logic                          pmp_deny_i,
     output logic                          rsp_valid_o,
     input  logic                          rsp_ready_o,
     output mosaic_uop_pkg::lsu_rsp_t      rsp_o,
@@ -338,6 +347,12 @@ module mosaic_lsu_endpoint (
   logic [XLEN-1:0] addr_c;
 
   assign addr_c     = req_i.base + req_i.imm;
+
+  // The effective address is published combinationally so the PMP check outside
+  // this module is made on *this* adder's result. It depends only on the offered
+  // request, and the refusal it feeds only affects registered state below, so the
+  // path is not a loop.
+  assign o_req_addr_o = addr_c;
 
   // Misaligned exactly when the access crosses a boundary the size demands.
   // `size_bytes = 8` requires all three low bits zero; a byte requires none.
@@ -692,6 +707,27 @@ module mosaic_lsu_endpoint (
               rsp_valid_q       <= 1'b1;
               last_fault_cause_q <= (req_i.we || req_i.is_amo || req_i.is_sc)
                                     ? EXC_STORE_MISALIGNED : EXC_LOAD_MISALIGNED;
+              last_fault_tval_q  <= addr_c;
+              rsp_ctr_q         <= rsp_ctr_q + 32'd1;
+              state_q           <= ST_DONE;
+            end else if (pmp_deny_i) begin
+              // ------------------------------------------------- PMP refusal
+              // "Failed accesses generate an instruction, load, or store
+              // access-fault exception", and the AMO pair folds into the store
+              // class exactly as the misaligned case does above. The access does
+              // not enter ST_REQ: `mem_req_valid_o` never rises, so the memory
+              // system does not see it, which is what "the fault has no side
+              // effect" means structurally rather than by a promise.
+              access_fault_ctr_q <= access_fault_ctr_q + 32'd1;
+              rsp_q.id          <= req_i.id;
+              rsp_q.fault       <= 1'b1;
+              rsp_q.cause       <= (req_i.we || req_i.is_amo || req_i.is_sc)
+                                   ? EXC_STORE_ACCESS : EXC_LOAD_ACCESS;
+              rsp_q.tval        <= addr_c;
+              rsp_q.data        <= 64'd0;
+              rsp_valid_q       <= 1'b1;
+              last_fault_cause_q <= (req_i.we || req_i.is_amo || req_i.is_sc)
+                                    ? EXC_STORE_ACCESS : EXC_LOAD_ACCESS;
               last_fault_tval_q  <= addr_c;
               rsp_ctr_q         <= rsp_ctr_q + 32'd1;
               state_q           <= ST_DONE;

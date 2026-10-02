@@ -40,7 +40,8 @@
   },
   "csr_files": [
     "csr/mode_m.json",
-    "csr/mode_su.json"
+    "csr/mode_su.json",
+    "csr/mode_pmp.json"
   ],
   "memory_map_file": "memory/p1.json",
   "geometry_file": "geometry/p1.json",

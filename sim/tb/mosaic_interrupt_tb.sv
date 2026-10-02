@@ -30,6 +30,11 @@ module mosaic_interrupt_tb (
     input  logic [63:0]          mie,
     input  logic [63:0]          mideleg,
     input  logic                 mstatus_mie,
+    // I-044: the mode the trap would be taken from, and the supervisor global
+    // enable. Both are driven by the case; with p0's M-only profile the driver
+    // holds them at M and 0, and the decision reduces to what it always was.
+    input  logic [1:0]           priv,
+    input  logic                 mstatus_sie,
 
     // software write to mip
     input  logic                 mip_we,
@@ -69,6 +74,8 @@ module mosaic_interrupt_tb (
       .mie_i                (mie),
       .mideleg_i            (mideleg),
       .mstatus_mie_i        (mstatus_mie),
+      .priv_i               (priv),
+      .mstatus_sie_i        (mstatus_sie),
 
       .mip_we_i             (mip_we),
       .mip_op_i             (mip_op),

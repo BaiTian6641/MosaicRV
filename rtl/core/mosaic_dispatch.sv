@@ -320,7 +320,9 @@ module mosaic_dispatch (
     output logic                        sys_ins_is_ecall,
     output logic                        sys_ins_is_ebreak,
     output logic                        sys_ins_is_mret,
+    output logic                        sys_ins_is_sret,
     output logic                        sys_ins_is_wfi,
+    output logic                        sys_ins_is_fetch_fault,
     // FENCE and FENCE.I are the other two macros the system unit resolves; they
     // carry no operand the core uses (the ISA defines fence's fields as
     // ordering hints this profile does not interpret) so the two class bits are
@@ -441,7 +443,11 @@ module mosaic_dispatch (
     logic                    sys_ecall;
     logic                    sys_ebreak;
     logic                    sys_mret;
+    logic                    sys_sret;
     logic                    sys_wfi;
+    // A fetch the PMP unit refused (I-044): a system instruction whose whole
+    // effect is an instruction access fault at its own PC.
+    logic                    sys_fetch_fault;
     // FENCE / FENCE.I are resolved by the system unit too (I-037); the class
     // bits are all the payload the core reads, because this profile treats the
     // fm/pred/succ fields conservatively and ignores them.
@@ -781,7 +787,9 @@ module mosaic_dispatch (
         q_mem[push_at].sys_ecall    <= dec_ctl0.is_ecall;
         q_mem[push_at].sys_ebreak   <= dec_ctl0.is_ebreak;
         q_mem[push_at].sys_mret     <= dec_ctl0.is_mret;
+        q_mem[push_at].sys_sret     <= dec_ctl0.is_sret;
         q_mem[push_at].sys_wfi      <= dec_ctl0.is_wfi;
+        q_mem[push_at].sys_fetch_fault <= dec_ctl0.is_fetch_fault;
         q_mem[push_at].sys_fence    <= dec_ctl0.is_miscmem && !dec_ctl0.is_fence_i;
         q_mem[push_at].sys_fence_i  <= dec_ctl0.is_fence_i;
       end
@@ -1085,7 +1093,9 @@ module mosaic_dispatch (
     sys_ins_is_ecall   = head.sys_ecall;
     sys_ins_is_ebreak  = head.sys_ebreak;
     sys_ins_is_mret    = head.sys_mret;
+    sys_ins_is_sret    = head.sys_sret;
     sys_ins_is_wfi     = head.sys_wfi;
+    sys_ins_is_fetch_fault = head.sys_fetch_fault;
     sys_ins_is_fence   = head.sys_fence;
     sys_ins_is_fence_i = head.sys_fence_i;
     sys_ins_src1_val   = sys_src1_val;
