@@ -19,13 +19,13 @@ budget 4,000,000 cycles.
 | Check | Observed |
 | --- | --- |
 | the registered case | `PASS retire.width_and_order` (exit 0) |
-| | `checks=1187 events=119 retires=118 comparisons=973 dual=28 single=63 same_rd=1 trap_blocked=1 store_load=1 cycles=573 seed=1` |
-| shipping binary | `sha256 ed82804c6f0ec41c422cb6399724f61b28f1666fc889474c2b09b4b5388d19f8` |
+| | `checks=1195 events=119 retires=118 comparisons=973 dual=28 single=63 same_rd=1 trap_blocked=1 store_load=1 cycles=573 seed=1` |
+| shipping binary | `sha256 b34fc7ede2414e54c5f45603796479aca180ca791903935338013dc6be24f0ee` |
 | controls | **5 of 5 exit 1**, each naming the check it breaks, each binary differing from the shipping one, each rebuilt from a deleted directory (§5) |
 | invisibility probes | 3 module mutants under the core change nothing at the top and are recorded as such, with the reason (§5.2) |
 | RTL gates | `tools/lint_rtl.py --profile p0` green (33 files); `slang-tidy --std 1800-2017 --single-unit -I build/p0/rtl $(find rtl -name '*.sv')` 0 errors, exit 0; **no RTL file was edited by this package** |
 | the driver under the project's C++ standard | `-Wall -Wextra -Wshadow` adds no warning of its own |
-| `tools/check_records.py` | **RED**, for a record defect that is not this package's: `registry: case core.corpus_sweep belongs to delivered package I-023, which does not list it as evidence` (§6.4) |
+| `tools/check_records.py` | green: `ok records agree: 37 delivered package(s), 49 registered case(s), every claimed case exists and belongs to the package claiming it`. It was **red** when this case was first delivered, on a registered case whose driver was a sibling lane's work in progress; the integration lead resolved it by giving the registry a documented `pending` marker (§6.4) |
 
 ## 1. The rule the case exists to test
 
@@ -55,7 +55,7 @@ feeds a don't-care into the decoder.
 | 1 | two writes to one `rd` in one cycle | `addi x8, x0, 0x111` at `0x80000108`, `addi x8, x0, 0x222` at `0x8000010c` | both retire in one cycle, slot 0's delta is `0x111` and slot 1's is `0x222` (the two disagree, so a delta taken from the cycle's end state is wrong), and `x8` afterwards is `0x222` |
 | 2 | a write to `x0` | 56 directed instructions, one per writeback arm the decoder implements: `op-reg`, `mul-div`, `op-imm`, `op-32`, `op-imm-32`, `lui`, `auipc`, `load`, `csr`, `csr-imm`, `jal`, `jalr` | each retires **in a lane** (40 distinct Pcs in lane 0, 16 in lane 1), no event ever reports `reg_we` with `rd = 0`, and the two instructions that read `x0` back (`add x29, x0, x0`, `add x30, x0, x6`) publish the model's values |
 | 3 | the instruction after a branch | taken `beq x0, x0, +8` at `0x80000120` (its shadow word at `0x80000124` must never retire); not-taken `bne x0, x0, +8` at `0x80000130` (its fall-through must retire); taken `jal x0, +8` at `0x800000d0` (shadow at `0x800000d4` must never retire); `jalr x0, t6, 8` at `0x800000dc` | a taken branch whose next event is its target, a branch whose next event is its own fall-through, and neither shadow word ever published |
-| 4 | a trapping instruction in slot 0 with an ordinary instruction in slot 1 | misaligned load `ld x9, 1(x0)` at `0x800001bc`, with `addi x9, x0, 0x7777` behind it | in that cycle lane 1 is not valid (checked), the ROB holds at least two entries, the trap event carries cause 4 and vectors to the model's next PC, and the ordinary instruction retires after `mret` resumes at `0x800001c0` |
+| 4 | a trapping instruction in slot 0 with an ordinary instruction in slot 1 | misaligned load `ld x9, 1(x0)` at `0x800001bc`, with `addi x9, x0, 0x777` behind it | in that cycle lane 1 is not valid (checked), the ROB holds at least two entries, the trap event carries cause 4 and vectors to the model's next PC, and the ordinary instruction retires after `mret` resumes at `0x800001c0` |
 | 5 | an adjacent store/load | `sd x6, 0(x5)` at `0x8000015c`, `ld x7, 0(x5)` at `0x80000160`, same address | both retire in one cycle, store in slot 0 and load in slot 1, with the load's value the one the store forwarded (`0x5a5`) |
 
 Two `div` instructions are placed so that situations 1 and 5 *can* occur: a
@@ -115,8 +115,8 @@ From the observed run (`results/unit/retire.width_and_order/run.log`):
 The architectural end state the program publishes is compared with the model's
 memory byte for byte: `x0` read back through `add` is `0` and `x0 + 3` is `3`,
 the two-writes-to-one-`rd` result is `0x222`, the not-taken branch's fall-through
-wrote `0x7777`, the store/load pair both read `0x5a5`, and the instruction behind
-the trap wrote `0x7777` after the handler returned.
+wrote `0x777`, the store/load pair both read `0x5a5`, and the instruction behind
+the trap wrote `0x777` after the handler returned.
 
 ## 5. Controls
 
@@ -126,11 +126,11 @@ its binary differs from the shipping one, and it exits 1 naming the check.
 
 | Mutant | Kind | Defect it injects | First failure it produced | Binary sha256 |
 | --- | --- | --- | --- | --- |
-| `MOSAIC_RETIRE_MUTANT_TRAP_AS_NORMAL` | RTL | the trapping instruction takes the ordinary retirement path: its payload reaches the stream as a retirement and its event carries no trap flag | `the trap event occupies lane 0 of the stream: the trap pulse and the event stream disagree` (cycle 505) | `b2fbb3160493ade860f0e126fe0d320bb7ae0853ac07b7bc89821bac4c129c9a` |
-| `MOSAIC_RETIRE_CHECKER_CYCLE_END` | driver | the older slot's expectation is taken from the cycle's end state instead of from the model's per-slot step | `the retirement stream follows the program-order model: event 61 value: at 0x0000000080000108 x8: expected 0x0000000000000222, got 0x0000000000000111` (cycle 388 — the two-writes-to-one-rd cycle) | `188f7408a3d1c09693bb049dfc06b184463d03fc68859c777e0893c82ea24038` |
-| `MOSAIC_RETIRE_CHECKER_LANE_REVERSED` | driver | the model is consumed in the order the slots were read rather than in lane order — the card's "slot order established by callback accident" | `the retirement stream follows the program-order model: event 24 pc: expected pc 0x0000000080000070, got 0x000000008000006c` (cycle 59) | `9a65865199912a1042b8c22c9245b894589f710b7672aac8c091127683733c91` |
-| `MOSAIC_RETIRE_CHECKER_X0_WRITE` | driver | the expectation describes a write to `x0` as a real destination write | `the retirement stream follows the program-order model: event 0 destination: at 0x0000000080000000: expected rd x0 we=1, got x0 we=0` (cycle 11) | `6d2a8324cda950e853b196ab8b4528f5ffd388f8876213b8f6c15957309cfd08` |
-| `MOSAIC_RETIRE_CHECKER_DROP_EVENT` | driver | the checker loses one event on the way to the comparison | `retire_order is dense and strictly increasing: cycle 59: expected seq 23 after (pc 0x000000008000006c id 0x0000000000000b80 seq 23 lane 0 at cycle 59), saw seq 24 (pc 0x0000000080000070 id 0x0000000000000c00 seq 24 lane 1 at cycle 59)` | `a20e2ab280274454a366b23078e71ad9af7514c40c60ea65b07e09dd56b701e9` |
+| `MOSAIC_RETIRE_MUTANT_TRAP_AS_NORMAL` | RTL | the trapping instruction takes the ordinary retirement path: its payload reaches the stream as a retirement and its event carries no trap flag | `the trap event occupies lane 0 of the stream: the trap pulse and the event stream disagree` (cycle 505) | `017da342f594f92a37fdd972cb990f062e7d5c7a35500b67dfbcc0545f8409be` |
+| `MOSAIC_RETIRE_CHECKER_CYCLE_END` | driver | the older slot's expectation is taken from the cycle's end state instead of from the model's per-slot step | `the retirement stream follows the program-order model: event 61 value: at 0x0000000080000108 x8: expected 0x0000000000000222, got 0x0000000000000111` (cycle 388 — the two-writes-to-one-rd cycle) | `07795677f2661de49834f815a382dc494bec13767faa555c4ed7bc6db4332fdd` |
+| `MOSAIC_RETIRE_CHECKER_LANE_REVERSED` | driver | the model is consumed in the order the slots were read rather than in lane order — the card's "slot order established by callback accident" | `the retirement stream follows the program-order model: event 24 pc: expected pc 0x0000000080000070, got 0x000000008000006c` (cycle 59) | `e6e5031974028dde53741f892b59a6413b29afb4969f1b2652b6e7473e8d6194` |
+| `MOSAIC_RETIRE_CHECKER_X0_WRITE` | driver | the expectation describes a write to `x0` as a real destination write | `the retirement stream follows the program-order model: event 0 destination: at 0x0000000080000000: expected rd x0 we=1, got x0 we=0` (cycle 11) | `debfaea6b26a9d534c8971b7e579a0f91b87a01e86a61774b4a9ef766641db9d` |
+| `MOSAIC_RETIRE_CHECKER_DROP_EVENT` | driver | the checker loses one event on the way to the comparison | `retire_order is dense and strictly increasing: cycle 59: expected seq 23 after (pc 0x000000008000006c id 0x0000000000000b80 seq 23 lane 0 at cycle 59), saw seq 24 (pc 0x0000000080000070 id 0x0000000000000c00 seq 24 lane 1 at cycle 59)` | `1b8991435241919d49c028f65e33197b3b0bf54c36db840967db0b8ee740d7a5` |
 
 Mapping to the card's fail modes: "a cycle's end state contaminating an earlier
 slot" → `CYCLE_END`; "slot order established by callback accident" →
@@ -172,9 +172,9 @@ All three exit 0 with results identical to the shipping build.
 
 | Probe | Why it is invisible through the integrated core | Binary sha256 |
 | --- | --- | --- |
-| `MOSAIC_RETIRE_MUTANT_SECOND_LANE_UNORDERED` | the order rule is removed, but the acknowledgement filter below it drops an ack for lane 1 with no ack for lane 0, so no out-of-order event is published; the fault is reported on `o_order_fault`, which the integrated core does not expose | `846fb77e921871cf9f08ef460b031c6bb8ff9b509bb6cd562dbb0f6b4eed6c8e` |
-| `MOSAIC_ROB_MUTANT_RETIRE_OVER_EXCEPTION` | an exceptional macro becomes retirable in the buffer, but the retire unit decides the trap from the entry's own exception flag, so the trap is still taken and the entry still does not retire | `29600b7a2c0b15b90d595cbc97013f081555bd4685779aafe0a2413645b2942e` |
-| `MOSAIC_RENAME_MUTANT_X0_ALLOC` | a write to `x0` allocates a physical tag, but nothing architectural reads it: the source path hardwires `x0` to zero and the commit path excludes `rd 0`. The defect is a tag leak, visible only as exhaustion after enough writes to `x0` | `84a5de5f0a2f0fff0b5f25ddc256d598b56b956d4a12eed420e3613aa23c0d21` |
+| `MOSAIC_RETIRE_MUTANT_SECOND_LANE_UNORDERED` | the order rule is removed, but the acknowledgement filter below it drops an ack for lane 1 with no ack for lane 0, so no out-of-order event is published; the fault is reported on `o_order_fault`, which the integrated core does not expose | `ea38d49d4c3b4da008bca0b282aa16399e56721b66325033a6fbbaf95c44e6bb` |
+| `MOSAIC_ROB_MUTANT_RETIRE_OVER_EXCEPTION` | an exceptional macro becomes retirable in the buffer, but the retire unit decides the trap from the entry's own exception flag, so the trap is still taken and the entry still does not retire | `5beeec42b90eae23a5aacb115c9c2cbea03877f3cd299e9b1b89998424e6299d` |
+| `MOSAIC_RENAME_MUTANT_X0_ALLOC` | a write to `x0` allocates a physical tag, but nothing architectural reads it: the source path hardwires `x0` to zero and the commit path excludes `rd 0`. The defect is a tag leak, visible only as exhaustion after enough writes to `x0` | `6a480ed821f890ab35543b37b308af70d33849b20c08c81acbd90f0e22229de4` |
 
 ## 6. Reported defects (found, not fixed)
 
@@ -232,12 +232,15 @@ to explain it. The program uses a misaligned load instead (that path does publis
 the lane-0 trap event); whoever owns the trap path should decide whether a system
 trap is meant to be an event.
 
-### 6.4 `tools/check_records.py` is red on the committed tree (not this package)
+### 6.4 `tools/check_records.py` was red on the committed tree (not this package)
 
-`registry: case core.corpus_sweep belongs to delivered package I-023, which does
-not list it as evidence`. The registry names `core.corpus_sweep` (task I-023) and
-the delivery ledger does not list it; the ledger is outside this package's write
-scope. Every other record check passes.
+At delivery: `registry: case core.corpus_sweep belongs to delivered package
+I-023, which does not list it as evidence`. The registry named `core.corpus_sweep`
+(task I-023, a sibling lane's case registered before its driver existed) and the
+delivery ledger did not list it; the ledger is outside this package's write scope,
+so it was reported rather than edited. Resolved in commit `393c7d9` by letting a
+case declare itself `pending`, which the checker now skips for coverage while
+still failing if a pending case is claimed as evidence; the gate is green.
 
 ## 7. Gates
 
