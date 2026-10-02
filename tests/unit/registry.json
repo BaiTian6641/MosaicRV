@@ -1334,6 +1334,23 @@
    "max_cycles": 4000000,
    "seed": 1,
    "pending": true
+  },
+  "fp.operation_matrix": {
+   "task": "I-049",
+   "top": "mosaic_fpu_tb",
+   "rtl": [
+    "rtl/core/mosaic_pkg.sv",
+    "rtl/core/mosaic_fpu.sv"
+   ],
+   "sv": [
+    "sim/tb/mosaic_fpu_tb.sv"
+   ],
+   "cpp": [
+    "sim/unit/tb_fpu.cpp"
+   ],
+   "max_cycles": 200000,
+   "seed": 1,
+   "pending": true
   }
  }
 }

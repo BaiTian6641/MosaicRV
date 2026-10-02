@@ -1828,3 +1828,39 @@ package had to make real programs work, not because a directed test looked for t
 corpus passing on the out-of-order core. In flight: I-040 (LR/SC, which completes the A extension's
 implementation) and I-031 (the ownership-change FSM). The A extension then waits only on its
 verification packages V-016 and V-020.
+
+---
+
+## 2026-10-01 — state after the fabric and atomics waves (49 packages)
+
+Advertised ISA: **rv64im_zicsr_zifencei_zihpm** (misa reset 0x8000000000001100). 58 registered cases, 49 delivered packages,
+`make check` and `check_records.py` green, lint clean over every RTL source under both tools.
+
+**Since the last summary**: the fabric chain is complete at module level (I-027 bypass, I-029
+steering, I-030 bounded-service arbiter, I-031 ownership FSM, I-032 bank-aware allocation), the A
+extension is complete (I-039 AMO, I-040 LR/SC — `Zaamo` and `Zalrsc` are advertisable and `A`
+waits only on V-020), C is advertised (I-041, delivered on its second attempt after the regression
+described above), and V-016 verified PC/fetch/FENCE.I. Non-hardware progress is now **49 of 188**
+I+V packages.
+
+**What is structurally important about the fabric modules**: all five are verified *in isolation* —
+each has its own case and its own mutants, and none is instantiated by the core yet. The integration
+that wires them in (and the arbitration/steering policy the core actually uses) is the plan's
+I-090/V-034 territory and is explicitly **not** claimed by their records. Saying that plainly
+matters more than the five green lines, because a reader could otherwise conclude the machine
+schedules dynamically today; it schedules with an alternating toggle and a fixed baseline, and the
+plan requires the dynamic/fixed comparison to be measured on equal resources before anything is
+claimed about it.
+
+**In flight**: I-044 privilege/PMP (attempt 2 — its RTL and config landed on attempt 1, and the
+config work is real: `mstatus` gained its writable fields, `medeleg`/`mideleg` were narrowed, a
+PMP config block and a `config/csr/mode_pmp.json` were added, and `gen_manifest` learned to merge a
+register declared in two mode blocks, which is what had made `--profile p1` fail outright) and
+I-049 (the F/D datapath, dispatchable because the card permits a declared subset as long as nothing
+silently falls back to software).
+
+**What the next wave is**: finish I-044, then I-050 (FP state and precise `fflags`), I-045/I-046
+(Sv39 walker and TLB/SFENCE.VMA, which need I-042's caches first), the cache and MSHR work
+(I-042/I-043), then the SoC and the p1 Linux contract (I-047/I-048). Stage 4+ (vector, multi-hart,
+cohort, the measured dynamic/fixed comparison, the RVA23S64 matrix) is untouched: it is the larger
+half of the plan and the half that justifies the project's name.
