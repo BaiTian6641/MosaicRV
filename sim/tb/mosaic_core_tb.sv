@@ -63,6 +63,16 @@ module mosaic_core_tb (
     // the platform map. The standalone cache-path DUT below also uses it.
     input  logic        cache_en_i,
 
+    // -------------------------------------- the runtime lane quota (I-059)
+    // A non-architectural control port, like `fab_dyn_i`: the vector engine's
+    // lane quota is a resource share, not a CSR. Low `lane_quota_req_i` (the
+    // default in every driver that predates the vector work) leaves the quota at
+    // its reset value of 8, so nothing changes. A held request is idempotent;
+    // the broker changes the committed quota only at a vector instruction
+    // boundary after a drain.
+    input  logic        lane_quota_req_i,
+    input  logic [3:0]  lane_quota_val_i,
+
     // ----------------------------------- standalone L1 cache path (directed)
     // A second instance of the *same* wrapper the core uses, exposed directly so
     // the directed control phases can drive refills, evictions, faults and a
@@ -354,6 +364,20 @@ module mosaic_core_tb (
     output logic [63:0]        o_vec_dbg0_o,
     output logic [63:0]        o_vec_dbg1_o,
     output logic [63:0]        o_vec_dbg2_o,
+    // -------------------------------------------- the lane broker (I-059)
+    output logic [3:0]         o_lane_quota_o,
+    output logic [3:0]         o_lane_req_quota_o,
+    output logic [7:0]         o_lane_gen_o,
+    output logic               o_lane_busy_o,
+    output logic               o_lane_stop_admit_o,
+    output logic               o_lane_macro_live_o,
+    output logic [31:0]        o_lane_publish_ctr_o,
+    output logic [31:0]        o_lane_ack_req_ctr_o,
+    output logic [31:0]        o_lane_ack_ctr_o,
+    output logic [31:0]        o_lane_req_mid_macro_ctr_o,
+    output logic [31:0]        o_lane_pub_mid_macro_ctr_o,
+    output logic [31:0]        o_lane_abort_ctr_o,
+    output logic [255:0]       o_lane_elem_ctr_o,
     output logic [31:0] o_csr_wr_o,
     output logic [31:0] o_csr_illegal_wr_o,
     output logic [31:0] o_csr_trap_o,
@@ -630,6 +654,8 @@ module mosaic_core_tb (
       .rst             (rst),
       .fab_dyn_i       (fab_dyn_i),
       .cache_en_i      (cache_en_i),
+      .lane_quota_req_i(lane_quota_req_i),
+      .lane_quota_val_i(lane_quota_val_i),
       .irq_soft_i      (irq_soft_i),
       .irq_timer_i     (irq_timer_i),
       .irq_ext_i       (irq_ext_i),
@@ -677,6 +703,19 @@ module mosaic_core_tb (
       .o_vec_dbg0      (o_vec_dbg0_o),
       .o_vec_dbg1      (o_vec_dbg1_o),
       .o_vec_dbg2      (o_vec_dbg2_o),
+      .o_lane_quota    (o_lane_quota_o),
+      .o_lane_req_quota(o_lane_req_quota_o),
+      .o_lane_gen      (o_lane_gen_o),
+      .o_lane_busy     (o_lane_busy_o),
+      .o_lane_stop_admit(o_lane_stop_admit_o),
+      .o_lane_macro_live(o_lane_macro_live_o),
+      .o_lane_publish_ctr(o_lane_publish_ctr_o),
+      .o_lane_ack_req_ctr(o_lane_ack_req_ctr_o),
+      .o_lane_ack_ctr  (o_lane_ack_ctr_o),
+      .o_lane_req_mid_macro_ctr(o_lane_req_mid_macro_ctr_o),
+      .o_lane_pub_mid_macro_ctr(o_lane_pub_mid_macro_ctr_o),
+      .o_lane_abort_ctr(o_lane_abort_ctr_o),
+      .o_lane_elem_ctr (o_lane_elem_ctr_o),
       .o_csr_wr_ctr    (o_csr_wr_o),
       .o_csr_illegal_wr_ctr(o_csr_illegal_wr_o),
       .o_csr_trap_ctr  (o_csr_trap_o),

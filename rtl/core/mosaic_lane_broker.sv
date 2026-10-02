@@ -98,21 +98,13 @@ module mosaic_lane_broker #(
     output logic [3:0]       o_req_quota,      // the request being held
     output logic             o_stop_admit,
     output logic             o_busy,
-    output logic             o_publish,        // one-cycle pulse in PUBLISH
     output logic [7:0]       o_gen,
-    output logic             o_ack_req,
-    output logic             o_ack_seen,
     output logic [31:0]      o_publish_ctr,
     output logic [31:0]      o_ack_req_ctr,
     output logic [31:0]      o_ack_ctr,
     output logic [31:0]      o_req_mid_macro_ctr,
     output logic [31:0]      o_pub_mid_macro_ctr,
-    output logic [31:0]      o_abort_ctr,
-    output logic [31:0]      o_drain_stall,
-    output logic [3:0]       o_state,
-    output logic [3:0]       o_quota_reset,
-    output logic [3:0]       o_quota_max,
-    output logic [7:0]       o_gen_w
+    output logic [31:0]      o_abort_ctr
 );
 
   // The FSM's generation and count widths are its own `localparam`s, derived
@@ -130,14 +122,12 @@ module mosaic_lane_broker #(
   // ------------------------------------------------------------ FSM wires
   logic                    fsm_ctrl_valid;
   logic [7:0]              fsm_ctrl_seq;
-  logic                    fsm_ctrl_ready, fsm_ctrl_ok, fsm_ctrl_dup, fsm_ctrl_reject;
-  logic                    fsm_ack_valid, fsm_ack_req, fsm_ack_ok, fsm_ack_unexpected;
+  logic                    fsm_ctrl_ready, fsm_ctrl_ok;
+  logic                    fsm_ack_valid, fsm_ack_req;
   logic                    fsm_stop_admit, fsm_busy, fsm_publish;
-  logic [FSM_GEN_W-1:0]    fsm_gen, fsm_old_gen, fsm_new_gen;
-  logic [FSM_CNT_W-1:0]    fsm_cnt_uop, fsm_cnt_res, fsm_cnt_crd, fsm_drain_cycles;
-  logic                    fsm_drain_stall;
+  logic [FSM_GEN_W-1:0]    fsm_gen;
+  logic [FSM_CNT_W-1:0]    fsm_cnt_res, fsm_cnt_crd;
   logic [31:0]             fsm_publish_ctr, fsm_ack_ok_ctr, fsm_abort_ctr;
-  logic [31:0]             fsm_states;
 
   // ------------------------------------------------------- request tracking
   logic [3:0] quota_q;      // committed
@@ -169,6 +159,7 @@ module mosaic_lane_broker #(
   assign res_done_eff = elem_done_i || (macro_done_i && (fsm_cnt_res != {FSM_CNT_W{1'b0}}));
   assign crd_done_eff = wb_done_i || (macro_done_i && (fsm_cnt_crd != {FSM_CNT_W{1'b0}}));
 
+  /* verilator lint_off PINCONNECTEMPTY */
   mosaic_owner_fsm u_owner (
       .clk              (clk),
       .rst              (rst),
@@ -176,12 +167,12 @@ module mosaic_lane_broker #(
       .ctrl_seq         (fsm_ctrl_seq),
       .ctrl_ready       (fsm_ctrl_ready),
       .ctrl_ok          (fsm_ctrl_ok),
-      .ctrl_dup         (fsm_ctrl_dup),
-      .ctrl_reject      (fsm_ctrl_reject),
+      .ctrl_dup         (),
+      .ctrl_reject      (),
       .ack_valid        (fsm_ack_valid),
       .ack_req          (fsm_ack_req),
-      .ack_ok           (fsm_ack_ok),
-      .ack_unexpected   (fsm_ack_unexpected),
+      .ack_ok           (),
+      .ack_unexpected   (),
       .uop_new          (macro_new_i),
       .uop_done         (macro_done_i),
       .res_new          (elem_new_i),
@@ -193,13 +184,13 @@ module mosaic_lane_broker #(
       .o_busy           (fsm_busy),
       .o_publish        (fsm_publish),
       .o_owner_gen      (fsm_gen),
-      .o_old_gen        (fsm_old_gen),
-      .o_new_gen        (fsm_new_gen),
-      .o_cnt_uop        (fsm_cnt_uop),
+      .o_old_gen        (),
+      .o_new_gen        (),
+      .o_cnt_uop        (),
       .o_cnt_res        (fsm_cnt_res),
       .o_cnt_crd        (fsm_cnt_crd),
-      .o_drain_cycles   (fsm_drain_cycles),
-      .o_drain_stall    (fsm_drain_stall),
+      .o_drain_cycles   (),
+      .o_drain_stall    (),
       .o_ctrl_ok_count  (),
       .o_ctrl_dup_count (),
       .o_ctrl_reject_count (),
@@ -213,8 +204,9 @@ module mosaic_lane_broker #(
       .o_cnt_w          (),
       .o_seq_w          (),
       .o_drain_limit    (),
-      .o_states         (fsm_states)
+      .o_states         ()
   );
+  /* verilator lint_on PINCONNECTEMPTY */
 
   // --------------------------------------------------------------- evidence
   logic        ack_req_q;
@@ -235,21 +227,13 @@ module mosaic_lane_broker #(
   assign o_req_quota     = held_q;
   assign o_stop_admit    = fsm_stop_admit;
   assign o_busy          = fsm_busy;
-  assign o_publish       = fsm_publish;
   assign o_gen           = 8'(fsm_gen);
-  assign o_ack_req       = fsm_ack_req;
-  assign o_ack_seen      = ack_i;
   assign o_publish_ctr   = fsm_publish_ctr;
   assign o_ack_req_ctr   = ack_req_ctr;
   assign o_ack_ctr       = fsm_ack_ok_ctr;
   assign o_req_mid_macro_ctr = req_mid_macro_ctr;
   assign o_pub_mid_macro_ctr = pub_mid_macro_ctr;
   assign o_abort_ctr     = fsm_abort_ctr;
-  assign o_drain_stall   = {31'd0, fsm_drain_stall};
-  assign o_state         = 4'(fsm_states);
-  assign o_quota_reset   = QUOTA_RESET;
-  assign o_quota_max     = QUOTA_MAX;
-  assign o_gen_w         = 8'(FSM_GEN_W);
 
   always_ff @(posedge clk) begin
     if (rst) begin

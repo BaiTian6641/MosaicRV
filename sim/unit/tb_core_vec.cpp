@@ -1,11 +1,13 @@
 // ============================================================================
-// tb_core_vec.cpp -- CASE=vec.integrated, work package I-059.
+// tb_core_vec.cpp -- CASE=vec.integrated and CASE=rvv.lane_resize_boundary,
+// work package I-059.
 //
 // The DUT is the integrated p0 out-of-order core with the vector engine wired
 // in: the OP-V decode in the front end, the dispatch system-insert route, the
 // ROB-head resolution, the I-051..I-058 units (descriptor, configuration, VRF,
 // integer ALU, memory packetizer, restart controller, chaining network), the
-// vector CSRs on the core's CSR path, and mstatus.VS dirtying.
+// vector CSRs on the core's CSR path, mstatus.VS dirtying, and the runtime lane
+// broker (`mosaic_lane_broker`).
 //
 // What this case claims, and what it uses as the oracle for each claim:
 //
@@ -44,10 +46,23 @@
 //   3. restart   a load that faults at element 2, a handler that repoints the
 //                base and returns, and the restarted load completing
 //   4. scalar    the scalar-equivalent computation for the comparison
+//   5. lane-8    one workload of eight elements at quota 8 (e16, m1)
+//   6. lane-two-4 two independent four-element descriptor chains -- two
+//                register-file regions standing in for two workloads,
+//                interleaved by the program -- at quota 4
+//   7. lane-resize a resize attempted *inside* a macro: it must land only at
+//                the vector instruction boundary, both sides must be correct,
+//                the old quota's state must be acknowledged, and vl/vlenb must
+//                not move. The lane counts in every phase state that the quota
+//                changes how many lanes work on the elements, never which
+//                elements exist.
 //
 // Controls: tools/run_vec_integrated_controls.py injects exactly one defect per
-// build, requires the mutant binary to differ from the shipping one and to exit
-// 1 with the named check. See results/reports/I-059-vector-integration.md.
+// build for the first four phases, and tools/run_lane_resize_controls.py does
+// the same for the lane quota. Each requires the mutant binary to differ from
+// the shipping one and to exit 1 with the named check. See
+// results/reports/I-059-vector-integration.md and
+// results/reports/I-059-lane-broker.md.
 //
 // `--seed` is accepted and unused: every vector here is directed.
 // ============================================================================
@@ -209,6 +224,15 @@ class Asm {
   void Vse32(uint32_t vs3, uint32_t rs1) {
     Emit((1u << 25) | (rs1 << 15) | (6u << 12) | (vs3 << 7) | 0x27);
   }
+  // vle16.v / vse16.v -- funct3 101 selects EEW = 16, which is what lets an
+  // e16,m1 configuration hold VLMAX = 128/16 = 8 elements, the eight-lane
+  // workload the lane-quota case needs.
+  void Vle16(uint32_t vd, uint32_t rs1) {
+    Emit((1u << 25) | (rs1 << 15) | (5u << 12) | (vd << 7) | 0x07);
+  }
+  void Vse16(uint32_t vs3, uint32_t rs1) {
+    Emit((1u << 25) | (rs1 << 15) | (5u << 12) | (vs3 << 7) | 0x27);
+  }
   // vadd.vv vd, vs2, vs1  -- OPIVV, funct6 000000, vm=1.
   void VaddVv(uint32_t vd, uint32_t vs2, uint32_t vs1) {
     Emit((1u << 25) | (vs2 << 20) | (vs1 << 15) | (0u << 12) | (vd << 7) | 0x57);
@@ -312,6 +336,19 @@ struct RunResult {
   uint64_t vec_vrf_bad = 0;
   uint64_t vec_vrf_rows = 0;
   uint64_t vec_vrf_banks = 0;
+  // The lane broker's evidence (I-059): the committed share, its generation,
+  // the resize/acknowledgement counts, the per-lane element counts (lane 0 in
+  // the least significant byte), and the two direct statements of the boundary
+  // and acknowledgement rules.
+  uint64_t lane_quota = 0;
+  uint64_t lane_gen = 0;
+  uint64_t lane_publish_ctr = 0;
+  uint64_t lane_ack_req_ctr = 0;
+  uint64_t lane_ack_ctr = 0;
+  uint64_t lane_req_mid_macro_ctr = 0;
+  uint64_t lane_pub_mid_macro_ctr = 0;
+  uint64_t lane_abort_ctr = 0;
+  uint32_t lane_elem[8] = {0, 0, 0, 0, 0, 0, 0, 0};
   uint64_t mstatus = 0;
   uint64_t mtvec = 0;
   uint64_t mepc = 0;
@@ -337,6 +374,11 @@ struct RunResult {
     mem.Read(kDataBase + off, 4, &v);
     value = static_cast<uint32_t>(v);
     return value;
+  }
+  uint32_t Data16(uint64_t off) {
+    uint64_t v = 0;
+    mem.Read(kDataBase + off, 2, &v);
+    return static_cast<uint32_t>(v & 0xFFFFull);
   }
   uint32_t At32(uint64_t addr) {
     uint64_t v = 0;
@@ -397,6 +439,8 @@ class Harness {
     dut_->arb_req_valid1_i = 0;
     dut_->arb_head_valid_i = 0;
     dut_->arb_head_retire_i = 0;
+    dut_->lane_quota_req_i = resize_req_ ? 1 : 0;
+    dut_->lane_quota_val_i = static_cast<uint8_t>(resize_val_ & 0xFu);
     dut_->eval();
 
     if (!rst) Observe();
@@ -481,6 +525,14 @@ class Harness {
     g_.retire_width = (g_.retire_width == 0) ? 1 : g_.retire_width;
   }
 
+  // The lane-quota request presented to the core on the next Cycle. A held
+  // request is idempotent, so the driver may simply keep it asserted until the
+  // broker commits it.
+  void SetResize(bool req, uint32_t val) {
+    resize_req_ = req;
+    resize_val_ = val;
+  }
+
  private:
   static constexpr uint64_t kMtimeBase = 0x100000000ull;
   Vmosaic_core_tb* dut_;
@@ -513,6 +565,8 @@ class Harness {
   }
   uint32_t last_commit_ = 0;
   uint32_t last_alloc_ = 0;
+  bool resize_req_ = false;
+  uint32_t resize_val_ = 0;
 };
 
 // ------------------------------------------------------------------ program
@@ -537,6 +591,14 @@ struct Scenario {
       data[off + i] = static_cast<uint8_t>((value >> (8 * i)) & 0xFFu);
     }
   }
+  void Put16(uint64_t off, uint16_t value) {
+    if (off + 2 > static_cast<uint64_t>(kDataSize)) {
+      Fail("scenario data", "halfword at offset " + Dec(off) + " leaves the block");
+    }
+    for (unsigned i = 0; i < 2; i++) {
+      data[off + i] = static_cast<uint8_t>((value >> (8 * i)) & 0xFFu);
+    }
+  }
   // A word outside the 2 KiB block (the tail of RAM), written into RAM directly.
   void PutAbs64(uint64_t addr, uint64_t value) {
     for (unsigned i = 0; i < 8; i++) {
@@ -549,6 +611,9 @@ struct Scenario {
     }
   }
 };
+
+void FillRun(Vmosaic_core_tb* dut, Harness* harness, mosaic::MemoryModel* mem,
+             RunResult* out);
 
 RunResult Execute(Vmosaic_core_tb* dut, mosaic::Reporter* reporter,
                   const Geometry& g, const std::string& name,
@@ -579,42 +644,166 @@ RunResult Execute(Vmosaic_core_tb* dut, mosaic::Reporter* reporter,
   }
 
   RunResult out;
-  out.cycles = harness.cycles();
-  out.commits = dut->o_commit_o;
-  out.vec_macro = dut->o_vec_macro_ctr_o;
-  out.vec_elem = dut->o_vec_elem_ctr_o;
-  out.vec_trap = dut->o_vec_trap_ctr_o;
-  out.vec_retire = dut->o_vec_retire_ctr_o;
-  out.vec_fault = dut->o_vec_fault_ctr_o;
-  out.vec_vtype = dut->o_vec_vtype_o;
-  out.vec_vl = dut->o_vec_vl_o;
-  out.vec_vstart = dut->o_vec_vstart_o;
-  out.vec_vcsr = dut->o_vec_vcsr_o;
-  out.vec_vlenb = dut->o_vec_vlenb_o;
-  out.vec_vlmax = dut->o_vec_vlmax_o;
-  out.vec_vill = dut->o_vec_vill_o;
-  out.vec_dbg0 = dut->o_vec_dbg0_o;
-  out.vec_dbg1 = dut->o_vec_dbg1_o;
-  out.vec_dbg2 = dut->o_vec_dbg2_o;
-  out.vec_lsu_req = dut->o_vec_lsu_req_ctr_o;
-  out.vec_alu_elems = dut->o_vec_alu_elems_o;
-  out.vec_chain_accept = dut->o_vec_chain_accept_ctr_o;
-  out.vec_chain_refuse = dut->o_vec_chain_refuse_ctr_o;
-  out.vec_desc_alloc = dut->o_vec_desc_alloc_ctr_o;
-  out.vec_desc_release = dut->o_vec_desc_release_ctr_o;
-  out.vec_vrf_rd = dut->o_vec_vrf_rd_ctr_o;
-  out.vec_vrf_wr = dut->o_vec_vrf_wr_ctr_o;
-  out.vec_vrf_bad = dut->o_vec_vrf_bad_ctr_o;
-  out.vec_vrf_rows = dut->o_vec_vrf_rows_o;
-  out.vec_vrf_banks = dut->o_vec_vrf_banks_o;
-  out.mstatus = dut->o_csr_mstatus_o;
-  out.mtvec = dut->o_csr_mtvec_o;
-  out.mepc = dut->o_csr_mepc_o;
-  out.mcause = dut->o_csr_mcause_o;
-  out.mtval = dut->o_csr_mtval_o;
-  out.traps = harness.trap_pcs();
-  out.trap_tvals = harness.trap_tvals();
-  out.mem = mem;
+  FillRun(dut, &harness, &mem, &out);
+  return out;
+}
+
+// Collect every observable the case checks, in one place so a phase that drives
+// the lane-quota port and a phase that does not report identically.
+void FillRun(Vmosaic_core_tb* dut, Harness* harness, mosaic::MemoryModel* mem,
+             RunResult* out) {
+  out->cycles = harness->cycles();
+  out->commits = dut->o_commit_o;
+  out->vec_macro = dut->o_vec_macro_ctr_o;
+  out->vec_elem = dut->o_vec_elem_ctr_o;
+  out->vec_trap = dut->o_vec_trap_ctr_o;
+  out->vec_retire = dut->o_vec_retire_ctr_o;
+  out->vec_fault = dut->o_vec_fault_ctr_o;
+  out->vec_vtype = dut->o_vec_vtype_o;
+  out->vec_vl = dut->o_vec_vl_o;
+  out->vec_vstart = dut->o_vec_vstart_o;
+  out->vec_vcsr = dut->o_vec_vcsr_o;
+  out->vec_vlenb = dut->o_vec_vlenb_o;
+  out->vec_vlmax = dut->o_vec_vlmax_o;
+  out->vec_vill = dut->o_vec_vill_o;
+  out->vec_dbg0 = dut->o_vec_dbg0_o;
+  out->vec_dbg1 = dut->o_vec_dbg1_o;
+  out->vec_dbg2 = dut->o_vec_dbg2_o;
+  out->vec_lsu_req = dut->o_vec_lsu_req_ctr_o;
+  out->vec_alu_elems = dut->o_vec_alu_elems_o;
+  out->vec_chain_accept = dut->o_vec_chain_accept_ctr_o;
+  out->vec_chain_refuse = dut->o_vec_chain_refuse_ctr_o;
+  out->vec_desc_alloc = dut->o_vec_desc_alloc_ctr_o;
+  out->vec_desc_release = dut->o_vec_desc_release_ctr_o;
+  out->vec_vrf_rd = dut->o_vec_vrf_rd_ctr_o;
+  out->vec_vrf_wr = dut->o_vec_vrf_wr_ctr_o;
+  out->vec_vrf_bad = dut->o_vec_vrf_bad_ctr_o;
+  out->vec_vrf_rows = dut->o_vec_vrf_rows_o;
+  out->vec_vrf_banks = dut->o_vec_vrf_banks_o;
+  out->lane_quota = dut->o_lane_quota_o;
+  out->lane_gen = dut->o_lane_gen_o;
+  out->lane_publish_ctr = dut->o_lane_publish_ctr_o;
+  out->lane_ack_req_ctr = dut->o_lane_ack_req_ctr_o;
+  out->lane_ack_ctr = dut->o_lane_ack_ctr_o;
+  out->lane_req_mid_macro_ctr = dut->o_lane_req_mid_macro_ctr_o;
+  out->lane_pub_mid_macro_ctr = dut->o_lane_pub_mid_macro_ctr_o;
+  out->lane_abort_ctr = dut->o_lane_abort_ctr_o;
+  for (int lane = 0; lane < 8; lane++) {
+    out->lane_elem[lane] = static_cast<uint32_t>(dut->o_lane_elem_ctr_o[lane]);
+  }
+  out->mstatus = dut->o_csr_mstatus_o;
+  out->mtvec = dut->o_csr_mtvec_o;
+  out->mepc = dut->o_csr_mepc_o;
+  out->mcause = dut->o_csr_mcause_o;
+  out->mtval = dut->o_csr_mtval_o;
+  out->traps = harness->trap_pcs();
+  out->trap_tvals = harness->trap_tvals();
+  out->mem = *mem;
+}
+
+// One committed quota change, with whether a vector macro was live at the
+// moment it was committed. The shipping rule is that every change lands with
+// `macro_live == false`; a change with a macro live is the mid-macro fail mode.
+struct QuotaChange {
+  uint64_t cycle = 0;
+  uint32_t from = 0;
+  uint32_t to = 0;
+  bool macro_live = false;
+  // The architectural configuration sampled in the cycle the change was
+  // committed: the resize must not move either.
+  uint64_t vl = 0;
+  uint64_t vlenb = 0;
+};
+
+struct ResizeRun {
+  RunResult run;
+  std::vector<QuotaChange> changes;
+};
+
+// Run a program while driving the runtime lane-quota port. Two stimulus shapes:
+//
+//   * `boundary_mode == false`: present `start_quota` from the first cycle, so
+//     the machine is already at that share before the first vector macro. Used
+//     for the "two workloads at 4 lanes" configuration.
+//   * `boundary_mode == true`: request 4 the first time a *unit* macro is live
+//     (a change attempted inside a macro), and 8 again while a later macro is
+//     live. Every committed change is recorded with whether a macro was live
+//     when it landed, which is the boundary observation the case asserts on.
+ResizeRun ExecuteResize(Vmosaic_core_tb* dut, mosaic::Reporter* reporter,
+                        const Geometry& g, const std::string& name,
+                        const Scenario& sc, uint32_t start_quota,
+                        bool boundary_mode) {
+  mosaic::MemoryModel mem;
+  for (int i = 0; i < kDataSize; i++) {
+    if (sc.data[i] == 0) continue;
+    mem.Write(kDataBase + static_cast<uint64_t>(i), 1, sc.data[i]);
+  }
+  for (const auto& kv : sc.extra) {
+    mem.Write(kv.first, 1, kv.second);
+  }
+  const ProgImage& image = sc.image;
+
+  Harness harness(dut, reporter, kProgramCycles, &image, &mem);
+  harness.SetGeometry(g);
+  harness.Phase(name);
+  dut->clk = 0;
+  dut->rst = 1;
+  dut->eval();
+  harness.Reset(kResetCycles);
+
+  ResizeRun out;
+  bool req = false;
+  uint32_t val = start_quota;
+  bool reqed1 = false;
+  bool reqed2 = false;
+  bool prev_live = false;
+  uint32_t last_q = static_cast<uint32_t>(dut->o_lane_quota_o);
+  uint32_t last_desc = static_cast<uint32_t>(dut->o_vec_desc_alloc_ctr_o);
+
+  while (!mem.finished() && harness.cycles() < kProgramCycles) {
+    if (!boundary_mode) {
+      req = true;
+      val = start_quota;
+    } else if (!reqed1) {
+      // The first unit macro is live: this is a resize attempted *inside* a
+      // macro, which must land only at the boundary after it drains.
+      if (prev_live && (last_desc >= 1)) {
+        req = true;
+        val = 4;
+        reqed1 = true;
+      }
+    } else if (!reqed2) {
+      if ((last_q == 4) && prev_live && (last_desc >= 2)) {
+        val = 8;
+        reqed2 = true;
+      }
+    }
+    harness.SetResize(req, val);
+    harness.Cycle(false);
+
+    const uint32_t q = static_cast<uint32_t>(dut->o_lane_quota_o);
+    if (q != last_q) {
+      QuotaChange change;
+      change.cycle = harness.cycles();
+      change.from = last_q;
+      change.to = q;
+      // `prev_live` is the macro-live state observed at the end of the cycle
+      // before the change was committed -- the cycle the request that caused it
+      // was presented.
+      change.macro_live = prev_live;
+      change.vl = dut->o_vec_vl_o;
+      change.vlenb = dut->o_vec_vlenb_o;
+      out.changes.push_back(change);
+      last_q = q;
+    }
+    prev_live = (dut->o_lane_macro_live_o != 0);
+    last_desc = static_cast<uint32_t>(dut->o_vec_desc_alloc_ctr_o);
+  }
+  for (int i = 0; i < 8; i++) harness.Cycle(false);
+  if (!mem.finished()) {
+    Fail(name, "the program never reached the exit protocol");
+  }
+  FillRun(dut, &harness, &mem, &out.run);
   return out;
 }
 
@@ -935,6 +1124,296 @@ RunResult PhaseScalar(Vmosaic_core_tb* dut, mosaic::Reporter* reporter,
   return run;
 }
 
+// ============================================================================
+// Phases 5-7: the runtime lane quota (I-059).
+//
+// The quota changes *how many lanes work on the elements*, never which elements
+// exist. The three phases below state that from both sides:
+//
+//   5. lane-8     one workload of eight elements at quota 8 -- the one workload
+//                 across eight lanes
+//   6. lane-two-4 two independent four-element descriptor chains (two register
+//                 regions standing in for two workloads, interleaved by the
+//                 program) at quota 4
+//   7. lane-resize a resize is *attempted inside a macro*; it must land only at
+//                 the boundary, both sides must compute correctly, the old
+//                 quota's state must be acknowledged, and `vl`/`vlenb` must not
+//                 move
+//
+// The host model is C's `uint16_t` addition, computed from the same arrays the
+// program loads; the DUT's arithmetic is never consulted.
+// ============================================================================
+constexpr uint16_t kA16[8] = {0x0001u, 0x7FFFu, 0xFFFFu, 0x1234u,
+                              0x0020u, 0x0100u, 0x00FFu, 0xABCDu};
+constexpr uint16_t kB16[8] = {0x0002u, 0x0001u, 0x0003u, 0x0001u,
+                              0x0004u, 0x0010u, 0x0001u, 0x0002u};
+
+uint16_t Sum16(uint16_t a, uint16_t b) {
+  return static_cast<uint16_t>(static_cast<uint32_t>(a) + static_cast<uint32_t>(b));
+}
+
+// Phase 5: one workload of eight elements at quota 8.
+RunResult PhaseLaneOne8(Vmosaic_core_tb* dut, mosaic::Reporter* reporter,
+                        const Geometry& g, const std::string& name) {
+  Asm a(g.reset_vector);
+  Scenario sc;
+  for (int i = 0; i < 8; i++) {
+    sc.Put16(static_cast<uint64_t>(i) * 2, kA16[i]);
+    sc.Put16(32 + static_cast<uint64_t>(i) * 2, kB16[i]);
+  }
+  a.Csrr(5, 0x300);
+  a.Ori(5, 5, 0x200);
+  a.Csrrw(0, 0x300, 5);
+  a.Vsetvli(7, 0, 0x20);          // e16, m1, AVL=x0 -> VLMAX = 8
+  a.LaAbs(10, kDataBase + 0);
+  a.LaAbs(11, kDataBase + 32);
+  a.LaAbs(12, kDataBase + 64);
+  a.Vle16(0, 10);
+  a.Vle16(1, 11);
+  a.VaddVv(2, 0, 1);
+  a.Vse16(2, 12);
+  a.LaAbs(6, kSlotBase);
+  a.Csrr(5, 0xC20);
+  a.Sd(5, 6, 0);                  // vl
+  a.Csrr(5, 0xC22);
+  a.Sd(5, 6, 8);                  // vlenb
+  a.Exit();
+  for (size_t i = 0; i < a.words().size(); i++) {
+    sc.image.Put(g.reset_vector + 4ull * i, a.words()[i]);
+  }
+
+  RunResult run = Execute(dut, reporter, g, name, sc);
+  Check(reporter, run.traps.empty(), name + ": no trap is taken");
+  Check(reporter, run.Slot(0) == 8,
+        name + ": vl after vsetvli e16,m1 is VLMAX=8, got " + Dec(run.Slot(0)));
+  Check(reporter, run.Slot(1) == 16,
+        name + ": vlenb is 16, got " + Dec(run.Slot(1)));
+  for (int i = 0; i < 8; i++) {
+    const uint32_t got = run.Data16(64 + static_cast<uint64_t>(i) * 2);
+    const uint32_t want = Sum16(kA16[i], kB16[i]);
+    Check(reporter, got == want,
+          name + ": C8[" + std::to_string(i) + "] = A+B, expected " +
+              Dec(want) + " got " + Dec(got));
+  }
+  Check(reporter, run.lane_quota == 8,
+        name + ": the committed quota is 8, got " + Dec(run.lane_quota));
+  Check(reporter, run.lane_publish_ctr == 0,
+        name + ": the one-workload run performs no resize, got " +
+            Dec(run.lane_publish_ctr));
+  uint32_t sum = 0;
+  bool all_used = true;
+  for (int l = 0; l < 8; l++) {
+    sum += run.lane_elem[l];
+    if (run.lane_elem[l] == 0) all_used = false;
+  }
+  Check(reporter, sum == 32,
+        name + ": 32 element completions were attributed to lanes, got " +
+            Dec(sum));
+  Check(reporter, all_used,
+        name + ": an eight-element workload used all eight lanes");
+  return run;
+}
+
+// Phase 6: two independent four-element chains at quota 4. The two register
+// regions (v0..v3 and v8..v11) stand in for two workloads, and the two
+// descriptor chains are interleaved by the program at macro granularity.
+ResizeRun PhaseLaneTwo4(Vmosaic_core_tb* dut, mosaic::Reporter* reporter,
+                        const Geometry& g, const std::string& name) {
+  Asm a(g.reset_vector);
+  Scenario sc;
+  for (int i = 0; i < 8; i++) {
+    sc.Put16(static_cast<uint64_t>(i) * 2, kA16[i]);
+    sc.Put16(32 + static_cast<uint64_t>(i) * 2, kB16[i]);
+  }
+  a.Csrr(5, 0x300);
+  a.Ori(5, 5, 0x200);
+  a.Csrrw(0, 0x300, 5);
+  a.Addi(5, 0, 4);
+  a.Vsetvli(7, 5, 0x20);          // AVL=4 -> vl=4
+  a.LaAbs(10, kDataBase + 0);     // A[0..3]
+  a.LaAbs(13, kDataBase + 8);     // A[4..7]
+  a.LaAbs(11, kDataBase + 32);    // B[0..3]
+  a.LaAbs(14, kDataBase + 40);    // B[4..7]
+  a.LaAbs(12, kDataBase + 96);    // C4a
+  a.LaAbs(15, kDataBase + 112);   // C4b
+  // Two chains, interleaved: P is A0+B0 -> C4a, Q is A4+B4 -> C4b.
+  a.Vle16(0, 10);
+  a.Vle16(8, 13);
+  a.Vle16(1, 11);
+  a.Vle16(9, 14);
+  a.VaddVv(2, 0, 1);
+  a.VaddVv(10, 8, 9);
+  a.Vse16(2, 12);
+  a.Vse16(10, 15);
+  a.LaAbs(6, kSlotBase);
+  a.Csrr(5, 0xC20);
+  a.Sd(5, 6, 0);                  // vl
+  a.Csrr(5, 0xC22);
+  a.Sd(5, 6, 8);                  // vlenb
+  a.Exit();
+  for (size_t i = 0; i < a.words().size(); i++) {
+    sc.image.Put(g.reset_vector + 4ull * i, a.words()[i]);
+  }
+
+  ResizeRun rr = ExecuteResize(dut, reporter, g, name, sc, 4, false);
+  RunResult run = rr.run;
+  Check(reporter, run.traps.empty(), name + ": no trap is taken");
+  Check(reporter, run.Slot(0) == 4,
+        name + ": vl after vsetvli with AVL=4 is 4, got " + Dec(run.Slot(0)));
+  Check(reporter, run.Slot(1) == 16,
+        name + ": vlenb is 16, got " + Dec(run.Slot(1)));
+  for (int i = 0; i < 4; i++) {
+    const uint32_t got_a = run.Data16(96 + static_cast<uint64_t>(i) * 2);
+    const uint32_t want_a = Sum16(kA16[i], kB16[i]);
+    Check(reporter, got_a == want_a,
+          name + ": C4a[" + std::to_string(i) + "] = A+B, expected " +
+              Dec(want_a) + " got " + Dec(got_a));
+    const uint32_t got_b = run.Data16(112 + static_cast<uint64_t>(i) * 2);
+    const uint32_t want_b = Sum16(kA16[4 + i], kB16[4 + i]);
+    Check(reporter, got_b == want_b,
+          name + ": C4b[" + std::to_string(i) + "] = A+B, expected " +
+              Dec(want_b) + " got " + Dec(got_b));
+  }
+  Check(reporter, run.lane_quota == 4,
+        name + ": the committed quota is 4, got " + Dec(run.lane_quota));
+  Check(reporter,
+        (run.lane_publish_ctr == 1) && (run.lane_ack_req_ctr == 1) &&
+            (run.lane_ack_ctr == 1) && (run.lane_abort_ctr == 0),
+        name + ": every resize was acknowledged (publish=" +
+            Dec(run.lane_publish_ctr) + " ack_req=" + Dec(run.lane_ack_req_ctr) +
+            " ack=" + Dec(run.lane_ack_ctr) + " abort=" + Dec(run.lane_abort_ctr) +
+            ")");
+  uint32_t sum = 0;
+  bool low_used = true;
+  bool high_unused = true;
+  for (int l = 0; l < 4; l++) {
+    sum += run.lane_elem[l];
+    if (run.lane_elem[l] == 0) low_used = false;
+  }
+  for (int l = 4; l < 8; l++) {
+    sum += run.lane_elem[l];
+    if (run.lane_elem[l] != 0) high_unused = false;
+  }
+  Check(reporter, sum == 32,
+        name + ": 32 element completions were attributed to lanes, got " +
+            Dec(sum));
+  Check(reporter, low_used && high_unused,
+        name + ": a four-lane share used lanes 0..3 and no lane above it");
+  return rr;
+}
+
+// Phase 7: a resize attempted inside a macro. It must land only at the vector
+// instruction boundary, after the macro drains; both sides must be correct; the
+// old quota's state must be acknowledged; and `vl`/`vlenb` must not move.
+ResizeRun PhaseLaneBoundary(Vmosaic_core_tb* dut, mosaic::Reporter* reporter,
+                            const Geometry& g, const std::string& name) {
+  Asm a(g.reset_vector);
+  Scenario sc;
+  for (int i = 0; i < 8; i++) {
+    sc.Put16(static_cast<uint64_t>(i) * 2, kA16[i]);
+    sc.Put16(32 + static_cast<uint64_t>(i) * 2, kB16[i]);
+  }
+  a.Csrr(5, 0x300);
+  a.Ori(5, 5, 0x200);
+  a.Csrrw(0, 0x300, 5);
+  a.Vsetvli(7, 0, 0x20);          // e16, m1, AVL=x0 -> vl=8
+  a.LaAbs(10, kDataBase + 0);
+  a.LaAbs(11, kDataBase + 32);
+  a.LaAbs(12, kDataBase + 64);    // C1
+  a.LaAbs(16, kDataBase + 128);   // C2
+  // Workload 1, then workload 2 (the same computation, so C1 == C2 == host).
+  a.Vle16(0, 10);
+  a.Vle16(1, 11);
+  a.VaddVv(2, 0, 1);
+  a.Vse16(2, 12);
+  a.Vle16(4, 10);
+  a.Vle16(5, 11);
+  a.VaddVv(6, 4, 5);
+  a.Vse16(6, 16);
+  a.LaAbs(6, kSlotBase);
+  a.Csrr(5, 0xC20);
+  a.Sd(5, 6, 0);                  // vl
+  a.Csrr(5, 0xC22);
+  a.Sd(5, 6, 8);                  // vlenb
+  a.Exit();
+  for (size_t i = 0; i < a.words().size(); i++) {
+    sc.image.Put(g.reset_vector + 4ull * i, a.words()[i]);
+  }
+
+  ResizeRun rr = ExecuteResize(dut, reporter, g, name, sc, 8, true);
+  RunResult run = rr.run;
+  Check(reporter, run.traps.empty(), name + ": no trap is taken");
+
+  // 1. Every committed change landed with no macro live: the boundary rule.
+  bool at_boundary = true;
+  std::string offending;
+  for (const QuotaChange& c : rr.changes) {
+    if (c.macro_live) {
+      at_boundary = false;
+      offending = " (cycle " + Dec(c.cycle) + ": " + Dec(c.from) + "->" +
+                  Dec(c.to) + " with a macro live)";
+    }
+  }
+  Check(reporter, at_boundary,
+        name + ": every quota change lands at a macro boundary" + offending);
+
+  // 1b. The visible configuration did not move at any change: sampled in the
+  //     cycle each change was committed.
+  bool config_stable = true;
+  std::string config_detail;
+  for (const QuotaChange& c : rr.changes) {
+    if ((c.vl != 8) || (c.vlenb != 16)) {
+      config_stable = false;
+      config_detail = " (cycle " + Dec(c.cycle) + ": vl=" + Dec(c.vl) +
+                      " vlenb=" + Dec(c.vlenb) + ")";
+    }
+  }
+  Check(reporter, config_stable,
+        name + ": vl and vlenb are unchanged across every change" + config_detail);
+
+  // 2. Both requested changes were committed.
+  Check(reporter, rr.changes.size() == 2,
+        name + ": two quota changes were committed, got " +
+            Dec(static_cast<uint64_t>(rr.changes.size())));
+
+  // 3. The old quota's state was acknowledged for every change, and at least
+  //    one request was accepted while a macro was live -- the mid-macro
+  //    attempt this phase exists to make.
+  Check(reporter,
+        (run.lane_publish_ctr == 2) && (run.lane_ack_req_ctr == 2) &&
+            (run.lane_ack_ctr == 2) && (run.lane_abort_ctr == 0) &&
+            (run.lane_pub_mid_macro_ctr == 0) &&
+            (run.lane_req_mid_macro_ctr >= 1),
+        name + ": every resize was acknowledged (publish=" +
+            Dec(run.lane_publish_ctr) + " ack_req=" + Dec(run.lane_ack_req_ctr) +
+            " ack=" + Dec(run.lane_ack_ctr) + " abort=" + Dec(run.lane_abort_ctr) +
+            " mid_macro_publish=" + Dec(run.lane_pub_mid_macro_ctr) +
+            " mid_macro_request=" + Dec(run.lane_req_mid_macro_ctr) + ")");
+
+  // 4. Both sides of every change computed correctly.
+  for (int i = 0; i < 8; i++) {
+    const uint32_t want = Sum16(kA16[i], kB16[i]);
+    const uint32_t got1 = run.Data16(64 + static_cast<uint64_t>(i) * 2);
+    Check(reporter, got1 == want,
+          name + ": C1[" + std::to_string(i) + "] = A+B, expected " +
+              Dec(want) + " got " + Dec(got1));
+    const uint32_t got2 = run.Data16(128 + static_cast<uint64_t>(i) * 2);
+    Check(reporter, got2 == want,
+          name + ": C2[" + std::to_string(i) + "] = A+B, expected " +
+              Dec(want) + " got " + Dec(got2));
+  }
+
+  // 5. The visible vector length did not move with the quota.
+  Check(reporter, run.Slot(0) == 8,
+        name + ": vl is unchanged across the resize, got " + Dec(run.Slot(0)));
+  Check(reporter, run.Slot(1) == 16,
+        name + ": vlenb is 16, got " + Dec(run.Slot(1)));
+  Check(reporter, run.lane_quota == 8,
+        name + ": the second change committed quota 8, got " +
+            Dec(run.lane_quota));
+  return rr;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -978,10 +1457,47 @@ int main(int argc, char** argv) {
                 "] is identical vector vs scalar");
     }
 
+    // The runtime lane quota: one workload at 8 lanes, two workloads at 4 lanes,
+    // and a resize attempted inside a macro. The lane quota changes how many
+    // lanes work on the elements, never which elements exist, so the two
+    // workloads' outputs must reproduce the single workload's output exactly.
+    RunResult lane8 = PhaseLaneOne8(&dut, &reporter, geometry, "lane-8");
+    ResizeRun lane4 = PhaseLaneTwo4(&dut, &reporter, geometry, "lane-two-4");
+    ResizeRun lane_resize = PhaseLaneBoundary(&dut, &reporter, geometry, "lane-resize");
+    for (int i = 0; i < 4; i++) {
+      Check(&reporter,
+            lane8.Data16(64 + static_cast<uint64_t>(i) * 2) ==
+                lane4.run.Data16(96 + static_cast<uint64_t>(i) * 2),
+            std::string("lane equivalence: C[") + std::to_string(i) +
+                "] of the one-workload-at-8 run equals the first workload at 4");
+      Check(&reporter,
+            lane8.Data16(64 + static_cast<uint64_t>(4 + i) * 2) ==
+                lane4.run.Data16(112 + static_cast<uint64_t>(i) * 2),
+            std::string("lane equivalence: C[") + std::to_string(4 + i) +
+                "] of the one-workload-at-8 run equals the second workload at 4");
+    }
+
+    uint64_t lane8_sum = 0;
+    uint64_t lane4_sum = 0;
+    uint64_t lane4_high = 0;
+    for (int l = 0; l < 8; l++) {
+      lane8_sum += lane8.lane_elem[l];
+      lane4_sum += lane4.run.lane_elem[l];
+      if (l >= 4) lane4_high += lane4.run.lane_elem[l];
+    }
+
     detail = "checks=" + Dec(static_cast<uint64_t>(reporter.checks())) +
-             " phases=4 seed=" + Dec(options.seed) +
+             " phases=7 seed=" + Dec(options.seed) +
              " vec_cycles=" + Dec(vec.cycles) +
-             " scalar_cycles=" + Dec(scalar.cycles);
+             " scalar_cycles=" + Dec(scalar.cycles) +
+             " lane8_quota=" + Dec(lane8.lane_quota) +
+             " lane8_elems=" + Dec(lane8_sum) +
+             " lane4_quota=" + Dec(lane4.run.lane_quota) +
+             " lane4_elems=" + Dec(lane4_sum) +
+             " lane4_high_elems=" + Dec(lane4_high) +
+             " resize_quota=" + Dec(lane_resize.run.lane_quota) +
+             " resizes=" + Dec(lane_resize.run.lane_publish_ctr) +
+             " acks=" + Dec(lane_resize.run.lane_ack_ctr);
   } catch (const Failure& f) {
     reporter.Mismatch(f.what, "every vector-integration claim holds on this machine",
                       "contract violated");

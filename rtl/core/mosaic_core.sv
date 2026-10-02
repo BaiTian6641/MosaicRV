@@ -160,6 +160,16 @@ module mosaic_core (
     // architectural result to be identical.
     input  logic                        cache_en_i,
 
+    // ----------------------------------------- the runtime lane quota (I-059)
+    // A *runtime* control port, like `fab_dyn_i`: the vector engine's lane
+    // quota is a resource share, not architectural state, so it is not a CSR
+    // and `vl`/`vlenb` must not move when it changes. The broker changes the
+    // committed quota only at a vector instruction boundary after a drain.
+    // Every driver that predates the vector work leaves `req_valid` low, so the
+    // quota stays at its reset value of 8 and behaviour is unchanged.
+    input  logic                        lane_quota_req_i,
+    input  logic [3:0]                  lane_quota_val_i,
+
     // ------------------------------------------------- instruction memory port
     output logic                        imem_req_valid,
     output mosaic_uop_pkg::mem_req_t    imem_req,
@@ -425,6 +435,25 @@ module mosaic_core (
     output logic [63:0]                 o_vec_dbg0,
     output logic [63:0]                 o_vec_dbg1,
     output logic [63:0]                 o_vec_dbg2,
+    // ---------------------------------------------- the lane broker (I-059)
+    // The committed quota, the request it is holding, the generation, and the
+    // boundary/acknowledgement evidence. `o_lane_elem_ctr` is eight 32-bit
+    // per-lane element counts packed lane 0 in the least significant slice:
+    // the direct statement that the quota changed *how many lanes worked on the
+    // elements* and never *which elements exist*.
+    output logic [3:0]                  o_lane_quota,
+    output logic [3:0]                  o_lane_req_quota,
+    output logic [7:0]                  o_lane_gen,
+    output logic                        o_lane_busy,
+    output logic                        o_lane_stop_admit,
+    output logic                        o_lane_macro_live,
+    output logic [31:0]                 o_lane_publish_ctr,
+    output logic [31:0]                 o_lane_ack_req_ctr,
+    output logic [31:0]                 o_lane_ack_ctr,
+    output logic [31:0]                 o_lane_req_mid_macro_ctr,
+    output logic [31:0]                 o_lane_pub_mid_macro_ctr,
+    output logic [31:0]                 o_lane_abort_ctr,
+    output logic [255:0]                o_lane_elem_ctr,
     output logic [31:0]                 o_csr_wr_ctr,
     output logic [31:0]                 o_csr_illegal_wr_ctr,
     output logic [31:0]                 o_csr_trap_ctr,
@@ -1519,6 +1548,36 @@ module mosaic_core (
   logic                       vec_lsu_owns_vrf;
   logic [31:0]                vec_vrf_rd_gnt_ctr, vec_vrf_wr_gnt_ctr, vec_vrf_rd_bad_ctr;
   logic [31:0]                vec_vrf_rows, vec_vrf_banks;
+  // The unit's write data before the lane-quota gate. In the shipping build the
+  // gate is the identity; the DISCARD_REST control makes it drop the writes of a
+  // macro-in-flight whose plan-lane the newly requested (smaller) quota no
+  // longer covers.
+  logic [63:0]                vec_vrf_wr_data_raw;
+  /* verilator lint_off UNUSEDSIGNAL */
+  // Read only by the DISCARD_REST control's gate below; in the shipping build the
+  // gate is the identity and this is written and never read.
+  logic [6:0]                 vec_vrf_wr_elem_now;
+  /* verilator lint_on UNUSEDSIGNAL */
+
+  // ------------------------------------------------------------------ the
+  // lane broker (I-059). The committed quota and its evidence; the per-macro
+  // lane plan; and the eight per-lane element counters.
+  logic [3:0]                 lane_quota;
+  logic [3:0]                 lane_req_quota;
+  logic [7:0]                 lane_gen;
+  logic                       lane_busy, lane_stop_admit, lane_macro_live;
+  logic [31:0]                lane_publish_ctr, lane_ack_req_ctr, lane_ack_ctr;
+  logic [31:0]                lane_req_mid_macro_ctr, lane_pub_mid_macro_ctr;
+  logic [31:0]                lane_abort_ctr;
+  logic                       lane_ack;
+  logic                       lane_macro_insert;
+  logic                       lane_wb_new;
+  /* verilator lint_off UNUSEDSIGNAL */
+  // Bit 3 (the value 8) is read only by the DISCARD_REST gate; the lane mask
+  // below uses the low three bits, for which 8 wraps to 0 and subtracts to 7.
+  logic [3:0]                 lane_plan_quota_q;
+  /* verilator lint_on UNUSEDSIGNAL */
+  logic [2:0]                 lane_accept_lane;
 
   // the vector engine's memory port, merged onto the core's one data port
   logic                       vec_mem_req_valid, vec_mem_req_ready;
@@ -3249,7 +3308,15 @@ module mosaic_core (
   assign o_vec_vl       = vec_vl;
   assign o_vec_vstart   = vec_vstart;
   assign o_vec_vcsr     = vec_vcsr;
+`ifdef MOSAIC_LANE_MUTANT_VLEN_LEAK
+  // NEGATIVE CONTROL: the runtime lane quota leaks into the architectural VLEN
+  // read-back. The lane count must only change throughput, never VLEN; with
+  // this define `vlenb` reads 16 + quota and the resize case's invariance check
+  // fails with the value the DUT reported.
+  assign o_vec_vlenb    = vec_vlenb + {60'd0, lane_quota};
+`else
   assign o_vec_vlenb    = vec_vlenb;
+`endif
   assign o_vec_vlmax    = vec_vlmax;
   assign o_vec_vill     = vec_vill;
   assign o_vec_macro_ctr = vec_macro_ctr;
@@ -3504,7 +3571,7 @@ module mosaic_core (
       .vs2_i                 (vec_desc_vs2),
       .vs3_i                 (5'd0),
       .mask_en_i             (vec_desc_mask_en),
-      .lane_count_i          (4'd1),
+      .lane_count_i          (lane_quota),
       .o_vtype_legal_o       (vec_desc_vtype_legal),
       .o_cfg_legal_o         (vec_desc_cfg_legal),
       .o_illegal_o           (vec_desc_illegal),
@@ -3608,7 +3675,8 @@ module mosaic_core (
       vec_vrf_wr_elem  = vec_lsu_wr_elem;
       vec_vrf_wr_sew   = vec_lsu_wr_sew;
       vec_vrf_wr_lmul  = vec_lsu_wr_lmul;
-      vec_vrf_wr_data  = vec_lsu_wr_data;
+      vec_vrf_wr_data_raw = vec_lsu_wr_data;
+      vec_vrf_wr_elem_now = vec_lsu_wr_elem;
     end else begin
       vec_vrf_rd_valid = vec_alu_rd_valid;
       vec_vrf_rd_base  = vec_alu_rd_base;
@@ -3621,9 +3689,25 @@ module mosaic_core (
       vec_vrf_wr_elem  = vec_alu_wr_elem;
       vec_vrf_wr_sew   = vec_alu_wr_sew;
       vec_vrf_wr_lmul  = vec_alu_wr_lmul;
-      vec_vrf_wr_data  = vec_alu_wr_data;
+      vec_vrf_wr_data_raw = vec_alu_wr_data;
+      vec_vrf_wr_elem_now = vec_alu_wr_elem;
     end
   end
+
+`ifdef MOSAIC_LANE_MUTANT_DISCARD_REST
+  // NEGATIVE CONTROL: a shrinking resize is read as "the elements the closed
+  // lanes still owed are discarded". The macro in flight keeps its launch-time
+  // lane plan, so its elements 0..plan-1 are named; the instant a *smaller*
+  // quota is requested, every element whose plan lane the new quota no longer
+  // covers has its destination write dropped (written as zero), and the
+  // architectural result loses exactly those elements. The shipping build's
+  // gate is the identity, because the quota never changes inside a macro.
+  assign vec_vrf_wr_data =
+      (((vec_vrf_wr_elem_now & (7'(lane_plan_quota_q) - 7'd1)) >= 7'(lane_req_quota))
+       ? 64'd0 : vec_vrf_wr_data_raw);
+`else
+  assign vec_vrf_wr_data = vec_vrf_wr_data_raw;
+`endif
 
   assign vec_alu_rd_gnt       = vec_vrf_rd_gnt;
   assign vec_alu_rd_rsp_valid = vec_vrf_rd_rsp_valid;
@@ -3649,7 +3733,7 @@ module mosaic_core (
   ) u_vec_vrf (
       .clk_i             (clk),
       .rst_i             (rst),
-      .lane_count_i      (4'd1),
+      .lane_count_i      (lane_quota),
       .plat_i            (2'd0),
       .rd_valid_i        (vec_vrf_rd_valid),
       .rd_base_i         (vec_vrf_rd_base),
@@ -4321,6 +4405,103 @@ module mosaic_core (
     end
   end
 
+  // ==========================================================================
+  // 7c. The lane broker (I-059)
+  // ==========================================================================
+  // The vector engine's lane quota is a throughput knob, so a change to it is
+  // safe exactly at a vector instruction boundary after the macro in flight has
+  // drained. `mosaic_lane_broker` owns that transition by instantiating the
+  // I-031 ownership FSM and binding its three settle classes to the engine's
+  // three obligations: a staged macro (`uop`), a launched macro's element work
+  // (`res`), and an uncollected macro completion (`crd`).
+  //
+  // The broker's `o_stop_admit` gates new macro *admission* in
+  // `sys_ins_ready_int` below; a macro already staged is never stopped, because
+  // it is the macro the drain is waiting for.
+  assign lane_macro_insert = disp_sys_valid && sys_ins_ready_int && disp_sys_is_vec;
+
+  // The completion that a writeback is owed for: the vset path sets `vec_done_q`
+  // on its launch cycle, the unit path when the unit reports done without a trap
+  // or an illegal.
+  assign lane_wb_new = ((vec_state_q == VEC_IDLE) && vec_launch_vset) ||
+                       ((vec_state_q == VEC_RUN) && vec_unit_done &&
+                        !vec_rst_trap && !vec_unit_illegal);
+
+  // The engine's own statement that its lane state for the old quota is
+  // quiesced: no staged macro, no pending writeback, nothing running. The FSM
+  // will not publish without it, so a quota is never committed over live state.
+  assign lane_ack = (vec_state_q == VEC_IDLE) && !vec_valid_q && !vec_wb_pending_q;
+
+  mosaic_lane_broker u_lane_broker (
+      .clk             (clk),
+      .rst             (rst),
+      .req_valid_i     (lane_quota_req_i),
+      .req_quota_i     (lane_quota_val_i),
+      .macro_live_i    (lane_macro_live),
+      .macro_new_i     (lane_macro_insert),
+      .macro_done_i    (vec_macro_leave),
+      .elem_new_i      (vec_launch_unit),
+      .elem_done_i     (vec_unit_done),
+      .wb_new_i        (lane_wb_new),
+      .wb_done_i       (vec_wb_valid),
+      .ack_i           (lane_ack),
+      .o_quota         (lane_quota),
+      .o_req_quota     (lane_req_quota),
+      .o_stop_admit    (lane_stop_admit),
+      .o_busy          (lane_busy),
+      .o_gen           (lane_gen),
+      .o_publish_ctr   (lane_publish_ctr),
+      .o_ack_req_ctr   (lane_ack_req_ctr),
+      .o_ack_ctr       (lane_ack_ctr),
+      .o_req_mid_macro_ctr (lane_req_mid_macro_ctr),
+      .o_pub_mid_macro_ctr (lane_pub_mid_macro_ctr),
+      .o_abort_ctr     (lane_abort_ctr)
+  );
+
+  // The per-macro lane plan: the quota in force when the macro *launched*. It is
+  // a snapshot, not a live value, and that is the whole mechanism -- a lane that
+  // goes away after the launch cannot change which elements the running macro
+  // owns, so no element is discarded. The plan also names the lane each element
+  // completion is attributed to.
+  always_ff @(posedge clk) begin
+    if (rst) lane_plan_quota_q <= 4'd8;
+    else if (vec_launch_unit) lane_plan_quota_q <= lane_quota;
+  end
+
+  // The lane an accepted element completion belongs to: element index modulo the
+  // launch-time quota. Every quota is a power of two, so the modulo is a mask.
+  assign lane_accept_lane = vec_chain_accept_index[2:0] & (3'(lane_plan_quota_q) - 3'd1);
+
+  // Eight 32-bit counters packed lane 0 in the least significant slice. A for
+  // loop rather than a generate block: this file uses no generate elsewhere,
+  // and a loop keeps the per-lane logic and its read-back in one place.
+  logic [255:0] lane_elem_ctr_q;
+  always_ff @(posedge clk) begin
+    if (rst) begin
+      lane_elem_ctr_q <= 256'd0;
+    end else begin
+      for (int lane = 0; lane < 8; lane++) begin
+        if (vec_desc_elem_done_valid && (lane_accept_lane == 3'(lane)))
+          lane_elem_ctr_q[32*lane +: 32] <= lane_elem_ctr_q[32*lane +: 32] + 32'd1;
+      end
+    end
+  end
+  assign o_lane_elem_ctr = lane_elem_ctr_q;
+
+  assign o_lane_quota        = lane_quota;
+  assign o_lane_req_quota    = lane_req_quota;
+  assign o_lane_gen          = lane_gen;
+  assign o_lane_busy         = lane_busy;
+  assign o_lane_stop_admit   = lane_stop_admit;
+  assign o_lane_macro_live   = lane_macro_live;
+  assign lane_macro_live     = vec_valid_q;
+  assign o_lane_publish_ctr  = lane_publish_ctr;
+  assign o_lane_ack_req_ctr  = lane_ack_req_ctr;
+  assign o_lane_ack_ctr      = lane_ack_ctr;
+  assign o_lane_req_mid_macro_ctr = lane_req_mid_macro_ctr;
+  assign o_lane_pub_mid_macro_ctr = lane_pub_mid_macro_ctr;
+  assign o_lane_abort_ctr    = lane_abort_ctr;
+
   // The vector-state write predicate for mstatus.VS. It is recorded per ROB slot
   // at allocation (like the FP FS predicate) and read when that slot retires, so
   // a vector macro a redirect discards never dirties VS.
@@ -4343,7 +4524,15 @@ module mosaic_core (
   assign vec_vs_dirty = rob_retire_ack && vec_state_wr_mem[rob_head_index];
 
   // ---------------------------------------------------- the core's CSR read
+`ifdef MOSAIC_LANE_MUTANT_VLEN_LEAK
+  // NEGATIVE CONTROL (same defect as the export above, on the path software
+  // actually reads): a `csrr vlenb` returns 16 + quota.
+  assign csr_rdata_final = (vec_csr_addr == 12'hC22)
+                         ? (vec_csr_rdata + {60'd0, lane_quota})
+                         : (csr_is_vec ? vec_csr_rdata : csr_rdata);
+`else
   assign csr_rdata_final = csr_is_vec ? vec_csr_rdata : csr_rdata;
+`endif
 
   // -------- the vector engine's memory response return path (elem/field echo)
   // The packetizer identifies a response by the element and field of the
@@ -4848,7 +5037,11 @@ module mosaic_core (
   // The staging entry is free unless a macro is staged in it; that is what
   // keeps one entry enough, because dispatch holds the macro until it can be
   // taken.
-  assign sys_ins_ready_int = !sys_valid_q && !vec_valid_q;
+  // A vector macro is admitted here; the lane broker's stop-admit holds new
+  // admission while a quota change is draining (I-059). A macro already staged
+  // is not affected -- it is the work the drain is waiting for -- so this gate
+  // can never deadlock against the drain.
+  assign sys_ins_ready_int = !sys_valid_q && !vec_valid_q && !lane_stop_admit;
 
   // --------------------------------------------------------------------------
   // The fence rule (I-037)
