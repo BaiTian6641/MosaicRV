@@ -1864,3 +1864,47 @@ silently falls back to software).
 (I-042/I-043), then the SoC and the p1 Linux contract (I-047/I-048). Stage 4+ (vector, multi-hart,
 cohort, the measured dynamic/fixed comparison, the RVA23S64 matrix) is untouched: it is the larger
 half of the plan and the half that justifies the project's name.
+
+---
+
+## 2026-10-01 — the p1 machine: privilege, virtual memory, atomics, and a ledger of what it does not prove (58 packages)
+
+The p1 profile now declares **M/S/U privilege, PMP and Sv39 translation**, and the manifest advertises
+`rv64acim_zaamo_zalrsc_zicsr_zifencei_zihpm`. That is a Linux-shaped machine: it can enter S-mode with `mret`, enforce PMP with real access
+checks, walk a three-level page table with an explicit A/D policy, cache translations in a TLB with
+exact `SFENCE.VMA` invalidation, take precise traps from all of it, and run the whole p0 corpus while
+doing so.
+
+**The package that matters most in this stretch is V-020**, because it is the one that says what the
+rest does *not* prove. It records 52 exclusions (0 open), each with a reason, a specification basis,
+an alternative verification that must exist **and pass**, and an end condition — and its checker
+rejects any difference that no ledger entry permits. Its own list of the largest open exclusions is
+the most useful paragraph this project has produced, and it is now machine-readable:
+
+1. **No ACT4 ELF runs for any advertised p1 extension** (A, C, Zicond, Zmmul, CMO). Every
+   "independent" expectation in this repository is a model written *here*. That is the deepest
+   limitation on all 58 green lines, and V-043 is the package that addresses it (running now).
+2. **`mepc[1:0]` was masked while p1 claimed C** — a contradiction inside an advertised capability,
+   found by two different lanes and finally tracked by the ledger. The fix is in flight.
+3. **No external reference** (NEMU, Sail, XiangShan) has ever been compared against this core.
+4. Four holes in the event interface (no MEM_VISIBLE producer, no interrupt event, three fields
+   absent, store payload unwired).
+5. `p13`'s store-to-read-only trap has no independent oracle because only the DUT models the ROM as
+   read-only.
+6. One profile, one seed, no device watchdog.
+
+**What the last stretch delivered**, in the order it landed: the A extension (AMO + LR/SC, then its
+verification), C (delivered on the second attempt after a regression that is written up in this file),
+the fabric modules (bypass, steering, quota/arbiter, ownership FSM, bank-aware allocation — each
+verified in isolation and **none yet instantiated by the core**, which their records say explicitly),
+the blocking L1 caches (module-level for the same reason), privilege/PMP (third attempt, after a real
+defect where a PMP-refused store was counted rather than trapped), the CSR rule ledger, the memory
+visibility provenance case (740 bytes each traced to a named committed producer), the Sv39 walker, the
+TLB, the MMIO side-effect model, the FPU (self-implemented, `fdiv` correctly rounded in five modes,
+`fsqrt` declared absent rather than faked) and the exclusion ledger itself.
+
+**The next wave** is ACT4 against the integrated core (V-043), the IALIGN fix, FP state and precise
+`fflags` (I-050), the caches in the path (I-043), the SoC and the Linux contract (I-047/I-048), and
+then Stage 4+: vector, multi-hart, cohort, the measured dynamic/fixed comparison and the RVA23S64
+matrix. Those last items are the larger half of the plan and the half that justifies the project's
+name; nothing in this file should be read as claiming them.
