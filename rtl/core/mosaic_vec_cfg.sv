@@ -32,17 +32,26 @@
 //
 // ---------------------------------------------------- vtype field encoding
 //
-// The `vtype` fields are decoded at bits 2:0 (`vlmul`), 3 (`vma`), 4 (`vta`),
-// 7:5 (`vsew`), 62:8 (reserved, must read zero), 63 (`vill`). This is the
-// encoding the delivered `mosaic_vec_desc` (I-051) decodes and the one
-// `config/csr/vector.json` records for `vtype`, so the configuration snapshot
-// this unit hands the descriptor is understood by it. NOTE: the ratified
-// `vtype-format.adoc` of the pinned tag places `vsew` at bits 5:3 and
-// `vma`/`vta` at 7/6; the whole delivered vector family uses 7:5 instead.
-// `vset`/CSR semantics (AVL rules, `vill`, permissions) are independent of that
-// choice, and this module follows the family's recorded layout so the
-// descriptor and this unit cannot disagree. The divergence is recorded in
-// results/reports/I-052-vset.md ("not covered"/finding).
+// The `vtype` fields are at the ratified v1.0 positions (`vtype-format.adoc` of
+// the pinned tag, included at L190 of `src/v-spec.adoc`): bits 2:0 `vlmul`, bits
+// 5:3 `vsew`, bit 6 `vta`, bit 7 `vma`, bit 63 `vill`, bits 62:8 reserved (must
+// be written zero and reads zero). This is the same encoding `mosaic_vec_desc`
+// now decodes and the one `config/csr/vector.json` records, so the configuration
+// snapshot this unit hands the descriptor is understood by it, and -- the point
+// of the layout -- a program that reads `vtype` back and decodes `vsew` at 5:3
+// computes the SEW the specification defines.
+//
+// The pre-ratification revision of this family placed `vsew` at 7:5 with
+// `vta`/`vma` at 4/3; `CASE=rvv.vtype_layout` and the MOSAIC_VEC_MUTANT_VTYPE_
+// LEGACY_75 / MOSAIC_VEC_MUTANT_VTYPE_SEW_WRONG controls keep that divergence
+// from returning silently. The `vset` seam holds the argument word verbatim
+// (all of bits 7:0), so the position is fixed at the decode points, not at
+// storage.
+//
+// `vset{i}vl{i}`'s immediate `vtypei[10:0]` carries the same field positions as
+// `vtype[10:0]`, and bits 10:8 of it are reserved-zero for the same reason bits
+// 10:8 of a `vsetvl` `rs2` word are: "all bits of the vtype argument must be
+// considered", so a non-zero reserved bit makes the value unsupported (vill).
 //
 // ------------------------------------------------------- configuration state
 //
@@ -66,24 +75,33 @@
 // `vl`, `vtype` and `vlenb` are unprivileged **read-only** CSRs: the only
 // writer of `vl`/`vtype` is `vset{i}vl{i}`, so a software CSR write to any of
 // the three raises an illegal-instruction exception (V spec: "The read-only
-// XLEN-wide vector type CSR ... can only be updated by vset{i}vl{i}"). NOTE:
-// config/csr/vector.json records `vtype` as `access: rwr` with writable fields
-// 7:0 and 63; that describes the *storage* `vset` writes, not software write
-// permission, and the spec rule (software writes illegal) is implemented here.
-// `vstart`, `vxsat`, `vxrm` and `vcsr` are read-write with WARL fields.
+// XLEN-wide vector type CSR ... can only be updated by vset{i}vl{i}"). The
+// address table says the same: config/csr/vector.json records `vl` and `vlenb`
+// as `access: ro` and `vtype` the same (the software-write-rule disagreement
+// I-052 recorded has been resolved in favour of the specification -- the table
+// was the wrong half; it previously said `rwr`, which is the *storage* `vset`
+// writes, not software write permission). `vstart`, `vxsat`, `vxrm` and `vcsr`
+// are read-write with WARL fields.
 // Accessing any of the seven while `mstatus.VS == Off` raises
 // illegal-instruction, and an address that is none of the seven raises
 // illegal-instruction.
 //
 // ---------------------------------------------------------- negative control
 //
-// Four `ifdef` mutants live here, one per fail mode the case's controls inject:
-//   MOSAIC_VEC_MUTANT_AVL_UNCLAMPED   (an AVL band returns AVL > VLMAX)
-//   MOSAIC_VEC_MUTANT_VILL_NO_BLOCK   (vill does not block execution)
+// The `ifdef` mutants live here, one per fail mode a case's controls inject:
+//   MOSAIC_VEC_MUTANT_AVL_UNCLAMPED    (an AVL band returns AVL > VLMAX)
+//   MOSAIC_VEC_MUTANT_VILL_NO_BLOCK    (vill does not block execution)
 //   MOSAIC_VEC_MUTANT_REPLAY_NEW_VTYPE (a replay returns the current vtype)
-//   MOSAIC_VEC_MUTANT_SILENT_M1       (an unsupported vtype is accepted as m1)
-// Each is off unless its `-D` is passed and is proven to fail
-// CASE=rvv.vset_boundaries; see results/reports/I-052-vset.md.
+//   MOSAIC_VEC_MUTANT_SILENT_M1        (an unsupported vtype is accepted as m1)
+//   -- all four proven to fail CASE=rvv.vset_boundaries; and, for the layout,
+//   MOSAIC_VEC_MUTANT_VTYPE_LEGACY_75  (the pre-ratification 7:5 vsew position,
+//                                       mirroring the same define in
+//                                       mosaic_vec_desc)
+//   MOSAIC_VEC_MUTANT_VTYPE_SW_WRITE   (a software CSR write to vtype is
+//                                       accepted, so software can write vill)
+//   -- both proven to fail CASE=rvv.vtype_layout.
+// Each is off unless its `-D` is passed; see results/reports/I-052-vset.md and
+// results/reports/rvv-vtype-layout.md.
 // ============================================================================
 
 `default_nettype none
@@ -236,13 +254,20 @@ module mosaic_vec_cfg #(
 
   // A full vtype word is supported only if vill is clear, every reserved bit is
   // zero, and SEW/LMUL are both encodings the profile implements. vta/vma
-  // (bits 4:3) do not affect support.
+  // (the ratified bits 6 and 7) do not affect support.
   /* verilator lint_off UNUSEDSIGNAL */
   function automatic logic vtype_supported (input logic [63:0] v);
     begin
+`ifdef MOSAIC_VEC_MUTANT_VTYPE_LEGACY_75
+      // NEGATIVE CONTROL: the pre-ratification 7:5 vsew position.
       vtype_supported = (v[63] == 1'b0) && (v[62:8] == 55'd0) &&
                         vsew_ok(v[7:5]) && vlmul_ok(v[2:0]) &&
                         emul_ok(v[7:5], v[2:0]);
+`else
+      vtype_supported = (v[63] == 1'b0) && (v[62:8] == 55'd0) &&
+                        vsew_ok(v[5:3]) && vlmul_ok(v[2:0]) &&
+                        emul_ok(v[5:3], v[2:0]);
+`endif
     end
   endfunction
   /* verilator lint_on UNUSEDSIGNAL */
@@ -294,8 +319,16 @@ module mosaic_vec_cfg #(
     end else begin
       arg = {53'b0, vset_vtypei_i};   // 11-bit immediate, zero-extended
     end
+`ifdef MOSAIC_VEC_MUTANT_VTYPE_LEGACY_75
+    // NEGATIVE CONTROL: the pre-ratification position -- vsew at 7:5 -- so a
+    // spec-encoded argument decodes to a different SEW.
     arg_vsew = arg[7:5];
+`else
+    arg_vsew = arg[5:3];
+`endif
     arg_vlmul = arg[2:0];
+    // The vset seam holds the argument's low byte verbatim, so the field
+    // positions are fixed at the decode points above and below, not at storage.
     vtype_field = arg[7:0];
     supported = vtype_supported(arg);
 
@@ -306,7 +339,7 @@ module mosaic_vec_cfg #(
     if (!arg[63] && !supported) begin
       arg_vsew  = 3'd3;
       arg_vlmul = 3'd0;
-      vtype_field = {arg_vsew, arg[4:3], arg_vlmul};
+      vtype_field = {arg[7:6], arg_vsew, arg_vlmul};
       supported = 1'b1;
     end
 `endif
@@ -332,10 +365,17 @@ module mosaic_vec_cfg #(
     vlmax64 = {56'b0, new_vlmax};
 
     // ---- the previous configuration, for the x0/x0 reserved check -------
+`ifdef MOSAIC_VEC_MUTANT_VTYPE_LEGACY_75
     old_valid = !vtype_q[63] && (vtype_q[62:8] == 55'd0) &&
                 vsew_ok(vtype_q[7:5]) && vlmul_ok(vtype_q[2:0]) &&
                 emul_ok(vtype_q[7:5], vtype_q[2:0]);
     old_vlmax = vlmax_of(vtype_q[7:5], vtype_q[2:0]);
+`else
+    old_valid = !vtype_q[63] && (vtype_q[62:8] == 55'd0) &&
+                vsew_ok(vtype_q[5:3]) && vlmul_ok(vtype_q[2:0]) &&
+                emul_ok(vtype_q[5:3], vtype_q[2:0]);
+    old_vlmax = vlmax_of(vtype_q[5:3], vtype_q[2:0]);
+`endif
 
     // ---- defaults -------------------------------------------------------
     vtype_d  = vtype_q;
@@ -387,8 +427,14 @@ module mosaic_vec_cfg #(
                   (csr_addr_i == CSR_VXRM)   || (csr_addr_i == CSR_VCSR)  ||
                   (csr_addr_i == CSR_VL)     || (csr_addr_i == CSR_VTYPE) ||
                   (csr_addr_i == CSR_VLENB);
-    csr_ro_c = (csr_addr_i == CSR_VL) || (csr_addr_i == CSR_VTYPE) ||
+    csr_ro_c = (csr_addr_i == CSR_VL) ||
+`ifdef MOSAIC_VEC_MUTANT_VTYPE_SW_WRITE
+               // NEGATIVE CONTROL: vtype is treated as software-writable, so a
+               // program can write vill (and any other configuration bit).
                (csr_addr_i == CSR_VLENB);
+`else
+               (csr_addr_i == CSR_VTYPE) || (csr_addr_i == CSR_VLENB);
+`endif
     csr_illegal_o = csr_valid_i &&
                     (csr_vs_off_i || !csr_known_c || (csr_write_i && csr_ro_c));
     csr_ready_o   = csr_valid_i;
@@ -414,6 +460,9 @@ module mosaic_vec_cfg #(
           vxrm_d  = {62'b0, csr_wdata_i[2:1]};
           vxsat_d = {63'b0, csr_wdata_i[0]};
         end
+`ifdef MOSAIC_VEC_MUTANT_VTYPE_SW_WRITE
+        CSR_VTYPE:  vtype_d = csr_wdata_i;   // NEGATIVE CONTROL
+`endif
         default: ;   // read-only addresses are rejected above
       endcase
     end

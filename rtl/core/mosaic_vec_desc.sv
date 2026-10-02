@@ -52,7 +52,7 @@
 //     111=1/2; encoding 100 is reserved (L348-L361). All seven non-reserved
 //     settings are supported, which satisfies the mandatory fractional-LMUL
 //     floor for ELEN=64 ("fractional LMULs of 1/2, 1/4, and 1/8 must be
-//     supported", L305-L314).
+//     supported", L305-L314). vlmul is bits 2:0 of vtype.
 //   * a supported SEW/LMUL pair must satisfy SEW <= LMUL*ELEN, i.e. the
 //     effective EMUL is at least 1. "For a given supported fractional LMUL
 //     setting, implementations must support SEW settings between SEW_MIN and
@@ -63,6 +63,26 @@
 //     At ELEN=64 the legal vtype count is 7+6+5+4 = 22 of the 64 vsew/vlmul
 //     combinations: SEW=8 admits all seven LMULs, SEW=16 excludes 1/8, SEW=32
 //     excludes 1/8 and 1/4, SEW=64 excludes 1/8, 1/4 and 1/2.
+//
+// ---------------------------------------------------------- the vtype layout
+//
+// The ratified v1.0 `vtype` layout (vtype-format.adoc, included at L190 of the
+// pinned `src/v-spec.adoc`; the prose at L186-L188 names the five fields
+// vill/vma/vta/vsew/vlmul) is, for XLEN=64:
+//
+//   bit 63        vill
+//   bits 62:8     reserved (WARL; must be written zero and reads zero)
+//   bit 7         vma   (mask-agnostic)
+//   bit 6         vta   (tail-agnostic)
+//   bits 5:3      vsew[2:0]   (SEW = 2^vsew)
+//   bits 2:0      vlmul[2:0]
+//
+// `vsew` at 5:3 is the position a program decodes after reading `vtype` back,
+// and the position `vset{i}vl{i}`'s 11-bit `vtypei` immediate uses. An earlier
+// revision of this family placed `vsew` at 7:5 (with vta/vma at 4/3), which a
+// software decoder would read as a different SEW; that divergence is the defect
+// `CASE=rvv.vtype_layout` is registered to catch, and MOSAIC_VEC_MUTANT_VTYPE_
+// LEGACY_75 / MOSAIC_VEC_MUTANT_VTYPE_SEW_WRONG below re-inject it.
 //
 // On top of the *config* rule sit the *operation* rules. Every vector operation
 // declares a source effective element width (EEW) and an effective LMUL (EMUL);
@@ -119,13 +139,18 @@
 //
 // ---------------------------------------------------------- negative control
 //
-// Three `ifdef` mutants live here, one per fail mode the case's controls
-// inject: MOSAIC_VEC_MUTANT_ILLEGAL_ACCEPTED (a combination the matrix calls
-// illegal is accepted), MOSAIC_VEC_MUTANT_LOSE_PROGRESS (an element completion
-// is dropped from the bitmap) and MOSAIC_VEC_MUTANT_LANE_VLEN (the lane quota
-// leaks into the architectural VLEN). Each is off unless its -D is passed and
-// is proven to fail CASE=rvv.descriptor_legality; see
-// results/reports/I-051-rvv-descriptor.md.
+// The `ifdef` mutants live here, one per fail mode a case's controls inject:
+// MOSAIC_VEC_MUTANT_ILLEGAL_ACCEPTED (a combination the matrix calls illegal is
+// accepted), MOSAIC_VEC_MUTANT_LOSE_PROGRESS (an element completion is dropped
+// from the bitmap) and MOSAIC_VEC_MUTANT_LANE_VLEN (the lane quota leaks into
+// the architectural VLEN) -- all three proven to fail
+// CASE=rvv.descriptor_legality; and, for the layout, MOSAIC_VEC_MUTANT_VTYPE_
+// LEGACY_75 (the pre-ratification 7:5 `vsew` position, mirroring the same
+// define in mosaic_vec_cfg) and MOSAIC_VEC_MUTANT_VTYPE_SEW_WRONG (a legal
+// configuration decoded from the wrong bits), both proven to fail
+// CASE=rvv.vtype_layout. Each is off unless its -D is passed; see
+// results/reports/I-051-rvv-descriptor.md and results/reports/
+// rvv-vtype-layout.md.
 // ============================================================================
 
 `default_nettype none
@@ -482,8 +507,21 @@ module mosaic_vec_desc #(
   end
 
   // ------------------------------------------------------------ vtype decode
+  // The ratified v1.0 layout: vlmul[2:0], vsew[5:3], vta[6], vma[7], vill[63].
+  // vta/vma do not affect legality (V spec: they are agnostic-ness policy), so
+  // they are read only by the register/CSR path, not here.
   always_comb begin
+`ifdef MOSAIC_VEC_MUTANT_VTYPE_LEGACY_75
+    // NEGATIVE CONTROL: the pre-ratification position -- vsew at 7:5 -- so a
+    // spec-encoded vtype decodes to a different SEW (the round-trip defect).
     sew_raw     = vtype_i[7:5];
+`elsif MOSAIC_VEC_MUTANT_VTYPE_SEW_WRONG
+    // NEGATIVE CONTROL: a legal configuration decoded from the wrong bits, so
+    // SEW is misread and a legal vtype is rejected or mis-sized.
+    sew_raw     = vtype_i[4:2];
+`else
+    sew_raw     = vtype_i[5:3];
+`endif
     lmul_raw    = vtype_i[2:0];
     vill        = vtype_i[63];
     vsew_valid  = (sew_raw >= 3'd3) && (sew_raw <= 3'd6);

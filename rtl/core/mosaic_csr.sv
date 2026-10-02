@@ -771,8 +771,15 @@ module mosaic_csr (
   logic [5:0] trap_code_c;
 
   assign trap_code_c  = trap_cause_i[5:0];
+`ifdef MOSAIC_CSR_MUTANT_NO_DELEGATION
+  // NEGATIVE CONTROL (boot.p1_contract): delegation is dropped, so every trap
+  // the profile delegated to S-mode is taken in M-mode instead. The case sees
+  // the trap target become mtvec and the supervisor handler never run.
+  assign trap_deleg_o = 1'b0;
+`else
   assign trap_deleg_o = (trap_cause_i[63] ? mideleg_q[trap_code_c] : medeleg_q[trap_code_c]) &&
                         (priv_q != mosaic_csr_pkg::MOSAIC_PRIV_M);
+`endif
 
   // ---------------------------------------------------------------------------
   // The legality of the two returns, evaluated in the mode the hart is in.
@@ -945,11 +952,20 @@ module mosaic_csr (
       // Same field rule with the supervisor stack: SIE <- SPIE, SPIE <- 1,
       // SPP <- the least-privileged supported mode, and MPRV is cleared because
       // SRET always returns to a mode less privileged than M.
+`ifdef MOSAIC_CSR_MUTANT_SRET_NO_RESTORE
+      // NEGATIVE CONTROL (boot.p1_contract): SRET returns but restores nothing:
+      // SIE is not reloaded from SPIE, SPIE/SPP are not updated and the
+      // privilege does not move. The case observes sstatus.SIE == 0 after the
+      // first `sret` and fails with that named check.
+      mstatus_d = mstatus_q;
+      priv_d    = priv_q;
+`else
       mstatus_d = (mstatus_q & ~(MSTATUS_SIE | MSTATUS_SPIE | MSTATUS_SPP | MSTATUS_MPRV))
                 | (mstatus_q[5] ? MSTATUS_SIE : 64'd0)
                 | MSTATUS_SPIE
                 | (mosaic_csr_pkg::MOSAIC_PRIV_LEAST[0] ? MSTATUS_SPP : 64'd0);
       priv_d    = {1'b0, mstatus_q[8]};   // SPP is one bit: 0 = U, 1 = S
+`endif
     end else if (wr_accept) begin
       case (csr_addr_i)
 `ifdef MOSAIC_CSR_MUTANT_NO_FIELD_MASK

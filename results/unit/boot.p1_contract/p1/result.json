@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "case": "boot.p1_contract",
+  "verdict": "FAIL",
+  "detail": "contract violated: run: max-cycles (4000000) exhausted: head_pc=0x0000000000000000 retired=792 traps=14 priv=1",
+  "seed": 1,
+  "max_cycles": 4000000,
+  "checks": 2,
+  "failures": 1,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-02T11:32:37Z",
+  "first_mismatch": "",
+  "failed_checks": ["no contract violation"]
+}

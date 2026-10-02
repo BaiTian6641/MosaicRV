@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "case": "rvv.vtype_layout",
+  "verdict": "PASS",
+  "detail": "checks=1253 words=88 descriptors=88 cycles=193",
+  "seed": 1,
+  "max_cycles": 200000,
+  "checks": 1253,
+  "failures": 0,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-02T11:29:57Z",
+  "first_mismatch": ""
+}

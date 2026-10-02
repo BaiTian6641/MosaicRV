@@ -1,9 +1,11 @@
 // ============================================================================
-// tb_vec.cpp -- CASE=rvv.descriptor_legality (work package I-051) and
-//               CASE=rvv.vset_boundaries (work package I-052).
+// tb_vec.cpp -- CASE=rvv.descriptor_legality (work package I-051),
+//               CASE=rvv.vset_boundaries (work package I-052) and
+//               CASE=rvv.vtype_layout (work package I-051).
 //
-// The single binary serves both cases; `--case` selects which phase set runs and
-// the RESULT line names it (`mosaic::Reporter::Finish` prints `options.case_id`).
+// The single binary serves all three cases; `--case` selects which phase set
+// runs and the RESULT line names it (`mosaic::Reporter::Finish` prints
+// `options.case_id`).
 //
 // This case freezes two things and proves both.
 //
@@ -105,7 +107,8 @@ const char* ReasonName(int r) {
 std::string Dec(uint64_t v) { return std::to_string(v); }
 
 uint64_t Vtype(int vsew, int vlmul, bool vill) {
-  uint64_t v = (static_cast<uint64_t>(vsew & 7) << 5) | static_cast<uint64_t>(vlmul & 7);
+  // Ratified v1.0 positions: vlmul[2:0], vsew[5:3], vill[63].
+  uint64_t v = (static_cast<uint64_t>(vsew & 7) << 3) | static_cast<uint64_t>(vlmul & 7);
   if (vill) v |= (1ull << 63);
   return v;
 }
@@ -797,13 +800,15 @@ constexpr uint64_t kCsrVlenb  = 0xC22;
 constexpr uint64_t kAvlMax    = ~0ull;
 constexpr uint64_t kVill      = 0x8000000000000000ull;
 
-// The vtype/vtypei word in the layout the descriptor decodes and
-// config/csr/vector.json records: vlmul[2:0], vma bit 3, vta bit 4,
-// vsew[2:0] = bits 7:5.
+// The vtype/vtypei word in the ratified v1.0 layout (vtype-format.adoc of the
+// pinned tag; the same fields in the `vset{i}vl{i}` 11-bit immediate):
+// vlmul[2:0] = bits 2:0, vsew[2:0] = bits 5:3, vta = bit 6, vma = bit 7.
+// This is the specification's encoding, not a mirror of the RTL's constants:
+// the case encodes here and requires the unit to decode what was encoded.
 uint64_t Vtypei(int vsew, int vlmul, int ta = 0, int ma = 0) {
-  return (static_cast<uint64_t>(ma & 1) << 3) |
-         (static_cast<uint64_t>(ta & 1) << 4) |
-         (static_cast<uint64_t>(vsew & 7) << 5) |
+  return (static_cast<uint64_t>(ma & 1) << 7) |
+         (static_cast<uint64_t>(ta & 1) << 6) |
+         (static_cast<uint64_t>(vsew & 7) << 3) |
          static_cast<uint64_t>(vlmul & 7);
 }
 
@@ -817,7 +822,7 @@ int VlmaxOf(int vsew, int vlmul) {
 bool WordSupported(uint64_t v) {
   if (((v >> 63) & 1ull) != 0) return false;
   if (((v >> 8) & ((1ull << 55) - 1ull)) != 0ull) return false;
-  const int vsew = static_cast<int>((v >> 5) & 7ull);
+  const int vsew = static_cast<int>((v >> 3) & 7ull);
   const int vlmul = static_cast<int>(v & 7ull);
   return VsewValid(vsew) && VlmulValid(vlmul) && (LmulExp(vlmul) + 6 >= vsew);
 }
@@ -1333,6 +1338,174 @@ void RunVsetCase(Vmosaic_vec_tb* dut, Dut* desc, ClockDriver* clk, Reporter* rep
   PhaseVlenInvariance(&cfg, rep);
 }
 
+// ============================================================================
+// CASE=rvv.vtype_layout -- the ratified v1.0 `vtype` field positions.
+//
+// The specification's layout (vtype-format.adoc of the pinned tag, included at
+// L190 of src/v-spec.adoc; the prose at L186-L188 names vill/vma/vta/vsew/
+// vlmul) is, for XLEN=64:
+//
+//   bit 63 vill | bits 62:8 reserved | bit 7 vma | bit 6 vta |
+//   bits 5:3 vsew[2:0] | bits 2:0 vlmul[2:0]
+//
+// Reading `vtype` back and decoding `vsew` at 5:3 is how a program discovers the
+// SEW the machine is configured for, and the `vset{i}vl{i}` immediate uses the
+// same positions. The case therefore encodes SEW/LMUL/vta/vma at *these*
+// positions (never at a position read out of the RTL), drives the word through
+// the configuration unit and the descriptor, and requires each unit to decode
+// what was encoded and to read the same positions back. An implementation that
+// placed `vsew` at 7:5 would answer a different SEW/LMUL -- the defect this
+// registered case exists to catch.
+// ============================================================================
+
+struct LayoutCounts {
+  int words = 0;        // spec-encoded words round-tripped through the register
+  int descriptors = 0;  // spec-encoded words decoded by the descriptor
+  int writes = 0;       // illegal software writes the URO rule must refuse
+};
+
+// The specification's field positions and extractors, named once here so the
+// assertions below are written against the manual, not against the RTL.
+constexpr int kVsewLo = 3;
+constexpr int kVtaPos = 6;
+constexpr int kVmaPos = 7;
+constexpr uint64_t kLowByte = 0xFFull;
+
+int SpecVsew(uint64_t v) { return static_cast<int>((v >> kVsewLo) & 7ull); }
+int SpecVlmul(uint64_t v) { return static_cast<int>(v & 7ull); }
+bool SpecVta(uint64_t v) { return ((v >> kVtaPos) & 1ull) != 0; }
+bool SpecVma(uint64_t v) { return ((v >> kVmaPos) & 1ull) != 0; }
+
+// Every legal SEW (8/16/32/64) and every legal LMUL, crossed with every vta/vma
+// combination, is encoded at the specification's positions, driven through
+// `vsetvli`, and read back. The SEW/LMUL the unit decodes is checked through
+// VLMAX = VLEN*LMUL/SEW and through the CSR read path, so the check fails if the
+// field is read from anywhere but 5:3 and 2:0.
+void PhaseLayoutRoundTrip(Cfg* cfg, Reporter* rep, LayoutCounts* counts) {
+  for (int vsew = 3; vsew <= 6; ++vsew) {
+    for (int vlmul = 0; vlmul < 8; ++vlmul) {
+      if (!VlmulValid(vlmul) || (LmulExp(vlmul) + 6 < vsew)) continue;
+      for (int ta = 0; ta < 2; ++ta) {
+        for (int ma = 0; ma < 2; ++ma) {
+          const uint64_t word = Vtypei(vsew, vlmul, ta, ma);
+          const uint64_t vlmax = static_cast<uint64_t>(VlmaxOf(vsew, vlmul));
+          const std::string name = "vtype-roundtrip vsew=" + Dec(vsew) +
+                                   " vlmul=" + Dec(vlmul) + " ta=" + Dec(ta) +
+                                   " ma=" + Dec(ma);
+          const CfgObs o = RunVset(cfg, VSETVLI, 5, 6, kAvlMax, word);
+          rep->Check(o.vset_commit && !o.vset_illegal && !o.vill,
+                     name + ": a legal configuration was not accepted");
+          // The unit must decode the encoded SEW and LMUL: VLMAX only matches
+          // when both fields were read at 5:3 and 2:0.
+          rep->Check(o.vlmax == vlmax,
+                     name + ": VLMAX " + Dec(o.vlmax) +
+                         " does not match the encoded SEW/LMUL (expected " + Dec(vlmax) + ")");
+          rep->Check(o.vl == vlmax,
+                     name + ": vl " + Dec(o.vl) + " does not match VLMAX " + Dec(vlmax));
+          // Read `vtype` back and decode it at the specification's positions.
+          rep->Check(o.vtype == word,
+                     name + ": vtype read back as " + mosaic::Hex(o.vtype) + ", expected " +
+                         mosaic::Hex(word));
+          rep->Check(SpecVsew(o.vtype) == vsew, name + ": vsew is not at bits 5:3");
+          rep->Check(SpecVlmul(o.vtype) == vlmul, name + ": vlmul is not at bits 2:0");
+          rep->Check(SpecVta(o.vtype) == (ta != 0), name + ": vta is not at bit 6");
+          rep->Check(SpecVma(o.vtype) == (ma != 0), name + ": vma is not at bit 7");
+          rep->Check((o.vtype & ~kLowByte) == 0ull, name + ": bits 62:8 do not read zero");
+          // The CSR read path returns the same word.
+          const CfgObs r = CsrRead(cfg, kCsrVtype);
+          rep->Check(r.csr_rdata == word, name + ": the CSR read-back differs");
+          ++counts->words;
+        }
+      }
+    }
+  }
+}
+
+// The descriptor decodes the same fields for its legality query: a spec-encoded
+// word must be decoded as the SEW/LMUL it encodes, and a legal one accepted.
+void PhaseLayoutDescriptor(Dut* desc, Reporter* rep, LayoutCounts* counts) {
+  for (int vsew = 3; vsew <= 6; ++vsew) {
+    for (int vlmul = 0; vlmul < 8; ++vlmul) {
+      if (!VlmulValid(vlmul) || (LmulExp(vlmul) + 6 < vsew)) continue;
+      for (int ta = 0; ta < 2; ++ta) {
+        for (int ma = 0; ma < 2; ++ma) {
+          const uint64_t word = Vtypei(vsew, vlmul, ta, ma);
+          // opivv with disjoint register groups: legality depends only on vtype.
+          const QueryObs q = desc->Query(word, VOP_IVV, 5, 6, 7, 8, false, 4);
+          const std::string name = "vtype-layout descriptor vsew=" + Dec(vsew) +
+                                   " vlmul=" + Dec(vlmul) + " ta=" + Dec(ta) +
+                                   " ma=" + Dec(ma);
+          rep->Check(q.vtype_legal, name + ": a legal configuration was rejected");
+          rep->Check(q.sew_log2 == vsew, name + ": sew_log2 decoded from the wrong bits");
+          rep->Check(q.lmul_exp == LmulExp(vlmul),
+                     name + ": lmul_exp decoded from the wrong bits");
+          rep->Check(q.elem_count == VlmaxOf(vsew, vlmul),
+                     name + ": elem_count does not match the encoded SEW/LMUL");
+          ++counts->descriptors;
+        }
+      }
+    }
+  }
+}
+
+// `vill` for an unsupported configuration; reserved bits honoured; and the URO
+// rule -- a software CSR write to vtype is illegal, so software cannot write
+// `vill` (or anything else) into the register.
+void PhaseLayoutVill(Cfg* cfg, Reporter* rep, LayoutCounts* counts) {
+  // SEW = 1 (vsew = 0) is not supported: vill set, vtype[62:0] zero, vl = 0.
+  const CfgObs bad = RunVset(cfg, VSETVLI, 5, 6, kAvlMax, Vtypei(0, 0, 1, 1));
+  rep->Check(bad.vill, "vtype-layout vill: an unsupported vtype did not set vill");
+  rep->Check(bad.vtype == kVill,
+             "vtype-layout vill: vtype[62:0] not zeroed (" + mosaic::Hex(bad.vtype) + ")");
+  rep->Check(bad.vl == 0, "vtype-layout vill: an unsupported vtype left vl != 0");
+
+  // A reserved bit of the vtype argument makes the value unsupported: "all bits
+  // of the vtype argument must be considered".
+  for (int bit : {8, 30, 62}) {
+    const CfgObs r = RunVset(cfg, VSETVL, 5, 6, kAvlMax, Vtypei(3, 0) | (1ull << bit));
+    rep->Check(r.vill && r.vtype == kVill,
+               "vtype-layout reserved: vsetvl vtype bit " + Dec(bit) + " did not set vill");
+  }
+
+  // URO: a software CSR write to vtype is illegal and the register is unchanged.
+  const CfgObs good = RunVset(cfg, VSETVLI, 5, 6, 4, Vtypei(5, 1, 1, 0));
+  const uint64_t held = good.vtype;
+  rep->Check(!good.vill && held == Vtypei(5, 1, 1, 0), "vtype-layout uro: V1 not configured");
+  const CfgObs w = CsrWrite(cfg, kCsrVtype, kVill);
+  rep->Check(w.csr_illegal && !w.csr_commit,
+             "vtype-layout uro: software set vill through a vtype CSR write");
+  const CfgObs r1 = CsrRead(cfg, kCsrVtype);
+  rep->Check(r1.csr_rdata == held,
+             "vtype-layout uro: a software write changed vtype (" + mosaic::Hex(r1.csr_rdata) +
+                 ")");
+  const CfgObs w2 = CsrWrite(cfg, kCsrVtype, 0);
+  rep->Check(w2.csr_illegal, "vtype-layout uro: a software write of 0 to vtype is not illegal");
+  // A software write aimed at a reserved bit is refused, and the reserved field
+  // reads zero afterwards, as the specification requires (bits 62:8 read zero).
+  const CfgObs wres = CsrWrite(cfg, kCsrVtype, 1ull << 40);
+  const CfgObs rres = CsrRead(cfg, kCsrVtype);
+  rep->Check(wres.csr_illegal && rres.csr_rdata == held,
+             "vtype-layout reserved: a software write of reserved bit 40 was not refused");
+  rep->Check((rres.csr_rdata >> 8) == 0ull,
+             "vtype-layout reserved: bits 62:8 do not read zero (" +
+                 mosaic::Hex(rres.csr_rdata) + ")");
+  // While vill is set, software still cannot clear it.
+  RunVset(cfg, VSETVLI, 5, 6, 4, Vtypei(0, 0));
+  const CfgObs w3 = CsrWrite(cfg, kCsrVtype, 0);
+  const CfgObs r2 = CsrRead(cfg, kCsrVtype);
+  rep->Check(w3.csr_illegal && r2.csr_rdata == kVill,
+             "vtype-layout uro: software cleared vill (" + mosaic::Hex(r2.csr_rdata) + ")");
+  counts->writes += 3;
+}
+
+void RunVtypeLayoutCase(Vmosaic_vec_tb* dut, Dut* desc, ClockDriver* clk, Reporter* rep,
+                        LayoutCounts* counts) {
+  Cfg cfg(dut, clk);
+  PhaseLayoutRoundTrip(&cfg, rep, counts);
+  PhaseLayoutDescriptor(desc, rep, counts);
+  PhaseLayoutVill(&cfg, rep, counts);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -1352,6 +1525,7 @@ int main(int argc, char** argv) {
   Vmosaic_vec_tb dut;
   Dut unit(&dut, &clk, &reporter);
   VsetCounts vset_counts;
+  LayoutCounts layout_counts;
 
   std::string detail;
   bool aborted = false;
@@ -1373,6 +1547,8 @@ int main(int argc, char** argv) {
 
     if (options.case_id == "rvv.vset_boundaries") {
       RunVsetCase(&dut, &unit, &clk, &reporter, &vset_counts);
+    } else if (options.case_id == "rvv.vtype_layout") {
+      RunVtypeLayoutCase(&dut, &unit, &clk, &reporter, &layout_counts);
     } else {
       int reason_hist[RSN_COUNT] = {0};
       bool class_seen[VOP_COUNT] = {false};
@@ -1403,6 +1579,12 @@ int main(int argc, char** argv) {
     return reporter.Finish("PASS", "checks=" + Dec(reporter.checks()) + " vtypes=" +
                                        Dec(vset_counts.vtypes) + " avl_bands=" +
                                        Dec(vset_counts.avl_bands) + " cycles=" +
+                                       Dec(cycles));
+  }
+  if (options.case_id == "rvv.vtype_layout") {
+    return reporter.Finish("PASS", "checks=" + Dec(reporter.checks()) + " words=" +
+                                       Dec(layout_counts.words) + " descriptors=" +
+                                       Dec(layout_counts.descriptors) + " cycles=" +
                                        Dec(cycles));
   }
   return reporter.Finish("PASS", "checks=" + Dec(reporter.checks()) + " combos=" +
