@@ -143,6 +143,35 @@
 // out-of-range index onto a valid one manufactures an alias onto somebody
 // else's register.
 //
+// ------------------------------------------------- optional bank preference
+//
+// I-032 adds a *preference* over the home bank of the next allocation, and the
+// whole of its contract is in the word "preference". When `alloc_bias_en` is
+// low the module is bit-identical to the design before this card: the scan runs
+// over the full free set. When it is high the scan is offered the tags whose
+// home bank is `alloc_bias_bank` **intersected with the free set**, and falls
+// back to the full free set when that intersection is empty:
+//
+//     preferred = free_bits & bank_mask(alloc_bias_bank)
+//     lane0 search set = (bias_en && preferred != 0) ? preferred : free_bits
+//
+// Three consequences, each of which is a checkable property rather than a hope:
+//
+//   * The search set is always a subset of the free set, so the scan can never
+//     return a tag that is still owned -- the preference cannot leak or steal a
+//     physical register.
+//   * Acceptance is the free *count* against the group's requirement, unchanged
+//     by the bias (see "group accept / refusal"), so an empty preferred bank can
+//     never turn into a refusal: the bias is a preference, not a requirement, and
+//     can never deadlock.
+//   * The bias therefore changes only *which* legal free tag is chosen and never
+//     *whether* an allocation succeeds, so it cannot change the architectural
+//     result -- it moves destinations between banks and nothing else.
+//
+// Lane 1's preference uses the same rule over its own search set (the free set
+// with lane 0's tag removed), so a two-wide group counts as two consecutive
+// single-width allocations under the bias exactly as it does without one.
+//
 // -------------------------------------------------------------- x0
 //
 // x0 is not a physical register. It reads as zero, a write to it is discarded,
@@ -485,6 +514,17 @@ module mosaic_rename (
     output logic                                  alloc2_old_valid,
     output logic [REN_TAG_W-1:0]                  alloc2_old_tag,
     output logic [REN_GEN_W-1:0]                  alloc2_old_gen,
+
+    // --------------------------------------------- optional bank preference
+    // I-032. A preference, not a requirement: `alloc_bias_en` high asks the
+    // allocator to take the next tag from the free tags whose home bank is
+    // `alloc_bias_bank`, and to fall back to any legal free tag when that bank
+    // has none. It never changes whether a group is accepted (the answer is still
+    // the free count against the group's requirement) and never returns a tag
+    // outside the free set. With `alloc_bias_en` low the module is the design
+    // before this card. See "optional bank preference" in the header.
+    input  logic                                  alloc_bias_en,
+    input  logic [REN_BANK_W-1:0]                 alloc_bias_bank,
 
     // ------------------------------------------------------- source reads
     // Combinational, zero latency: the address presented in cycle N yields the
@@ -832,31 +872,82 @@ module mosaic_rename (
   // it, because "which tag lane 1 takes" must have one answer per cycle whether
   // or not the group is finally accepted.
   logic                   lane0_wants_tag;
+  logic [REN_ENTRIES-1:0] bias_bank_mask;   // tags whose home bank is the preferred one
+  logic [REN_ENTRIES-1:0] lane0_scan_mask;  // lane 0's search set (free, maybe bank-restricted)
+  logic [REN_ENTRIES-1:0] lane1_base_mask;  // lane 1's search set before the preference
   logic [REN_ENTRIES-1:0] lane1_scan_mask;
   logic [REN_TAG_W-1:0]   lane1_scan_ptr;
 
   assign lane0_wants_tag = alloc_req && (alloc_rd != 5'd0);
 
+  // The home bank of a tag, exactly as the header's decode states it: the bank
+  // field is `tag[TAG_W-1:ROW_W]`. A set, not a lookup, so the preference below
+  // is one AND with the free set and cannot drift from the decode.
+  function automatic logic [REN_BANK_W-1:0] bank_of(input logic [REN_TAG_W-1:0] tag);
+    bank_of = tag[REN_TAG_W-1 -: REN_BANK_W];
+  endfunction
+
+  always_comb begin
+    bias_bank_mask = {REN_ENTRIES{1'b0}};
+    for (int unsigned t = 0; t < REN_ENTRIES; t++) begin
+      if (bank_of(REN_TAG_W'(t)) == alloc_bias_bank) begin
+        bias_bank_mask[t] = 1'b1;
+      end
+    end
+  end
+
+  // Lane 0's search set, and lane 1's after it. Each is the full free set, or the
+  // free tags of the preferred bank when the bias is on *and* that intersection is
+  // non-empty. The intersection with `free_bits` is what makes the preference
+  // unable to return an owned tag, and the non-empty test is what makes "the
+  // preferred bank is empty" fall back rather than stall.
+  //
   // Lane 1's scan is the one two consecutive single-width allocations would
   // produce: it starts one past lane 0's tag and cannot see that tag. When lane 0
-  // takes no tag (an x0 lane, or a group of one) lane 1 *is* the first
-  // allocation, so it takes lane 0's scan unchanged.
-  //
-  // The mask clears lane 0's tag from the full 96-bit vector, so a tag of 95
-  // lands in bit 95 and nothing is truncated. The pointer wraps to zero at the
-  // end of the file exactly as the post-allocation rotation does.
-  assign lane1_scan_mask = lane0_wants_tag
-                           ? (free_bits & ~(REN_ENTRIES'(1) << scan_tag))
-                           : free_bits;
+  // takes no tag (an x0 lane, or a group of one) lane 1 *is* the first allocation,
+  // so it takes lane 0's search set unchanged. The mask clears lane 0's tag from
+  // the full 96-bit vector, so a tag of 95 lands in bit 95 and nothing is
+  // truncated; the pointer wraps to zero at the end of the file exactly as the
+  // post-allocation rotation does.
   assign lane1_scan_ptr  = lane0_wants_tag
                            ? ((scan_tag == REN_TAG_W'(REN_ENTRIES - 1))
                                 ? {REN_TAG_W{1'b0}} : (scan_tag + REN_TAG_W'(1)))
                            : alloc_ptr;
 
+`ifdef MOSAIC_RENAME_MUTANT_BIAS_UNRELEASED
+  // NEGATIVE CONTROL (I-032): the preference is applied *without* intersecting it
+  // with the free set, so the scan can return a tag that is still owned -- an
+  // unreleased physical tag. The allocation then hands out a register whose
+  // previous owner can still write it.
   always_comb begin
-    scan_tag  = scan_free(free_bits,       alloc_ptr);
+    lane0_scan_mask = alloc_bias_en ? bias_bank_mask : free_bits;
+    scan_tag        = scan_free(lane0_scan_mask, alloc_ptr);
+    lane1_base_mask = lane0_wants_tag
+                      ? (free_bits & ~(REN_ENTRIES'(1) << scan_tag))
+                      : free_bits;
+    lane1_scan_mask = alloc_bias_en ? (lane1_base_mask & bias_bank_mask) : lane1_base_mask;
+    scan_tag2       = scan_free(lane1_scan_mask, lane1_scan_ptr);
+  end
+`else
+  always_comb begin
+    lane0_scan_mask = free_bits;
+    if (alloc_bias_en && ((free_bits & bias_bank_mask) != {REN_ENTRIES{1'b0}})) begin
+      lane0_scan_mask = free_bits & bias_bank_mask;
+    end
+
+    scan_tag = scan_free(lane0_scan_mask, alloc_ptr);
+
+    lane1_base_mask = lane0_wants_tag
+                      ? (free_bits & ~(REN_ENTRIES'(1) << scan_tag))
+                      : free_bits;
+    lane1_scan_mask = lane1_base_mask;
+    if (alloc_bias_en && ((lane1_base_mask & bias_bank_mask) != {REN_ENTRIES{1'b0}})) begin
+      lane1_scan_mask = lane1_base_mask & bias_bank_mask;
+    end
+
     scan_tag2 = scan_free(lane1_scan_mask, lane1_scan_ptr);
   end
+`endif
 
   // --------------------------------------------------- group accept / refusal
   // Each refusal has its own report. "Refused" with no reason would leave the
@@ -891,7 +982,21 @@ module mosaic_rename (
   assign alloc_is_x0     = alloc_req && (alloc_rd == 5'd0) && !alloc_blocked;
   assign alloc2_is_x0    = alloc2_req && (alloc2_rd == 5'd0) && !alloc_blocked;
 
-`ifdef MOSAIC_RENAME_MUTANT_NO_EXHAUST_CHECK
+`ifdef MOSAIC_RENAME_MUTANT_BIAS_DEADLOCK
+  // NEGATIVE CONTROL (I-032): the preference becomes a requirement. When the
+  // preferred bank has no free tag the group is refused as if the register file
+  // were empty, even though tags are free elsewhere, so allocation deadlocks on an
+  // empty preferred bank -- the card's first Fail mode.
+  logic bias_starved;
+  assign bias_starved = alloc_bias_en && ((free_bits & bias_bank_mask) == {REN_ENTRIES{1'b0}});
+  assign alloc_exhausted  = alloc_req && !alloc_blocked && (group_need != 2'd0) &&
+                            (bias_starved || !group_enough);
+  assign alloc2_exhausted = alloc_req && alloc2_req && !alloc_blocked && (group_need != 2'd0) &&
+                            (bias_starved || !group_enough);
+  assign alloc_accepted   = alloc_req && !alloc_blocked && group_enough && !bias_starved;
+  assign alloc2_accepted  = alloc_req && alloc2_req && !alloc_blocked && group_enough &&
+                            !bias_starved;
+`elsif MOSAIC_RENAME_MUTANT_NO_EXHAUST_CHECK
   // NEGATIVE CONTROL 4 (I-013): exhaustion is not detected. A group is taken and
   // tags are produced even when the free set is empty -- which means the tags
   // belong to somebody else, and nothing in the core can tell. Both lanes are
@@ -944,8 +1049,21 @@ module mosaic_rename (
 `endif
 
   assign alloc_new_tag   = scan_tag;
+`ifdef MOSAIC_RENAME_MUTANT_BIAS_ARCH
+  // NEGATIVE CONTROL (I-032): the preference leaks into the destination identity.
+  // With the bias on, the generation is taken from the tag the *unbiased* scan
+  // would have chosen, so the produced (tag, generation) is not the chosen tag's
+  // next generation. The writeback that should deliver the architectural value is
+  // then judged stale and the register is never written: the preference has
+  // changed the architectural result.
+  logic [REN_TAG_W-1:0] scan_tag_unbiased;
+  always_comb scan_tag_unbiased = scan_free(free_bits, alloc_ptr);
+  assign alloc_new_gen   = gen_valid[scan_tag_unbiased]
+                           ? (gen[scan_tag_unbiased] + REN_GEN_W'(1)) : {REN_GEN_W{1'b0}};
+`else
   assign alloc_new_gen   = gen_valid[scan_tag] ? (gen[scan_tag] + REN_GEN_W'(1))
                                                : {REN_GEN_W{1'b0}};
+`endif
 
 `ifdef MOSAIC_RENAME_MUTANT_SAME_TAG_LANE1
   // NEGATIVE CONTROL 8 (I-014): lane 1 reuses lane 0's tag instead of taking the

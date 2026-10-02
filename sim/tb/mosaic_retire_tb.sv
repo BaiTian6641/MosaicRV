@@ -938,6 +938,10 @@ module mosaic_retire_tb (
       .alloc2_old_valid  (ren_alloc2_old_valid),
       .alloc2_old_tag    (ren_alloc2_old_tag),
       .alloc2_old_gen    (ren_alloc2_old_gen),
+      // Optional bank preference (I-032) off: this card tests retirement, and the
+      // bias changes only which legal free tag an allocation takes.
+      .alloc_bias_en     (1'b0),
+      .alloc_bias_bank   (mosaic_cfg_pkg::MOSAIC_PRF_BANK_W'(0)),
 
       .rs1_addr          (5'd0),
       .rs2_addr          (5'd0),

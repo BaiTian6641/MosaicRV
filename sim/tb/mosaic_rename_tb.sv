@@ -54,6 +54,7 @@ localparam int unsigned TB_GEN_W     = mosaic_cfg_pkg::MOSAIC_INT_PRF_TAG_W;
 localparam int unsigned TB_ARCH_REGS = mosaic_cfg_pkg::MOSAIC_ARCH_INT_REGS;
 localparam int unsigned TB_BANKS     = mosaic_cfg_pkg::MOSAIC_PRF_BANKS;
 localparam int unsigned TB_ROWS      = TB_ENTRIES / TB_BANKS;
+localparam int unsigned TB_BANK_W    = mosaic_cfg_pkg::MOSAIC_PRF_BANK_W;
 localparam int unsigned TB_JOURNAL   = mosaic_cfg_pkg::MOSAIC_ROB_ENTRIES;
 localparam int unsigned TB_MAP_W     = TB_TAG_W + TB_GEN_W;
 // The undo window's length register is one bit wider than an index, because it
@@ -90,6 +91,10 @@ module mosaic_rename_tb (
     output logic                                       alloc2_old_valid,
     output logic [TB_TAG_W-1:0]                        alloc2_old_tag,
     output logic [TB_GEN_W-1:0]                        alloc2_old_gen,
+
+    // optional bank preference (I-032), passed straight through
+    input  logic                                       alloc_bias_en,
+    input  logic [TB_BANK_W-1:0]                       alloc_bias_bank,
 
     // source reads
     input  logic [4:0]                                 rs1_addr,
@@ -221,6 +226,9 @@ module mosaic_rename_tb (
       .alloc2_old_valid (alloc2_old_valid),
       .alloc2_old_tag   (alloc2_old_tag),
       .alloc2_old_gen   (alloc2_old_gen),
+
+      .alloc_bias_en    (alloc_bias_en),
+      .alloc_bias_bank  (alloc_bias_bank),
 
       .rs1_addr         (rs1_addr),
       .rs2_addr         (rs2_addr),

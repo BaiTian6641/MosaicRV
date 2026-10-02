@@ -169,6 +169,26 @@ def render_sv_package(bundle: config_check.Bundle, advertised) -> str:
         add("  localparam int unsigned MOSAIC_VRF_BANK_B  = %d;" % vector["vrf_bank_bytes"])
         add("")
 
+    # PMP: the entry count and the grain are a platform decision, so they come
+    # from the profile's geometry file and never from the RTL. A profile with no
+    # `pmp` block implements no entries at all (Priv v1.12: "Implementations may
+    # implement zero, 16, or 64 PMP entries"), which is the honest description of
+    # an M-only profile that has no less-privileged mode to protect.
+    pmp = geometry.get("pmp")
+    entries = int(pmp["entries"]) if pmp else 0
+    grain = int(pmp["granularity_bytes"]) if pmp else 4
+    g = 0
+    while (1 << (g + 2)) < grain:
+        g += 1
+    if (1 << (g + 2)) != grain:
+        raise SystemExit("geometry pmp.granularity_bytes must be a power of two >= 4")
+    add("  // PMP: entries and grain from the profile geometry (Priv v1.12 2.7.1).")
+    add("  localparam int unsigned MOSAIC_PMP_ENTRIES     = %d;" % entries)
+    add("  localparam int unsigned MOSAIC_PMP_GRAIN_BYTES = %d;" % grain)
+    add("  localparam int unsigned MOSAIC_PMP_G           = %d;" % g)
+    add("  localparam int unsigned MOSAIC_PMP_CFG_COUNT   = %d;" % ((entries + 7) // 8))
+    add("")
+
     add("  // Physical memory map")
     for region in sorted(bundle.memory["regions"], key=lambda r: r["base"]):
         base_name = "MOSAIC_%s_BASE" % region["name"].upper()
@@ -344,6 +364,161 @@ def _bit_mask(specs, width: int, where: str) -> int:
 # from the same table without anyone editing this file.
 NO_TARGET_WITHOUT_LESS_PRIVILEGE = ("medeleg", "mideleg")
 
+# Fields that only exist when a less-privileged mode exists. The CSR tables are
+# shared by every profile, so a field whose whole meaning is "the previous/next
+# privilege of a trap, and the memory-privilege override that only a mode below
+# M can be overridden to" is described once and narrowed here for a profile that
+# has no such mode. Narrowing rather than forbidding keeps one table and one
+# rule; the alternative -- a second p0-only table -- is the second copy of a
+# fact this generator exists to prevent.
+#
+#   mstatus.MPP [12:11]  previous privilege: read-only 3 when the only mode is M
+#                        (Priv v1.12: "MPP ... implementations that support only
+#                        M-mode may hardwire MPP to 3").
+#   mstatus.SPP [8]      previous privilege for a trap into S-mode; there is no
+#                        S-mode to return to.
+#   mstatus.MPRV [17]    "MPRV is read-only 0 if U-mode is not supported."
+#   mstatus.SUM [18]     "The SUM ... bit ... permissions apply only to S-mode";
+#                        there is no S-mode.
+#   mstatus.MXR [19]     same argument as SUM: it selects S-mode's ability to
+#                        read a page with execute-only permission.
+#   mstatus.TVM [20]     traps S-mode's satp access; no S-mode.
+#   mstatus.TW [21]      traps WFI in a less-privileged mode; none exists.
+#   mstatus.TSR [22]     traps SRET in S-mode; there is no S-mode.
+#   mie/mip bits 9, 5, 1 (SEIE/STIE/SSIE and SEIP/STIP/SSIP) are the supervisor
+#                        interrupt enables and pending bits; with no S-mode the
+#                        only legal value of each is 0.
+#   mcounteren [2:0]     gates counter access *from U-mode* (Priv v1.12: "When
+#                        the CY, TM, IR ... bit in mcounteren is clear, attempts
+#                        to read ... while executing in U-mode will cause an
+#                        illegal instruction exception"). With no U-mode there is
+#                        no access to gate and the register is read-only zero.
+LESS_PRIVILEGE_ONLY_FIELDS = {
+    "mstatus": ("12:11", "8", "17", "18", "19", "20", "21", "22"),
+    "mie": ("9", "5", "1"),
+    "mip": ("9", "5", "1"),
+    "mcounteren": ("2", "1", "0"),
+}
+
+
+def _bit_list_mask(specs) -> int:
+    """Mask of a raw "msb:lsb"/"bit" list, without any width checking.
+
+    ``_bit_mask`` validates a range against a register width and is the right
+    function for a table's own fields; this one is used to subtract bits that
+    the table declares from a mask that has already been validated.
+    """
+    mask = 0
+    for spec in specs or []:
+        if ":" in spec:
+            msb_text, lsb_text = spec.split(":", 1)
+            msb, lsb = int(msb_text), int(lsb_text)
+        else:
+            msb = lsb = int(spec)
+        for bit in range(lsb, msb + 1):
+            mask |= 1 << bit
+    return mask
+
+
+def collect_csrs(bundle: config_check.Bundle) -> list:
+    """Every CSR this profile implements, once, with its privilege visibility.
+
+    The two CSR tables answer the same question from two sides: mode_m.json lists
+    a register in the block of each *privilege mode from which it may be
+    accessed*, so a register several modes share (the cycle/time/instret counter
+    shadows are readable from M, S and U) appears in more than one block. The
+    register itself is one register, so the blocks are merged here by name, and
+    two entries for one address that disagree about anything else are a hard
+    error rather than a silent last-wins.
+
+    The merged record carries the set of modes, which is what the RTL needs and
+    what the testbench checks. The access *rule*, though, is not taken from this
+    list: the ISA encodes the minimum privilege of a CSR in its own address
+    (bits [9:8] for reads, [11:10] for writes), so the generated package states
+    that too, decoded from the address, and the model and the RTL both use it.
+    The mode blocks are the implementation statement; the address is the rule.
+    """
+    profile = bundle.profile
+    order = {name: level for level, name in enumerate(("U", "S", "H", "M"))}
+
+    merged = {}
+    for table in bundle.csr_tables:
+        for block in table["modes"]:
+            mode = block["mode"]
+            if mode not in order:
+                raise SystemExit("csr table declares unknown privilege mode %r" % mode)
+            for csr in block["csrs"]:
+                key = csr["name"]
+                record = merged.get(key)
+                if record is None:
+                    record = dict(csr)
+                    record["modes"] = set()
+                    merged[key] = record
+                else:
+                    for field in ("address", "width", "access", "behavior", "reset",
+                                  "writable_fields", "wpri_fields",
+                                  "unmodifiable_bits"):
+                        if record.get(field) != csr.get(field):
+                            raise SystemExit(
+                                "csr %s: the %s block and an earlier block disagree "
+                                "about %s (%r vs %r); one register has one definition"
+                                % (key, mode, field, record.get(field), csr.get(field))
+                            )
+                record["modes"].add(mode)
+
+    csrs = sorted(merged.values(), key=lambda csr: csr["address"])
+    for csr in csrs:
+        address = csr["address"]
+        # Priv v1.12, "CSR Address Mapping Conventions": csr[9:8] is the lowest
+        # privilege level that can access the register, and csr[11:10] is 11 for
+        # a read-only register and something else for a read/write one. So the
+        # read privilege and the write privilege (when a write is allowed at all)
+        # are both csr[9:8]: a write is illegal from a mode below it *and*
+        # illegal everywhere when the address says read-only.
+        csr["min_priv_r"] = (address >> 8) & 0x3
+        csr["min_priv_w"] = 3 if ((address >> 10) & 0x3) == 0x3 else csr["min_priv_r"]
+        read_only_addr = csr["min_priv_w"] == 3 and csr["min_priv_r"] != 3
+        for mode in csr["modes"]:
+            if order[mode] < csr["min_priv_r"]:
+                raise SystemExit(
+                    "csr %s (0x%03x): declared accessible from %s, but the address "
+                    "reserves access to privilege %d and above"
+                    % (csr["name"], address, mode, csr["min_priv_r"])
+                )
+        if csr["access"] != "ro":
+            if read_only_addr:
+                raise SystemExit(
+                    "csr %s (0x%03x): the table declares it writable but the address "
+                    "encodes a read-only register" % (csr["name"], address)
+                )
+            if order[max(csr["modes"], key=lambda m: order[m])] < csr["min_priv_w"]:
+                raise SystemExit(
+                    "csr %s (0x%03x): declared writable from a mode below the address's "
+                    "access privilege %d" % (csr["name"], address, csr["min_priv_w"])
+                )
+    return csrs
+
+
+def effective_csr_wmask(csr, less_privileged: bool) -> int:
+    """The write mask a profile actually gets for one CSR.
+
+    Two rules narrow the table, both keyed on the profile and not on a
+    hand-edited mask: a delegation register whose target mode does not exist has
+    no legal value but zero, and a field whose whole meaning is a less-privileged
+    mode is read-only when there is no such mode.
+    """
+    if csr["access"] == "ro":
+        return 0
+    width = csr["width"]
+    wmask = _bit_mask(csr.get("writable_fields", []), width,
+                      "csr %s writable_fields" % csr["name"])
+    if less_privileged:
+        return wmask
+    if csr["name"] in NO_TARGET_WITHOUT_LESS_PRIVILEGE:
+        return 0
+    narrowed = _bit_list_mask(LESS_PRIVILEGE_ONLY_FIELDS.get(csr["name"], ()))
+    return wmask & ~narrowed
+
 
 def render_sv_csr_package(bundle: config_check.Bundle) -> str:
     """Emit the CSR implementation table as a synthesisable package.
@@ -362,44 +537,43 @@ def render_sv_csr_package(bundle: config_check.Bundle) -> str:
       * ``wpri_fields``         -> never writable and read back zero, so they are
                                    absent from the write mask by construction.
 
-    The one rule that is not a mask projection is the delegation registers: with
-    no S or U mode there is no delegation target, so the table's "the whole
-    register is a WARL field" collapses to "the only legal value is 0". That is
-    applied here, from the profile's own privilege list, rather than being
-    written into the RTL as a second opinion.
+    The one rule that is not a mask projection is the delegation registers and the
+    fields that only exist for a less-privileged mode: with no S or U mode there
+    is no delegation target and no less-privileged mode for MPP/SPP/MPRV/SUM/MXR/
+    TVM/TW/TSR to name, so those bits collapse to "the only legal value is 0".
+    That is applied by ``effective_csr_wmask``, from the profile's own privilege
+    list, rather than being written into the RTL as a second opinion.
+
+    Three further constants are emitted per register and they are the ones the
+    access check reads:
+
+      * ``MOSAIC_CSR_MODES_<NAME>``      the modes the table declares this
+                                         register accessible from, bit i = level i
+                                         (U=0, S=1, M=3);
+      * ``MOSAIC_CSR_MINPRIV_R/W_<NAME>`` the ISA's own minimum privilege for a
+                                         read and for a write, decoded from the
+                                         register's address bits [9:8]/[11:10].
     """
     profile = bundle.profile
-    less_privileged = [mode for mode in profile["privilege_modes"] if mode in ("S", "U")]
-
-    csrs = []
-    for table in bundle.csr_tables:
-        for block in table["modes"]:
-            for csr in block["csrs"]:
-                csrs.append(csr)
-    csrs.sort(key=lambda csr: csr["address"])
-
-    seen = {}
-    for csr in csrs:
-        if csr["address"] in seen:
-            raise SystemExit(
-                "csr %s: address 0x%03x already emitted for %s; the generated package "
-                "cannot hold two registers at one number"
-                % (csr["name"], csr["address"], seen[csr["address"]])
-            )
-        seen[csr["address"]] = csr["name"]
+    less_privileged = bool([mode for mode in profile["privilege_modes"] if mode in ("S", "U")])
+    csrs = collect_csrs(bundle)
 
     lines = []
     add = lines.append
     add("// GENERATED FILE - do not edit.")
-    add("// Produced by tools/gen_manifest.py --profile %s from config/csr/mode_m.json." % bundle.name)
+    add("// Produced by tools/gen_manifest.py --profile %s from the profile's CSR tables." % bundle.name)
     add("//")
     add("// One address, one reset value and one write mask per CSR, decoded from the")
-    add("// implementation table that tools/check_profile.py validates. The CSR file")
+    add("// implementation tables that tools/check_profile.py validates. The CSR file")
     add("// names these constants and carries no second copy of any of them.")
     add("//")
     add("//   MOSAIC_CSR_WMASK_<NAME>        bits software may change (writable_fields)")
     add("//   MOSAIC_CSR_WRITE_LEGAL_<NAME>  whether a write to the register is legal")
     add("//                                  at all (access mode != ro)")
+    add("//   MOSAIC_CSR_MODES_<NAME>        modes the table declares it accessible from,")
+    add("//                                  bit i = privilege level i")
+    add("//   MOSAIC_CSR_MINPRIV_R/W_<NAME>  the minimum privilege a read/write needs,")
+    add("//                                  decoded from the register's own address")
     add("//")
     add("// Bits in a WARL/WPRI register that are neither listed as writable nor as")
     add("// write-preserve-zero are reset-only: they read back their reset value.")
@@ -419,28 +593,41 @@ def render_sv_csr_package(bundle: config_check.Bundle) -> str:
     add("")
     add("  localparam int unsigned MOSAIC_CSR_COUNT = %d;" % len(csrs))
     add("")
+    modes_list = list(profile["privilege_modes"])
+    add("  // Privilege levels, and which of them this profile implements. The RTL reads")
+    add("  // \"is there a mode below M\" from here rather than naming a profile.")
+    add("  localparam logic [1:0] MOSAIC_PRIV_U = 2'd0;")
+    add("  localparam logic [1:0] MOSAIC_PRIV_S = 2'd1;")
+    add("  localparam logic [1:0] MOSAIC_PRIV_M = 2'd3;")
+    add("  localparam logic MOSAIC_CSR_HAS_S = 1'b%d;" % (1 if "S" in modes_list else 0))
+    add("  localparam logic MOSAIC_CSR_HAS_U = 1'b%d;" % (1 if "U" in modes_list else 0))
+    add("  localparam logic [1:0] MOSAIC_PRIV_LEAST = 2'd%d;"
+        % (0 if "U" in modes_list else (1 if "S" in modes_list else 3)))
+    add("")
 
     for csr in csrs:
         name = csr["name"].upper()
         width = csr["width"]
         access = csr["access"]
         write_legal = access != "ro"
-        if write_legal:
-            wmask = _bit_mask(csr.get("writable_fields", []), width,
-                              "csr %s writable_fields" % csr["name"])
-        else:
-            wmask = 0
+        wmask = effective_csr_wmask(csr, less_privileged)
         note = ""
-        if csr["name"] in NO_TARGET_WITHOUT_LESS_PRIVILEGE and not less_privileged:
-            if wmask != 0:
-                note = ("  // %s: no S or U mode in profile %s, so there is no delegation\n"
-                        "  // target and every bit is WARL whose only legal value is 0;\n"
-                        "  // writes are accepted and canonicalise to 0."
-                        % (csr["name"], bundle.name))
-            wmask = 0
+        table_wmask = 0
+        if write_legal:
+            table_wmask = _bit_mask(csr.get("writable_fields", []), width,
+                                    "csr %s writable_fields" % csr["name"])
+        if table_wmask != wmask:
+            note = ("  // %s: the table declares bits 0x%X writable, but profile %s has no\n"
+                    "  // less-privileged mode for them to name, so every bit is WARL whose\n"
+                    "  // only legal value is 0; writes are accepted and canonicalise to 0."
+                    % (csr["name"], table_wmask & ~wmask, bundle.name))
+        modes_mask = 0
+        for mode in csr["modes"]:
+            modes_mask |= {"U": 1 << 0, "S": 1 << 1, "H": 1 << 2, "M": 1 << 3}[mode]
         add("  // ---------------------------------------------------------------- %s" % csr["name"])
-        add("  // 0x%03X, %d-bit, access %s, %s, reset 0x%X"
-            % (csr["address"], width, access, csr["behavior"], csr["reset"]))
+        add("  // 0x%03X, %d-bit, access %s, %s, reset 0x%X, modes %s"
+            % (csr["address"], width, access, csr["behavior"], csr["reset"],
+               "/".join(sorted(csr["modes"]))))
         if note:
             add(note)
         add("  localparam logic [11:0] MOSAIC_CSR_ADDR_%-11s = 12'h%03x;"
@@ -451,6 +638,12 @@ def render_sv_csr_package(bundle: config_check.Bundle) -> str:
             % (name, _hex64(wmask)))
         add("  localparam logic        MOSAIC_CSR_WRITE_LEGAL_%-2s = 1'b%d;"
             % (name, 1 if write_legal else 0))
+        add("  localparam logic [3:0]  MOSAIC_CSR_MODES_%-7s = 4'b%s;"
+            % (name, format(modes_mask, "04b")))
+        add("  localparam logic [1:0]  MOSAIC_CSR_MINPRIV_R_%-5s = 2'd%d;"
+            % (name, csr["min_priv_r"]))
+        add("  localparam logic [1:0]  MOSAIC_CSR_MINPRIV_W_%-5s = 2'd%d;"
+            % (name, csr["min_priv_w"]))
         add("")
 
     add("  /* verilator lint_on UNUSEDSIGNAL */")
@@ -475,19 +668,13 @@ def render_csr_header(bundle: config_check.Bundle) -> str:
     from the contract prose in rtl/core/mosaic_csr.sv and share no code with it.
     """
     profile = bundle.profile
-    less_privileged = [mode for mode in profile["privilege_modes"] if mode in ("S", "U")]
-
-    csrs = []
-    for table in bundle.csr_tables:
-        for block in table["modes"]:
-            for csr in block["csrs"]:
-                csrs.append(csr)
-    csrs.sort(key=lambda csr: csr["address"])
+    less_privileged = bool([mode for mode in profile["privilege_modes"] if mode in ("S", "U")])
+    csrs = collect_csrs(bundle)
 
     lines = []
     add = lines.append
     add("// GENERATED FILE - do not edit.")
-    add("// Produced by tools/gen_manifest.py --profile %s from config/csr/mode_m.json." % bundle.name)
+    add("// Produced by tools/gen_manifest.py --profile %s from the profile's CSR tables." % bundle.name)
     add("//")
     add("// The unit test's shadow model reads its table from here so there is exactly")
     add("// one copy of every CSR address, reset value and write mask in the tree; the")
@@ -506,19 +693,18 @@ def render_csr_header(bundle: config_check.Bundle) -> str:
     add("  uint64_t    reset;        /* reset value */")
     add("  uint64_t    wmask;        /* bits software may change */")
     add("  uint8_t     write_legal;  /* 0 = a write is an illegal CSR access */")
+    add("  uint8_t     min_priv_r;   /* minimum privilege a read needs */")
+    add("  uint8_t     min_priv_w;   /* minimum privilege a write needs */")
     add("} mosaic_csr_desc_t;")
     add("")
     add("static const mosaic_csr_desc_t MOSAIC_CSR_TABLE[MOSAIC_CSR_COUNT] = {")
     for csr in csrs:
-        width = csr["width"]
         access = csr["access"]
         write_legal = access != "ro"
-        wmask = _bit_mask(csr.get("writable_fields", []), width,
-                          "csr %s writable_fields" % csr["name"]) if write_legal else 0
-        if csr["name"] in NO_TARGET_WITHOUT_LESS_PRIVILEGE and not less_privileged:
-            wmask = 0
-        add('  { "%s", 0x%03x, UINT64_C(0x%016x), UINT64_C(0x%016x), %d },'
-            % (csr["name"], csr["address"], csr["reset"], wmask, 1 if write_legal else 0))
+        wmask = effective_csr_wmask(csr, less_privileged)
+        add('  { "%s", 0x%03x, UINT64_C(0x%016x), UINT64_C(0x%016x), %d, %d, %d },'
+            % (csr["name"], csr["address"], csr["reset"], wmask,
+               1 if write_legal else 0, csr["min_priv_r"], csr["min_priv_w"]))
     add("};")
     add("")
     add("#endif  // MOSAIC_CSR_TABLE_H_")

@@ -156,6 +156,32 @@ struct Failure {
 std::string U64(uint64_t value) { return mosaic::Hex(value); }
 std::string Dec(uint64_t value) { return std::to_string(value); }
 
+// ------------------------------------------------ the injected harness defects
+// Both are harness defects because in p0 there is no cache: the core asks for
+// four bytes at the instruction's own PC and *this memory model* assembles them,
+// so "the PC the memory serves" is a memory-side property. That is the same
+// reason I-041's wrong-line control is a `-CFLAGS` define.
+//
+//   (d) kMaskPc    -- the memory answers a PC that is not on a line front with
+//       the line front: the PC masked at a boundary, so the machine executes a
+//       word that is not the one at its own PC.
+//   (b) kJalrOdd   -- the memory answers the fetch of a JALR's target with the
+//       bytes the *uncleared* (odd) address names: the architectural consequence
+//       of a JALR that does not clear bit 0. See the report: the one RTL mutant
+//       for that defect (MOSAIC_BRANCH_TARGET_MUTANT_1) is *unobservable* in the
+//       integrated core, because mosaic_cluster recomputes the JALR target
+//       itself and never reads the branch-target unit's `target` output.
+#ifdef MOSAIC_IMEM_MUTANT_MASK_PC
+constexpr bool kMaskPc = true;
+#else
+constexpr bool kMaskPc = false;
+#endif
+#ifdef MOSAIC_IMEM_MUTANT_JALR_ODD
+constexpr bool kJalrOdd = true;
+#else
+constexpr bool kJalrOdd = false;
+#endif
+
 // ============================================================================
 // Instruction encoding (RV64IM; every program here is 32-bit)
 // ============================================================================
@@ -230,11 +256,13 @@ class Img {
   // them. As in I-041's model, the encoding decides the length: the first
   // halfword's low two bits are 11 for a 32-bit instruction (which then needs
   // its second halfword mapped, or the fetch cannot be served) and anything else
-  // is a 16-bit instruction, where two bytes are enough. `mask_pc` is control
-  // (d): the memory answers a PC that is not on a line front with the line front
-  // -- the PC masked at a boundary.
-  bool Fetch(uint64_t addr, bool mask_pc, uint32_t* bits, uint32_t* len) const {
-    const uint64_t from = mask_pc ? (addr & ~(kLineBytes - 1u)) : addr;
+  // is a 16-bit instruction, where two bytes are enough. The two harness defects
+  // the controls inject (`kMaskPc`, `kJalrOdd`) are applied to the address the
+  // bytes are taken from, below.
+  bool Fetch(uint64_t addr, uint32_t* bits, uint32_t* len) const {
+    uint64_t from = addr;
+    if (mask_pc_) from = addr & ~(kLineBytes - 1u);
+    if (jalr_odd_ && jalr_targets_.count(addr) != 0) from = addr | 1u;
     if (!Mapped(from) || !Mapped(from + 1)) return false;
     const uint16_t first = Half(from);
     if ((first & 3u) == 3u) {
@@ -285,11 +313,26 @@ class Img {
     for (uint64_t a = from; a + 4 <= to; a += 4) Emit32(a, kNop);
   }
 
+  // The addresses a JALR hands control to, so the `kJalrOdd` control knows which
+  // fetches to answer from the uncleared address.
+  void AddJalrTarget(uint64_t addr) { jalr_targets_.insert(addr); }
+
+  // The reference model must never see a defect the harness injects into the
+  // device under test: it is the *unperturbed* statement of what the program
+  // does. `RunReference` clears them on its own copy.
+  void ClearDefects() {
+    mask_pc_ = false;
+    jalr_odd_ = false;
+  }
+
  private:
   void Put(uint64_t addr, uint8_t byte) { bytes_[addr] = byte; }
 
   std::map<uint64_t, uint8_t> bytes_;
   std::set<uint64_t> starts_;
+  std::set<uint64_t> jalr_targets_;
+  bool mask_pc_ = kMaskPc;
+  bool jalr_odd_ = kJalrOdd;
 };
 
 // The exit protocol, at an arbitrary PC: materialise TOHOST PC-relatively, then
@@ -344,13 +387,14 @@ uint64_t SignExtend(uint64_t value, unsigned bits) {
 }
 
 RefTrace RunReference(Img img, uint64_t start) {
+  img.ClearDefects();   // the reference is the unperturbed statement
   RefTrace out;
   uint64_t regs[32] = {};
   uint64_t pc = start;
   for (int step = 0; step < 4096; step++) {
     uint32_t bits = 0;
     uint32_t len = 0;
-    if (!img.Fetch(pc, false, &bits, &len)) {
+    if (!img.Fetch(pc, &bits, &len)) {
       out.stopped = true;
       out.stop_pc = pc;
       out.stop_reason = "the instruction at this address cannot be fetched";
@@ -396,6 +440,13 @@ RefTrace RunReference(Img img, uint64_t start) {
         case 0x6u: value = regs[rs1] | static_cast<uint64_t>(imm_i); break;
         default:   value = regs[rs1] & static_cast<uint64_t>(imm_i); break;
       }
+      we = true;
+    } else if (op == 0x13u && f3 == 0x1u) {  // SLLI (RV64: shamt is insn[25:20])
+      const uint32_t upper = (bits >> 26) & 0x3Fu;
+      if (upper != 0u) {
+        Fail("reference", "SLLI with a non-zero insn[31:26] at pc " + U64(pc));
+      }
+      value = regs[rs1] << ((bits >> 20) & 0x3Fu);
       we = true;
     } else if (op == 0x33u && f3 == 0x0u && (f7 == 0x00u || f7 == 0x20u)) {
       value = (f7 == 0x00u) ? (regs[rs1] + regs[rs2]) : (regs[rs1] - regs[rs2]);
@@ -531,8 +582,8 @@ uint64_t PackedLane(uint64_t packed, uint32_t lane, uint32_t width) {
 // ============================================================================
 class Harness {
  public:
-  Harness(Vmosaic_core_tb* dut, Img* img, bool mask_pc, uint64_t max_cycles)
-      : dut_(dut), img_(img), mask_pc_(mask_pc), max_cycles_(max_cycles) {}
+  Harness(Vmosaic_core_tb* dut, Img* img, uint64_t max_cycles)
+      : dut_(dut), img_(img), max_cycles_(max_cycles) {}
 
   const std::vector<DutRecord>& records() const { return records_; }
   const std::vector<Delivery>& deliveries() const { return deliveries_; }
@@ -679,7 +730,7 @@ class Harness {
       bool fault = false;
     };
 
-    Imem(Img* img, bool mask_pc) : img_(img), mask_pc_(mask_pc) {}
+    explicit Imem(Img* img) : img_(img) {}
 
     bool HasResponse() const { return !ready_.empty(); }
     const Response& Current() const { return ready_.front(); }
@@ -690,7 +741,7 @@ class Harness {
       rsp.epoch = epoch;
       uint32_t bits = 0;
       uint32_t len = 0;
-      if (!img_->Fetch(addr, mask_pc_, &bits, &len)) {
+      if (!img_->Fetch(addr, &bits, &len)) {
         rsp.fault = true;
         rsp.data = img_->Mapped(addr) ? static_cast<uint32_t>(img_->Half(addr))
                                       : 0x00000073u;   // ECALL for a hole
@@ -721,7 +772,6 @@ class Harness {
       int left = 0;
     };
     Img* img_;
-    bool mask_pc_;
     std::vector<Entry> inflight_;
     std::deque<Response> ready_;
     std::vector<uint64_t> faulted_;
@@ -833,9 +883,8 @@ class Harness {
 
   Vmosaic_core_tb* dut_;
   Img* img_;
-  bool mask_pc_;
   uint64_t max_cycles_;
-  Imem imem_{img_, mask_pc_};
+  Imem imem_{img_};
   Dmem dmem_{img_};
   uint32_t retire_width_ = 2;
   uint64_t cycles_ = 0;
@@ -858,6 +907,14 @@ class Harness {
 // ============================================================================
 // Running one program and comparing it with the reference
 // ============================================================================
+// The addresses a JALR hands control to, so the `kJalrOdd` control knows which
+// fetches to answer from the uncleared address. Harmless when the control is off.
+void CollectJalrTargets(Img* img, const RefTrace& ref) {
+  for (const RefRec& r : ref.recs) {
+    if (r.is_jalr) img->AddJalrTarget(r.next_pc);
+  }
+}
+
 struct RunOut {
   std::vector<DutRecord> records;
   std::vector<Delivery> deliveries;
@@ -874,9 +931,8 @@ struct RunOut {
 };
 
 RunOut RunOnce(Vmosaic_core_tb* dut, const Geometry& geometry, Img* img,
-               size_t want, bool expect_stop, bool mask_pc,
-               const std::string& label) {
-  Harness harness(dut, img, mask_pc, kMaxRunCycles);
+               size_t want, bool expect_stop, const std::string& label) {
+  Harness harness(dut, img, kMaxRunCycles);
   harness.SetGeometry(geometry);
   harness.Reset(kResetCycles);
   const size_t cap = want + 16;
@@ -1060,7 +1116,7 @@ void CheckStructure(mosaic::Reporter* reporter, const std::string& label,
     if (img.IsStart(addr)) continue;
     uint32_t bits = 0;
     uint32_t len = 0;
-    if (!img.Fetch(addr, false, &bits, &len)) continue;   // not servable: allowed
+    if (!img.Fetch(addr, &bits, &len)) continue;   // not servable: allowed
     bad_req++;
     if (bad_req <= 3) {
       reporter->Check(false, label + ": every instruction request is for an "
@@ -1147,11 +1203,15 @@ void BuildTransfers(Img* img, Sites* sites) {
   img->Emit32(kBase + 0x2C, EncI(0x13u, 0x6u, A1, A1, 1));        // ori a1, a1, 1
   sites->jalr_raw = kBase + 0x3D;
   sites->jalr_cleared = kBase + 0x3C;
-  sites->unaligned_pc = kBase + 0x30;
   img->Emit32(kBase + 0x30, Jalr(2u, A1, 0));                     // jalr x2, a1, 0
   img->Emit32(kBase + 0x34, EncI(0x13u, 0x0u, S5, X0, 0x555));    // skipped
   img->Emit32(kBase + 0x38, EncI(0x13u, 0x0u, S6, X0, 0x666));    // skipped
-  img->Emit32(kBase + 0x3C, EncI(0x13u, 0x0u, S7, 2u, 0));        // s7 = x2 (the link)
+  // The JALR's target. It is `slli x6, x0, 0` on purpose: its first byte is 0x13
+  // and its second is 0x13, so the four bytes at 0x3D -- the address an uncleared
+  // target would name -- also assemble to a *legal* instruction (an ADDI of x0),
+  // which is what lets control (b) show an event record whose own bits are not
+  // the word at its PC rather than a machine that merely stops.
+  img->Emit32(kBase + 0x3C, EncI(0x13u, 0x1u, T1, X0, 0));        // slli x6, x0, 0
   EmitExit(img, kBase + 0x40);
 }
 
@@ -1194,8 +1254,11 @@ void BuildLine(Img* img, Sites* sites) {
   // program put at 0x0FFE.
   img->Emit32(kBase + 0x0FF8, EncI(0x13u, 0x0u, S11, X0, 0xBAD));
   // The straddling instruction: PC 0x80000FFE (2 mod 4), four bytes crossing the
-  // eight-byte line at 0x80001000 and the 4 KiB page front there.
-  img->Emit32(kBase + 0x0FFE, EncI(0x13u, 0x0u, A4, X0, 0x777));
+  // eight-byte line at 0x80001000 and the 4 KiB page front there. Its encoding is
+  // the same 0x00001313 as the transfers run's JALR target, for the same reason:
+  // the four bytes at the uncleared address 0x80000FFF must also assemble to a
+  // legal instruction.
+  img->Emit32(kBase + 0x0FFE, EncI(0x13u, 0x1u, T1, X0, 0));
   img->Emit32(kBase + 0x1002, EncI(0x13u, 0x0u, A5, A4, 1));
   img->Emit32(kBase + 0x1006, EncJ(X0, -0xFBA));                  // jal x0 -> 0x4C
 }
@@ -1292,12 +1355,6 @@ int main(int argc, char** argv) {
   std::string detail;
   bool passed = true;
 
-#ifdef MOSAIC_IMEM_MUTANT_MASK_PC
-  const bool mask_pc = true;
-#else
-  const bool mask_pc = false;
-#endif
-
   try {
     dut.clk = 0;
     dut.rst = 0;
@@ -1319,10 +1376,11 @@ int main(int argc, char** argv) {
       Sites sites;
       BuildTransfers(&img, &sites);
       const RefTrace ref = RunReference(img, kBase);
+      CollectJalrTargets(&img, ref);
       const std::string label = "transfers";
       reporter.Check(ref.exited, label + ": the reference reaches the exit protocol");
       const RunOut got = RunOnce(&dut, geometry, &img, ref.recs.size(), false,
-                                 mask_pc, label);
+                                 label);
       CompareStream(&reporter, label, got, ref);
       CheckStructure(&reporter, label, got, img, ref);
       AccountCoverage(ref, &cov);
@@ -1399,10 +1457,11 @@ int main(int argc, char** argv) {
       Sites sites;
       BuildPages(&img, &sites);
       const RefTrace ref = RunReference(img, kBase);
+      CollectJalrTargets(&img, ref);
       const std::string label = "pages";
       reporter.Check(ref.exited, label + ": the reference reaches the exit protocol");
       const RunOut got = RunOnce(&dut, geometry, &img, ref.recs.size(), false,
-                                 mask_pc, label);
+                                 label);
       CompareStream(&reporter, label, got, ref);
       CheckStructure(&reporter, label, got, img, ref);
       AccountCoverage(ref, &cov);
@@ -1454,10 +1513,11 @@ int main(int argc, char** argv) {
       Sites sites;
       BuildLine(&img, &sites);
       const RefTrace ref = RunReference(img, kBase);
+      CollectJalrTargets(&img, ref);
       const std::string label = "line";
       reporter.Check(ref.exited, label + ": the reference reaches the exit protocol");
       const RunOut got = RunOnce(&dut, geometry, &img, ref.recs.size(), false,
-                                 mask_pc, label);
+                                 label);
       CompareStream(&reporter, label, got, ref);
       CheckStructure(&reporter, label, got, img, ref);
       AccountCoverage(ref, &cov);
@@ -1476,7 +1536,7 @@ int main(int argc, char** argv) {
         saw_target = true;
         uint32_t bits = 0;
         uint32_t len = 0;
-        img.Fetch(sites.unaligned_target, false, &bits, &len);
+        img.Fetch(sites.unaligned_target, &bits, &len);
         reporter.Check(got.records[i].len == 4u && got.records[i].insn == bits,
                        label + ": the instruction at the 2-mod-4 target " +
                            U64(sites.unaligned_target) + " retires with its own "
@@ -1487,6 +1547,23 @@ int main(int argc, char** argv) {
                                "instruction plus four: next record at " +
                            U64(got.records[i + 1].pc));
       }
+      bool saw_jalr = false;
+      for (size_t i = 0; i + 1 < got.records.size(); i++) {
+        if (got.records[i].pc != sites.unaligned_pc) continue;
+        saw_jalr = true;
+        reporter.Check(got.records[i].rd == 2u && got.records[i].we &&
+                           got.records[i].value == sites.unaligned_pc + 4u,
+                       label + ": the JALR at " + U64(sites.unaligned_pc) +
+                           " writes pc + 4 as its link: got " +
+                           U64(got.records[i].value));
+        reporter.Check(got.records[i + 1].pc == sites.unaligned_target,
+                       label + ": the JALR at " + U64(sites.unaligned_pc) +
+                           " hands control to " + U64(sites.unaligned_target) +
+                           ", the record after it is at " +
+                           U64(got.records[i + 1].pc));
+      }
+      reporter.Check(saw_jalr,
+                     label + ": the JALR at " + U64(sites.unaligned_pc) + " retired");
       reporter.Check(saw_target,
                      label + ": the JALR reaches its 2-mod-4 target " +
                          U64(sites.unaligned_target));
@@ -1511,10 +1588,11 @@ int main(int argc, char** argv) {
       Sites sites;
       BuildFenceI(&img, &sites);
       const RefTrace ref = RunReference(img, kBase);
+      CollectJalrTargets(&img, ref);
       const std::string label = "fencei";
       reporter.Check(ref.exited, label + ": the reference reaches the exit protocol");
       const RunOut got = RunOnce(&dut, geometry, &img, ref.recs.size(), false,
-                                 mask_pc, label);
+                                 label);
       CompareStream(&reporter, label, got, ref);
       CheckStructure(&reporter, label, got, img, ref);
       AccountCoverage(ref, &cov);
@@ -1542,6 +1620,10 @@ int main(int argc, char** argv) {
       reporter.Check(saw_fix,
                      label + ": the word immediately after FENCE.I " +
                          U64(sites.fix_pc) + " retires");
+      reporter.Check(sites.fix_pc == sites.fence_i_pc + 4u,
+                     label + ": the patched word is the one immediately after "
+                             "FENCE.I (FENCE.I at " + U64(sites.fence_i_pc) +
+                         ", FIXPC " + U64(sites.fix_pc) + ")");
       total_records += got.records.size();
       total_cycles += got.cycles;
       runs++;
@@ -1557,10 +1639,11 @@ int main(int argc, char** argv) {
       Sites sites;
       BuildWrongPath(&img, &sites);
       const RefTrace ref = RunReference(img, kBase);
+      CollectJalrTargets(&img, ref);
       const std::string label = "wrongpath";
       reporter.Check(ref.exited, label + ": the reference reaches the exit protocol");
       const RunOut got = RunOnce(&dut, geometry, &img, ref.recs.size(), false,
-                                 mask_pc, label);
+                                 label);
       CompareStream(&reporter, label, got, ref);
       CheckStructure(&reporter, label, got, img, ref);
       AccountCoverage(ref, &cov);
@@ -1629,11 +1712,12 @@ int main(int argc, char** argv) {
       Sites sites;
       BuildFetchFault(&img, &sites);
       const RefTrace ref = RunReference(img, kBase);
+      CollectJalrTargets(&img, ref);
       const std::string label = "fetchfault";
       reporter.Check(ref.stopped,
                      label + ": the reference cannot fetch the JALR's target");
       const RunOut got = RunOnce(&dut, geometry, &img, ref.recs.size(), true,
-                                 mask_pc, label);
+                                 label);
       CompareStream(&reporter, label, got, ref);
       CheckStructure(&reporter, label, got, img, ref, /*expect_refusal=*/true);
 

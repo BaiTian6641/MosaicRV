@@ -114,6 +114,25 @@
         "lane_groups_large": { "type": "integer", "minimum": 1, "maximum": 32 },
         "max_eu64_per_group": { "type": "integer", "minimum": 1, "maximum": 64 }
       }
+    },
+    "pmp": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["entries", "granularity_bytes"],
+      "description": "Physical Memory Protection (Priv v1.12 2.7). A profile without this block implements no PMP entries, which is the correct description of a hart with no less-privileged mode.",
+      "properties": {
+        "entries": {
+          "type": "integer",
+          "enum": [0, 16, 64],
+          "description": "Priv v1.12 2.7.1: implementations may implement zero, 16 or 64 PMP entries, and the lowest-numbered entries are implemented first."
+        },
+        "granularity_bytes": {
+          "type": "integer",
+          "minimum": 4,
+          "maximum": 4096,
+          "description": "The grain 2^(G+2) from Priv v1.12 2.7.1.1; must be a power of two. 4 means G=0 and NA4 is selectable."
+        }
+      }
     }
   }
 }

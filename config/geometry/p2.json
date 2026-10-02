@@ -52,5 +52,9 @@
     "lane_groups_medium": 4,
     "lane_groups_large": 8,
     "max_eu64_per_group": 16
+  },
+  "pmp": {
+    "entries": 16,
+    "granularity_bytes": 4
   }
 }

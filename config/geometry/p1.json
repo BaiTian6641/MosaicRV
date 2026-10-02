@@ -42,5 +42,9 @@
     "l1d_sets": 256,
     "l1d_ways": 4,
     "mshrs": 2
+  },
+  "pmp": {
+    "entries": 16,
+    "granularity_bytes": 4
   }
 }

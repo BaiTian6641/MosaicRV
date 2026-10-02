@@ -23,24 +23,24 @@
             "36",
             "35:34",
             "33:32",
-            "22",
-            "21",
-            "20",
-            "19",
-            "18",
-            "17",
             "16:15",
-            "12:11",
-            "8",
             "6"
           ],
           "writable_fields": [
             "1",
+            "10:9",
+            "12:11",
+            "14:13",
+            "17",
+            "18",
+            "19",
+            "20",
+            "21",
+            "22",
             "3",
             "5",
             "7",
-            "10:9",
-            "14:13"
+            "8"
           ],
           "wpri_fields": [
             "62:38",
@@ -49,7 +49,7 @@
             "2",
             "0"
           ],
-          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L303 '0x300 & MRW & mstatus'. src/machine.tex: section 'Machine Status Registers (mstatus and mstatush)' L363, 'The mstatus register is an MXLEN-bit read/write register' L365; RV64 layout figure mstatusreg L441-L520, bit-number header rows L448-L495 and field-name rows L462-L474 / L497-L511 (SD 63, WPRI 62:38, MBE 37, SBE 36, SXL 35:34, UXL 33:32, WPRI 31:23, TSR 22, TW 21, TVM 20, MXR 19, SUM 18, MPRV 17, XS 16:15, FS 14:13, MPP 12:11, VS 10:9, SPP 8, MPIE 7, UBE 6, SPIE 5, WPRI 4, MIE 3, WPRI 2, SIE 1, WPRI 0); mstatush is 'For RV32 only' L522 and is therefore excluded. Per-field rules: xPP WARL and 'If privilege mode x is not implemented, then x/PP must be read-only 0' L621-L623; SXL read-only zero without S-mode L646-L647; UXL read-only zero without U-mode L651-L652; 'MPRV is read-only 0 if U-mode is not supported' L688; MXR read-only 0 without S-mode L697-L698; SUM read-only 0 without S-mode L718-L719; MBE/SBE/UBE WARL L727-L728, SBE read-only 0 without S-mode L736, UBE read-only 0 without U-mode L740, 'An implementation supports only little-endian memory accesses if fields MBE, SBE, and UBE are all read-only 0' L767-L768; TVM read-only 0 without S-mode L821; TW read-only 0 with no mode less privileged than M L841-L842; TSR read-only 0 without S-mode L860-L861; FS read-only zero without F or S-mode L928; VS read-only zero without V or S-mode L944; 'XS field is read-only zero' L950. Reset: section 'Reset' L2839, 'The mstatus fields MIE and MPRV are reset to 0' L2842-L2843, 'If little-endian memory accesses are supported, the mstatus/mstatush field MBE is reset to 0' L2844-L2845, 'All other hart state is unspecified' L2858; MosaicRV sets MPP=0b11 so no WARL field holds an illegal value (L2857), giving reset = 3<<11 = 0x1800. p0 is M-mode only and little-endian (config/profiles/p0.json), which forces every field except MPIE/SPIE/MIE/SIE to read-only zero and MPP to read-only 0b11.; FS [14:13] and VS [10:9] are WARL extension-state fields. When the F extension is implemented FS shall not be read-only zero and reads as Dirty when any floating-point state is dirty; the same holds for VS and the V extension. A profile claiming neither reads them as zero"
+          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033. Address and privilege: src/priv-csrs.tex L303 '0x300 & MRW & mstatus'. src/machine.tex: section 'Machine Status Registers (mstatus and mstatush)' L363, 'The mstatus register is an MXLEN-bit read/write register' L365; RV64 layout figure mstatusreg L441-L520, bit-number header rows L448-L495 and field-name rows L462-L474 / L497-L511 (SD 63, WPRI 62:38, MBE 37, SBE 36, SXL 35:34, UXL 33:32, WPRI 31:23, TSR 22, TW 21, TVM 20, MXR 19, SUM 18, MPRV 17, XS 16:15, FS 14:13, MPP 12:11, VS 10:9, SPP 8, MPIE 7, UBE 6, SPIE 5, WPRI 4, MIE 3, WPRI 2, SIE 1, WPRI 0); mstatush is 'For RV32 only' L522 and is therefore excluded. Per-field rules: xPP WARL and 'If privilege mode x is not implemented, then x/PP must be read-only 0' L621-L623; SXL read-only zero without S-mode L646-L647; UXL read-only zero without U-mode L651-L652; 'MPRV is read-only 0 if U-mode is not supported' L688; MXR read-only 0 without S-mode L697-L698; SUM read-only 0 without S-mode L718-L719; MBE/SBE/UBE WARL L727-L728, SBE read-only 0 without S-mode L736, UBE read-only 0 without U-mode L740, 'An implementation supports only little-endian memory accesses if fields MBE, SBE, and UBE are all read-only 0' L767-L768; TVM read-only 0 without S-mode L821; TW read-only 0 with no mode less privileged than M L841-L842; TSR read-only 0 without S-mode L860-L861; FS read-only zero without F or S-mode L928; VS read-only zero without V or S-mode L944; 'XS field is read-only zero' L950. Reset: section 'Reset' L2839, 'The mstatus fields MIE and MPRV are reset to 0' L2842-L2843, 'If little-endian memory accesses are supported, the mstatus/mstatush field MBE is reset to 0' L2844-L2845, 'All other hart state is unspecified' L2858; MosaicRV sets MPP=0b11 so no WARL field holds an illegal value (L2857), giving reset = 3<<11 = 0x1800. p0 is M-mode only and little-endian (config/profiles/p0.json), which forces every field except MPIE/SPIE/MIE/SIE to read-only zero and MPP to read-only 0b11.; FS [14:13] and VS [10:9] are WARL extension-state fields. When the F extension is implemented FS shall not be read-only zero and reads as Dirty when any floating-point state is dirty; the same holds for VS and the V extension. A profile claiming neither reads them as zero Field-level rules the RTL implements and the generator narrows per profile: MPP (12:11) holds the previous privilege (only M in an M-only profile, 'implementations that support only M-mode may hardwire MPP to 3'); SPP (8) the same for a trap into S; MPRV (17) 'is read-only 0 if U-mode is not supported' and otherwise selects MPP as the effective privilege of loads and stores; SUM (18) and MXR (19) adjust S-mode page permissions and are read-only 0 with no S-mode; TVM (20), TW (21) and TSR (22) intercept S-mode satp access, WFI and SRET respectively and are read-only 0 with no S-mode. tools/gen_manifest.py subtracts exactly those bits for a profile whose privilege_modes list has no S or U, so one table describes every profile."
         },
         {
           "name": "misa",
@@ -88,10 +88,10 @@
           "reset": 0,
           "unmodifiable_bits": [],
           "writable_fields": [
-            "63:0"
+            "1"
           ],
           "wpri_fields": [],
-          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033, src/machine.tex: section 'Machine Trap Delegation Registers (medeleg and mideleg)' L1237; Fig. midelegreg L1333-L1347 (the entire MXLEN field is labelled 'Interrupts (WARL)'); 'mideleg holds trap delegation bits for individual interrupts, with the layout of bits matching those in the mip register' L1349-L1352; Sec 'Machine Interrupt Registers (mip and mie)' L1412-L1414 'if register mideleg exists, bit i is not set in mideleg'. Address and privilege: src/priv-csrs.tex L306 '0x303 & MRW & mideleg'. With no S or U mode there is no delegation target, so every bit is WARL whose only legal value is 0; writes are accepted and each bit canonicalises to 0, and a read always returns 0."
+          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033, src/machine.tex: section 'Machine Trap Delegation Registers (medeleg and mideleg)' L1237; Fig. midelegreg L1333-L1347 (the entire MXLEN field is labelled 'Interrupts (WARL)'); 'mideleg holds trap delegation bits for individual interrupts, with the layout of bits matching those in the mip register' L1349-L1352; Sec 'Machine Interrupt Registers (mip and mie)' L1412-L1414 'if register mideleg exists, bit i is not set in mideleg'. Address and privilege: src/priv-csrs.tex L306 '0x303 & MRW & mideleg'. With no S or U mode there is no delegation target, so every bit is WARL whose only legal value is 0; writes are accepted and each bit canonicalises to 0, and a read always returns 0. Implementation choice, allowed by 'Version 1.11 and earlier prohibited having any bits of mideleg corresponding to machine-level interrupts (but may do so for lower-level interrupts)': bits 3, 7 and 11 (MSI/MTI/MEI) are WARL whose only legal value is 0, because a machine-level interrupt is not taken in a less-privileged mode, and bits 9 and 5 (SEI/STI) are read-only zero because the platform has no supervisor external or timer source. Bit 1 (SSI) is the one delegatable interrupt this profile implements."
         },
         {
           "name": "mie",
@@ -103,15 +103,19 @@
           "unmodifiable_bits": [],
           "writable_fields": [
             "7",
-            "3"
+            "3",
+            "1"
           ],
           "wpri_fields": [
             "63:16",
-            "15:8",
-            "6:4",
-            "2:0"
+            "15:10",
+            "8",
+            "6",
+            "4",
+            "2",
+            "0"
           ],
-          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033, src/machine.tex: section 'Machine Interrupt Registers (mip and mie)' L1358, 'the mie register is the corresponding MXLEN-bit read/write register containing interrupt enable bits' L1361-L1363; 'Interrupt cause number i ... corresponds with bit i in both mip and mie. Bits 15:0 are allocated to standard interrupt causes only, while bits 16 and above are designated for platform or custom use' L1364-L1367; Fig. miereg L1387-L1401; Fig. miereg-standard L1482-L1522 with bits 11/7/3 named MEIE/MTIE/MSIE (L1502, L1506, L1510) and the remaining standard bits drawn as literal '0'; 'A bit in mie must be writable if the corresponding interrupt can ever become pending. Bits of mie that are not writable must be read-only zero' L1432-L1434. Address and privilege: src/priv-csrs.tex L307 '0x304 & MRW & mie'. p0 has a CLINT (config/memory/p0.json) driving MTIP and MSIP and no PLIC, so MTIE(7) and MSIE(3) are writable and every other bit is write-preserve-zero."
+          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033, src/machine.tex: section 'Machine Interrupt Registers (mip and mie)' L1358, 'the mie register is the corresponding MXLEN-bit read/write register containing interrupt enable bits' L1361-L1363; 'Interrupt cause number i ... corresponds with bit i in both mip and mie. Bits 15:0 are allocated to standard interrupt causes only, while bits 16 and above are designated for platform or custom use' L1364-L1367; Fig. miereg L1387-L1401; Fig. miereg-standard L1482-L1522 with bits 11/7/3 named MEIE/MTIE/MSIE (L1502, L1506, L1510) and the remaining standard bits drawn as literal '0'; 'A bit in mie must be writable if the corresponding interrupt can ever become pending. Bits of mie that are not writable must be read-only zero' L1432-L1434. Address and privilege: src/priv-csrs.tex L307 '0x304 & MRW & mie'. p0 has a CLINT (config/memory/p0.json) driving MTIP and MSIP and no PLIC, so MTIE(7) and MSIE(3) are writable and every other bit is write-preserve-zero. Bit 1 (SSIE) is implemented because this profile implements S-mode, and it is the enable for the one supervisor-level interrupt source the platform has: the software-written SSIP. Bits 5 (STIE) and 9 (SEIE) have no source and are WARL whose only legal value is 0. Bits 3 and 7 (MSIE, MTIE) are the machine software and timer enables."
         },
         {
           "name": "mtvec",
@@ -136,11 +140,15 @@
           "behavior": "warl",
           "reset": 0,
           "unmodifiable_bits": [
-            "31:0"
+            "31:3"
           ],
-          "writable_fields": [],
+          "writable_fields": [
+            "2",
+            "1",
+            "0"
+          ],
           "wpri_fields": [],
-          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033, src/machine.tex: section 'Machine Counter-Enable Register (mcounteren)' L1741, 'The counter-enable register mcounteren is a 32-bit register' L1744-L1746; Fig. mcounteren L1748-L1781 (CY 0, TM 1, IR 2, HPM3..HPM31 bits 3..31); 'The settings in this register only control accessibility' L1784-L1786; 'In systems with U-mode, the mcounteren must be implemented, but all fields are WARL and may be read-only zero' L1820-L1823 and 'In systems without U-mode, the mcounteren register should not exist' L1824. Address and privilege: src/priv-csrs.tex L309 '0x306 & MRW & mcounteren'. p0 is M-only (no U-mode), so no counter is ever exposed to a less privileged mode and every field is WARL read-only zero, giving reset 0. Recorded deviation: the spec says the register 'should not exist' in a system without U-mode; MosaicRV keeps it at 0x306 as an all-zero WARL register so firmware reads a defined value instead of taking an illegal-instruction trap, and 0 is a legal WARL value (L2857)."
+          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033, src/machine.tex: section 'Machine Counter-Enable Register (mcounteren)' L1741, 'The counter-enable register mcounteren is a 32-bit register' L1744-L1746; Fig. mcounteren L1748-L1781 (CY 0, TM 1, IR 2, HPM3..HPM31 bits 3..31); 'The settings in this register only control accessibility' L1784-L1786; 'In systems with U-mode, the mcounteren must be implemented, but all fields are WARL and may be read-only zero' L1820-L1823 and 'In systems without U-mode, the mcounteren register should not exist' L1824. Address and privilege: src/priv-csrs.tex L309 '0x306 & MRW & mcounteren'. p0 is M-only (no U-mode), so no counter is ever exposed to a less privileged mode and every field is WARL read-only zero, giving reset 0. Recorded deviation: the spec says the register 'should not exist' in a system without U-mode; MosaicRV keeps it at 0x306 as an all-zero WARL register so firmware reads a defined value instead of taking an illegal-instruction trap, and 0 is a legal WARL value (L2857). CY/TM/IR (bits 2:0) are writable: they gate U-mode reads of cycle/time/instret ('When the CY, TM, IR ... bit in mcounteren is clear, attempts to read ... while executing in U-mode will cause an illegal instruction exception'). Bits 31:3 (HPM3-HPM31) are read-only zero because this profile implements no hpmcounter_n. tools/gen_manifest.py narrows CY/TM/IR back to read-only zero for a profile with no U-mode, where there is no access to gate."
         },
         {
           "name": "mscratch",
@@ -210,15 +218,19 @@
           "unmodifiable_bits": [],
           "writable_fields": [
             "7",
-            "3"
+            "3",
+            "1"
           ],
           "wpri_fields": [
             "63:16",
-            "15:8",
-            "6:4",
-            "2:0"
+            "15:10",
+            "8",
+            "6",
+            "4",
+            "2",
+            "0"
           ],
-          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033, src/machine.tex: section 'Machine Interrupt Registers (mip and mie)' L1358, 'The mip register is an MXLEN-bit read/write register containing information on pending interrupts' L1360-L1361; 'Interrupt cause number i ... corresponds with bit i in both mip and mie. Bits 15:0 are allocated to standard interrupt causes only, while bits 16 and above are designated for platform or custom use' L1364-L1367; Fig. mipreg L1370-L1384; trap conditions (a) MIE, (b) bit i set in both mip and mie, (c) bit i clear in mideleg L1404-L1416; 'Each individual bit in register mip may be writable or may be read-only' L1424-L1430; Fig. mipreg-standard L1440-L1480 with bits 11/7/3 named MEIP/MTIP/MSIP (L1460, L1464, L1468) and all other standard bits drawn as literal '0'. Address and privilege: src/priv-csrs.tex L318 '0x344 & MRW & mip'. p0 has a CLINT (config/memory/p0.json) driving MTIP and MSIP and no PLIC, so MTIP(7) and MSIP(3) are the implemented bits and every other bit, including MEIP(11), is write-preserve-zero."
+          "spec_clause": "RISC-V Privileged Spec v1.12, tag Priv-v1.12 commit 98964261c931d51884f733664b22efe43de93033, src/machine.tex: section 'Machine Interrupt Registers (mip and mie)' L1358, 'The mip register is an MXLEN-bit read/write register containing information on pending interrupts' L1360-L1361; 'Interrupt cause number i ... corresponds with bit i in both mip and mie. Bits 15:0 are allocated to standard interrupt causes only, while bits 16 and above are designated for platform or custom use' L1364-L1367; Fig. mipreg L1370-L1384; trap conditions (a) MIE, (b) bit i set in both mip and mie, (c) bit i clear in mideleg L1404-L1416; 'Each individual bit in register mip may be writable or may be read-only' L1424-L1430; Fig. mipreg-standard L1440-L1480 with bits 11/7/3 named MEIP/MTIP/MSIP (L1460, L1464, L1468) and all other standard bits drawn as literal '0'. Address and privilege: src/priv-csrs.tex L318 '0x344 & MRW & mip'. p0 has a CLINT (config/memory/p0.json) driving MTIP and MSIP and no PLIC, so MTIP(7) and MSIP(3) are the implemented bits and every other bit, including MEIP(11), is write-preserve-zero. Bit 1 (SSIP) is writable for the same reason mip.MSIP/MTIP are: a software-writable pending bit must behave like a real one ('a pending interrupt i can be cleared by writing 0 to this bit'). Bits 5 (STIP) and 9 (SEIP) are read-only zero here -- the platform has no supervisor timer or external source -- which is also what sip's own row declares for STIP."
         },
         {
           "name": "mvendorid",

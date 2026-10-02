@@ -138,6 +138,19 @@ std::string Bool(bool value) { return value ? "1" : "0"; }
 
 std::string Dec(uint64_t value) { return std::to_string(value); }
 
+// ceil(log2(v)), the width a value needs. Used only to recover the RTL's row
+// width from the elaborated geometry (`row_w = clog2(entries / banks)`), so the
+// shadow derives the bank decode from the same numbers the hardware does.
+uint32_t CeilLog2(uint32_t v) {
+  uint32_t w = 0;
+  uint32_t p = 1;
+  while (p < v) {
+    p <<= 1;
+    w++;
+  }
+  return w;
+}
+
 // A {tag, generation} destination identity. Two allocations of the same
 // physical tag are different destinations, which is the whole point of the
 // generation, so the shadow and the test both carry the pair rather than the
@@ -191,6 +204,12 @@ struct Stim {
   // so it needs no checkpoint to have been taken.
   bool flush_restore = false;
 
+  // The optional bank preference (I-032). Off is the pre-I-032 allocator; on asks
+  // for the next tag from `alloc_bias_bank`'s free tags, falling back to any legal
+  // free tag when that bank has none.
+  bool alloc_bias_en = false;
+  uint32_t alloc_bias_bank = 0;
+
   std::string str() const {
     return "[alloc=" + Bool(alloc_req) + ":x" + Dec(alloc_rd) +
            " alloc2=" + Bool(alloc2_req) + ":x" + Dec(alloc2_rd) +
@@ -200,7 +219,8 @@ struct Stim {
            " commit=" + Bool(commit_valid) + ":x" + Dec(commit_rd) + commit.str() +
            " commit2=" + Bool(commit2_valid) + ":x" + Dec(commit2_rd) + commit2.str() +
            " ckpt=" + Bool(ckpt_valid) + " squash=" + Bool(squash) +
-           " flush=" + Bool(flush_restore) + "]";
+           " flush=" + Bool(flush_restore) +
+           (alloc_bias_en ? (" bias=b" + Dec(alloc_bias_bank)) : std::string()) + "]";
   }
 };
 
@@ -280,15 +300,22 @@ struct Outputs {
 class ShadowRename {
  public:
   ShadowRename(uint32_t entries, uint32_t tag_w, uint32_t gen_w, uint32_t arch_regs,
-               uint32_t journal)
+               uint32_t journal, uint32_t banks)
       : entries_(entries),
         tag_w_(tag_w),
         gen_w_(gen_w),
         arch_regs_(arch_regs),
         journal_(journal),
+        banks_(banks),
+        row_w_(CeilLog2((banks == 0) ? 1u : (entries / banks))),
         gen_mask_((gen_w >= 32) ? 0xffffffffu : ((1u << gen_w) - 1u)) {
     Reset();
   }
+
+  // The home bank of a tag, from the same decode the RTL states -- `tag`'s bank
+  // field is the bits above the row field -- so the shadow's preference is over
+  // exactly the banks the hardware has.
+  uint32_t BankOfTag(uint32_t tag) const { return tag >> row_w_; }
 
   uint32_t gen_mask() const { return gen_mask_; }
   uint32_t journal_length() const { return static_cast<uint32_t>(j_len_); }
@@ -404,9 +431,32 @@ class ShadowRename {
 
     // Two scans, exactly as two consecutive single-width allocations would run
     // them: lane 1's starts one past lane 0's tag and cannot see that tag.
-    const uint32_t tag0 = ScanFrom(free_, rot_);
+    //
+    // The optional bank preference (I-032) changes only the *search set*: the
+    // full free set, or -- when the bias is on and the preferred bank has a free
+    // tag -- those free tags. Because the search set is built by intersecting with
+    // the free set, the preference can never return an owned tag; because the
+    // restriction applies only when the intersection is non-empty, an empty
+    // preferred bank falls back rather than stalling.
+    std::vector<bool> lane0_mask = free_;
+    if (s.alloc_bias_en) {
+      std::vector<bool> prefer(entries_, false);
+      for (uint32_t t = 0; t < entries_; t++) {
+        prefer[t] = free_[t] && (BankOfTag(t) == s.alloc_bias_bank);
+      }
+      if (AnyIn(prefer)) lane0_mask = prefer;
+    }
+    const uint32_t tag0 = ScanFrom(lane0_mask, rot_);
+
     std::vector<bool> lane1_mask = free_;
     if (wants0 && tag0 < entries_) lane1_mask[tag0] = false;
+    if (s.alloc_bias_en) {
+      std::vector<bool> prefer1(entries_, false);
+      for (uint32_t t = 0; t < entries_; t++) {
+        prefer1[t] = lane1_mask[t] && (BankOfTag(t) == s.alloc_bias_bank);
+      }
+      if (AnyIn(prefer1)) lane1_mask = prefer1;
+    }
     const uint32_t lane1_ptr = !wants0 ? rot_
                                        : ((tag0 + 1 >= entries_) ? 0u : tag0 + 1);
     const uint32_t tag1 = wants0 ? ScanFrom(lane1_mask, lane1_ptr) : tag0;
@@ -734,6 +784,15 @@ class ShadowRename {
   // function over the mask it is given. Lane 1's mask has lane 0's tag cleared and
   // its pointer starts one past it, which is what makes a two-wide group take the
   // same two tags as two consecutive single-width allocations.
+  // Is any tag in the mask set? Used by the bank-preference fallback: the
+  // preference is applied only when the preferred bank actually has a free tag.
+  static bool AnyIn(const std::vector<bool>& mask) {
+    for (uint32_t t = 0; t < mask.size(); t++) {
+      if (mask[t]) return true;
+    }
+    return false;
+  }
+
   uint32_t ScanFrom(const std::vector<bool>& mask, uint32_t ptr) const {
     for (uint32_t k = 0; k < entries_; k++) {
       uint32_t t = (ptr + k) % entries_;
@@ -763,6 +822,8 @@ class ShadowRename {
   uint32_t gen_w_;
   uint32_t arch_regs_;
   uint32_t journal_;
+  uint32_t banks_;
+  uint32_t row_w_;
   uint32_t gen_mask_;
 
   std::vector<Dest> spec_;
@@ -882,6 +943,8 @@ class Harness {
     dut_->alloc_rd = static_cast<uint8_t>(s.alloc_rd & 0x1f);
     dut_->alloc2_req = s.alloc2_req ? 1 : 0;
     dut_->alloc2_rd = static_cast<uint8_t>(s.alloc2_rd & 0x1f);
+    dut_->alloc_bias_en = s.alloc_bias_en ? 1 : 0;
+    dut_->alloc_bias_bank = static_cast<uint8_t>(s.alloc_bias_bank & 0x3);
     dut_->rs1_addr = static_cast<uint8_t>(s.rs1_addr & 0x1f);
     dut_->rs2_addr = static_cast<uint8_t>(s.rs2_addr & 0x1f);
     dut_->rs3_addr = static_cast<uint8_t>(s.rs3_addr & 0x1f);
@@ -2359,7 +2422,7 @@ void PhaseExhaustion(Harness* h, mosaic::Reporter* reporter, uint32_t entries,
 // never does it: the window is nothing but allocations, and a squash discards all
 // of them.
 void PhaseRandom(Harness* h, mosaic::Reporter* reporter, uint32_t entries, uint32_t arch_regs,
-                 uint32_t seed, uint32_t cycles) {
+                 uint32_t seed, uint32_t cycles, bool bank_bias, uint32_t banks, uint32_t row_w) {
   mosaic::Rng rng(seed);
 
   // Destinations the test has actually been handed, so most requests name
@@ -2377,6 +2440,11 @@ void PhaseRandom(Harness* h, mosaic::Reporter* reporter, uint32_t entries, uint3
   uint32_t squashes = 0;
   uint32_t windows = 0;
   uint32_t out_of_range_rejected = 0;
+  // I-032 bank-preference coverage: how often the preference was offered, landed
+  // in the preferred bank, and had to fall back because that bank was empty.
+  uint32_t bias_cycles = 0;
+  uint32_t bias_hits = 0;
+  uint32_t bias_fallbacks = 0;
 
   for (uint32_t i = 0; i < cycles; i++) {
     Stim s;
@@ -2469,7 +2537,26 @@ void PhaseRandom(Harness* h, mosaic::Reporter* reporter, uint32_t entries, uint3
       }
     }
 
+    // I-032: offer the bank preference on a random subset of the cycles when the
+    // case asks for it, so the bias rides the whole random soup -- allocations,
+    // retires, squashes, stale writebacks and all.
+    if (bank_bias && rng.Chance(60)) {
+      s.alloc_bias_en = true;
+      s.alloc_bias_bank = rng.Below(banks);
+    }
+
     Outputs o = h->Cycle(s);
+
+    if (s.alloc_bias_en) {
+      bias_cycles++;
+      if (o.alloc_new_valid) {
+        if ((o.alloc_new.tag >> row_w) == s.alloc_bias_bank) {
+          bias_hits++;
+        } else {
+          bias_fallbacks++;
+        }
+      }
+    }
 
     if (o.alloc_new_valid) {
       handed.push_back(o.alloc_new);
@@ -2528,6 +2615,20 @@ void PhaseRandom(Harness* h, mosaic::Reporter* reporter, uint32_t entries, uint3
   Require(squashes > 0, "random", "no squash was ever accepted");
   Require(out_of_range_rejected > 0, "random",
           "no out-of-range tag was ever rejected: the campaign never aimed at one");
+  // I-032: when the case asks for the bias, the campaign must actually have
+  // driven it, landed in the preferred bank at least once, and hit the fallback
+  // at least once -- otherwise the phase would be asserting nothing about the
+  // feature it is for.
+  if (bank_bias) {
+    Require(bias_cycles > cycles / 4, "random",
+            "the bank preference was offered on only " + Dec(bias_cycles) + " of " +
+                Dec(cycles) + " cycles: too few to cover it");
+    Require(bias_hits > 0, "random",
+            "the bank preference never landed an allocation in the preferred bank");
+    Require(bias_fallbacks > 0, "random",
+            "the preferred bank was never exhausted under the random bias, so the "
+            "fallback to another legal bank was not exercised");
+  }
   // Exhaustion is reachable in a random campaign only if the campaign fills the
   // file, which it may not; the dedicated phase covers it, so this is not a
   // requirement here. It is reported either way.
@@ -2536,7 +2637,11 @@ void PhaseRandom(Harness* h, mosaic::Reporter* reporter, uint32_t entries, uint3
                   "random: " + Dec(accepted_allocs) + " allocations, " + Dec(accepted_wbs) +
                       " accepted writebacks, " + Dec(refused_stale) +
                       " stale rejections, " + Dec(squashes) + " squashes, " + Dec(exhausted) +
-                      " exhaustion reports over " + Dec(cycles) + " cycles");
+                      " exhaustion reports over " + Dec(cycles) + " cycles" +
+                      (bank_bias ? (", bias on " + Dec(bias_cycles) + " cycles (" +
+                                    Dec(bias_hits) + " preferred, " + Dec(bias_fallbacks) +
+                                    " fallback)")
+                                 : std::string()));
 }
 
 
@@ -3839,6 +3944,278 @@ void PhaseJournalWindow(Harness* h, mosaic::Reporter* reporter, uint32_t arch_re
 }
 
 
+// ============================================================================
+// I-032: the optional bank preference over physical allocation.
+//
+// The three claims the case exists for:
+//
+//   1. The preference is honoured when the preferred bank has a free tag, and it
+//      *falls back* to any legal free tag when it does not -- including for a bank
+//      that has no tags at all (96 entries over 4 banks leaves a bank empty of
+//      tags).
+//   2. Exhausting the preferred bank while tags remain elsewhere never stalls the
+//      allocation: the bias is a preference, not a requirement.
+//   3. Running one deterministic campaign twice -- bias off, then bias on --
+//      measures the change in stalls and bank conflicts instead of assuming a
+//      benefit, and asserts the conservation quantities are identical, which is
+//      what "a bias leaks no free register" means at this level.
+// ============================================================================
+void PhaseBankBias(Harness* h, mosaic::Reporter* reporter, uint32_t entries,
+                   uint32_t arch_regs, uint32_t banks, uint32_t row_w) {
+  const auto bank_of = [&](uint32_t tag) { return tag >> row_w; };
+  const auto bank_has_free = [&](uint32_t bank) {
+    for (uint32_t t = 0; t < entries; t++) {
+      if (h->shadow_is_free(t) && bank_of(t) == bank) return true;
+    }
+    return false;
+  };
+
+  // --- 1. The preference is honoured where it can be, and falls back where it
+  //        cannot. Every bank is tried, including one with no tags at all.
+  for (uint32_t b = 0; b < banks; b++) {
+    h->Reset(4);
+    const bool can = bank_has_free(b);
+    Stim s;
+    s.alloc_req = true;
+    s.alloc_rd = 5;
+    s.alloc_bias_en = true;
+    s.alloc_bias_bank = b;
+    const uint32_t free_before = h->free_count();
+    Outputs o = h->Cycle(s);
+    Require(o.alloc_accepted && o.alloc_new_valid, "bank-bias",
+            "a biased allocation to bank " + Dec(b) + " was refused while " +
+                Dec(free_before) + " tags were free: the preference became a "
+                "requirement");
+    const uint32_t got = bank_of(o.alloc_new.tag);
+    if (can) {
+      Require(got == b, "bank-bias",
+              "bank " + Dec(b) + " had a free tag but the biased allocation took tag " +
+                  Dec(o.alloc_new.tag) + " in bank " + Dec(got) + ": the preference was "
+                  "not honoured");
+    } else {
+      Require(got != b, "bank-bias",
+              "bank " + Dec(b) + " had no free tag, so the biased allocation should have "
+              "fallen back, but it reported tag " + Dec(o.alloc_new.tag) + " in bank " +
+                  Dec(got));
+    }
+    Require(h->free_count() + 1 == free_before, "bank-bias",
+            "a biased allocation changed the free count by more than one: it leaked or "
+            "double-allocated a tag");
+  }
+
+  // --- 2. Exhaust the preferred bank and prove the next allocation still
+  //        succeeds, from another bank, with the count conserved.
+  h->Reset(4);
+  const uint32_t PREF = 1;
+  uint32_t filled = 0;
+  while (bank_has_free(PREF)) {
+    Stim s;
+    s.alloc_req = true;
+    s.alloc_rd = 1 + (filled % (arch_regs - 1));
+    s.alloc_bias_en = true;
+    s.alloc_bias_bank = PREF;
+    Outputs o = h->Cycle(s);
+    Require(o.alloc_new_valid, "bank-bias",
+            "a fill allocation to bank " + Dec(PREF) + " was refused while that bank had "
+            "a free tag");
+    Require(bank_of(o.alloc_new.tag) == PREF, "bank-bias",
+            "the fill left bank " + Dec(PREF) + ": the preference was not honoured while "
+            "the preferred bank had free tags");
+    filled++;
+    Require(filled <= entries, "bank-bias", "the fill did not consume the preferred bank");
+  }
+  Require(!bank_has_free(PREF), "bank-bias", "the preferred bank was not emptied");
+  Require(h->free_count() > 0, "bank-bias",
+          "the exercise emptied the whole register file, not just the preferred bank, so "
+          "it does not test a fallback");
+  {
+    const uint32_t before = h->free_count();
+    Stim s;
+    s.alloc_req = true;
+    s.alloc_rd = 3;
+    s.alloc_bias_en = true;
+    s.alloc_bias_bank = PREF;
+    Outputs o = h->Cycle(s);
+    Require(o.alloc_accepted && o.alloc_new_valid, "bank-bias",
+            "the biased allocation was refused after its preferred bank emptied while " +
+                Dec(before) + " tags were free elsewhere: the preference deadlocked");
+    Require(bank_of(o.alloc_new.tag) != PREF, "bank-bias",
+            "the fallback allocation took tag " + Dec(o.alloc_new.tag) + " in bank " +
+                Dec(bank_of(o.alloc_new.tag)) + ", but the preferred bank was empty: it "
+                "cannot have come from there");
+    Require(h->free_count() + 1 == before, "bank-bias",
+            "the fallback allocation did not take exactly one tag");
+  }
+
+  // --- 2b. Lane 1 of a two-wide group falls back on its own when lane 0 takes the
+  //         preferred bank's last free tag.
+  h->Reset(4);
+  while (true) {
+    uint32_t n = 0;
+    for (uint32_t t = 0; t < entries; t++) {
+      if (h->shadow_is_free(t) && bank_of(t) == PREF) n++;
+    }
+    if (n <= 1) break;
+    Stim s;
+    s.alloc_req = true;
+    s.alloc_rd = 1 + (n % (arch_regs - 1));
+    s.alloc_bias_en = true;
+    s.alloc_bias_bank = PREF;
+    Outputs o = h->Cycle(s);
+    Require(o.alloc_new_valid, "bank-bias", "the lane-1 fallback setup allocation was refused");
+  }
+  {
+    Stim g;
+    g.alloc_req = true;
+    g.alloc_rd = 9;
+    g.alloc2_req = true;
+    g.alloc2_rd = 10;
+    g.alloc_bias_en = true;
+    g.alloc_bias_bank = PREF;
+    Outputs o = h->Cycle(g);
+    Require(o.alloc_accepted && o.alloc_new_valid && o.alloc2_new_valid, "bank-bias",
+            "a two-wide group biased to a bank with one free tag was refused: lane 1 did "
+            "not fall back");
+    Require(bank_of(o.alloc_new.tag) == PREF, "bank-bias",
+            "lane 0 did not take the preferred bank's last free tag");
+    Require(bank_of(o.alloc2_new.tag) != PREF, "bank-bias",
+            "lane 1 took tag " + Dec(o.alloc2_new.tag) + " from the preferred bank, which "
+            "lane 0 had just emptied: lane 1's preference did not fall back");
+    Require(o.alloc_new.tag != o.alloc2_new.tag, "bank-bias",
+            "the two lanes of the biased group took the same tag");
+  }
+
+  // --- 3. The measured delta. One deterministic campaign, run twice with the same
+  //        stimulus: bias off, then bias on with a fixed preferred bank. The
+  //        conservation quantities must be identical; the conflict/stall counts
+  //        are *reported*, not assumed to improve.
+  struct Stats {
+    uint32_t accepted0 = 0;
+    uint32_t accepted1 = 0;
+    uint32_t stalls = 0;
+    uint32_t read_conflicts = 0;
+    uint32_t lane_pair_conflicts = 0;
+    uint32_t bias_hits = 0;
+    uint32_t fallbacks = 0;
+    std::vector<uint32_t> bank_hist;
+    std::vector<uint32_t> free_trace;
+  };
+  const uint32_t DELTA_CYCLES = 240;
+  const uint32_t DELTA_PREF = 1;
+  auto run = [&](bool bias_on, uint32_t preferred, uint32_t cycles) {
+    Stats st;
+    st.bank_hist.assign(banks, 0);
+    h->Reset(4);
+    std::vector<std::vector<Dest>> pend(arch_regs);
+    uint32_t rr = 1;
+    for (uint32_t i = 0; i < cycles; i++) {
+      Stim s;
+      // A checkpoint every 16 cycles keeps the undo window inside its ROB bound.
+      // It does not touch the free-count trajectory, which is what the two runs
+      // are compared on.
+      if (i % 16 == 0) s.ckpt_valid = true;
+      s.alloc_req = true;
+      s.alloc_rd = 1 + (i % (arch_regs - 1));
+      if (i % 3 == 0) {
+        s.alloc2_req = true;
+        s.alloc2_rd = 1 + ((i * 5 + 7) % (arch_regs - 1));
+      }
+      s.rs1_addr = 1 + ((i * 3) % (arch_regs - 1));
+      s.rs2_addr = 1 + ((i * 11 + 5) % (arch_regs - 1));
+      s.rs3_addr = 1 + ((i * 7 + 1) % (arch_regs - 1));
+      s.rs4_addr = 1 + ((i * 13 + 3) % (arch_regs - 1));
+      // Retire the oldest uncommitted mapping of some register every few cycles,
+      // so tags are recycled and the file is not simply filled once.
+      if (i % 7 == 3) {
+        for (uint32_t k = 0; k < arch_regs; k++) {
+          const uint32_t r = 1 + ((rr + k) % (arch_regs - 1));
+          if (!pend[r].empty()) {
+            s.commit_valid = true;
+            s.commit_rd = r;
+            s.commit = pend[r].front();
+            rr = r + 1;
+            break;
+          }
+        }
+      }
+      s.alloc_bias_en = bias_on;
+      s.alloc_bias_bank = preferred;
+
+      Outputs o = h->Cycle(s);
+
+      if (o.alloc_new_valid) {
+        st.accepted0++;
+        st.bank_hist[bank_of(o.alloc_new.tag)]++;
+        if (bias_on) {
+          if (bank_of(o.alloc_new.tag) == preferred) {
+            st.bias_hits++;
+          } else {
+            st.fallbacks++;
+          }
+        }
+      }
+      if (o.alloc2_new_valid) st.accepted1++;
+      if (o.alloc_exhausted) st.stalls++;
+      if (!o.rs1_is_x0 && !o.rs2_is_x0 &&
+          bank_of(o.rs1.tag) == bank_of(o.rs2.tag)) {
+        st.read_conflicts++;
+      }
+      if (!o.rs3_is_x0 && !o.rs4_is_x0 &&
+          bank_of(o.rs3.tag) == bank_of(o.rs4.tag)) {
+        st.read_conflicts++;
+      }
+      if (o.alloc_new_valid && o.alloc2_new_valid &&
+          bank_of(o.alloc_new.tag) == bank_of(o.alloc2_new.tag)) {
+        st.lane_pair_conflicts++;
+      }
+      st.free_trace.push_back(h->free_count());
+
+      if (o.alloc_new_valid) pend[s.alloc_rd].push_back(o.alloc_new);
+      if (o.alloc2_new_valid) pend[s.alloc2_rd].push_back(o.alloc2_new);
+      if (o.commit_accepted && !pend[s.commit_rd].empty()) {
+        pend[s.commit_rd].erase(pend[s.commit_rd].begin());
+      }
+    }
+    return st;
+  };
+
+  const Stats off = run(false, 0, DELTA_CYCLES);
+  const Stats on = run(true, DELTA_PREF, DELTA_CYCLES);
+
+  // The conservation the card demands: the preference changes only *which* legal
+  // free tag is chosen. The number of accepted allocations and the free count on
+  // every cycle are therefore identical between the two runs -- a leak, a
+  // double allocation or a changed decision would break one of them.
+  Require(off.free_trace == on.free_trace, "bank-bias",
+          "the free-count trajectory differs between the bias-off and bias-on runs: the "
+          "preference changed an allocation decision, or leaked/returned a tag");
+  Require(off.accepted0 == on.accepted0 && off.accepted1 == on.accepted1 &&
+              off.stalls == on.stalls,
+          "bank-bias",
+          "the bias changed how many allocations were accepted (" + Dec(off.accepted0) +
+              "/" + Dec(off.accepted1) + " off vs " + Dec(on.accepted0) + "/" +
+              Dec(on.accepted1) + " on) or how often it stalled (" + Dec(off.stalls) +
+              " off vs " + Dec(on.stalls) + " on)");
+  Require(on.bias_hits > 0, "bank-bias",
+          "the bias never landed an allocation in the preferred bank over " +
+              Dec(DELTA_CYCLES) + " cycles: the campaign does not exercise the preference");
+  Require(on.fallbacks > 0, "bank-bias",
+          "the preferred bank was never exhausted over " + Dec(DELTA_CYCLES) +
+              " cycles: the fallback path was not exercised");
+
+  reporter->Check(true,
+                  "bank-bias: the preference was honoured for every bank with a free tag "
+                  "and fell back for the bank with none; a fully emptied preferred bank "
+                  "(" + Dec(filled) + " tags) did not stall the next allocation, and lane 1 "
+                  "fell back on its own; and over " + Dec(DELTA_CYCLES) + " identical cycles "
+                  "the measured delta was stalls " + Dec(off.stalls) + "->" + Dec(on.stalls) +
+                  ", read-port conflicts " + Dec(off.read_conflicts) + "->" +
+                  Dec(on.read_conflicts) + ", lane-pair bank conflicts " +
+                  Dec(off.lane_pair_conflicts) + "->" + Dec(on.lane_pair_conflicts) +
+                  ", with " + Dec(on.bias_hits) + " preferred-bank hits and " +
+                  Dec(on.fallbacks) + " fallbacks and an identical free-count trajectory");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -3890,7 +4267,7 @@ int main(int argc, char** argv) {
     Require(banks > 0 && entries % banks == 0, "geometry",
             "the bank count does not divide the register file");
 
-    ShadowRename shadow(entries, tag_w, gen_w, arch_regs, journal);
+    ShadowRename shadow(entries, tag_w, gen_w, arch_regs, journal, banks);
     auto fresh = [&]() {
       harness.Reset(4);
       shadow.Reset();
@@ -3902,10 +4279,13 @@ int main(int argc, char** argv) {
     // phases and printed PASS would be worse than a failure.
     const bool two_wide = options.case_id == "rename.same_cycle_chain";
     const bool journal_case = options.case_id == "rename.journal_window";
-    if (!two_wide && !journal_case && options.case_id != "rename.single_width_ownership") {
+    const bool bank_case = options.case_id == "rename.bank_bias_exhaustion";
+    if (!two_wide && !journal_case && !bank_case &&
+        options.case_id != "rename.single_width_ownership") {
       Fail("case", "unknown case id '" + options.case_id +
                        "': expected rename.single_width_ownership, "
-                       "rename.same_cycle_chain or rename.journal_window");
+                       "rename.same_cycle_chain, rename.journal_window or "
+                       "rename.bank_bias_exhaustion");
     }
 
     // Phase order is deliberate. Each phase resets first and owns exactly one
@@ -3917,11 +4297,21 @@ int main(int argc, char** argv) {
     // single-width campaign follows it, so the case still exercises the whole
     // contract. The two-wide phases run only for their own case and only after
     // the single-width ones, so a two-wide change which broke the single-width
-    // path is caught by the phase that owns that path.
+    // path is caught by the phase that owns that path. rename.bank_bias_exhaustion
+    // runs its own phase first for the same reason, then the whole single-width
+    // campaign with the bias off (which is the pre-I-032 allocator), then the
+    // random campaign again with the bias on.
     if (journal_case) {
       fresh();
       harness.Phase("journal-window");
       PhaseJournalWindow(&harness, &reporter, arch_regs);
+    }
+
+    if (bank_case) {
+      fresh();
+      harness.Phase("bank-bias");
+      PhaseBankBias(&harness, &reporter, entries, arch_regs, banks,
+                    CeilLog2(entries / banks));
     }
 
     fresh();
@@ -3954,7 +4344,16 @@ int main(int argc, char** argv) {
 
     fresh();
     harness.Phase("random");
-    PhaseRandom(&harness, &reporter, entries, arch_regs, static_cast<uint32_t>(options.seed), 4000);
+    PhaseRandom(&harness, &reporter, entries, arch_regs, static_cast<uint32_t>(options.seed),
+                4000, /*bank_bias=*/false, banks, CeilLog2(entries / banks));
+
+    if (bank_case) {
+      fresh();
+      harness.Phase("bank-bias-random");
+      PhaseRandom(&harness, &reporter, entries, arch_regs,
+                  static_cast<uint32_t>(options.seed) + 1, 4000, /*bank_bias=*/false, banks,
+                  CeilLog2(entries / banks));
+    }
 
     // The two-wide phases (I-014) run only for their own case, after the
     // single-width ones; the case id was validated before any phase ran.

@@ -48,7 +48,8 @@
     "I-039",
     "I-041",
     "I-031",
-    "I-040"
+    "I-040",
+    "V-016"
   ],
   "evidence": {
     "I-001": {
@@ -589,6 +590,17 @@
       "verdict": "PASS",
       "notes": "LR/SC reservations, completing the A extension's implementation. Case PASS from a clean build: 73 checks. The reservation contract is DECLARED and checked rather than implied: the granule is the naturally aligned 64-byte block containing the LR address (GRANULE_BITS=6), verified as state against the address mask in every cycle a reservation stands (42 samples, 0 violations) and through its consequences (an in-granule store from the other agent breaks the reservation, an out-of-granule store does not). The card's forward-progress requirement is met the way it demands -- a declared bound, measured: N=16 attempts is compiled into the program as a hard ceiling with its own exit code, and the interfering run shows attempts == injected conflicts + 1, attempts <= N, with the case failing loudly if the stimulus injects >= N conflicting writes before any measurement. Four mutants each exit 1 with a precise first failure naming the ISA rule: SC_WRITES_ON_FAIL (the failing SC retires rd=0 where the ISA requires 1), SC_DOUBLE_WRITE (four write beats where two SCs succeeded -- 'exactly once' violated), NO_EXT_INVAL (three external writes clear nothing), and GRANULE_OVERINVALIDATE (an out-of-granule store breaks a reservation that must survive). Seventeen other cases were re-run green, including every memory and atomic case, the corpus sweep, the trap and retire verifications and the bring-up reference. NOT covered, stated by the lane: p0 is single-hart, so the second agent is the harness writing the shared memory model and raising an external-write notification, which is one event by construction -- the case therefore cannot distinguish invalidation-on-notification from invalidation-on-write, and there is no arbitration; a real multi-master test needs I-042/I-043/V-086. With no cache, any granule containing the LR address behaves identically, so the 64-byte size is not made *necessary* by anything this machine can do -- it is observable as declared state and through SC status, and that is the honest extent of it. aq/rl ordering effects are not demonstrated (the path is conservatively ordered; the bits are carried); speculative LR/SC is made unreachable by ROB-head serialization rather than tested; the misaligned LR/SC traps (cause 4 for LR, 6 for SC) are not exercised; atomic MMIO is neither claimed nor driven; a legitimate long retry cannot be exhibited because this implementation never fails spuriously; and no corpus program uses LR/SC.",
       "report": "results/reports/I-040-lrsc.md"
+    },
+    "V-016": {
+      "cases": [
+        "pc.branch_and_fetch_visibility"
+      ],
+      "commands": [
+        "python3 tools/run_unit.py --profile p0 --case pc.branch_and_fetch_visibility"
+      ],
+      "verdict": "PASS",
+      "notes": "PC transfer, fetch boundaries and FENCE.I visibility, compared per instruction against an ISA-derived expectation. Case PASS from a clean build: 93 checks over 6 runs, 85 retires, 805 cycles. Every situation the card names is produced with its specifics recorded: a JAL link value checked as a register value; two not-taken branches falling through to pc+4 and a taken branch reaching its target; a JALR whose computed target has bit 0 set (0x8000003D) cleared to 0x8000003C with the link at 0x80000034; positive and negative branch displacements across the 4 KiB page front (0x80000008 -> 0x80001004 and 0x80001008 -> 0x80000FD0); a 32-bit instruction at 0x80000FFE whose four bytes cross the harness's 8-byte line *and* the 4 KiB page front at 0x80001000 (line_straddles=2, page_straddles=1, and the event record still carries the instruction's own bits and a pc_after of +4); FENCE.I after a code patch with the patched word and its effect being what is fetched and executed; and a wrong-path fetch in which eight fetches faulted inside regions that were never executed, leaving no record, no stop, no refusal and no trap. Five controls: two harness-level (a PC masked to the line front; JALR's target served from the uncleared odd address) and three RTL mutants (FENCE.I not invalidating; a wrong-path undecodable macro leaking past the redirect; a branch-target mutant), of which the last was verified UNOBSERVABLE in the integrated core because the cluster recomputes the JALR target itself -- reported as a finding rather than counted as a control. Regression-checked here: the case passes and fence.code_and_data_order and core.corpus_branch pass after clean rebuilds. NOT covered, stated by the lane: 'page boundary' is only an address boundary because p0 has no MMU or cache; the integrated core produces no instruction-address-misaligned trap (only the bring-up core does), so a fault cannot be produced for a 2-mod-4 target -- an unaligned target is instead shown to execute, which is correct for C/IALIGN=16 but means the fault path is untested here; a fetch fault is a stop rather than a trap in p0; mepc on a 2-mod-4 PC is not exercised because the p0 CSR config declares IALIGN=32 (the same cross-package item I-041 raised for p1); there is no cache-line refill (no L1I), interrupts are tied off, the ISA reference implements only the RV64IM subset the six programs use, and there is no second-ISS differential.",
+      "report": "results/reports/V-016-pc.md"
     }
   }
 }

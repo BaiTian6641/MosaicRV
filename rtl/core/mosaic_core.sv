@@ -1350,6 +1350,11 @@ module mosaic_core (
       .alloc2_old_valid (),
       .alloc2_old_tag   (),
       .alloc2_old_gen   (),
+      // The bank preference is off in the p0 core: it is an optional allocation
+      // policy (I-032) with no consumer here yet, and off is bit-identical to the
+      // pre-I-032 allocator.
+      .alloc_bias_en    (1'b0),
+      .alloc_bias_bank  (mosaic_cfg_pkg::MOSAIC_PRF_BANK_W'(0)),
       .rs1_addr         (ren_rs1_addr),
       .rs2_addr         (ren_rs2_addr),
       .rs1_is_x0        (ren_rs1_is_x0),

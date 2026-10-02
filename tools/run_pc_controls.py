@@ -15,10 +15,8 @@ deleted build directory -- and runs it. Every mutant must:
 A mutant that exits 0 is either an unobservable defect or a check that cannot
 fail; this tool reports it as MISS rather than counting it.
 
-Three defects are in the RTL, so their define goes to Verilator (`-D`):
+Two defects are in the RTL, so their define goes to Verilator (`-D`):
 
-  * MOSAIC_BRANCH_TARGET_MUTANT_1          JALR forgets to clear bit 0 (I-011's
-    mutant, reused);
   * MOSAIC_CORE_MUTANT_FENCEI_NO_INVALIDATE  FENCE.I does not invalidate the
     delivered fetch view (I-037's mutant, reused -- this case does not invent a
     second one);
@@ -26,15 +24,23 @@ Three defects are in the RTL, so their define goes to Verilator (`-D`):
     undecodable macro a wrong-path fetch left in the decode buffer (I-023's
     mutant, reused).
 
-The fourth -- the PC masked at a boundary -- cannot be RTL: in p0 there is no
-cache, the core asks for four bytes at the instruction's own PC, and *this
-harness's memory model* is what assembles them. Its define therefore goes to the
-generated C++ (`-CFLAGS -D`), exactly as I-041's wrong-line control does:
+Two cannot be RTL. In p0 there is no cache, the core asks for four bytes at the
+instruction's own PC, and *this harness's memory model* is what assembles them,
+so their define goes to the generated C++ (`-CFLAGS -D`), exactly as I-041's
+wrong-line control does:
 
-  * MOSAIC_IMEM_MUTANT_MASK_PC   the memory serves the fetch of a PC that is not
-    on a line front from the line front, so the machine executes a word that is
-    not the one at its own PC. The per-instruction comparison catches it because
-    the record's PC and the record's own bits disagree with the image.
+  * MOSAIC_IMEM_MUTANT_MASK_PC    the memory serves the fetch of a PC that is not
+    on a line front from the line front -- the PC masked at a boundary -- so the
+    machine executes a word that is not the one at its own PC;
+  * MOSAIC_IMEM_MUTANT_JALR_ODD   the memory serves the fetch of a JALR's target
+    from the uncleared (odd) address, the architectural consequence of a JALR
+    that does not clear bit 0. This has to be a harness defect: the one RTL
+    mutant for that defect, MOSAIC_BRANCH_TARGET_MUTANT_1, is *unobservable* in
+    the integrated core. mosaic_cluster recomputes the JALR target itself
+    (`br_target_eff = is_jalr ? {br_sum[63:1], 1'b0} : br_target`) and never reads
+    the branch-target unit's `target` output, so the mutant binary differs from
+    shipping while behaving identically (verified: identical RESULT line). The
+    report records that as a finding.
 
 Usage: run_pc_controls.py [--case pc.branch_and_fetch_visibility] [--only NAME]
 """
@@ -58,11 +64,23 @@ REPO_ROOT = run_unit.REPO_ROOT
 # injects, and the check that must catch it.
 MUTANTS = [
     (
-        "MOSAIC_BRANCH_TARGET_MUTANT_1",
-        "rtl",
-        "JALR forgets that bit 0 of its computed target is always zero, so the "
-        "machine resumes at an odd address",
-        "clears bit 0 of its computed target",
+        "MOSAIC_IMEM_MUTANT_MASK_PC",
+        "cpp",
+        "the harness's instruction memory answers a PC that is not on a line "
+        "front with the line front -- the PC masked at a boundary -- so the "
+        "machine executes a word that is not the one at its own PC",
+        "the event record carries the instruction's own bits",
+    ),
+    (
+        "MOSAIC_IMEM_MUTANT_JALR_ODD",
+        "cpp",
+        "the harness's instruction memory answers the fetch of a JALR's target "
+        "with the bytes the uncleared (odd) address names -- the architectural "
+        "consequence of a JALR that does not clear bit 0. It has to be a "
+        "harness defect: the one RTL mutant for that defect "
+        "(MOSAIC_BRANCH_TARGET_MUTANT_1) is unobservable in the integrated core, "
+        "because mosaic_cluster recomputes the JALR target itself",
+        "the event record carries the instruction's own bits",
     ),
     (
         "MOSAIC_CORE_MUTANT_FENCEI_NO_INVALIDATE",
@@ -79,14 +97,6 @@ MUTANTS = [
         "undecodable macro a wrong-path fetch left in the decode buffer is "
         "dispatched and the machine stops",
         "the machine never stops on a wrong-path fetch fault",
-    ),
-    (
-        "MOSAIC_IMEM_MUTANT_MASK_PC",
-        "cpp",
-        "the harness's instruction memory answers a PC that is not on a line "
-        "front with the line front -- the PC masked at a boundary -- so the "
-        "machine executes a word that is not the one at its own PC",
-        "the event record carries the instruction's own bits",
     ),
 ]
 
