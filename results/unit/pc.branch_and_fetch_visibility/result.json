@@ -1,16 +1,15 @@
 {
   "schema_version": 1,
   "case": "pc.branch_and_fetch_visibility",
-  "verdict": "FAIL",
-  "detail": "checks=94 runs=6 retires=85 line_straddles=2 page_straddles=1 wrongpath_faults=8 cycles=806 seed=1",
+  "verdict": "PASS",
+  "detail": "checks=89 runs=6 retires=85 line_straddles=2 page_straddles=1 wrongpath_faults=8 cycles=806 seed=1",
   "seed": 1,
   "max_cycles": 4000000,
-  "checks": 95,
-  "failures": 9,
+  "checks": 90,
+  "failures": 0,
   "image": "",
   "expect": "",
   "tool": "Verilator 5.052 2026-09-05",
-  "timestamp": "2026-10-02T04:04:34Z",
-  "first_mismatch": "",
-  "failed_checks": ["transfers: the retirement stream follows the reference: retire 3 at 0x0000000080000014 destination expected rd=8 we=0, got rd=0 we=0", "transfers: the retirement stream follows the reference: retire 4 at 0x0000000080000018 destination expected rd=8 we=0, got rd=0 we=0", "transfers: the retirement stream follows the reference: retire 5 at 0x000000008000001c destination expected rd=8 we=0, got rd=0 we=0", "transfers: the retirement stream equals the independent RV64IM reference, pc_before and pc_after instruction by instruction (15 lanes compared)", "pages: the retirement stream follows the reference: retire 2 at 0x0000000080000008 destination expected rd=29 we=0, got rd=0 we=0", "pages: the retirement stream follows the reference: retire 4 at 0x0000000080001008 destination expected rd=9 we=0, got rd=0 we=0", "pages: the retirement stream equals the independent RV64IM reference, pc_before and pc_after instruction by instruction (10 lanes compared)", "fetchfault: no macro is refused while the program runs: illegal=65 unsupported=65", "no contract violation"]
+  "timestamp": "2026-10-02T04:04:57Z",
+  "first_mismatch": ""
 }

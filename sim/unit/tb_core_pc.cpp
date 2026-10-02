@@ -1635,7 +1635,7 @@ int main(int argc, char** argv) {
       const RunOut got = RunOnce(&dut, geometry, &img, ref.recs.size(), true,
                                  mask_pc, label);
       CompareStream(&reporter, label, got, ref);
-      CheckStructure(&reporter, label, got, img, ref);
+      CheckStructure(&reporter, label, got, img, ref, /*expect_refusal=*/true);
 
       reporter.Check(got.stopped,
                      label + ": p0 stops at a correct-path instruction-access "
