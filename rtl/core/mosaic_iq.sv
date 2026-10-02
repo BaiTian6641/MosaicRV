@@ -294,6 +294,21 @@ module mosaic_iq #(
   input  logic [TAG_GEN_W-1:0]     wu_gen,
   input  logic [XLEN-1:0]          wu_val,
 
+  // ------------------------------------- an earlier value-visible wakeup (I-090)
+  // The cluster's local bypass (I-027) taps its own functional unit's result one
+  // cycle before the durable writeback broadcast reaches this queue, and offers
+  // it here. The rule is the durable port's exactly -- an exact (tag,
+  // generation) match against an operand that is *not* ready, an already-ready
+  // operand left alone, and a later broadcast of the same identity still the
+  // duplicate it already is -- so the durable path is untouched and a consumer
+  // woken from here reads the same value it would have read one cycle later.
+  // The port defaults inactive, so an instantiation that predates the bypass is
+  // bit-identical.
+  input  logic                     wu2_valid = 1'b0,
+  input  logic [TAG_W-1:0]         wu2_tag   = '0,
+  input  logic [TAG_GEN_W-1:0]     wu2_gen   = '0,
+  input  logic [XLEN-1:0]          wu2_val   = '0,
+
   // ------------------------------------------------------------------- grant
   output logic                     grant_valid,
   input  logic                     grant_ready,
@@ -354,7 +369,11 @@ module mosaic_iq #(
   output logic [31:0]              o_wu_matched,
   output logic [31:0]              o_wu_dup,
   output logic [31:0]              o_wu_stale,
-  output logic [31:0]              o_wu_miss
+  output logic [31:0]              o_wu_miss,
+  // Operands resolved by the second, earlier wakeup port (I-027 wired by
+  // I-090). It is a separate counter from `o_wu_matched` because it counts a
+  // different port: the durable broadcast's own counters keep their meaning.
+  output logic [31:0]              o_wu2_matched
 );
 
   // ------------------------------------------------------------------ guards
@@ -512,6 +531,7 @@ module mosaic_iq #(
   logic [31:0] wu_dup_q;
   logic [31:0] wu_stale_q;
   logic [31:0] wu_miss_q;
+  logic [31:0] wu2_matched_q;
 
   // The conservation counters are the registers themselves: there is exactly
   // one place a count can live, so a counter cannot be exported one value behind
@@ -524,6 +544,7 @@ module mosaic_iq #(
   assign o_wu_dup      = wu_dup_q;
   assign o_wu_stale    = wu_stale_q;
   assign o_wu_miss     = wu_miss_q;
+  assign o_wu2_matched = wu2_matched_q;
 
   // ----------------------------------------------------------------- insert
   // `ins_ready` looks at the registered occupancy and nothing else: no
@@ -568,6 +589,8 @@ module mosaic_iq #(
   // generation-mismatched one, so both are observable refusals.
   logic [DEPTH-1:0] wu_hit1;
   logic [DEPTH-1:0] wu_hit2;
+  logic [DEPTH-1:0] wu2_hit1;
+  logic [DEPTH-1:0] wu2_hit2;
   logic [DEPTH-1:0] wu_dup1;
   logic [DEPTH-1:0] wu_dup2;
   logic [DEPTH-1:0] wu_tag_seen;   // this tag on some live source, any gen
@@ -582,6 +605,10 @@ module mosaic_iq #(
                    (ent_s1_tag[i] == wu_tag);
       wu_hit2[i] = wu_valid && slot_valid[i] && !ent_s2_rdy[i] &&
                    (ent_s2_tag[i] == wu_tag);
+      wu2_hit1[i] = wu2_valid && slot_valid[i] && !ent_s1_rdy[i] &&
+                    (ent_s1_tag[i] == wu2_tag);
+      wu2_hit2[i] = wu2_valid && slot_valid[i] && !ent_s2_rdy[i] &&
+                    (ent_s2_tag[i] == wu2_tag);
       wu_dup1[i] = wu_valid && slot_valid[i] && ent_s1_rdy[i] &&
                    (ent_s1_tag[i] == wu_tag);
       wu_dup2[i] = wu_valid && slot_valid[i] && ent_s2_rdy[i] &&
@@ -602,6 +629,10 @@ module mosaic_iq #(
                        (ent_s1_tag[i] == wu_tag) && (ent_s1_gen[i] == wu_gen);
       wu_hit2[i]     = wu_valid && slot_valid[i] && !ent_s2_rdy[i] &&
                        (ent_s2_tag[i] == wu_tag) && (ent_s2_gen[i] == wu_gen);
+      wu2_hit1[i]    = wu2_valid && slot_valid[i] && !ent_s1_rdy[i] &&
+                       (ent_s1_tag[i] == wu2_tag) && (ent_s1_gen[i] == wu2_gen);
+      wu2_hit2[i]    = wu2_valid && slot_valid[i] && !ent_s2_rdy[i] &&
+                       (ent_s2_tag[i] == wu2_tag) && (ent_s2_gen[i] == wu2_gen);
       wu_dup1[i]     = wu_valid && slot_valid[i] && ent_s1_rdy[i] &&
                        (ent_s1_tag[i] == wu_tag) && (ent_s1_gen[i] == wu_gen);
       wu_dup2[i]     = wu_valid && slot_valid[i] && ent_s2_rdy[i] &&
@@ -616,6 +647,8 @@ module mosaic_iq #(
   // stale generation must not make a *newly inserted* entry ready either.
   logic ins_hit1;
   logic ins_hit2;
+  logic ins2_hit1;
+  logic ins2_hit2;
   logic ins_dup1;
   logic ins_dup2;
 
@@ -635,6 +668,16 @@ module mosaic_iq #(
                     (ins_src2_tag == wu_tag) && (ins_src2_gen == wu_gen);
 `endif
 
+  // The second port's same-cycle insert path (I-027 wired by I-090): a uop
+  // dispatched this cycle whose operand the local bypass publishes this cycle is
+  // ready in that cycle, exactly as for the durable port. It is unconditional
+  // because it is a different port from the one the NO_SAME_CYCLE_WAKEUP
+  // control disables.
+  assign ins2_hit1 = wu2_valid && ins_valid && !ins_src1_ready &&
+                     (ins_src1_tag == wu2_tag) && (ins_src1_gen == wu2_gen);
+  assign ins2_hit2 = wu2_valid && ins_valid && !ins_src2_ready &&
+                     (ins_src2_tag == wu2_tag) && (ins_src2_gen == wu2_gen);
+
   assign ins_dup1 = wu_valid && ins_valid && ins_src1_ready &&
                     (ins_src1_tag == wu_tag) && (ins_src1_gen == wu_gen);
   assign ins_dup2 = wu_valid && ins_valid && ins_src2_ready &&
@@ -645,8 +688,8 @@ module mosaic_iq #(
   // produced in the same cycle the uop is dispatched is ready in that cycle.
   logic ins_ready_now;
   assign ins_ready_now = ins_fire &&
-                         (ins_src1_ready || ins_hit1) &&
-                         (ins_src2_ready || ins_hit2);
+                         (ins_src1_ready || ins_hit1 || ins2_hit1) &&
+                         (ins_src2_ready || ins_hit2 || ins2_hit2);
 
   // Broadcast classification. Mutually exclusive and ordered, so a broadcast
   // that both advances one entry and duplicates another is counted once, as the
@@ -703,8 +746,8 @@ module mosaic_iq #(
   logic [DEPTH-1:0] entry_ready;
   always_comb begin
     for (int unsigned i = 0; i < DEPTH; i++) begin
-      entry_ready[i] = slot_valid[i] && (ent_s1_rdy[i] || wu_hit1[i]) &&
-                                       (ent_s2_rdy[i] || wu_hit2[i]);
+      entry_ready[i] = slot_valid[i] && (ent_s1_rdy[i] || wu_hit1[i] || wu2_hit1[i]) &&
+                                       (ent_s2_rdy[i] || wu_hit2[i] || wu2_hit2[i]);
     end
   end
 
@@ -944,16 +987,18 @@ module mosaic_iq #(
       grant_uop     = ins_uop;
       grant_meta    = ins_meta;
       grant_imm     = ins_imm;
-      grant_a       = ins_hit1 ? wu_val : ins_src1_val;
-      grant_b       = ins_hit2 ? wu_val : ins_src2_val;
+      grant_a       = ins_hit1 ? wu_val : (ins2_hit1 ? wu2_val : ins_src1_val);
+      grant_b       = ins_hit2 ? wu_val : (ins2_hit2 ? wu2_val : ins_src2_val);
       grant_dst_tag = ins_dst_tag;
       grant_dst_gen = ins_dst_gen;
     end else begin
       grant_uop     = ent_uop[grant_idx];
       grant_meta    = ent_meta[grant_meta_idx];
       grant_imm     = ent_imm[grant_idx];
-      grant_a       = wu_hit1[grant_idx] ? wu_val : ent_s1_val[grant_idx];
-      grant_b       = wu_hit2[grant_idx] ? wu_val : ent_s2_val[grant_idx];
+      grant_a       = wu_hit1[grant_idx] ? wu_val
+                      : (wu2_hit1[grant_idx] ? wu2_val : ent_s1_val[grant_idx]);
+      grant_b       = wu_hit2[grant_idx] ? wu_val
+                      : (wu2_hit2[grant_idx] ? wu2_val : ent_s2_val[grant_idx]);
       grant_dst_tag = ent_dst_tag[grant_idx];
       grant_dst_gen = ent_dst_gen[grant_idx];
     end
@@ -1037,6 +1082,7 @@ module mosaic_iq #(
       wu_dup_q      <= 32'd0;
       wu_stale_q    <= 32'd0;
       wu_miss_q     <= 32'd0;
+      wu2_matched_q <= 32'd0;
     end else begin
       for (int unsigned i = 0; i < DEPTH; i++) begin
         // The insert writes the whole entry; an existing entry only has its
@@ -1054,10 +1100,10 @@ module mosaic_iq #(
           ent_dst_gen[i] <= ins_dst_gen;
           // A broadcast aimed at the entry being inserted is applied to it, so
           // a value that arrives before the entry does is not lost.
-          ent_s1_val[i]  <= ins_hit1 ? wu_val : ins_src1_val;
-          ent_s2_val[i]  <= ins_hit2 ? wu_val : ins_src2_val;
-          ent_s1_rdy[i]  <= ins_src1_ready || ins_hit1;
-          ent_s2_rdy[i]  <= ins_src2_ready || ins_hit2;
+          ent_s1_val[i]  <= ins_hit1 ? wu_val : (ins2_hit1 ? wu2_val : ins_src1_val);
+          ent_s2_val[i]  <= ins_hit2 ? wu_val : (ins2_hit2 ? wu2_val : ins_src2_val);
+          ent_s1_rdy[i]  <= ins_src1_ready || ins_hit1 || ins2_hit1;
+          ent_s2_rdy[i]  <= ins_src2_ready || ins_hit2 || ins2_hit2;
         end else begin
           // A broadcast aimed at a resident entry. A hit is only ever raised
           // from not-ready, so the stored value of a satisfied operand cannot be
@@ -1065,9 +1111,15 @@ module mosaic_iq #(
           if (wu_hit1[i]) begin
             ent_s1_val[i] <= wu_val;
             ent_s1_rdy[i] <= 1'b1;
+          end else if (wu2_hit1[i]) begin
+            ent_s1_val[i] <= wu2_val;
+            ent_s1_rdy[i] <= 1'b1;
           end
           if (wu_hit2[i]) begin
             ent_s2_val[i] <= wu_val;
+            ent_s2_rdy[i] <= 1'b1;
+          end else if (wu2_hit2[i]) begin
+            ent_s2_val[i] <= wu2_val;
             ent_s2_rdy[i] <= 1'b1;
           end
         end
@@ -1119,6 +1171,13 @@ module mosaic_iq #(
       if (grant_taken) grant_total_q <= grant_total_q + 32'd1;
       if (kill_only_mask != {DEPTH{1'b0}}) begin
         kill_total_q <= kill_total_q + 32'(PopCount(kill_only_mask));
+      end
+      // The earlier port's own tally. It is separate from `wu_fire` so the
+      // durable broadcast's counters keep counting exactly the durable
+      // broadcast; this one counts the operands the local bypass resolved.
+      if (wu2_valid && !rst &&
+          ((|wu2_hit1) || (|wu2_hit2) || (ins_fire && (ins2_hit1 || ins2_hit2)))) begin
+        wu2_matched_q <= wu2_matched_q + 32'd1;
       end
       if (wu_fire) begin
         wu_total_q <= wu_total_q + 32'd1;

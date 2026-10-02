@@ -137,6 +137,17 @@ module mosaic_core (
     input  logic                        clk,
     input  logic                        rst,
 
+    // ------------------------------------------------- the fabric strategy
+    // I-090. Low is the fixed machine this core has always been: dispatch's
+    // alternating cluster affinity, rename's allocator without the I-032 bank
+    // preference, and no local bypass (I-027). High enables the fabric --
+    // dynamic steering (I-029), the bank preference fed by the routing
+    // decision, and the cluster bypass -- so a case can run one program
+    // through both strategies and compare. It is a *runtime* input, not a
+    // parameter, and it is one toggle because the comparison must be on equal
+    // resources: the same core, the same program, the same seed, one bit.
+    input  logic                        fab_dyn_i,
+
     // ------------------------------------------------- instruction memory port
     output logic                        imem_req_valid,
     output mosaic_uop_pkg::mem_req_t    imem_req,
@@ -476,7 +487,32 @@ module mosaic_core (
     // the operand no wakeup will ever arrive for.
     output logic [CORE_ARCH_N*CORE_MAP_W-1:0] o_dbg_spec_map,
     output logic [CORE_PRF_N-1:0]       o_dbg_gen_valid,
-    output logic [CORE_PRF_N-1:0]       o_dbg_wb_done
+    output logic [CORE_PRF_N-1:0]       o_dbg_wb_done,
+
+    // ------------------------------------------------------- fabric evidence
+    // I-090. What the dynamic steering decided and where macros went, straight
+    // from mosaic_dispatch's `o_fab_*` ports, plus the bank the I-032
+    // preference was driven with. All zero and static while `fab_dyn_i` is
+    // low. Nothing in the core reads them.
+    output logic [4*32-1:0]             o_fab_unit_issues,
+    output logic [6*32-1:0]             o_fab_reason_ctr,
+    output logic [31:0]                 o_fab_grant_ctr,
+    output logic [31:0]                 o_fab_stall_ctr,
+    output logic [31:0]                 o_fab_reject_ctr,
+    output logic [31:0]                 o_fab_units,
+    output logic [31:0]                 o_fab_classes,
+    output logic [31:0]                 o_fab_age_w,
+    output logic [31:0]                 o_fab_occ_w,
+    output logic [31:0]                 o_fab_unit_w,
+    output logic [1:0]                  o_fab_alloc_bank,
+    // The cluster bypass (I-027), wired by I-090: what each cluster's slot did.
+    // `o_fab_bp_hit_ctr` counts operands the slot resolved before the durable
+    // wakeup, `o_fab_bp_captured_ctr` the producers it tapped, and
+    // `o_fab_bp_flush_ctr` the redirects that cleared it.
+    output logic [31:0]                 o_fab_bp_captured_ctr,
+    output logic [31:0]                 o_fab_bp_hit_ctr,
+    output logic [31:0]                 o_fab_bp_unauth_ctr,
+    output logic [31:0]                 o_fab_bp_flush_ctr
 );
 
   // ==========================================================================
@@ -678,7 +714,36 @@ module mosaic_core (
   logic                      c0_redir_taken, c1_redir_taken;
   logic [CORE_RET_N-1:0]     redir_ack_vec;
   logic                      c0_flush_busy, c1_flush_busy;
+  // I-090: the two clusters' bypass evidence, summed into the core's own
+  // fabric outputs below.
+  logic [31:0]               c0_wu2_matched, c1_wu2_matched;
+  logic [31:0]               c0_bp_captured, c1_bp_captured;
+  logic [31:0]               c0_bp_unauth, c1_bp_unauth;
+  logic [31:0]               c0_bp_flush, c1_bp_flush;
   logic [31:0]               c0_count, c1_count;
+  // I-090: the strategy the fabric actually sees. `MOSAIC_FAB_MUTANT_NO_DELTA`
+  // is the measurement control: it holds this low whatever the input says, so
+  // the "dynamic" run of the case is the fixed machine and the case's
+  // measurable-difference check has nothing to measure and must fail. It is the
+  // control for the comparison itself, not for the policy.
+  logic                      fab_dyn_use;
+`ifdef MOSAIC_FAB_MUTANT_NO_DELTA
+  assign fab_dyn_use = 1'b0;
+`else
+  assign fab_dyn_use = fab_dyn_i;
+`endif
+  // I-090: the cluster dispatch's allocation-time affinity pinned the oldest
+  // buffered macro to; the I-032 bank preference is driven from it while the
+  // fabric is on.
+  logic                      fab_alloc_cluster;
+  logic [1:0]                fab_alloc_bank;
+  assign fab_alloc_bank   = {1'b0, fab_alloc_cluster};
+  assign o_fab_alloc_bank = fab_alloc_bank;
+  // The bypass evidence, summed over the two clusters (I-090).
+  assign o_fab_bp_captured_ctr = c0_bp_captured + c1_bp_captured;
+  assign o_fab_bp_hit_ctr      = c0_wu2_matched + c1_wu2_matched;
+  assign o_fab_bp_unauth_ctr   = c0_bp_unauth + c1_bp_unauth;
+  assign o_fab_bp_flush_ctr    = c0_bp_flush + c1_bp_flush;
   logic                      c0_grant_valid, c1_grant_valid;
   logic [CORE_UOP_ID_W-1:0]  c0_grant_uop, c1_grant_uop;
   logic [31:0]               c0_alu_ctr, c1_alu_ctr, c0_br_ctr, c1_br_ctr, md_ctr;
@@ -2040,11 +2105,15 @@ module mosaic_core (
       .alloc2_old_valid (),
       .alloc2_old_tag   (),
       .alloc2_old_gen   (),
-      // The bank preference is off in the p0 core: it is an optional allocation
-      // policy (I-032) with no consumer here yet, and off is bit-identical to the
-      // pre-I-032 allocator.
-      .alloc_bias_en    (1'b0),
-      .alloc_bias_bank  (mosaic_cfg_pkg::MOSAIC_PRF_BANK_W'(0)),
+      // I-032, wired by I-090: while the fabric is on, the destination is
+      // biased to the home bank of the cluster the macro was routed to
+      // (producer locality -- cluster c's home bank is bank c). It is a
+      // *preference with a fallback*, proven by CASE=rename.bank_bias_exhaustion
+      // to change only which legal free tag is chosen and never whether an
+      // allocation succeeds. With the fabric off it is the pre-I-032 allocator,
+      // bit for bit.
+      .alloc_bias_en    (fab_dyn_use),
+      .alloc_bias_bank  ({1'b0, fab_alloc_cluster}),
       .rs1_addr         (ren_rs1_addr),
       .rs2_addr         (ren_rs2_addr),
       .rs1_is_fp        (ren_rs1_is_fp),
@@ -2340,7 +2409,12 @@ module mosaic_core (
       .o_md_ctr        (md_ctr),
       .o_refuse_ctr    (),
       .o_purge_ctr     (),
-      .o_wu_miss_ctr   ()
+      .o_wu_miss_ctr   (),
+      .fab_dyn         (fab_dyn_use),
+      .o_wu2_matched   (c0_wu2_matched),
+      .o_bp_captured_ctr(c0_bp_captured),
+      .o_bp_unauth_ctr (c0_bp_unauth),
+      .o_bp_flush_ctr  (c0_bp_flush)
   );
 
   mosaic_cluster u_c1 (
@@ -2421,7 +2495,12 @@ module mosaic_core (
       .o_md_ctr        (),
       .o_refuse_ctr    (),
       .o_purge_ctr     (),
-      .o_wu_miss_ctr   ()
+      .o_wu_miss_ctr   (),
+      .fab_dyn         (fab_dyn_i),
+      .o_wu2_matched   (c1_wu2_matched),
+      .o_bp_captured_ctr(c1_bp_captured),
+      .o_bp_unauth_ctr (c1_bp_unauth),
+      .o_bp_flush_ctr  (c1_bp_flush)
   );
 
   // ==========================================================================
@@ -2714,6 +2793,7 @@ module mosaic_core (
   mosaic_dispatch u_disp (
       .clk              (clk),
       .rst              (rst),
+      .fab_dyn          (fab_dyn_use),
       .dec_valid        ({1'b0, dbuf_valid[0]}),
       .dec_ctl0         (dbuf_ctl[0]),
       .dec_ctl1         (dbuf_ctl[1]),
@@ -2833,6 +2913,9 @@ module mosaic_core (
       .c0_ins_src2_val  (c0_s2_val),
       .c0_ins_dst_tag   (c0_dst_tag),
       .c0_ins_dst_gen   (c0_dst_gen),
+      .c0_count_i       (c0_count),
+      .c1_count_i       (c1_count),
+      .o_target_cluster (fab_alloc_cluster),
       .c1_ins_valid     (c1_ins_valid),
       .c1_ins_ready     (c1_ins_ready),
       .c1_ins_uop       (c1_ins_uop),
@@ -2872,7 +2955,19 @@ module mosaic_core (
       .o_rob_full_ctr   (),
       .o_queue_stall_ctr(),
       .o_queue_cnt      (),
-      .o_queue_full     ()
+      .o_queue_full     (),
+
+      // -------------------------------------------------- fabric observation
+      .o_fab_unit_issues(o_fab_unit_issues),
+      .o_fab_reason_ctr (o_fab_reason_ctr),
+      .o_fab_grant_ctr  (o_fab_grant_ctr),
+      .o_fab_stall_ctr  (o_fab_stall_ctr),
+      .o_fab_reject_ctr (o_fab_reject_ctr),
+      .o_fab_units      (o_fab_units),
+      .o_fab_classes    (o_fab_classes),
+      .o_fab_age_w      (o_fab_age_w),
+      .o_fab_occ_w      (o_fab_occ_w),
+      .o_fab_unit_w     (o_fab_unit_w)
   );
 
   assign core_stop = disp_unsupported;

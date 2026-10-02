@@ -208,6 +208,20 @@ module mosaic_cluster_bypass #(
     output logic [RGEN_W-1:0]  slot_rob_gen,
     output logic [UOP_W-1:0]   slot_uop_index,
 
+    // ------------------------------------- the early value-visible wakeup (I-090)
+    // The source this unit offers a consumer one cycle before the durable
+    // broadcast: the registered slot in the shipping build (the producer's own
+    // result under the EARLY_TAP control). It is the same selection the match
+    // above reads, exported so an issue queue that resolves operands from
+    // *wakeups* rather than from per-candidate reads can take the bypass as a
+    // second wakeup port instead of fabricating a candidate for the ports on
+    // the consumer side above. Those ports remain the module's own contract and
+    // are exercised by its registered case.
+    output logic               bp_src_valid,
+    output logic [TAG_W-1:0]   bp_src_tag,
+    output logic [PGEN_W-1:0]  bp_src_gen,
+    output logic [XLEN-1:0]    bp_src_value,
+
     // ---------------------------------------------------------- observation
     output logic               o_slot_captured,
     output logic               o_unauth,
@@ -345,6 +359,12 @@ module mosaic_cluster_bypass #(
   assign slot_rob_index = slot_idx_q;
   assign slot_rob_gen   = slot_rgen_q;
   assign slot_uop_index = slot_uop_q;
+
+  // The early wakeup a consumer takes (I-090): the same source the match reads.
+  assign bp_src_valid = bsrc_valid;
+  assign bp_src_tag   = bsrc_tag;
+  assign bp_src_gen   = bsrc_gen;
+  assign bp_src_value = bsrc_val;
 
   // ---------------------------------------------------------- accountants
   //

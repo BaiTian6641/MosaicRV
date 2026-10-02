@@ -94,6 +94,13 @@ module mosaic_cluster_bypass_tb (
     output logic [31:0] slot_rob_gen_o,
     output logic [31:0] slot_uop_index_o,
 
+    // The early value-visible wakeup source (I-090): the same tap the core's
+    // issue queue takes as its second wakeup port.
+    output logic        bp_src_valid_o,
+    output logic [31:0] bp_src_tag_o,
+    output logic [31:0] bp_src_gen_o,
+    output logic [63:0] bp_src_value_o,
+
     output logic        o_slot_captured_o,
     output logic        o_unauth_o,
     output logic [31:0] o_hit_ctr_o,
@@ -175,6 +182,11 @@ module mosaic_cluster_bypass_tb (
       .slot_rob_index (slot_rob_index_n),
       .slot_rob_gen   (slot_rob_gen_n),
       .slot_uop_index (slot_uop_index_n),
+
+      .bp_src_valid   (bp_src_valid_o),
+      .bp_src_tag     (bp_src_tag_o),
+      .bp_src_gen     (bp_src_gen_o),
+      .bp_src_value   (bp_src_value_o),
 
       .o_slot_captured(o_slot_captured_o),
       .o_unauth       (o_unauth_o),

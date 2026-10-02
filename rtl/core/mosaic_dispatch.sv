@@ -156,6 +156,21 @@ module mosaic_dispatch (
     input  logic                        clk,
     input  logic                        rst,
 
+    // ------------------------------------------------- the fabric strategy
+    // I-090. Low is the fixed baseline this core has always used: the first
+    // macro of a fetched pair goes to cluster 0, the second to cluster 1, and
+    // MUL/DIV and FP macros go to cluster 0 because that queue's grant is the
+    // one routed to the shared units. High replaces that alternating toggle
+    // with the I-029 locality/least-loaded/age policy (`mosaic_steering`),
+    // which sees the same four routable targets (the two clusters and the two
+    // shared units) and the same capacity matrix the core states below.
+    //
+    // The two strategies are the *same machine with one decision changed*,
+    // which is what makes their comparison an experiment rather than two
+    // designs. The strategy is a runtime input and not a parameter so a case
+    // can run the same program, with the same seed, through both.
+    input  logic                        fab_dyn,
+
     // ------------------------------------------------------ decoded macros in
     // Lane 0 is the older macro. Lane 1 is offered in the same cycle but is
     // allocated on a later cycle, because the ROB has one allocation port.
@@ -384,6 +399,21 @@ module mosaic_dispatch (
     output logic [DSP_TAG_W-1:0]        c1_ins_dst_tag,
     output logic [DSP_IGEN_W-1:0]       c1_ins_dst_gen,
 
+    // ------------------------------------------------ the fabric's own state
+    // I-090: the two clusters' issue-queue occupancy, which the dynamic policy
+    // reads as the least-loaded key. They come straight from the clusters'
+    // `o_count` ports; dispatch does not compute a second occupancy of its
+    // own, because a policy that guesses the machine's load is not measuring
+    // anything.
+    input  logic [31:0]                 c0_count_i,
+    input  logic [31:0]                 c1_count_i,
+    // The cluster the allocating macro was pinned to, exposed so the core can
+    // drive rename's I-032 bank preference from the same decision (producer
+    // locality: the destination is biased to the producing cluster's home
+    // bank). It is the *allocation-time* affinity; the insert-time dynamic
+    // choice is the steering's and is not visible here.
+    output logic                        o_target_cluster,
+
     // ------------------------------------------------------------ control
     input  logic                        recovering,
     input  logic                        barrier,
@@ -422,7 +452,26 @@ module mosaic_dispatch (
     output logic [31:0]                 o_rob_full_ctr,
     output logic [31:0]                 o_queue_stall_ctr,
     output logic [DSP_CNT_W-1:0]        o_queue_cnt,
-    output logic                        o_queue_full
+    output logic                        o_queue_full,
+
+    // --------------------------------------------------- fabric observation
+    // I-090: what the steering decided, so the case reports the decisions
+    // rather than inferring them. `o_fab_unit_issues` is one 32-bit counter per
+    // routable target (0/1 the two clusters, 2 the shared MUL/DIV+FP route, 3
+    // the LSU), `o_fab_reason_ctr` is one per `grant_reason` value (0 none,
+    // 1 fixed affinity, 2 capability alone, 3 locality, 4 load, 5 age), and the
+    // three counters are the offers granted, stalled and rejected. They are
+    // zero and static while `fab_dyn` is low.
+    output logic [4*32-1:0]             o_fab_unit_issues,
+    output logic [6*32-1:0]             o_fab_reason_ctr,
+    output logic [31:0]                 o_fab_grant_ctr,
+    output logic [31:0]                 o_fab_stall_ctr,
+    output logic [31:0]                 o_fab_reject_ctr,
+    output logic [31:0]                 o_fab_units,
+    output logic [31:0]                 o_fab_classes,
+    output logic [31:0]                 o_fab_age_w,
+    output logic [31:0]                 o_fab_occ_w,
+    output logic [31:0]                 o_fab_unit_w
 );
 /* verilator lint_on UNUSEDSIGNAL */
 
@@ -434,6 +483,12 @@ module mosaic_dispatch (
   // --------------------------------------------------------------------------
   typedef struct packed {
     logic [DSP_UOP_ID_W-1:0] id;
+    // The macro's program-order age, taken from the allocation counter when the
+    // entry is created. It is the only age the dynamic steering's tie-break
+    // compares (I-029), and it is meaningful only while the stream between two
+    // live ages is below half its modulus (2^16), which every program this
+    // machine runs is. A ring index would not do: it is not monotonic.
+    logic [15:0]             age;
     mosaic_uop_pkg::uop_meta_t meta;
     logic [DSP_XLEN-1:0]     imm;
     logic                    cluster;
@@ -527,6 +582,49 @@ module mosaic_dispatch (
   logic [31:0] alloc_ctr, ins_ctr, unsup_ctr, illegal_ctr, exhausted_ctr, squashed_ctr;
   logic [31:0] stall_ctr, src_read_ctr, src_conflict_ctr, src_bad_ctr;
   logic [31:0] rob_full_ctr, queue_stall_ctr;
+
+  // --------------------------------------------------------------------------
+  // The fabric: the dynamic steering policy (I-090 wiring of I-029)
+  // --------------------------------------------------------------------------
+  // The router is one macro wide, exactly like the dispatch queue it sits in:
+  // the head is the macro about to leave for a cluster or the memory path, and
+  // the offer is made only in a cycle the macro could actually go (its operands
+  // are resolved), so a grant is one macro routed and not one cycle the head
+  // waited. The four units and the capability matrix are the machine's own: the
+  // two clusters execute the integer ALU and branch classes, the shared MUL/DIV
+  // and FP unit is reached through cluster 0's queue (so its "room" is that
+  // queue's), and the LSU is reached through the memory insert port.
+  logic             fab_steer_grant;
+  /* verilator lint_off UNUSEDSIGNAL */
+  // The module's per-cycle stall/reject flags. Their *counts* are the evidence
+  // (`o_fab_stall_ctr`/`o_fab_reject_ctr` below); these two are the same facts
+  // one cycle wide and nothing in the router needs them again, but the port
+  // must be driven.
+  logic             fab_steer_stall;
+  logic             fab_steer_reject;
+  /* verilator lint_on UNUSEDSIGNAL */
+  logic [1:0]       fab_steer_unit;
+  logic [2:0]       fab_steer_reason;
+  logic [4*32-1:0]  fab_unit_issues_steer;
+  logic [31:0]      fab_steer_grant_ctr;
+  logic [31:0]      fab_steer_stall_ctr;
+  logic [31:0]      fab_steer_reject_ctr;
+  logic [31:0]      fab_units, fab_classes, fab_age_w, fab_occ_w, fab_unit_w;
+
+  logic [3:0]       fab_unit_room;
+  logic [3:0][3:0]  fab_unit_occ;
+  logic [3:0][6:0]  fab_unit_cap;      // one 7-bit class mask per unit
+  logic [3:0]       fab_unit_locality;
+  logic [3:0]       fab_unit_shared;
+  logic [6:0][1:0]  fab_fixed_unit;    // one unit per class
+
+  logic             head_steerable;
+  logic [15:0]      head_age;
+  logic             fab_cluster_eff;   // the cluster the head goes to this cycle
+  logic             fab_cluster_ok;    // the dynamic grant covers a cluster
+  logic             fab_mem_ok;        // the dynamic grant covers the LSU
+  logic [5:0][31:0] fab_reason_hist;
+
 
   // --------------------------------------------------------------------------
   // Classification and the unsupported refusal
@@ -761,6 +859,156 @@ module mosaic_dispatch (
     target_cluster = (dec_ctl0.is_muldiv || dec_ctl0.is_fp) ? 1'b0 : aff_toggle;
   end
 
+  assign o_target_cluster = target_cluster;
+
+  // --------------------------------------------------------------------------
+  // The dynamic route (I-029, wired by I-090)
+  // --------------------------------------------------------------------------
+  // The steering answers "which of the machine's routable targets takes this
+  // macro". Its eligibility, capability and capacity inputs are the core's real
+  // ones, and its answer is used only while `fab_dyn` is high: with it low the
+  // policy is idle (`req_valid` is low) and the fixed affinity above is what
+  // routes, so the baseline is bit-for-bit the pre-I-090 machine.
+  // A memory macro is not offered to the router. The router replaces the
+  // *cluster* affinity, and the LSU is not a cluster a macro can be routed to:
+  // it is the single path every load and store takes. Offering it would also
+  // close a combinational loop, because the core's memory-insert readiness
+  // (`disp_mem_ready`) is a function of the offer it gates -- a store that
+  // faults is ready by a different arm. The unit is still in the capability
+  // matrix below, so the router's model of the machine is complete; it is just
+  // never asked.
+  assign head_steerable = head_valid && !head.sys && !head_is_mem;
+  assign head_age       = head.age;
+
+  always_comb begin
+    // Room: "this unit can take one more macro this cycle". The shared units
+    // are reached through cluster 0's queue, so their room is that queue's.
+    fab_unit_room[0] = c0_ins_ready;
+    fab_unit_room[1] = c1_ins_ready;
+    fab_unit_room[2] = c0_ins_ready;
+    // Constant: the LSU is never a candidate (see `head_steerable`), and a
+    // constant here is what keeps the memory path out of the router's
+    // combinational cone.
+    fab_unit_room[3] = 1'b1;
+  end
+
+  always_comb begin
+    // Occupancy: the least-loaded key. Slots 0 and 1 are the real issue queues;
+    // 2 mirrors cluster 0 (its queue is what holds a MUL/DIV/FP macro) and 3 is
+    // the LSU, which has no queue occupancy dispatch can see and is the only
+    // unit eligible for its classes, so the key cannot discriminate there.
+    fab_unit_occ[0] = c0_count_i[3:0];
+    fab_unit_occ[1] = c1_count_i[3:0];
+    fab_unit_occ[2] = c0_count_i[3:0];
+    fab_unit_occ[3] = 4'd0;
+  end
+
+  always_comb begin
+    // The capability matrix, stated once: bit c is set iff the unit may execute
+    // class c. Class order is mosaic_uop_pkg::uop_class_e (ALU 0, BRANCH 1,
+    // MULDIV 2, LOAD 3, STORE 4, SYSTEM 5, FP 6). No unit implements SYSTEM --
+    // it is resolved at the architectural boundary, not in a functional unit --
+    // and dispatch never offers one to the steering, so the reject path is
+    // unreachable from this integration by construction.
+    fab_unit_cap[0] = 7'b0000011;   // cluster 0: ALU, BRANCH
+    fab_unit_cap[1] = 7'b0000011;   // cluster 1: ALU, BRANCH
+    fab_unit_cap[2] = 7'b1000100;   // shared: MULDIV, FP
+    fab_unit_cap[3] = 7'b0011000;   // LSU: LOAD, STORE
+    fab_unit_locality = 4'b0010;    // unit 1 belongs to cluster 1
+    fab_unit_shared   = 4'b1100;    // units 2 and 3 serve both localities
+    // The fixed table is the module's own baseline; it is not used by this
+    // integration (the fixed baseline here is the affinity toggle above), but
+    // the port must be driven, and pinning each class to the unit that
+    // implements it is the only meaningful table.
+    fab_fixed_unit[0] = 2'd0;       // ALU
+    fab_fixed_unit[1] = 2'd0;       // BRANCH
+    fab_fixed_unit[2] = 2'd2;       // MULDIV
+    fab_fixed_unit[3] = 2'd3;       // LOAD
+    fab_fixed_unit[4] = 2'd3;       // STORE
+    fab_fixed_unit[5] = 2'd0;       // SYSTEM (never offered)
+    fab_fixed_unit[6] = 2'd2;       // FP
+  end
+
+  mosaic_steering #(
+      .ST_N_UNITS   (4),
+      // The class space is uop_class_e's full width (7); the module's default
+      // of 6 predates the FP class (I-050) and would alias FP onto SYSTEM.
+      .ST_N_CLASSES (7),
+      .ST_AGE_W     (16),
+      .ST_OCC_W     (4)
+  ) u_steer (
+      .clk            (clk),
+      .rst            (rst),
+      // The strategy is the module's: it is only consulted when this core's
+      // strategy is dynamic, and then it is dynamic.
+      .mode_dyn       (fab_dyn),
+      .req_valid      (fab_dyn && head_steerable && !recovering),
+      .req_class      (head.meta.class_),
+      // Dispatch does not carry the producing cluster of a macro's operands --
+      // rename hands back tags and generations, not provenance -- so no
+      // locality preference is expressed here and the locality key
+      // discriminates nothing in this integration. That is reported, not
+      // hidden: it is the difference between the policy as written and the
+      // policy as wired.
+      .req_locality   (1'b0),
+      .req_locality_en(1'b0),
+      .req_age        (head_age),
+      .unit_room      (fab_unit_room),
+      .unit_occ       (fab_unit_occ),
+      .unit_cap       (fab_unit_cap),
+      .unit_locality  (fab_unit_locality),
+      .unit_shared    (fab_unit_shared),
+      .fixed_unit     (fab_fixed_unit),
+      .grant_valid    (fab_steer_grant),
+      .grant_unit     (fab_steer_unit),
+      .grant_reason   (fab_steer_reason),
+      .stall          (fab_steer_stall),
+      .reject         (fab_steer_reject),
+      .o_unit_issues  (fab_unit_issues_steer),
+      .o_grant_ctr    (fab_steer_grant_ctr),
+      .o_stall_ctr    (fab_steer_stall_ctr),
+      .o_reject_ctr   (fab_steer_reject_ctr),
+      .o_units        (fab_units),
+      .o_classes      (fab_classes),
+      .o_age_w        (fab_age_w),
+      .o_unit_w       (fab_unit_w),
+      .o_occ_w        (fab_occ_w)
+  );
+
+  assign o_fab_unit_issues = fab_unit_issues_steer;
+  assign o_fab_reason_ctr  = fab_reason_hist;
+  assign o_fab_grant_ctr   = fab_steer_grant_ctr;
+  assign o_fab_stall_ctr   = fab_steer_stall_ctr;
+  assign o_fab_reject_ctr  = fab_steer_reject_ctr;
+  assign o_fab_units       = fab_units;
+  assign o_fab_classes     = fab_classes;
+  assign o_fab_age_w       = fab_age_w;
+  assign o_fab_occ_w       = fab_occ_w;
+  assign o_fab_unit_w      = fab_unit_w;
+
+  // The insert decision. `fab_cluster_ok` is the dynamic grant's "this macro
+  // may go to a cluster this cycle", `fab_mem_ok` its "it may go to the LSU";
+  // both are high unconditionally in the fixed baseline, where the steering is
+  // not consulted at all.
+  always_comb begin
+    fab_cluster_eff = fab_dyn ? (fab_steer_unit == 2'd1) : head.cluster;
+    fab_cluster_ok  = !fab_dyn || (fab_steer_grant && (fab_steer_unit != 2'd3));
+    // The memory path is never routed by the fabric; it keeps the fixed single
+    // path it has always had.
+    fab_mem_ok      = 1'b1;
+  end
+
+  // The reason histogram, so the case reports which key decided rather than
+  // only where the macro went. Observational only.
+  always_ff @(posedge clk) begin
+    if (rst) begin
+      fab_reason_hist <= {6{32'd0}};
+    end else if (fab_dyn && fab_steer_grant && !head_is_mem && !head_is_sys) begin
+      fab_reason_hist[fab_steer_reason[2:0]] <=
+          fab_reason_hist[fab_steer_reason[2:0]] + 32'd1;
+    end
+  end
+
   // --------------------------------------------------------------------------
   // Queue next state
   // --------------------------------------------------------------------------
@@ -806,6 +1054,11 @@ module mosaic_dispatch (
       end
       if (alloc_ok) begin
         q_mem[push_at].id       <= {rob_alloc_index, rob_alloc_gen, {DSP_UOP_W{1'b0}}};
+        // The macro's program-order age: the allocation counter *before* this
+        // allocation's increment, so it is strictly increasing in program order
+        // and two macros in the machine never share it. The steering's age
+        // tie-break compares these; see the field's note.
+        q_mem[push_at].age      <= alloc_ctr[15:0];
         q_mem[push_at].meta     <= new_meta;
         q_mem[push_at].imm      <= dec_ctl0.imm;
         q_mem[push_at].cluster  <= target_cluster;
@@ -988,7 +1241,7 @@ module mosaic_dispatch (
   end
 
   always_comb begin
-    ins_ready_sel = head.cluster ? c1_ins_ready : c0_ins_ready;
+    ins_ready_sel = fab_cluster_eff ? c1_ins_ready : c0_ins_ready;
   end
 
   // A memory macro does not enter a cluster: it is allocated into the load or
@@ -1020,9 +1273,9 @@ module mosaic_dispatch (
   assign s2_val_ready = head.s2_x0 || head.s2_const || (rq_written[1] && s2_value_ok);
 
   assign ins_ok_cluster = head_valid && !recovering && !head_is_mem && !head_is_sys &&
-                          s1_value_ok && s2_value_ok && ins_ready_sel;
+                          s1_value_ok && s2_value_ok && fab_cluster_ok && ins_ready_sel;
   assign mem_ins_offer  = head_valid && !recovering && head_is_mem &&
-                          s1_val_ready && s2_val_ready;
+                          s1_val_ready && s2_val_ready && fab_mem_ok;
   assign mem_ins_valid  = mem_ins_offer;
   // F/D (I-050): an FP load is a memory macro whose destination is an
   // f-register; `head.meta.fp_dst_fp` is set only for those (an FP arithmetic
@@ -1071,7 +1324,7 @@ module mosaic_dispatch (
   end
 
   always_comb begin
-    c0_ins_valid     = ins_ok_cluster && !head.cluster;
+    c0_ins_valid     = ins_ok_cluster && !fab_cluster_eff;
     c0_ins_uop       = ins_uop_v;
     c0_ins_meta      = ins_meta_v;
     c0_ins_imm       = ins_imm_v;
@@ -1088,7 +1341,7 @@ module mosaic_dispatch (
     c0_ins_dst_tag   = ins_dst_tag_v;
     c0_ins_dst_gen   = ins_dst_gen_v;
 
-    c1_ins_valid     = ins_ok_cluster && head.cluster;
+    c1_ins_valid     = ins_ok_cluster && fab_cluster_eff;
     c1_ins_uop       = ins_uop_v;
     c1_ins_meta      = ins_meta_v;
     c1_ins_imm       = ins_imm_v;

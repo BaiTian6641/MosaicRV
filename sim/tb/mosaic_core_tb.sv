@@ -50,6 +50,12 @@ module mosaic_core_tb (
     input  logic        clk,
     input  logic        rst,
 
+    // I-090: the fabric strategy. Low is the fixed machine every case has always
+    // built; high enables dynamic steering and the cluster bypass. It defaults
+    // to 0 in every driver that predates the fabric, so their behaviour is
+    // unchanged.
+    input  logic        fab_dyn_i,
+
     // ------------------------------------------------- instruction memory port
     input  logic        imem_req_ready_i,
     input  logic        imem_rsp_valid_i,
@@ -341,6 +347,20 @@ module mosaic_core_tb (
     output logic [31:0] o_dbg_alloc_ctr_o,
     output logic [31:0] o_dbg_ins_ctr_o,
 
+    // ---------------------------------------------------------- fabric (I-090)
+    output logic [4*32-1:0] o_fab_unit_issues_o,
+    output logic [6*32-1:0] o_fab_reason_ctr_o,
+    output logic [31:0]     o_fab_grant_ctr_o,
+    output logic [31:0]     o_fab_stall_ctr_o,
+    output logic [31:0]     o_fab_reject_ctr_o,
+    output logic [31:0]     o_fab_units_o,
+    output logic [31:0]     o_fab_classes_o,
+    output logic [1:0]      o_fab_alloc_bank_o,
+    output logic [31:0]     o_fab_bp_captured_o,
+    output logic [31:0]     o_fab_bp_hit_o,
+    output logic [31:0]     o_fab_bp_unauth_o,
+    output logic [31:0]     o_fab_bp_flush_o,
+
     // ------------------------------------------- readiness state (diagnosis)
     // What rename believes, so a case that stops making progress names the
     // stalled mapping instead of only that nothing retired.
@@ -526,6 +546,7 @@ module mosaic_core_tb (
   mosaic_core u_core (
       .clk             (clk),
       .rst             (rst),
+      .fab_dyn_i       (fab_dyn_i),
       .irq_soft_i      (irq_soft_i),
       .irq_timer_i     (irq_timer_i),
       .irq_ext_i       (irq_ext_i),
@@ -743,7 +764,23 @@ module mosaic_core_tb (
       .o_dbg_ins_ctr    (o_dbg_ins_ctr_o),
       .o_dbg_spec_map   (o_dbg_spec_map_o),
       .o_dbg_gen_valid  (o_dbg_gen_valid_o),
-      .o_dbg_wb_done    (o_dbg_wb_done_o)
+      .o_dbg_wb_done    (o_dbg_wb_done_o),
+      // -------------------------------------------------------- fabric (I-090)
+      .o_fab_unit_issues(o_fab_unit_issues_o),
+      .o_fab_reason_ctr (o_fab_reason_ctr_o),
+      .o_fab_grant_ctr  (o_fab_grant_ctr_o),
+      .o_fab_stall_ctr  (o_fab_stall_ctr_o),
+      .o_fab_reject_ctr (o_fab_reject_ctr_o),
+      .o_fab_units      (o_fab_units_o),
+      .o_fab_classes    (o_fab_classes_o),
+      .o_fab_age_w      (),
+      .o_fab_occ_w      (),
+      .o_fab_unit_w     (),
+      .o_fab_alloc_bank (o_fab_alloc_bank_o),
+      .o_fab_bp_captured_ctr(o_fab_bp_captured_o),
+      .o_fab_bp_hit_ctr (o_fab_bp_hit_o),
+      .o_fab_bp_unauth_ctr(o_fab_bp_unauth_o),
+      .o_fab_bp_flush_ctr(o_fab_bp_flush_o)
   );
 
   // ------------------------------------------- standalone redirect arbiter DUT

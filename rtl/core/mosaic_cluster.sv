@@ -163,7 +163,20 @@ module mosaic_cluster (
     output logic [31:0]                 o_md_ctr,
     output logic [31:0]                 o_refuse_ctr,
     output logic [31:0]                 o_purge_ctr,
-    output logic [31:0]                 o_wu_miss_ctr
+    output logic [31:0]                 o_wu_miss_ctr,
+
+    // ---------------------------------------------------------- fabric (I-090)
+    // The strategy this cluster's local bypass (I-027) is armed with, and what
+    // it did. `o_wu2_matched` is the issue queue's own tally of operands the
+    // earlier wakeup resolved; the other three are the bypass unit's, with
+    // `o_bp_captured_ctr` counting the producers it tapped (the unit has no
+    // captured counter of its own because its registered case reads the
+    // per-cycle flag instead).
+    input  logic                        fab_dyn,
+    output logic [31:0]                 o_wu2_matched,
+    output logic [31:0]                 o_bp_captured_ctr,
+    output logic [31:0]                 o_bp_unauth_ctr,
+    output logic [31:0]                 o_bp_flush_ctr
 );
 
   // -------------------------------------------------------------------- IQ
@@ -528,6 +541,132 @@ module mosaic_cluster (
     end
   end
 
+  // ==========================================================================
+  // The local bypass (I-027), wired by I-090
+  // ==========================================================================
+  // A consumer of an ALU or branch result does not have to wait for the durable
+  // writeback broadcast. The tap is the functional unit's result *before* the
+  // cluster's result register, registered once in the bypass slot; the slot's
+  // identity and value are offered to the issue queue as a second, earlier
+  // value-visible wakeup (see mosaic_iq's `wu2_*`). Every rule the unit states
+  // is kept: the producer must write a value and not be a squashed macro (a
+  // redirect clears the slot before it can forward), and the durable path is
+  // untouched -- the later broadcast for the same identity is still delivered
+  // and is still the duplicate the issue queue already ignores.
+  //
+  // Armed by the fabric strategy. With it low the slot is emptied and the wakeup
+  // port is idle, so the cluster is the pre-I-090 machine.
+  logic                    bp_p_valid;
+  logic                    bp_src_valid;
+  logic [CL_TAG_W-1:0]     bp_src_tag;
+  // The bypass's generation width is the PRF identity's (8), one bit wider
+  // than the issue queue's integer namespace (7); the extra bit is always 0.
+  /* verilator lint_off UNUSEDSIGNAL */
+  logic [mosaic_id_pkg::MOSAIC_ID_W_PRF_GEN-1:0] bp_src_gen;
+  /* verilator lint_on UNUSEDSIGNAL */
+  logic [CL_XLEN-1:0]      bp_src_value;
+  logic                    bp_wu2_valid;
+  logic                    bp_captured;
+  logic [31:0]             bp_captured_ctr;
+  /* verilator lint_off UNUSEDSIGNAL */
+  // The unit's per-candidate operand-resolution ports. This core's issue queue
+  // resolves operands from *wakeups*, so the cluster takes the bypass as the
+  // earlier wakeup above and does not present a candidate to the per-candidate
+  // ports; they remain the module's own contract and CASE=bypass.local_raw_chain
+  // is their evidence. The port must be driven, so these are declared and left.
+  logic                    bp_s1_hit, bp_s2_hit, bp_fb_s1_sel, bp_fb_s2_sel;
+  logic                    bp_s1_rdy, bp_s2_rdy, bp_s1_src, bp_s2_src;
+  logic [CL_XLEN-1:0]      bp_s1_val, bp_s2_val;
+  logic                    bp_slot_valid;
+  logic [CL_TAG_W-1:0]     bp_slot_tag;
+  logic [mosaic_id_pkg::MOSAIC_ID_W_PRF_GEN-1:0] bp_slot_gen;
+  logic [CL_IDX_W-1:0]     bp_slot_rob_index;
+  logic [CL_RGEN_W-1:0]    bp_slot_rob_gen;
+  logic [CL_UOP_W-1:0]     bp_slot_uop_index;
+  logic                    bp_unauth;
+  logic [31:0]             bp_hit_ctr, bp_miss_ctr, bp_id_reject_ctr;
+  logic [1:0]              bp_s1_src_n, bp_s2_src_n;
+  /* verilator lint_on UNUSEDSIGNAL */
+
+  // The tap: a value-writing ALU or branch macro, in the cycle its functional
+  // unit computed it, and before the result register. A branch that writes no
+  // link and any uop with no destination contribute nothing.
+  assign bp_p_valid = grant_fire &&
+                      (iq_grant_dst_tag != {CL_TAG_W{1'b0}}) &&
+                      (is_alu || (is_branch && iq_grant_meta.writes_link));
+
+  mosaic_cluster_bypass u_bypass (
+      .clk            (clk),
+      .rst            (rst),
+      .bp_en          (fab_dyn),
+      .p_valid        (bp_p_valid),
+      // Every grant this cluster issues belongs to an allocated, unsquashed
+      // macro: the issue queue removes a killed macro, and a redirect purges
+      // the queue before a stale macro can be granted. The unit's identity
+      // discipline (a withdrawn grant is never forwarded) is therefore not
+      // narrowed here, and its own case drives the refusal directly.
+      .p_authorised   (1'b1),
+      .p_tag          (iq_grant_dst_tag),
+      .p_gen          (mosaic_id_pkg::MOSAIC_ID_W_PRF_GEN'(iq_grant_dst_gen)),
+      .p_rob_index    (iq_grant_uop[CL_UOP_ID_W-1 -: CL_IDX_W]),
+      .p_rob_gen      (iq_grant_uop[CL_IGEN_W + CL_UOP_W - 1 -: CL_RGEN_W]),
+      .p_uop_index    (iq_grant_uop[CL_UOP_W-1:0]),
+      .p_value        (is_branch ? br_link : alu_result),
+      .flush          (flush),
+      // The durable broadcast, so the unit's own fallback rule is the same one
+      // the queue already takes.
+      .w_valid        (wu_valid),
+      .w_tag          (wu_tag),
+      .w_gen          (mosaic_id_pkg::MOSAIC_ID_W_PRF_GEN'(wu_gen)),
+      .w_val          (wu_val),
+      // No candidate is presented (see the note above).
+      .c_valid        (1'b0),
+      .c_s1_tag       ({CL_TAG_W{1'b0}}),
+      .c_s1_gen       (mosaic_id_pkg::MOSAIC_ID_W_PRF_GEN'(1'b0)),
+      .c_s1_need      (1'b0),
+      .c_s2_tag       ({CL_TAG_W{1'b0}}),
+      .c_s2_gen       (mosaic_id_pkg::MOSAIC_ID_W_PRF_GEN'(1'b0)),
+      .c_s2_need      (1'b0),
+      .bp_s1_hit      (bp_s1_hit),
+      .bp_s2_hit      (bp_s2_hit),
+      .fb_s1_sel      (bp_fb_s1_sel),
+      .fb_s2_sel      (bp_fb_s2_sel),
+      .s1_rdy         (bp_s1_rdy),
+      .s2_rdy         (bp_s2_rdy),
+      .s1_val         (bp_s1_val),
+      .s2_val         (bp_s2_val),
+      .s1_src         (bp_s1_src_n),
+      .s2_src         (bp_s2_src_n),
+      .slot_valid     (bp_slot_valid),
+      .slot_tag       (bp_slot_tag),
+      .slot_gen       (bp_slot_gen),
+      .slot_rob_index (bp_slot_rob_index),
+      .slot_rob_gen   (bp_slot_rob_gen),
+      .slot_uop_index (bp_slot_uop_index),
+      .bp_src_valid   (bp_src_valid),
+      .bp_src_tag     (bp_src_tag),
+      .bp_src_gen     (bp_src_gen),
+      .bp_src_value   (bp_src_value),
+      .o_slot_captured(bp_captured),
+      .o_unauth       (bp_unauth),
+      .o_hit_ctr      (bp_hit_ctr),
+      .o_miss_ctr     (bp_miss_ctr),
+      .o_unauth_ctr   (o_bp_unauth_ctr),
+      .o_id_reject_ctr(bp_id_reject_ctr),
+      .o_flush_ctr    (o_bp_flush_ctr)
+  );
+
+  assign bp_wu2_valid = fab_dyn && bp_src_valid;
+
+  always_ff @(posedge clk) begin
+    if (rst) begin
+      bp_captured_ctr <= 32'd0;
+    end else if (bp_captured) begin
+      bp_captured_ctr <= bp_captured_ctr + 32'd1;
+    end
+  end
+  assign o_bp_captured_ctr = bp_captured_ctr;
+
   // ------------------------------------------------------------------- IQ
   // mosaic_iq declares its geometry as `localparam` entries in its parameter
   // port list, so it cannot be overridden and is not: the generated package is
@@ -556,6 +695,14 @@ module mosaic_cluster (
       .wu_tag          (wu_tag),
       .wu_gen          (wu_gen),
       .wu_val          (wu_val),
+
+      // The local bypass's earlier wakeup (I-090). Armed by the strategy; the
+      // queue applies it with the durable port's own rules, so a later broadcast
+      // for the same identity is still the duplicate it already ignores.
+      .wu2_valid       (bp_wu2_valid),
+      .wu2_tag         (bp_src_tag),
+      .wu2_gen         (bp_src_gen[CL_IGEN_W-1:0]),
+      .wu2_val         (bp_src_value),
 
       .grant_valid     (iq_grant_valid),
       .grant_ready     (iq_grant_ready),
@@ -609,7 +756,8 @@ module mosaic_cluster (
       .o_wu_matched    (iq_unused_wu_matched),
       .o_wu_dup        (iq_unused_wu_dup),
       .o_wu_stale      (iq_unused_wu_stale),
-      .o_wu_miss       (iq_wu_miss)
+      .o_wu_miss       (iq_wu_miss),
+      .o_wu2_matched   (o_wu2_matched)
   );
 
   assign o_count       = 32'(iq_count);

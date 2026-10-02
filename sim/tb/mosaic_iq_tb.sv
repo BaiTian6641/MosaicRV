@@ -360,6 +360,10 @@ module mosaic_iq_tb (
 
     logic [31:0] ins_total_s, grant_total_s, kill_total_s;
     logic [31:0] wu_total_s, wu_matched_s, wu_dup_s, wu_stale_s, wu_miss_s;
+    // The second (earlier) wakeup port's tally (I-090). The port itself is
+    // left at its inactive default by this wrapper, so the case exercises the
+    // durable path exactly as before.
+    logic [31:0] wu2_matched_s;
 
     if (c == 0) begin : g_c0
       assign ins_valid_s    = c0_ins_valid;
@@ -648,7 +652,8 @@ module mosaic_iq_tb (
       .o_wu_matched  (wu_matched_s),
       .o_wu_dup      (wu_dup_s),
       .o_wu_stale    (wu_stale_s),
-      .o_wu_miss     (wu_miss_s)
+      .o_wu_miss     (wu_miss_s),
+      .o_wu2_matched (wu2_matched_s)
     );
   end
 
