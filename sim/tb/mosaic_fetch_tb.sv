@@ -135,6 +135,10 @@ module mosaic_fetch_tb #(
     // output register). Brought out so the pin is not left dangling; the
     // redirect/recovery cases read it through mosaic_core.
     output logic [127:0] o_dbg_state,
+    // I-041: the accepted response's liveness and its instruction's length, so the
+    // requester can build the sequential PC (`answered PC + own length`).
+    output logic        o_rsp_live,
+    output logic [2:0]  o_rsp_len,
 
     // The elaborated geometry, read back from the DUT instance.
     output logic [31:0] o_fetch_outstanding,
@@ -222,7 +226,9 @@ module mosaic_fetch_tb #(
       .deny_count          (deny_count),
       .cancel_count        (cancel_count),
       .fetch_pc            (fetch_pc),
-      .o_dbg_state         (o_dbg_state)
+      .o_dbg_state         (o_dbg_state),
+      .o_rsp_live          (o_rsp_live),
+      .o_rsp_len           (o_rsp_len)
   );
 
   // Read back from the instance rather than from a second `include of the

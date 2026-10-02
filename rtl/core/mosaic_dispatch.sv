@@ -164,6 +164,12 @@ module mosaic_dispatch (
     input  mosaic_pkg::decode_ctl_t     dec_ctl1,
     input  logic [DSP_XLEN-1:0]         dec_pc0,
     input  logic [DSP_XLEN-1:0]         dec_pc1,
+    // I-041: the decoded instruction's own length in bytes (2 or 4) and its own
+    // bits. The length is needed for the link value a compressed jump writes and
+    // for the event record; the bits are needed for the event record. Both come
+    // from the fetch unit through the decode buffer and neither is re-derived.
+    input  logic [2:0]                  dec_len0,
+    input  logic [31:0]                 dec_bits0,
 
     // ----------------------------------------------------- rename allocation
     output logic                        alloc_req,
@@ -218,6 +224,11 @@ module mosaic_dispatch (
     // "This macro is a store", so the ROB's commit path can name the store it
     // is retiring and the store queue can authorise exactly that entry.
     output logic                        desc_wr_is_store,
+    // I-041: the retire record's instruction identity -- the instruction's own
+    // length and its own bits -- written with the rest of the descriptor so the
+    // event stream can report what retired rather than only where.
+    output logic [2:0]                  desc_wr_len,
+    output logic [31:0]                 desc_wr_insn,
 
     // ------------------------------------------- ready table query (arbiter)
     output logic [1:0]                  rq_valid,
@@ -258,6 +269,13 @@ module mosaic_dispatch (
     output logic [DSP_XLEN-1:0]         mem_ins_imm,
     output logic [2:0]                  mem_ins_size,
     output logic                        mem_ins_signed,
+    // A extension (I-039): the macro is an atomic read-modify-write. The fields
+    // travel with the memory insert bus exactly as the rest of the memory
+    // metadata does, so the integration does not re-decode the instruction.
+    output logic                        mem_ins_is_amo,
+    output mosaic_pkg::amo_op_e         mem_ins_amo_op,
+    output logic                        mem_ins_amo_aq,
+    output logic                        mem_ins_amo_rl,
     output logic [DSP_XLEN-1:0]         mem_ins_data,
     output logic [DSP_TAG_W-1:0]        mem_ins_dst_tag,
     output logic [DSP_IGEN_W-1:0]       mem_ins_dst_gen,
@@ -345,6 +363,12 @@ module mosaic_dispatch (
     // ------------------------------------------------------------ control
     input  logic                        recovering,
     input  logic                        barrier,
+    // An unresolved control transfer is in flight. Everything younger than it
+    // may still be squashed by its redirect, so a macro this stage cannot
+    // decode is *held* rather than refused while this is high; see the refusal
+    // rule below. (This is narrower than `barrier`, which also covers a WFI
+    // halt: a halt is not a transfer and its fall-through is architectural.)
+    input  logic                        branch_in_flight,
     // "Software has installed a trap vector" (mtvec is no longer at its reset
     // value). Until it has, an instruction whose whole architectural effect is
     // "take a trap" is refused rather than taken: the p0 reset value of mtvec is
@@ -429,6 +453,7 @@ module mosaic_dispatch (
   logic                 queue_has_room;
   logic                 head_fire;
   logic                 l0_unsupported;
+  logic                 l0_refused;
   logic                 l0_illegal;
   logic                 alloc_now;
   logic                 alloc_ok;
@@ -475,7 +500,22 @@ module mosaic_dispatch (
   // Classification and the unsupported refusal
   // --------------------------------------------------------------------------
   assign stop = stop_q;
-  assign o_take = alloc_ok || l0_unsupported;
+  // "This macro is refused and the machine stops at it." A macro the machine has
+  // no path for is refused **only when it is the architectural next
+  // instruction**. While a control transfer is still in flight, its redirect may
+  // squash everything younger than it -- and it does: the decode buffer is
+  // purged with the front end -- so a macro behind that transfer is held here
+  // (neither taken, nor allocated, nor stopped) until the transfer has been
+  // accounted for. Both of the other choices are wrong. Taking it would be the
+  // hole this refusal exists to close: an undecodable instruction leaving the
+  // machine silently. Stopping on it would halt the machine on an instruction
+  // that never executes architecturally, which is exactly what a speculatively
+  // fetched reserved encoding is -- the fetch of the padding behind an
+  // unconditional jump delivers one, and the jump's own redirect is what has to
+  // discard it (CASE=core.mem_program, and the fetch.redirect_late_response
+  // contract for late responses behind a transfer).
+  assign l0_refused = l0_unsupported && !branch_in_flight;
+  assign o_take = alloc_ok || l0_refused;
 
   logic l0_trap_unarmed;
 
@@ -544,6 +584,10 @@ module mosaic_dispatch (
   // Recorded for *every* allocated macro (not gated on `alloc_ok`) so a stale
   // slot cannot keep an old "is a store" bit that the retire path would read.
   assign desc_wr_is_store = (dec_ctl0.mem_kind == mosaic_pkg::MEM_STORE);
+  // The instruction's own length and bits, from the front end, recorded with the
+  // descriptor the retire event reads them back from.
+  assign desc_wr_len  = dec_len0;
+  assign desc_wr_insn = dec_bits0;
 
   // --------------------------------------------------------------------------
   // The meta
@@ -554,6 +598,14 @@ module mosaic_dispatch (
       new_meta.class_ = mosaic_uop_pkg::UOP_MULDIV;
     end else if (dec_ctl0.mem_kind == mosaic_pkg::MEM_LOAD) begin
       new_meta.class_ = mosaic_uop_pkg::UOP_LOAD;
+    end else if (dec_ctl0.mem_kind == mosaic_pkg::MEM_AMO) begin
+      // An AMO is issued through the load queue: it returns a value to a
+      // destination register before retirement and, sitting at the queue head,
+      // it blocks a younger load to the same address from overtaking it. It
+      // must NOT be a store class: a store class completes at allocation and
+      // drains after retirement, which would write memory before the atomic
+      // read was even performed.
+      new_meta.class_ = mosaic_uop_pkg::UOP_LOAD;
     end else if (dec_ctl0.mem_kind == mosaic_pkg::MEM_STORE) begin
       new_meta.class_ = mosaic_uop_pkg::UOP_STORE;
     end else if (dec_ctl0.is_branch || dec_ctl0.is_jal || dec_ctl0.is_jalr) begin
@@ -562,6 +614,7 @@ module mosaic_dispatch (
       new_meta.class_ = mosaic_uop_pkg::UOP_SYSTEM;
     end
     new_meta.pc          = dec_pc0;
+    new_meta.insn_len    = dec_len0;
     new_meta.alu_op      = dec_ctl0.alu_op;
     new_meta.md_op       = dec_ctl0.md_op;
     new_meta.md_w        = dec_ctl0.md_w;
@@ -571,6 +624,10 @@ module mosaic_dispatch (
     new_meta.writes_link = dec_ctl0.writes_link;
     new_meta.mem_size    = dec_ctl0.mem_size;
     new_meta.mem_signed  = dec_ctl0.mem_signed;
+    new_meta.is_amo      = (dec_ctl0.mem_kind == mosaic_pkg::MEM_AMO);
+    new_meta.amo_op      = dec_ctl0.amo_op;
+    new_meta.amo_aq      = dec_ctl0.amo_aq;
+    new_meta.amo_rl      = dec_ctl0.amo_rl;
     new_meta.is_fence    = dec_ctl0.is_miscmem && !dec_ctl0.is_fence_i;
     new_meta.is_fence_i  = dec_ctl0.is_fence_i;
   end
@@ -980,6 +1037,10 @@ module mosaic_dispatch (
     mem_ins_imm      = head.imm;
     mem_ins_size     = head.meta.mem_size;
     mem_ins_signed   = head.meta.mem_signed;
+    mem_ins_is_amo   = head.meta.is_amo;
+    mem_ins_amo_op   = head.meta.amo_op;
+    mem_ins_amo_aq   = head.meta.amo_aq;
+    mem_ins_amo_rl   = head.meta.amo_rl;
     mem_ins_data     = head.s2_x0 ? {DSP_XLEN{1'b0}}
                        : (head.s2_const ? head.s2_cval : s2_val_sel);
     // A store writes no register, so its destination is x0 by construction
@@ -1058,11 +1119,13 @@ module mosaic_dispatch (
     end else begin
       if (alloc_ok) alloc_ctr <= alloc_ctr + 32'd1;
       if (head_fire) ins_ctr <= ins_ctr + 32'd1;
-      if (l0_unsupported) begin
+      if (l0_refused) begin
         unsup_ctr <= unsup_ctr + 32'd1;
         stop_q    <= 1'b1;
       end
-      if (l0_illegal) illegal_ctr <= illegal_ctr + 32'd1;
+      // Counted where the refusal happens, not every cycle the macro waits at
+      // the head: a held macro is not yet a refusal.
+      if (l0_illegal && !branch_in_flight) illegal_ctr <= illegal_ctr + 32'd1;
       if (alloc_now && alloc_exhausted) exhausted_ctr <= exhausted_ctr + 32'd1;
       if (alloc_now && alloc_squashed)  squashed_ctr  <= squashed_ctr + 32'd1;
       if (alloc_now && alloc_accepted && rob_alloc_refused)

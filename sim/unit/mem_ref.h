@@ -506,6 +506,110 @@ RefResult RunReference(const Image& img, uint64_t start, mosaic::MemoryModel* me
         reg_we = true;
         break;
       }
+      case 0x2Fu: {  // AMO (A extension, I-039)
+        // An atomic read-modify-write, modelled from the ISA text: read the
+        // field, apply the operation, write it back, and return the *old* value.
+        // The operation's signedness is a property of the encoding (MIN/MAX
+        // signed, MINU/MAXU unsigned), and AMO*.W operates on 32 bits and signs
+        // its result into rd -- both are the boundaries the case drives.
+        const uint64_t addr = regs[rs1];
+        unsigned size = 0;
+        switch (f3) {
+          case 0x2u: size = 4; break;   // AMO*.W
+          case 0x3u: size = 8; break;   // AMO*.D
+          default: supported = false; break;
+        }
+        if (!supported) break;
+        const uint32_t f5 = (w >> 27) & 0x1Fu;
+        int op = -1;
+        switch (f5) {
+          case 0x00u: op = 0; break;   // amoadd
+          case 0x01u: op = 1; break;   // amoswap
+          case 0x04u: op = 2; break;   // amoxor
+          case 0x0Cu: op = 3; break;   // amoand
+          case 0x08u: op = 4; break;   // amoor
+          case 0x10u: op = 5; break;   // amomin
+          case 0x14u: op = 6; break;   // amomax
+          case 0x18u: op = 7; break;   // amominu
+          case 0x1Cu: op = 8; break;   // amomaxu
+          default: supported = false; break;  // lr, sc, reserved
+        }
+        if (!supported) break;
+        if (addr % size != 0) {
+          out.stop_pc = pc;
+          out.stop_word = w;
+          out.stop_reason = "misaligned AMO";
+          out.stopped = true;
+          return out;
+        }
+        uint64_t old_raw = 0;
+        if (mem->Read(addr, size, &old_raw) != mosaic::AccessStatus::kOk) {
+          out.stop_pc = pc;
+          out.stop_word = w;
+          out.stop_reason = "AMO access fault";
+          out.stopped = true;
+          return out;
+        }
+        const uint64_t operand = regs[rs2];
+        uint64_t result = 0;
+        if (size == 4) {
+          const uint32_t a32 = static_cast<uint32_t>(old_raw);
+          const uint32_t b32 = static_cast<uint32_t>(operand);
+          uint32_t r32 = 0;
+          switch (op) {
+            case 0: r32 = a32 + b32; break;
+            case 1: r32 = b32; break;
+            case 2: r32 = a32 ^ b32; break;
+            case 3: r32 = a32 & b32; break;
+            case 4: r32 = a32 | b32; break;
+            case 5:
+              r32 = (static_cast<int32_t>(a32) < static_cast<int32_t>(b32)) ? a32 : b32;
+              break;
+            case 6:
+              r32 = (static_cast<int32_t>(a32) > static_cast<int32_t>(b32)) ? a32 : b32;
+              break;
+            case 7: r32 = (a32 < b32) ? a32 : b32; break;
+            default: r32 = (a32 > b32) ? a32 : b32; break;
+          }
+          result = static_cast<uint64_t>(r32);
+        } else {
+          switch (op) {
+            case 0: result = old_raw + operand; break;
+            case 1: result = operand; break;
+            case 2: result = old_raw ^ operand; break;
+            case 3: result = old_raw & operand; break;
+            case 4: result = old_raw | operand; break;
+            case 5:
+              result = (static_cast<int64_t>(old_raw) < static_cast<int64_t>(operand))
+                           ? old_raw : operand;
+              break;
+            case 6:
+              result = (static_cast<int64_t>(old_raw) > static_cast<int64_t>(operand))
+                           ? old_raw : operand;
+              break;
+            case 7: result = (old_raw < operand) ? old_raw : operand; break;
+            default: result = (old_raw > operand) ? old_raw : operand; break;
+          }
+        }
+        if (mem->Write(addr, size, result) != mosaic::AccessStatus::kOk) {
+          out.stop_pc = pc;
+          out.stop_word = w;
+          out.stop_reason = "AMO access fault";
+          out.stopped = true;
+          return out;
+        }
+        // rd gets the old value, sign-extended into 64 bits for AMO*.W.
+        if (size == 4) {
+          value = static_cast<uint64_t>(static_cast<int64_t>(
+              static_cast<int32_t>(static_cast<uint32_t>(old_raw))));
+        } else {
+          value = old_raw;
+        }
+        reg_we = true;
+        rec.is_load = true;
+        out.loads++;
+        break;
+      }
       default:
         supported = false;
         break;

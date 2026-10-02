@@ -158,11 +158,29 @@ module mosaic_lsu_endpoint (
   localparam logic [63:0] EXC_STORE_MISALIGNED = mosaic_pkg::EXC_STORE_MISALIGNED;
   localparam logic [63:0] EXC_STORE_ACCESS     = mosaic_pkg::EXC_STORE_ACCESS;
 
-  typedef enum logic [1:0] {
-    ST_IDLE = 2'd0,
-    ST_REQ  = 2'd1,
-    ST_WAIT = 2'd2,
-    ST_DONE = 2'd3
+  //   IDLE --accept--> REQ --mem ready--> WAIT --mem response--> DONE
+  //     |                                                         |
+  //     |                    (atomic read-modify-write)           |
+  //     +-----------------------> AMO_W --mem ready--> AMO_WAIT --+
+  //
+  // An ordinary load or store is the three-state path the module always had. An
+  // **atomic read-modify-write** (I-039) adds the two `AMO_W`/`AMO_WAIT`
+  // states: the read beat returns in WAIT, its doubleword is latched, the new
+  // field is computed by `mosaic_amo_alu` and presented as the write beat, and
+  // the write's acknowledgement completes the transaction. The whole sequence
+  // is one indivisible operation: the endpoint is not in ST_IDLE between the
+  // two beats, so it accepts no other request and offers the memory port to
+  // nothing else -- the shared serialization point the card asks for. Under
+  // `MOSAIC_AMO_MUTANT_SPLIT` the endpoint *does* return to IDLE between the
+  // beats, which is exactly the "decomposition that loses atomicity" the case
+  // must catch.
+  typedef enum logic [2:0] {
+    ST_IDLE     = 3'd0,
+    ST_REQ      = 3'd1,
+    ST_WAIT     = 3'd2,
+    ST_AMO_W    = 3'd3,   // offering the atomic write beat
+    ST_AMO_WAIT = 3'd4,   // waiting for its acknowledgement
+    ST_DONE     = 3'd5
   } state_e;
 
   state_e state_q;
@@ -183,10 +201,36 @@ module mosaic_lsu_endpoint (
     logic                    is_signed;
     logic [XLEN-1:0]         store_data;
     logic                    dev;
+    // A extension (I-039): an atomic read-modify-write. `store_data` is the
+    // operand and `amo_op` names the operation. The read and the write are two
+    // *beats of one transaction*: the endpoint owns the operation across both
+    // and is not in ST_IDLE between them, so no other request is accepted and no
+    // other access can interleave. `amo` travels with both beats so the memory
+    // system -- and the case -- can see that they belong to one atomic
+    // operation.
+    logic                    is_amo;
+    mosaic_pkg::amo_op_e     amo_op;
+    logic                    aq;
+    logic                    rl;
   } txn_t;
 
   txn_t            req_q;
   logic [XLEN-1:0] addr_q;
+
+  // The aligned doubleword the atomic read beat returned. Latched between the
+  // read and the write so the new field can be computed from it and the *old*
+  // value can still be reported to the consumer (a load takes its value from
+  // the response the memory has just presented; an AMO's response comes one
+  // beat later, so the value has to survive).
+  logic [XLEN-1:0] amo_old_q;
+
+  // `MOSAIC_AMO_MUTANT_SPLIT` only: the deferred write beat. The mutation
+  // releases the endpoint to ST_IDLE after the read and issues the write from a
+  // later, independent cycle, so the memory port is free in between -- the
+  // "load+store decomposition" that loses atomicity.
+`ifdef MOSAIC_AMO_MUTANT_SPLIT
+  logic            amo_pending_q;
+`endif
 
   // The response being held for the consumer.
   mosaic_uop_pkg::lsu_rsp_t rsp_q;
@@ -228,8 +272,15 @@ module mosaic_lsu_endpoint (
   // A request is taken only from IDLE: one transaction at a time, so the
   // acceptance order *is* the memory order.
   logic accept_c;
-  assign accept_c    = req_valid_i && (state_q == ST_IDLE);
+`ifdef MOSAIC_AMO_MUTANT_SPLIT
+  // The endpoint holds the port free but refuses the *next real* request until
+  // the deferred write has gone, so the only thing that can use the window is
+  // the competing agent the case models.
+  assign req_ready_o = (state_q == ST_IDLE) && !amo_pending_q;
+`else
   assign req_ready_o = (state_q == ST_IDLE);
+`endif
+  assign accept_c    = req_valid_i && req_ready_o;
 
   // ---------------------------------------------------- downstream request
   // Offered in ST_REQ and only then. The payload is the latched transaction, so
@@ -245,24 +296,81 @@ module mosaic_lsu_endpoint (
   assign shifted_store_c = req_q.store_data;
 `endif
 
-  assign mem_req_valid_o = (state_q == ST_REQ);
-  assign mem_req_o.we    = req_q.we;
-  assign mem_req_o.addr  = addr_q;
-  assign mem_req_o.size  = req_q.size;
-  assign mem_req_o.wstrb = mosaic_uop_pkg::expected_wstrb(req_q.size, addr_q[2:0]);
-  assign mem_req_o.wdata = shifted_store_c;
+  // The read-modify-write datapath. It is fed the doubleword the read beat
+  // returned and the operand, and produces the doubleword to write back. It is
+  // stable in ST_AMO_W (both inputs are registered), so the write beat's payload
+  // cannot change while the memory is not ready.
+  logic [XLEN-1:0] amo_new_c;
 
-  // The memory response is taken in ST_WAIT. Taking it in the same cycle it is
-  // shown is what keeps the transaction to one round trip.
-  assign mem_rsp_ready_o = (state_q == ST_WAIT);
+  mosaic_amo_alu u_amo_alu (
+      .op_i      (req_q.amo_op),
+      .size_i    (req_q.size),
+      .lane_i    (addr_q[2:0]),
+      .old_win_i (amo_old_q),
+      .operand_i (req_q.store_data),
+      .new_win_o (amo_new_c)
+  );
+
+  // The read beat is offered in ST_REQ, the atomic write beat in ST_AMO_W.
+  // Nothing else is offered from any other state, so the two beats of one AMO
+  // are adjacent on the port with no other access between them.
+  assign mem_req_valid_o = (state_q == ST_REQ) || (state_q == ST_AMO_W);
+
+  // `ST_AMO_W` is always a write; `ST_REQ` is whatever the transaction is.
+  logic amo_write_c;
+  assign amo_write_c = (state_q == ST_AMO_W);
+
+  always_comb begin
+    // The write beat's payload is the doubleword the datapath produced, laid
+    // out by lane (the datapath already shifted the field into place). An
+    // ordinary store keeps its own payload; only the atomic write uses the
+    // datapath's output.
+    mem_req_o.wdata = amo_write_c ? amo_new_c : shifted_store_c;
+    mem_req_o.we    = amo_write_c ? 1'b1 : req_q.we;
+    mem_req_o.addr  = addr_q;
+    mem_req_o.size  = req_q.size;
+    mem_req_o.wstrb = mosaic_uop_pkg::expected_wstrb(req_q.size, addr_q[2:0]);
+    // The atomic attribute travels with *both* beats, so the memory system --
+    // and the case -- can attribute them to one atomic operation.
+`ifdef MOSAIC_AMO_MUTANT_SPLIT
+    mem_req_o.amo    = 1'b0;
+    mem_req_o.amo_op = mosaic_pkg::AMO_ADD;
+    mem_req_o.aq     = 1'b0;
+    mem_req_o.rl     = 1'b0;
+`elsif MOSAIC_AMO_MUTANT_IGNORE_AQR
+    // NEGATIVE CONTROL: the operation is carried but the ordering bits are
+    // dropped, so aq/rl are treated as hints. The case requires every atomic
+    // transaction to carry the instruction's aq/rl.
+    mem_req_o.amo    = req_q.is_amo;
+    mem_req_o.amo_op = req_q.amo_op;
+    mem_req_o.aq     = 1'b0;
+    mem_req_o.rl     = 1'b0;
+`else
+    mem_req_o.amo    = req_q.is_amo;
+    mem_req_o.amo_op = req_q.amo_op;
+    mem_req_o.aq     = req_q.aq;
+    mem_req_o.rl     = req_q.rl;
+`endif
+  end
+
+  // The memory response is taken in the read-wait and the write-ack states.
+  assign mem_rsp_ready_o = (state_q == ST_WAIT) || (state_q == ST_AMO_WAIT);
 
   // ------------------------------------------------------- value extraction
   // The load's architectural value: the addressed byte lanes, sign- or
-  // zero-extended. `mem_rsp_rdata` carries the lane-aligned doubleword.
+  // zero-extended. `mem_rsp_rdata` carries the lane-aligned doubleword. For an
+  // AMO the response is the *old* value, and it is built one beat later than the
+  // read that fetched it, so it comes from the latched doubleword.
   logic [XLEN-1:0] lane_shifted_c;
   logic [63:0]     extracted_c;
 
-  assign lane_shifted_c = mem_rsp_i.rdata >> {addr_q[2:0], 3'b000};
+  // The window the value comes from: the latched one in the atomic write-ack
+  // state (the read is one beat behind there), the presented one everywhere else
+  // -- including the read beat's own cycle, which is where a decomposed AMO
+  // builds its response and where the still-latched `amo_old_q` would be a beat
+  // stale.
+  assign lane_shifted_c = ((state_q == ST_AMO_WAIT) ? amo_old_q : mem_rsp_i.rdata)
+                          >> {addr_q[2:0], 3'b000};
 
 `ifndef MOSAIC_LSU_MUTANT_NO_SIGN_EXTEND
   always_comb begin
@@ -328,6 +436,10 @@ module mosaic_lsu_endpoint (
       // rtl/common/mosaic_ram.sv documents for storage in general.
       addr_q             <= 64'd0;
       rsp_valid_q        <= 1'b0;
+      amo_old_q          <= 64'd0;
+`ifdef MOSAIC_AMO_MUTANT_SPLIT
+      amo_pending_q      <= 1'b0;
+`endif
       load_ctr_q         <= 32'd0;
       store_ctr_q        <= 32'd0;
       txn_ctr_q          <= 32'd0;
@@ -347,13 +459,30 @@ module mosaic_lsu_endpoint (
 
       case (state_q)
         ST_IDLE: begin
+`ifdef MOSAIC_AMO_MUTANT_SPLIT
+          // NEGATIVE CONTROL: the deferred second half of the decomposition.
+          // `amo_pending_q` is set after the read beat and the endpoint is back
+          // in ST_IDLE, presenting nothing and holding no busy -- one whole
+          // cycle in which the memory port is free. The case's competing agent
+          // writes in that window, and the write that follows overwrites it with
+          // a value computed from the stale read: the read-modify-write is no
+          // longer atomic.
+          if (amo_pending_q) begin
+            state_q <= ST_AMO_W;
+          end else if (accept_c) begin
+`else
           if (accept_c) begin
+`endif
             req_q.id         <= req_i.id;
             req_q.we         <= req_i.we;
             req_q.size       <= req_i.size;
             req_q.is_signed  <= req_i.signed_;
             req_q.store_data <= req_i.store_data;
             req_q.dev        <= req_dev_i;
+            req_q.is_amo     <= req_i.is_amo;
+            req_q.amo_op     <= req_i.amo_op;
+            req_q.aq         <= req_i.aq;
+            req_q.rl         <= req_i.rl;
             addr_q           <= addr_c;
 
             if (req_i.we) store_ctr_q <= store_ctr_q + 32'd1;
@@ -366,11 +495,16 @@ module mosaic_lsu_endpoint (
               misaligned_ctr_q  <= misaligned_ctr_q + 32'd1;
               rsp_q.id          <= req_i.id;
               rsp_q.fault       <= 1'b1;
-              rsp_q.cause       <= req_i.we ? EXC_STORE_MISALIGNED : EXC_LOAD_MISALIGNED;
+              // The privileged spec folds AMO into the store/AMO pair for
+              // causes 6 and 7: a misaligned atomic access reports store/AMO
+              // address misaligned, not load address misaligned.
+              rsp_q.cause       <= (req_i.we || req_i.is_amo)
+                                   ? EXC_STORE_MISALIGNED : EXC_LOAD_MISALIGNED;
               rsp_q.tval        <= addr_c;
               rsp_q.data        <= 64'd0;
               rsp_valid_q       <= 1'b1;
-              last_fault_cause_q <= req_i.we ? EXC_STORE_MISALIGNED : EXC_LOAD_MISALIGNED;
+              last_fault_cause_q <= (req_i.we || req_i.is_amo)
+                                    ? EXC_STORE_MISALIGNED : EXC_LOAD_MISALIGNED;
               last_fault_tval_q  <= addr_c;
               rsp_ctr_q         <= rsp_ctr_q + 32'd1;
               state_q           <= ST_DONE;
@@ -389,6 +523,27 @@ module mosaic_lsu_endpoint (
 
         ST_WAIT: begin
           if (mem_rsp_valid_i) begin
+            if (req_q.is_amo) begin
+              // The read beat returned. Latch the old doubleword and move to the
+              // write beat in the very next cycle -- the endpoint is not idle in
+              // between, so nothing else can touch the location.
+              amo_old_q <= mem_rsp_i.rdata;
+`ifdef MOSAIC_AMO_MUTANT_SPLIT
+              // The decomposition: complete the read as an ordinary load,
+              // remember the write for later, and give the port back.
+              rsp_q.id      <= req_q.id;
+              rsp_q.fault   <= mem_rsp_i.fault;
+              rsp_q.tval    <= addr_q;
+              rsp_q.cause   <= EXC_STORE_ACCESS;
+              rsp_q.data    <= extracted_c;
+              rsp_valid_q   <= 1'b1;
+              amo_pending_q <= 1'b1;
+              rsp_ctr_q     <= rsp_ctr_q + 32'd1;
+              state_q       <= ST_DONE;
+`else
+              state_q <= ST_AMO_W;
+`endif
+            end else begin
             rsp_q.id    <= req_q.id;
 `ifdef MOSAIC_LSU_MUTANT_DEV_ERR_OK
             // NEGATIVE CONTROL: a device access the device rejected is reported
@@ -404,17 +559,60 @@ module mosaic_lsu_endpoint (
             rsp_q.fault <= mem_rsp_i.fault;
 `endif
             rsp_q.tval  <= addr_q;
-            rsp_q.cause <= req_q.we ? EXC_STORE_ACCESS : EXC_LOAD_ACCESS;
+            rsp_q.cause <= (req_q.we || req_q.is_amo)
+                           ? EXC_STORE_ACCESS : EXC_LOAD_ACCESS;
+            // An AMO's response is the *old* value, extracted exactly like a
+            // load of the access width (the atomic op itself happened in the
+            // memory system, inside the one transaction).
             rsp_q.data  <= req_q.we ? 64'd0 : extracted_c;
             rsp_valid_q <= 1'b1;
 
             if (mem_rsp_i.fault) begin
               access_fault_ctr_q <= access_fault_ctr_q + 32'd1;
-              last_fault_cause_q <= req_q.we ? EXC_STORE_ACCESS : EXC_LOAD_ACCESS;
+              last_fault_cause_q <= (req_q.we || req_q.is_amo)
+                                    ? EXC_STORE_ACCESS : EXC_LOAD_ACCESS;
               last_fault_tval_q  <= addr_q;
             end
 
             rsp_ctr_q <= rsp_ctr_q + 32'd1;
+            state_q   <= ST_DONE;
+            end
+          end
+        end
+
+        // ------------------------------------------------- the atomic write beat
+        // The write beat is offered while this state holds. `mem_req_valid_o`
+        // is high here, so the read and the write are adjacent on the port with
+        // no other request accepted in between: the two beats are one
+        // indivisible operation.
+        ST_AMO_W: begin
+          if (mem_req_ready_i) begin
+            txn_ctr_q <= txn_ctr_q + 32'd1;
+            state_q   <= ST_AMO_WAIT;
+          end
+        end
+
+        // -------------------------------------------------- the write's ack
+        ST_AMO_WAIT: begin
+          if (mem_rsp_valid_i) begin
+            // The transaction completes. The value reported is the *old* one,
+            // latched from the read beat and shifted out by `extracted_c`
+            // (which reads `amo_old_q` in this state); the fault is the write's.
+            rsp_q.id    <= req_q.id;
+            rsp_q.fault <= mem_rsp_i.fault;
+            rsp_q.tval  <= addr_q;
+            rsp_q.cause <= EXC_STORE_ACCESS;
+            rsp_q.data  <= extracted_c;
+            rsp_valid_q <= 1'b1;
+            if (mem_rsp_i.fault) begin
+              access_fault_ctr_q <= access_fault_ctr_q + 32'd1;
+              last_fault_cause_q <= EXC_STORE_ACCESS;
+              last_fault_tval_q  <= addr_q;
+            end
+            rsp_ctr_q <= rsp_ctr_q + 32'd1;
+`ifdef MOSAIC_AMO_MUTANT_SPLIT
+            amo_pending_q <= 1'b0;
+`endif
             state_q   <= ST_DONE;
           end
         end

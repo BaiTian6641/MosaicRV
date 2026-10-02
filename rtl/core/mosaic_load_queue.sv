@@ -673,6 +673,16 @@ module mosaic_load_queue #(
     req_o.size       = head_c.size;
     req_o.signed_    = head_c.signed_;
     req_o.store_data = {XLEN{1'b0}};
+    // The load queue itself never issues an atomic read-modify-write: the
+    // operation and operand live in mosaic_amo_unit (I-039), because this
+    // packet is a frozen interface and this queue's entry has no room for them.
+    // The integration overwrites these fields when it recognises an AMO by
+    // identity. They are driven explicitly here so they are never left
+    // unassigned for an ordinary load.
+    req_o.is_amo     = 1'b0;
+    req_o.amo_op     = mosaic_pkg::AMO_ADD;
+    req_o.aq         = 1'b0;
+    req_o.rl         = 1'b0;
   end
 
   logic issue_accept_c;

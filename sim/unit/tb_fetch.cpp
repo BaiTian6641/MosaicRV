@@ -368,15 +368,27 @@ class ShadowFetch {
     if (e.rsp_fire) {
       if (e.rsp_live) {
         accept_++;
-        // A 32-bit instruction is the 4-byte form whose low two bits are 11.
-        // Anything else is a 16-bit compressed encoding, which is I-041 / p1
-        // and is reported illegal rather than decoded.
-        const bool is_32bit = (s.rsp_len == 4) && ((s.rsp_data & 3u) == 3u);
+        // I-041's rule, in one place: the *encoding* decides the length. Low two
+        // bits 11 is a 32-bit instruction and must be reported in four bytes;
+        // anything else is a 16-bit compressed instruction and must be reported
+        // in two. A 32-bit encoding in two bytes is a malformed response and is
+        // refused as illegal; so is a 16-bit encoding with no length at all.
+        const bool is_16bit = (s.rsp_data & 3u) != 3u;
+        const bool is_32bit = !is_16bit && (s.rsp_len == 4);
+        const bool is_insn = is_16bit || is_32bit;
+#ifdef MOSAIC_FETCH_MUTANT_DELIVER_16BIT
+        // The mutant reports a 16-bit instruction in four bytes and does not
+        // mask its upper half, which is the "compressed length reported as
+        // four" defect.
+        const bool mut16len4 = true;
+#else
+        const bool mut16len4 = false;
+#endif
         if (s.rsp_fault) {
           out_kind_ = kKindFault;
           out_cause_ = kExcInsnAccess;
           fault_++;
-        } else if (is_32bit) {
+        } else if (is_insn) {
           out_kind_ = kKindInsn;
           out_cause_ = 0;
           delivered_++;
@@ -386,8 +398,8 @@ class ShadowFetch {
           illegal_++;
         }
         out_pc_ = slots_[s.rsp_id].pc;
-        out_bits_ = s.rsp_data;
-        out_len_ = s.rsp_len;
+        out_bits_ = (is_16bit && !mut16len4) ? (s.rsp_data & 0xffffu) : s.rsp_data;
+        out_len_ = (is_16bit && !mut16len4) ? 2u : 4u;
       } else {
         drop_++;
         if (e.rsp_stale) {
@@ -934,12 +946,17 @@ class Requester {
       p.fault = true;
     } else if (form == 3) {
       // Four bytes returned for an instruction whose encoding is still
-      // compressed: the low two bits are not 11. This is the form a real fetch
-      // produces when a 16-bit instruction sits in a four-byte slot, and it is
-      // the case that a check on the *length* alone would miss.
+      // compressed: the low two bits are not 11. The encoding decides, so this
+      // is a 16-bit instruction and must be reported as two bytes.
       p.data = static_cast<uint32_t>((pc >> 2) ^ 0x2468ace0u) & ~3u;
       p.data |= 1u;
       p.len = 4;
+    } else if (form == 4) {
+      // A 32-bit encoding (low two bits 11) returned in only two bytes: the
+      // instruction cannot be assembled from what arrived, and fetch refuses it
+      // rather than delivering half an instruction.
+      p.data = static_cast<uint32_t>((pc >> 2) ^ 0x13579bdfu) | 3u;
+      p.len = 2;
     }
     p.issued_cycle = cycle;
     return p;
@@ -1571,10 +1588,15 @@ void PhaseEpochWrap(Harness* h, mosaic::Reporter* reporter, Requester* req) {
                         "still rejected");
 }
 
-void PhaseIllegal16Bit(Harness* h, mosaic::Reporter* reporter, Requester* req) {
-  h->Phase("illegal-16bit");
+void PhaseCompressed16Bit(Harness* h, mosaic::Reporter* reporter, Requester* req) {
+  h->Phase("compressed-16bit");
   h->Reset(4);
 
+  // A 16-bit encoding returned in two bytes is an *instruction*: it is
+  // delivered, with its own length (two) and its own bits (the low half only --
+  // the upper half of the fetch window is the next instruction's encoding).
+  // Before I-041 this was reported illegal; that refusal is the contract this
+  // phase replaces, and this is what it is replaced with.
   Stim issue;
   issue.req_valid = true;
   issue.req_pc = kBasePc;
@@ -1587,60 +1609,82 @@ void PhaseIllegal16Bit(Harness* h, mosaic::Reporter* reporter, Requester* req) {
   const Expect post = h->PeekFinal();
 
   Require(e.rsp_live, h->phase(), "the 16-bit response was not classified live");
-  Require(!post.out_valid, h->phase(),
-          "a 16-bit instruction was delivered as a decodable instruction");
-  Require(post.out_illegal, h->phase(),
-          "a 16-bit instruction was not reported illegal");
+  Require(post.out_valid, h->phase(),
+          "a 16-bit instruction was not delivered as a decodable instruction");
+  Require(!post.out_illegal, h->phase(),
+          "a 16-bit instruction was reported illegal");
   Require(post.out_len == 2, h->phase(),
-          "the illegal report did not carry the length that arrived (len=" +
-              std::to_string(post.out_len) + ")");
-  Require(post.out_cause == kExcIllegalInsn, h->phase(),
-          "the illegal report carried cause " + std::to_string(post.out_cause) +
-              ", expected " + std::to_string(kExcIllegalInsn));
+          "a 16-bit instruction was reported with length " +
+              std::to_string(post.out_len) + ", expected 2");
+  Require(post.out_bits == (p.data & 0xffffu), h->phase(),
+          "a 16-bit instruction's bits were not preserved unmasked");
+  Require((post.out_bits >> 16) == 0, h->phase(),
+          "a 16-bit instruction carried its neighbour's bytes in the upper half");
+  Require(post.out_cause == 0, h->phase(),
+          "a delivered instruction carried a cause");
   Require(post.out_pc == issue.req_pc, h->phase(),
-          "the illegal report lost the PC the instruction belongs to");
-  Require(post.illegal == 1, h->phase(),
-          "the illegal instruction was not counted (illegal=" +
-              std::to_string(post.illegal) + ")");
-  // The slot is still released: a rejected encoding costs one credit, once.
+          "the delivery lost the PC the instruction belongs to");
+  Require(post.delivered == 1 && post.illegal == 0, h->phase(),
+          "the 16-bit instruction was not counted as delivered exactly once");
   Require(post.outstanding == 0, h->phase(),
-          "an illegal instruction did not return its slot's credit");
-  // And it is reported, not delivered: no decoder ever sees these bits.
-  Require(post.delivered == 0, h->phase(),
-          "a rejected encoding was counted as a delivered instruction");
+          "a delivered instruction did not return its slot's credit");
 
-  // The same rejection with a four-byte response. The length says four, and the
-  // encoding still says 16 bits: a check on the length alone would deliver this
-  // one, which is why fetch tests the encoding and not the word count.
+  // The same encoding returned in a four-byte window. The *encoding* still says
+  // 16 bits, so the instruction is still two bytes long and its upper half is
+  // still not part of it: a rule that trusted the byte count would report four
+  // and hand the decoder the next instruction's bytes.
   {
     Stim again;
     again.req_valid = true;
     again.req_pc = kBasePc + 4;
     const Expect accepted = h->Cycle(again);
     Require(accepted.req_fire, h->phase(),
-            "the table did not accept a request after an illegal instruction");
+            "the table did not accept a request after a delivery");
 
     const Requester::Pending q =
         Requester::Make(accepted.req_id, accepted.req_epoch, again.req_pc, 3, 0);
     h->Cycle(req->Respond(q));
     const Expect second = h->PeekFinal();
-    Require(!second.out_valid, h->phase(),
-            "a compressed encoding returned in four bytes was delivered as an "
-            "instruction");
-    Require(second.out_illegal, h->phase(),
-            "a compressed encoding returned in four bytes was not reported illegal");
-    Require(second.out_len == 4, h->phase(),
-            "the report did not carry the length that arrived (len=" +
+    Require(second.out_valid, h->phase(),
+            "a compressed encoding in a four-byte window was not delivered");
+    Require(second.out_len == 2, h->phase(),
+            "the byte count decided the length instead of the encoding (len=" +
                 std::to_string(second.out_len) + ")");
-    Require(second.illegal == 2, h->phase(),
-            "both rejected encodings should be counted (illegal=" +
-                std::to_string(second.illegal) + ")");
+    Require((second.out_bits >> 16) == 0, h->phase(),
+            "the four-byte window's upper half was carried into a 16-bit "
+            "instruction's bits");
+    Require(second.delivered == 2, h->phase(),
+            "both 16-bit encodings should be counted as delivered (delivered=" +
+                std::to_string(second.delivered) + ")");
     Require(second.outstanding == 0, h->phase(),
-            "a rejected encoding did not return its slot's credit");
+            "a delivered instruction did not return its slot's credit");
   }
 
-  reporter->Check(true, "illegal-16bit: a compressed encoding is reported, not decoded, "
-                        "at either reported length");
+  // A 32-bit *encoding* returned in two bytes is malformed: the instruction
+  // cannot be assembled from what arrived, so it is refused rather than
+  // delivered half-decoded.
+  {
+    Stim third;
+    third.req_valid = true;
+    third.req_pc = kBasePc + 8;
+    const Expect accepted = h->Cycle(third);
+    Require(accepted.req_fire, h->phase(),
+            "the table did not accept a request after a delivery");
+
+    const Requester::Pending q =
+        Requester::Make(accepted.req_id, accepted.req_epoch, third.req_pc, 4, 0);
+    h->Cycle(req->Respond(q));
+    const Expect last = h->PeekFinal();
+    Require(last.out_illegal, h->phase(),
+            "a 32-bit encoding returned in two bytes was delivered anyway");
+    Require(last.out_len == 4, h->phase(),
+            "the malformed response's report did not carry a length");
+    Require(last.illegal == 1, h->phase(),
+            "the malformed response was not counted as illegal");
+  }
+
+  reporter->Check(true, "compressed-16bit: a 16-bit encoding is delivered with its own "
+                        "length and its own bits, and a truncated 32-bit one is refused");
 }
 
 void PhaseFaultPath(Harness* h, mosaic::Reporter* reporter, Requester* req) {
@@ -1830,7 +1874,10 @@ void PhaseRandom(Harness* h, mosaic::Reporter* reporter, mosaic::Rng* rng,
     const Expect e = h->Cycle(s);
     req->Retire(e);
     if (e.req_fire) {
-      const int form = static_cast<int>(rng->Below(16) == 0 ? rng->Below(3) : 0);
+      // I-041: the random traffic now includes the compressed encodings (form 1:
+      // 16-bit in two bytes; form 3: 16-bit in four) and the malformed one (form 4:
+      // a 32-bit encoding in two bytes), as well as faults (form 2).
+      const int form = static_cast<int>(rng->Below(16) == 0 ? rng->Below(5) : 0);
       pending.push_back(Requester::Make(e.req_id, e.req_epoch, s.req_pc, form, i));
       next_pc += 4;
     }
@@ -1944,7 +1991,7 @@ int main(int argc, char** argv) {
     PhaseBoundEnforced(&harness, &reporter);
     PhaseSameCycle(&harness, &reporter);
     PhaseEpochWrap(&harness, &reporter, &requester);
-    PhaseIllegal16Bit(&harness, &reporter, &requester);
+    PhaseCompressed16Bit(&harness, &reporter, &requester);
     PhaseFaultPath(&harness, &reporter, &requester);
     PhasePredictorAdvisory(&harness, &reporter);
     PhaseRandom(&harness, &reporter, &rng, &requester);

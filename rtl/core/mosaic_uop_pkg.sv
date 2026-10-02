@@ -145,6 +145,13 @@ package mosaic_uop_pkg;
   typedef struct packed {
     uop_class_e        class_;      // `class` is a reserved word
     logic [XLEN-1:0]   pc;          // the macro's own PC
+    // The instruction's own length in bytes: 4 for a base-ISA instruction, 2 for
+    // a 16-bit compressed one (I-041). It rides in the meta because the link
+    // value every jump writes is `pc + length`, and the length is a property of
+    // the instruction the branch unit is executing -- deriving it from the PC
+    // (alignment) would be wrong, because a 32-bit instruction may start at a
+    // two-byte-aligned address.
+    logic [2:0]        insn_len;
     mosaic_pkg::alu_op_e alu_op;    // valid for UOP_ALU and UOP_BRANCH
     mosaic_pkg::md_op_e  md_op;     // valid for UOP_MULDIV
     logic              md_w;        // M-extension W form (32-bit operation)
@@ -154,6 +161,14 @@ package mosaic_uop_pkg;
     logic              writes_link; // JAL/JALR write rd = PC + 4
     logic [2:0]        mem_size;    // SZ_BYTE..SZ_DBL
     logic              mem_signed;  // load sign extension
+    // A extension (I-039). `is_amo` marks the memory macro as an atomic
+    // read-modify-write; `amo_op` names it; `amo_aq`/`amo_rl` are the ordering
+    // bits. They ride in the meta so the dispatch entry carries them with the
+    // macro and the memory insert bus re-presents them without a second decode.
+    logic              is_amo;
+    mosaic_pkg::amo_op_e amo_op;
+    logic              amo_aq;
+    logic              amo_rl;
     logic              is_fence;    // FENCE / FENCE.I, drained by the memory path
     logic              is_fence_i;
   } uop_meta_t;
@@ -218,7 +233,16 @@ package mosaic_uop_pkg;
     logic [XLEN-1:0]   imm;
     logic [2:0]        size;        // mosaic_pkg::SZ_*
     logic              signed_;     // load sign extension
-    logic [XLEN-1:0]   store_data;  // src2's value for a store
+    logic [XLEN-1:0]   store_data;  // src2's value for a store, or the AMO operand
+    // A extension (I-039). When `is_amo` is set this request is an atomic
+    // read-modify-write of `size` bytes at `base + imm`, with the operand in
+    // `store_data`; the endpoint performs it as *one* memory transaction (never
+    // a load followed by a store) and returns the old value. `aq`/`rl` are
+    // carried to the transaction, not dropped after decode.
+    logic              is_amo;
+    mosaic_pkg::amo_op_e amo_op;
+    logic              aq;
+    logic              rl;
   } lsu_req_t;
 
   typedef struct packed {
@@ -242,6 +266,18 @@ package mosaic_uop_pkg;
     logic [2:0]        size;
     logic [XLEN/8-1:0] wstrb;      // byte strobes: a byte store must not clobber
     logic [XLEN-1:0]   wdata;
+    // A extension (I-039). `amo` marks this memory transaction as an atomic
+    // read-modify-write: the memory system must read `size` bytes at `addr`
+    // (lane-aligned, `wdata` is the operand at lane 0), apply `amo_op`, write the
+    // result back, and return the *old* window in `rdata`. It is one request and
+    // one response -- the whole point of "not a loose load+store pair". `aq`/`rl`
+    // travel with the transaction so an interconnect that honours them has them.
+    // The fetch path and every ordinary load/store drive `amo` low, so the
+    // memory system's behaviour for them is unchanged.
+    logic              amo;
+    mosaic_pkg::amo_op_e amo_op;
+    logic              aq;
+    logic              rl;
   } mem_req_t;
 
   typedef struct packed {

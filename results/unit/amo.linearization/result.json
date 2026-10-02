@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "case": "amo.linearization",
+  "verdict": "PASS",
+  "detail": "checks=699 amo_bindings=30 run_a_txns=150 run_b_txns=191 cycles=1540 seed=1",
+  "seed": 1,
+  "max_cycles": 4000000,
+  "checks": 700,
+  "failures": 0,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-02T03:35:59Z",
+  "first_mismatch": ""
+}

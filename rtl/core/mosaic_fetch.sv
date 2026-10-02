@@ -124,18 +124,29 @@
 //
 // ------------------------------------------------- 16-bit instructions
 //
-// A 16-bit (compressed) instruction is **reported illegal, not decoded and not
-// delivered**, because the C extension is I-041 and is p1. That is the whole of
-// the compressed-instruction story in this build: fetch recognises the encoding,
-// reports it, and stops. It does not implement C.
+// I-041 turns this module's old refusal into the correct handling, so the rules
+// are stated here once:
 //
-// What fetch *does* establish is the reporting contract the rest of the
-// frontend depends on: every delivered event carries the PC the instruction
-// belongs to, its original bits and its length, so a 32-bit instruction that
-// straddled a fetch boundary is still attributed to the address it was fetched
-// for, and mosaic_decoder can decode without re-fetching anything. The PC that
-// is reported is the PC recorded in the request slot, not any address derived
-// from the response payload.
+//   * the instruction's *encoding* decides its length: `rsp_data[1:0] == 11` is
+//     a 32-bit instruction and a length of 4 bytes; anything else is a 16-bit
+//     compressed instruction and a length of 2. `rsp_len` is the memory's
+//     report and is *checked* against that, not trusted: a 32-bit encoding
+//     returned in two bytes is a malformed response and is reported illegal.
+//   * `out_len` is the instruction's own length, 2 or 4. It is what the core
+//     advances the program counter by and what the retire event records, so a
+//     compressed instruction's PC is never "the previous PC plus four".
+//   * `out_bits` is the instruction's own bits: for a 16-bit instruction the
+//     upper half of the fetched word is *not* carried, because those bits are
+//     the next instruction's encoding.
+//   * `out_pc` is the PC recorded in the request slot, never an address derived
+//     from the response payload, so a 32-bit instruction that straddled a fetch
+//     line or a page is still attributed to the address it started at.
+//
+// The decompression itself is not here: the decoder (mosaic_decoder) expands a
+// 16-bit encoding to its base-ISA equivalent, so the rest of the pipeline needs
+// no knowledge of C. Fetch establishes only what the front end needs to move the
+// PC by the right amount and what the event record needs to name the
+// instruction.
 //
 // ------------------------------------------------------------------ faults
 //
@@ -292,6 +303,17 @@ module mosaic_fetch #(
     output logic [31:0]              deny_count,        // issues refused, not dropped
     output logic [31:0]              cancel_count,
     output logic [XLEN-1:0]          fetch_pc,
+    // ---------------------------------- the response being accepted this cycle
+    // I-041: the sequential program counter is `the answered request's PC + the
+    // answered instruction's own length`, and only this module knows that
+    // length (it is a property of the encoding, which the encoding rule here
+    // owns). `o_rsp_live` says a live response is being accepted at this edge
+    // and `o_rsp_len` is its instruction's length in bytes, so the requester can
+    // issue the *next* request in the same cycle instead of stalling a cycle
+    // per instruction. Both are exactly the signals the output register below
+    // is built from -- not a second derivation.
+    output logic                     o_rsp_live,
+    output logic [2:0]               o_rsp_len,
     // ------------------------------------------------ observation for a case
     // The response classification and the output register, so a case can say
     // *why* an instruction did or did not reach the decoder instead of only that
@@ -535,22 +557,56 @@ module mosaic_fetch #(
   assign out_cause   = out_reg_cause;
   assign fetch_pc    = fetch_pc_q;
 
-  // A 32-bit instruction is exactly the 4-byte form whose low two bits are
-  // 11. Anything else is a 16-bit compressed encoding, which is I-041 / p1 and
-  // is reported illegal here rather than decoded.
+  // ---------------------------------------------------- the instruction length
+  // RISC-V states the length of an instruction in its own first two bits: 11 is
+  // a 32-bit (or longer) encoding, anything else is a 16-bit compressed one.
+  // Fetch therefore reads the *encoding*, not the byte count the memory
+  // reported, and the reported count is checked against it: a 32-bit encoding
+  // returned in two bytes is a malformed response, not an instruction with half
+  // its bits missing, and it is refused as illegal rather than delivered.
+  //
+  // This is the change I-041 makes. Before it, a 16-bit encoding was reported
+  // illegal here (the C extension was p1); the refusal is replaced by correct
+  // handling, and the *length* and the *original bits* now travel with the
+  // instruction so the retire event can carry them and the PC advance can use
+  // them. Nothing is re-derived downstream from the encoding.
+  logic rsp_is_16bit;
   logic rsp_is_32bit;
+  assign rsp_is_16bit = (rsp_data[1:0] != 2'b11);
+  assign rsp_is_32bit = !rsp_is_16bit && (rsp_len == 3'd4);
+
+  // The instruction's own length in bytes, and its own bits: a 16-bit
+  // instruction's upper half must not be carried along, because those bits
+  // belong to the instruction *after* it in memory and an event record that
+  // showed them would be showing a different instruction's encoding.
+  logic [2:0]  rsp_insn_len;
+  logic [31:0] rsp_insn_bits;
 `ifdef MOSAIC_FETCH_MUTANT_DELIVER_16BIT
-  // NEGATIVE CONTROL 5: the compressed-form check is removed entirely, so a
-  // 16-bit instruction is handed to the decoder as if it were a 32-bit one. The
-  // decoder then reads a half-instruction's bits as an opcode it never
-  // validated, which is the failure mode this package exists to prevent.
-  assign rsp_is_32bit = 1'b1;
+  // NEGATIVE CONTROL for I-041: a 16-bit instruction is handed on as though it
+  // were a 32-bit one -- length four, the whole fetched word as its bits. The
+  // decoder then reads the following instruction's bytes as this instruction's
+  // upper half, the PC advances four bytes instead of two, and the event record
+  // reports a length that is not the instruction's. CASE=compressed.cross_boundary
+  // names the first of those (the length at the first compressed retirement),
+  // and CASE=fetch.redirect_late_response names it at the delivery itself.
+  assign rsp_insn_len  = 3'd4;
+  assign rsp_insn_bits = rsp_data;
 `else
-  assign rsp_is_32bit = (rsp_len == 3'd4) && (rsp_data[1:0] == 2'b11);
+  assign rsp_insn_len  = rsp_is_16bit ? 3'd2 : 3'd4;
+  assign rsp_insn_bits = rsp_is_16bit ? {16'b0, rsp_data[15:0]} : rsp_data;
 `endif
 
+  logic rsp_is_insn;
+  assign rsp_is_insn = rsp_is_16bit || rsp_is_32bit;
+
   logic [1:0] rsp_kind;
-  assign rsp_kind = rsp_fault ? OUT_FAULT : (rsp_is_32bit ? OUT_INSN : OUT_ILLEGAL);
+  assign rsp_kind = rsp_fault ? OUT_FAULT : (rsp_is_insn ? OUT_INSN : OUT_ILLEGAL);
+
+  // The accepted response's own length, for the requester's sequential PC. Gated
+  // on the response being live, so a stale or squashed response -- or one
+  // arriving on a redirect cycle -- never contributes a length.
+  assign o_rsp_live = rsp_fire && rsp_live;
+  assign o_rsp_len  = rsp_insn_len;
 
   // ---------------------------------------------------------- predictor glue
   // The advisory next PC, and the only prediction this module acts on.
@@ -650,8 +706,10 @@ module mosaic_fetch #(
           out_reg_valid <= 1'b1;
           out_reg_kind  <= rsp_kind;
           out_reg_pc    <= slot_pc[rsp_id];
-          out_reg_bits  <= rsp_data;
-          out_reg_len   <= rsp_len;
+          // The instruction's own bits and its own length -- never the fetch
+          // window's byte count, and never a 16-bit instruction's upper half.
+          out_reg_bits  <= rsp_insn_bits;
+          out_reg_len   <= rsp_insn_len;
 `ifdef MOSAIC_FETCH_MUTANT_FAULT_AS_INSN
           // NEGATIVE CONTROL 6: a *faulting* response is delivered as an
           // ordinary instruction -- no fault event, no cause, the fault bit
@@ -663,11 +721,11 @@ module mosaic_fetch #(
             out_reg_cause <= 64'd0;
           end else begin
             out_reg_kind  <= rsp_kind;
-            out_reg_cause <= rsp_is_32bit ? 64'd0 : mosaic_pkg::EXC_ILLEGAL_INSN;
+            out_reg_cause <= rsp_is_insn ? 64'd0 : mosaic_pkg::EXC_ILLEGAL_INSN;
           end
 `else
           out_reg_cause <= rsp_fault ? mosaic_pkg::EXC_INSN_ACCESS
-                       : (rsp_is_32bit ? 64'd0 : mosaic_pkg::EXC_ILLEGAL_INSN);
+                       : (rsp_is_insn ? 64'd0 : mosaic_pkg::EXC_ILLEGAL_INSN);
 `endif
           if (rsp_kind == OUT_FAULT) begin
             fault_count <= fault_count + 32'd1;

@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "case": "arbiter.forward_progress",
+  "verdict": "PASS",
+  "detail": "bounded service holds: 62593 per-cycle checks over 3414 cycles",
+  "seed": 1,
+  "max_cycles": 200000,
+  "checks": 10,
+  "failures": 0,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-02T03:36:01Z",
+  "first_mismatch": ""
+}

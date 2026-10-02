@@ -79,6 +79,13 @@ module mosaic_core_tb (
     output logic [2:0]  dmem_req_size_o,
     output logic [7:0]  dmem_req_wstrb_o,
     output logic [TB_XLEN-1:0] dmem_req_wdata_o,
+    // A extension (I-039): the atomic attribute of the data-port transaction, so
+    // CASE=amo.linearization can require every AMO to appear as exactly one
+    // atomic memory transaction carrying its operation and its aq/rl bits.
+    output logic        dmem_req_amo_o,
+    output logic [3:0]  dmem_req_amo_op_o,
+    output logic        dmem_req_aq_o,
+    output logic        dmem_req_rl_o,
     output logic        dmem_rsp_ready_o,
 
     // ------------------------------------------------------ retire event stream
@@ -86,6 +93,9 @@ module mosaic_core_tb (
     output logic [TB_RET_N-1:0]              ev_trap_o,
     output logic [TB_RET_N*TB_SEQ_W-1:0]     ev_seq_o,
     output logic [TB_RET_N*TB_XLEN-1:0]      ev_pc_o,
+    // I-041: the instruction's own length and bits, per lane.
+    output logic [TB_RET_N*TB_SIZE_W-1:0]    ev_len_o,
+    output logic [TB_RET_N*32-1:0]           ev_insn_o,
     output logic [TB_RET_N*TB_RET_ID_W-1:0]  ev_id_o,
     output logic [TB_RET_N-1:0]              ev_reg_we_o,
     output logic [TB_RET_N*TB_RD_W-1:0]      ev_rd_o,
@@ -329,6 +339,10 @@ module mosaic_core_tb (
   assign dmem_req_size_o  = dmem_req.size;
   assign dmem_req_wstrb_o = dmem_req.wstrb;
   assign dmem_req_wdata_o = dmem_req.wdata;
+  assign dmem_req_amo_o    = dmem_req.amo;
+  assign dmem_req_amo_op_o = dmem_req.amo_op;
+  assign dmem_req_aq_o     = dmem_req.aq;
+  assign dmem_req_rl_o     = dmem_req.rl;
 
   logic        imem_req_valid_int;
   logic [TB_REQ_ID_W-1:0] imem_req_id_int;
@@ -394,6 +408,8 @@ module mosaic_core_tb (
       .ev_trap         (ev_trap_o),
       .ev_seq          (ev_seq_o),
       .ev_pc           (ev_pc_o),
+      .ev_len          (ev_len_o),
+      .ev_insn         (ev_insn_o),
       .ev_id           (ev_id_o),
       .ev_reg_we       (ev_reg_we_o),
       .ev_rd           (ev_rd_o),

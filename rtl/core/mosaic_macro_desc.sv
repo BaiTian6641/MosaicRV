@@ -79,6 +79,11 @@ module mosaic_macro_desc (
     input  logic [1:0][MD_RD_W-1:0]           wr_rd,
     input  logic [1:0]                        wr_reg_we,
     input  logic [1:0]                        wr_is_store,
+    // I-041: the retiring instruction's own length and bits, carried so the
+    // event stream can report them. They are retire-only facts with no other
+    // consumer, which is exactly what this store is for.
+    input  logic [1:0][2:0]                   wr_len,
+    input  logic [1:0][31:0]                  wr_insn,
 
     // ------------------------------------------------------- two retire reads
     input  logic [MD_IDX_W-1:0]               rd_index0,
@@ -95,6 +100,10 @@ module mosaic_macro_desc (
     output logic [MD_RD_W-1:0]                rd_rd1,
     output logic                              rd_reg_we1,
     output logic                              rd_is_store1,
+    output logic [2:0]                        rd_len0,
+    output logic [31:0]                       rd_insn0,
+    output logic [2:0]                        rd_len1,
+    output logic [31:0]                       rd_insn1,
 
     // ------------------------------------------------------ two retire clears
     input  logic [1:0]                        clr_valid,
@@ -113,6 +122,8 @@ module mosaic_macro_desc (
   logic [MD_RD_W-1:0]    rd_q      [0:MD_ENTRIES-1];
   logic                  reg_we_q  [0:MD_ENTRIES-1];
   logic                  store_q   [0:MD_ENTRIES-1];
+  logic [2:0]            len_q     [0:MD_ENTRIES-1];
+  logic [31:0]           insn_q    [0:MD_ENTRIES-1];
   logic [MD_ENTRIES-1:0] live_q;
 
   logic [31:0] write_ctr;
@@ -130,6 +141,8 @@ module mosaic_macro_desc (
     rd_rd0        = rd_valid0 ? rd_q[rd_index0]     : {MD_RD_W{1'b0}};
     rd_reg_we0    = rd_valid0 && reg_we_q[rd_index0];
     rd_is_store0  = rd_valid0 && store_q[rd_index0];
+    rd_len0       = rd_valid0 ? len_q[rd_index0]    : 3'd0;
+    rd_insn0      = rd_valid0 ? insn_q[rd_index0]   : 32'd0;
 
     rd_valid1     = live_q[rd_index1];
     rd_tag1       = rd_valid1 ? tag_q[rd_index1]    : {MD_TAG_W{1'b0}};
@@ -137,6 +150,8 @@ module mosaic_macro_desc (
     rd_rd1        = rd_valid1 ? rd_q[rd_index1]     : {MD_RD_W{1'b0}};
     rd_reg_we1    = rd_valid1 && reg_we_q[rd_index1];
     rd_is_store1  = rd_valid1 && store_q[rd_index1];
+    rd_len1       = rd_valid1 ? len_q[rd_index1]    : 3'd0;
+    rd_insn1      = rd_valid1 ? insn_q[rd_index1]   : 32'd0;
   end
 
   // ------------------------------------------------------------- next state
@@ -176,6 +191,8 @@ module mosaic_macro_desc (
           rd_q[wr_index[p]]     <= wr_rd[p];
           reg_we_q[wr_index[p]] <= wr_reg_we[p];
           store_q[wr_index[p]]  <= wr_is_store[p];
+          len_q[wr_index[p]]    <= wr_len[p];
+          insn_q[wr_index[p]]   <= wr_insn[p];
         end
       end
 

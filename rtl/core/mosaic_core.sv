@@ -94,6 +94,9 @@ localparam int unsigned CORE_BANKS   = mosaic_cfg_pkg::MOSAIC_PRF_BANKS;
 localparam int unsigned CORE_ROB_N   = mosaic_cfg_pkg::MOSAIC_ROB_ENTRIES;
 localparam int unsigned CORE_FETCH_N = mosaic_cfg_pkg::MOSAIC_FETCH_OUTSTANDING;
 localparam int unsigned CORE_REQ_ID_W = (CORE_FETCH_N <= 1) ? 1 : $clog2(CORE_FETCH_N);
+// The fetch unit's `outstanding_count` is one bit wider than an index because it
+// must be able to name "full" as well as 0..CORE_FETCH_N-1.
+localparam int unsigned CORE_FETCH_CNT_W = $clog2(CORE_FETCH_N + 1);
 localparam int unsigned CORE_EPOCH_W = (CORE_ROB_N <= 1) ? 2 : $clog2(CORE_ROB_N) + 1;
 localparam int unsigned CORE_RET_N   = mosaic_cfg_pkg::MOSAIC_RETIRE_WIDTH;
 localparam int unsigned CORE_RET_ID_W = 2 * CORE_TAG_W;
@@ -160,6 +163,11 @@ module mosaic_core (
     output logic [CORE_RET_N-1:0]       ev_trap,
     output logic [CORE_RET_N*CORE_SEQ_W-1:0]  ev_seq,
     output logic [CORE_RET_N*CORE_XLEN-1:0]   ev_pc,
+    // I-041: the instruction's own length (2 or 4 bytes) and its own bits, so a
+    // consumer can tell a compressed instruction from a 32-bit one without
+    // inferring the length from the PC, which alignment does not decide.
+    output logic [CORE_RET_N*CORE_SIZE_W-1:0] ev_len,
+    output logic [CORE_RET_N*32-1:0]          ev_insn,
     output logic [CORE_RET_N*CORE_RET_ID_W-1:0] ev_id,
     output logic [CORE_RET_N-1:0]       ev_reg_we,
     output logic [CORE_RET_N*CORE_RD_W-1:0]   ev_rd,
@@ -393,17 +401,29 @@ module mosaic_core (
   // ==========================================================================
   // fetch
   logic [CORE_XLEN-1:0]      fetch_pc_q;
-  logic                      fetch_req_fire;
   logic                      want_imem_req;
   logic                      fetch_slot_free;
   logic                      fetch_req_valid_int;
   logic                      fetch_out_valid, fetch_out_ready;
   logic [CORE_XLEN-1:0]      fetch_out_pc;
   logic [31:0]               fetch_out_bits;
+  logic [2:0]                fetch_out_len;
   logic                      fetch_out_illegal, fetch_out_fault;
-  logic                      fetch_pred_next_valid;
+  // I-041: an instruction the fetch unit has delivered but whose consumption
+  // has not yet advanced the program counter, and the fetch unit's own count of
+  // occupied request slots. Together they hold the front end to one instruction
+  // in flight, which is what lets the PC advance by the instruction's own length.
+  logic                      fetch_insn16;
+  logic [CORE_FETCH_CNT_W-1:0] fetch_outstanding;
+  // The accepted response's liveness and its instruction's length, published by
+  // the fetch unit; and the sequential PC computed from them.
+  logic                      fetch_rsp_live;
+  logic [2:0]                fetch_rsp_len;
+  logic [CORE_XLEN-1:0]      fetch_next_pc;
+  // The predictor offers no next PC in this integration (`pred_valid` is tied
+  // low), so the fetch unit's advisory next-PC pair is left unconnected rather
+  // than carried as a dead net.
   logic [127:0]              fetch_dbg_state;
-  logic [CORE_XLEN-1:0]      fetch_pred_next_pc;
 
   // control
   logic                      redirect_valid;
@@ -422,6 +442,11 @@ module mosaic_core (
   logic                      dbuf_valid [0:1];
   logic [CORE_XLEN-1:0]      dbuf_pc    [0:1];
   mosaic_pkg::decode_ctl_t   dbuf_ctl   [0:1];
+  // I-041: the delivered instruction's own length and bits, stored beside the
+  // control word so the retire event can carry them. They are the *fetch*
+  // unit's values, never derived here from the decoded control.
+  logic [2:0]                dbuf_len   [0:1];
+  logic [31:0]               dbuf_bits  [0:1];
   logic [1:0]                dbuf_cnt;
   logic                      dbuf_take, dbuf_push, dbuf_room;
   // The push slot and the buffer's next state. The push lands at the tail
@@ -432,6 +457,8 @@ module mosaic_core (
   logic [1:0]                dbuf_valid_n;
   logic [CORE_XLEN-1:0]      dbuf_pc_n  [0:1];
   mosaic_pkg::decode_ctl_t   dbuf_ctl_n [0:1];
+  logic [2:0]                dbuf_len_n  [0:1];
+  logic [31:0]               dbuf_bits_n [0:1];
 
   // dispatch
   logic [4:0]                alloc_rd_w;
@@ -484,6 +511,10 @@ module mosaic_core (
   logic                      desc_wr_reg_we;
   logic [31:0]               desc_live_ctr;
   logic [4:0]                desc_rd0, desc_rd1;
+  // I-041: the retiring instruction's own length and bits, read back from the
+  // descriptor store on the same two retire lanes the destination comes from.
+  logic [2:0]                desc_len0, desc_len1;
+  logic [31:0]               desc_insn0, desc_insn1;
   // The destination's *physical* generation, which the ROB does not carry: the
   // ROB knows the tag and its own entry generation, while rename's maps are
   // keyed on the tag's generation. The descriptor store is where the
@@ -629,6 +660,11 @@ module mosaic_core (
   logic [CORE_XLEN-1:0]       disp_mem_base, disp_mem_imm, disp_mem_data;
   logic [2:0]                 disp_mem_size;
   logic                       disp_mem_signed;
+  // The A extension (I-039). The memory insert bus already carries the operand
+  // in `disp_mem_data`; these are the operation and the ordering bits.
+  logic                       disp_mem_is_amo;
+  mosaic_pkg::amo_op_e        disp_mem_amo_op;
+  logic                       disp_mem_amo_aq, disp_mem_amo_rl;
   logic [CORE_UOP_ID_W-1:0]   disp_mem_id;
   logic [CORE_MEM_ID_W-1:0]   disp_mem_full_id;
   logic [CORE_TAG_W-1:0]      disp_mem_dst_tag;
@@ -700,6 +736,25 @@ module mosaic_core (
   logic                       ser_accept_c;
   logic                       ser_owner_q;
   logic                       ser_owner_c;
+  // I-039. `ser_serialize_c` is "this access must go through the serializer's
+  // non-speculative, exactly-once path": a PMA device (I-038) or an atomic
+  // read-modify-write. The device attribute that travels to the memory system is
+  // the PMA one alone and is latched separately (`ser_hold_dev_q`), because an
+  // AMO to RAM is serialized but is not a device.
+  logic                       ser_is_amo_c;
+  logic                       ser_serialize_c;
+  logic                       ser_hold_dev_q;
+  // The AMO issue record (mosaic_amo_unit): the one atomic read-modify-write the
+  // load queue is currently carrying. The operation/operand cannot live in the
+  // load queue's frozen entry, so they are held here and re-presented when the
+  // queue offers the macro by identity.
+  logic                       amo_alloc_c;
+  logic                       amo_taken_c;
+  logic                       amo_busy;
+  logic                       amo_hit;
+  mosaic_pkg::amo_op_e        amo_hit_op;
+  logic                       amo_hit_aq, amo_hit_rl;
+  logic [CORE_XLEN-1:0]       amo_hit_operand;
   logic [CORE_MEM_ID_W-1:0]   rob_head_id;
   logic                       rob_boundary_ok;
   logic [31:0]                dev_txn_ctr_q, ram_txn_ctr_q, dev_wait_ctr_q, dev_hold_ctr_q;
@@ -710,6 +765,8 @@ module mosaic_core (
 
   logic                       desc_is_store0, desc_is_store1;
   logic                       desc_wr_is_store;
+  logic [2:0]                 desc_wr_len;
+  logic [31:0]                desc_wr_insn;
   logic [CORE_IDX_W-1:0]      rob_alloc_ptr;
   logic [31:0] squash_nc_ctr;
   logic        core_stop_prev;
@@ -852,14 +909,36 @@ module mosaic_core (
   // instruction to fetch until the wake event, and fetching ahead of it would
   // execute past the halt.
   assign want_imem_req      = !core_stop && !recovering && !wfi_halt;
-  assign imem_req_valid     = want_imem_req && fetch_slot_free;
+  // The sequential program counter. RISC-V instructions are 2 or 4 bytes, so the
+  // byte after the instruction being answered is `its PC + its own length` --
+  // and the length only exists in the answer. `fetch_rsp_live` is high in the
+  // cycle a live response is accepted and `fetch_rsp_len` is that instruction's
+  // length, both published by the fetch unit from the same rule it builds the
+  // instruction record with. Using them *combinationally* is what keeps the
+  // front end at one instruction per cycle: the next request is issued in the
+  // very cycle the current answer is taken, instead of a cycle later.
+  //
+  // The request is only offered when no other request is in flight, or when the
+  // response being accepted is freeing the one slot there is -- so the fetch
+  // unit never has two unanswered requests whose PCs it would have to guess.
+  assign fetch_next_pc      = fetch_rsp_live
+                              ? (fetch_pc_q + CORE_XLEN'(fetch_rsp_len))
+                              : fetch_pc_q;
+  assign imem_req_valid     = want_imem_req && fetch_slot_free &&
+                              ((fetch_outstanding == {CORE_FETCH_CNT_W{1'b0}}) ||
+                               fetch_rsp_live);
   assign fetch_req_valid_int= imem_req_valid && imem_req_ready;
-  assign fetch_req_fire     = fetch_req_valid_int;
   assign imem_req.we    = 1'b0;
-  assign imem_req.addr  = fetch_pc_q;
+  assign imem_req.addr  = fetch_next_pc;
   assign imem_req.size  = mosaic_pkg::SZ_WORD;
   assign imem_req.wstrb = {(CORE_XLEN/8){1'b0}};
   assign imem_req.wdata = {CORE_XLEN{1'b0}};
+  // The instruction port is never atomic (I-039); the fields are driven so the
+  // packet is never left half-assigned.
+  assign imem_req.amo    = 1'b0;
+  assign imem_req.amo_op = mosaic_pkg::AMO_ADD;
+  assign imem_req.aq     = 1'b0;
+  assign imem_req.rl     = 1'b0;
 
   always_ff @(posedge clk) begin
     if (rst) begin
@@ -875,9 +954,20 @@ module mosaic_core (
 `else
       fetch_pc_q <= redirect_pc;
 `endif
-    end else if (fetch_req_fire) begin
-      fetch_pc_q <= fetch_pred_next_valid ? fetch_pred_next_pc
-                                          : (fetch_pc_q + CORE_XLEN'(4));
+    end else if (fetch_rsp_live) begin
+      // The PC advances by the instruction's *own* length -- 4 for a 32-bit
+      // instruction, 2 for a compressed one -- in the cycle the answer is taken,
+      // so a compressed instruction's PC is never "the previous PC plus four".
+`ifdef MOSAIC_CORE_MUTANT_FETCH_PC_PLUS4
+      // NEGATIVE CONTROL for I-041 (the card's named failure mode): the counter
+      // is advanced by four whatever the instruction's length was. The byte
+      // after a compressed instruction is skipped and the machine fetches from
+      // the middle of the next instruction. CASE=compressed.cross_boundary names
+      // the first programme counter that is not the next instruction's.
+      fetch_pc_q <= fetch_pc_q + CORE_XLEN'(4);
+`else
+      fetch_pc_q <= fetch_pc_q + CORE_XLEN'(fetch_rsp_len);
+`endif
     end
   end
 
@@ -885,7 +975,7 @@ module mosaic_core (
       .clk                (clk),
       .rst                (rst),
       .req_valid          (fetch_req_valid_int),
-      .req_pc             (fetch_pc_q),
+      .req_pc             (fetch_next_pc),
       .req_ready          (fetch_slot_free),
       .req_id             (imem_req_id),
       .req_epoch          (imem_req_epoch),
@@ -914,8 +1004,10 @@ module mosaic_core (
       .upd_target         ({CORE_XLEN{1'b0}}),
       .ckpt_valid         (1'b0),
       .flush              (fetch_redir_valid),
-      .pred_next_valid    (fetch_pred_next_valid),
-      .pred_next_pc       (fetch_pred_next_pc),
+      // The predictor offers no next PC here (`pred_valid` is tied low), so the
+      // advisory pair is left unconnected rather than carried as a dead net.
+      .pred_next_valid    (),
+      .pred_next_pc       (),
       .pred_squashed      (),
       .pred_taken         (),
       .pred_btb_hit       (),
@@ -928,12 +1020,14 @@ module mosaic_core (
       .out_ready          (fetch_out_ready),
       .out_pc             (fetch_out_pc),
       .out_bits           (fetch_out_bits),
-      .out_len            (),
+      .out_len            (fetch_out_len),
       .out_illegal        (fetch_out_illegal),
       .out_fault          (fetch_out_fault),
       .out_cause          (),
       .o_dbg_state        (fetch_dbg_state),
-      .outstanding_count  (),
+      .outstanding_count  (fetch_outstanding),
+      .o_rsp_live         (fetch_rsp_live),
+      .o_rsp_len          (fetch_rsp_len),
       .cancel_pending     (),
       .epoch_now          (),
       .issued_count       (),
@@ -953,9 +1047,18 @@ module mosaic_core (
   // ==========================================================================
   // 2. Decode buffer (2 entries, program order, lane 0 oldest)
   // ==========================================================================
+  // I-041: the instruction's length is part of what the front end delivered, so
+  // it is what tells the decoder which of the two encodings it is looking at,
+  // and it is carried with the control word through the buffer so the retire
+  // event can report it. `stopped`/`faulted` deliveries are pushed too, as a
+  // fully illegal control word, so the machine stops at the instruction that
+  // could not be decoded instead of dropping it and continuing.
+  assign fetch_insn16    = (fetch_out_len == 3'd2);
+
   mosaic_decoder u_dec (
-      .insn (fetch_out_bits),
-      .ctl  (dec_ctl_comb)
+      .insn_raw (fetch_out_bits),
+      .insn16   (fetch_insn16),
+      .ctl      (dec_ctl_comb)
   );
 
   // A delivered instruction that fetch reported illegal or faulted does not
@@ -974,6 +1077,40 @@ module mosaic_core (
   // nowhere else; the decoder never produces it.
   localparam logic [31:0] WFI_WORD = 32'h1050_0073;
 
+  // A-extension decode (I-039), also done here rather than in mosaic_decoder and
+  // for the same ownership reason as WFI: the decoder's case asserts every
+  // opcode outside RV64IM is illegal, and opcode 0101111 is outside RV64IM. The
+  // integration recognises the encoding it builds from the raw word.
+  logic [4:0]          amo_f5_c;
+  logic [2:0]          amo_f3_c;
+  logic                amo_size_ok_c;
+  logic                amo_op_ok_c;
+  mosaic_pkg::amo_op_e amo_op_c;
+
+  assign amo_f5_c = fetch_out_bits[31:27];
+  assign amo_f3_c = fetch_out_bits[14:12];
+  // funct3 010 is AMO*.W and 011 is AMO*.D; every other funct3 on this opcode
+  // (including the W/D-less reserved bytes) is illegal. LR/SC keep the opcode
+  // but their funct5 values are handled by the op switch below and left illegal.
+  assign amo_size_ok_c = (amo_f3_c == 3'b010) || (amo_f3_c == 3'b011);
+
+  always_comb begin
+    amo_op_ok_c = 1'b1;
+    amo_op_c    = mosaic_pkg::AMO_ADD;
+    case (amo_f5_c)
+      5'b00000: amo_op_c = mosaic_pkg::AMO_ADD;
+      5'b00001: amo_op_c = mosaic_pkg::AMO_SWAP;
+      5'b00100: amo_op_c = mosaic_pkg::AMO_XOR;
+      5'b01100: amo_op_c = mosaic_pkg::AMO_AND;
+      5'b01000: amo_op_c = mosaic_pkg::AMO_OR;
+      5'b10000: amo_op_c = mosaic_pkg::AMO_MIN;
+      5'b10100: amo_op_c = mosaic_pkg::AMO_MAX;
+      5'b11000: amo_op_c = mosaic_pkg::AMO_MINU;
+      5'b11100: amo_op_c = mosaic_pkg::AMO_MAXU;
+      default:  amo_op_ok_c = 1'b0;
+    endcase
+  end
+
   always_comb begin
     dbuf_ctl_new = dec_ctl_comb;
     if (fetch_out_illegal || fetch_out_fault) begin
@@ -987,12 +1124,45 @@ module mosaic_core (
       dbuf_ctl_new.illegal   = 1'b0;
       dbuf_ctl_new.is_system = 1'b1;
       dbuf_ctl_new.is_wfi    = 1'b1;
+    end else if ((fetch_out_bits[6:0] == mosaic_pkg::OP_AMO) && amo_op_ok_c) begin
+      // A legal AMO always overwrites the illegal constant's fields; the
+      // reserved case (bad funct3) is refused by not entering this arm, so the
+      // control word stays fully illegal rather than half-decoded.
+      if (amo_size_ok_c) begin
+        dbuf_ctl_new.valid      = 1'b1;
+        dbuf_ctl_new.illegal    = 1'b0;
+        dbuf_ctl_new.uses_rs1   = 1'b1;
+        dbuf_ctl_new.uses_rs2   = 1'b1;
+        dbuf_ctl_new.uses_imm   = 1'b0;   // the address is rs1, there is no offset
+        dbuf_ctl_new.rs1        = fetch_out_bits[19:15];
+        dbuf_ctl_new.rs2        = fetch_out_bits[24:20];
+        dbuf_ctl_new.rd         = fetch_out_bits[11:7];
+        dbuf_ctl_new.reg_write  = (fetch_out_bits[11:7] != 5'd0);
+        dbuf_ctl_new.mem_kind   = mosaic_pkg::MEM_AMO;
+        dbuf_ctl_new.amo_op     = amo_op_c;
+        dbuf_ctl_new.mem_size   = (amo_f3_c == 3'b010) ? mosaic_pkg::SZ_WORD
+                                                       : mosaic_pkg::SZ_DBL;
+        // The old value is returned sign-extended for AMO*.W, exactly as `lw`
+        // returns it. The *operation*'s signedness is `amo_op` (MIN/MAX vs
+        // MINU/MAXU), not this bit; folding the two is the named
+        // signed/unsigned-boundary defect.
+        dbuf_ctl_new.mem_signed = 1'b1;
+        dbuf_ctl_new.amo_aq     = fetch_out_bits[26];
+        dbuf_ctl_new.amo_rl     = fetch_out_bits[25];
+        dbuf_ctl_new.imm        = 64'd0;
+      end
     end
   end
 
   assign dbuf_take = disp_take;
   assign dbuf_room = (dbuf_cnt < 2'd2) || dbuf_take;
-  assign dbuf_push = fetch_out_valid && dbuf_room && !core_stop && !wfi_halt;
+  // Every kind of delivery advances the buffer: an instruction (out_valid), and
+  // an undecodable response (out_illegal / out_fault) as a control word that is
+  // fully illegal, so dispatch refuses it and the machine stops *at that
+  // instruction* with its PC rather than skipping over it. A delivery that is
+  // never pushed is an instruction the machine silently executed past.
+  assign dbuf_push = (fetch_out_valid || fetch_out_illegal || fetch_out_fault) &&
+                     dbuf_room && !core_stop && !wfi_halt;
   assign fetch_out_ready = dbuf_room && !core_stop && !wfi_halt;
 
   // The buffer's next state, one expression per slot. The valid entries are
@@ -1029,10 +1199,14 @@ module mosaic_core (
     dbuf_valid_n[1] = dbuf_valid[1];
     dbuf_pc_n    = dbuf_pc;
     dbuf_ctl_n   = dbuf_ctl;
+    dbuf_len_n   = dbuf_len;
+    dbuf_bits_n  = dbuf_bits;
     if (dbuf_take) begin
       dbuf_valid_n[0] = dbuf_valid[1];
       dbuf_pc_n[0]    = dbuf_pc[1];
       dbuf_ctl_n[0]   = dbuf_ctl[1];
+      dbuf_len_n[0]   = dbuf_len[1];
+      dbuf_bits_n[0]  = dbuf_bits[1];
       // The entry's old slot is invalidated. With the push slot chosen above,
       // the live entries are exactly `[0 .. dbuf_cnt-1]`; a pop that is not
       // accompanied by a push would otherwise leave the shifted entry alive in
@@ -1046,6 +1220,11 @@ module mosaic_core (
       dbuf_valid_n[dbuf_push_at] = 1'b1;
       dbuf_pc_n[dbuf_push_at]    = fetch_out_pc;
       dbuf_ctl_n[dbuf_push_at]   = dbuf_ctl_new;
+      // The instruction's own length and its own bits travel with it, so the
+      // retire event can report what the instruction *was*, not what the
+      // decoder made of it.
+      dbuf_len_n[dbuf_push_at]   = fetch_out_len;
+      dbuf_bits_n[dbuf_push_at]  = fetch_out_bits;
     end
   end
 
@@ -1076,6 +1255,8 @@ module mosaic_core (
       dbuf_valid[1] <= dbuf_valid_n[1];
       dbuf_pc       <= dbuf_pc_n;
       dbuf_ctl      <= dbuf_ctl_n;
+      dbuf_len      <= dbuf_len_n;
+      dbuf_bits     <= dbuf_bits_n;
       dbuf_cnt      <= dbuf_cnt + {1'b0, dbuf_push} - {1'b0, dbuf_take};
     end
   end
@@ -1210,6 +1391,8 @@ module mosaic_core (
       .wr_rd           ({5'd0, desc_wr_rd}),
       .wr_reg_we       ({1'b0, desc_wr_reg_we}),
       .wr_is_store     ({1'b0, desc_wr_is_store}),
+      .wr_len          ({3'd0, desc_wr_len}),
+      .wr_insn         ({32'd0, desc_wr_insn}),
       .rd_index0       (rob_head_index),
       .rd_index1       (rob_head1_index),
       .rd_valid0       (),
@@ -1218,12 +1401,16 @@ module mosaic_core (
       .rd_rd0          (desc_rd0),
       .rd_reg_we0      (desc_reg_we0),
       .rd_is_store0    (desc_is_store0),
+      .rd_len0         (desc_len0),
+      .rd_insn0        (desc_insn0),
       .rd_valid1       (),
       .rd_tag1         (),
       .rd_gen1         (desc_gen1),
       .rd_rd1          (desc_rd1),
       .rd_reg_we1      (desc_reg_we1),
       .rd_is_store1    (desc_is_store1),
+      .rd_len1         (desc_len1),
+      .rd_insn1        (desc_insn1),
       .clr_valid       (retire_clr_valid),
       .clr_index       (retire_clr_index),
       .o_write_ctr     (),
@@ -1635,6 +1822,9 @@ module mosaic_core (
       .dec_ctl1         (dbuf_ctl[1]),
       .dec_pc0          (dbuf_pc[0]),
       .dec_pc1          (dbuf_pc[1]),
+      // I-041: the oldest buffered instruction's own length and bits.
+      .dec_len0         (dbuf_len[0]),
+      .dec_bits0        (dbuf_bits[0]),
       .alloc_req        (ren_alloc_req),
       .alloc_rd         (alloc_rd_w),
       .alloc_accepted   (ren_alloc_accepted),
@@ -1671,6 +1861,8 @@ module mosaic_core (
       .desc_wr_rd       (desc_wr_rd),
       .desc_wr_reg_we   (desc_wr_reg_we),
       .desc_wr_is_store (desc_wr_is_store),
+      .desc_wr_len      (desc_wr_len),
+      .desc_wr_insn     (desc_wr_insn),
       // ---------------------------------------------------------- memory insert
       .mem_ins_valid    (disp_mem_valid),
       .mem_ins_ready    (disp_mem_ready),
@@ -1680,6 +1872,10 @@ module mosaic_core (
       .mem_ins_imm      (disp_mem_imm),
       .mem_ins_size     (disp_mem_size),
       .mem_ins_signed   (disp_mem_signed),
+      .mem_ins_is_amo   (disp_mem_is_amo),
+      .mem_ins_amo_op   (disp_mem_amo_op),
+      .mem_ins_amo_aq   (disp_mem_amo_aq),
+      .mem_ins_amo_rl   (disp_mem_amo_rl),
       .mem_ins_data     (disp_mem_data),
       .mem_ins_dst_tag  (disp_mem_dst_tag),
       .mem_ins_dst_gen  (disp_mem_dst_gen),
@@ -1747,6 +1943,10 @@ module mosaic_core (
       // A WFI halt holds allocation exactly as an unresolved branch does: the
       // front end has nothing to run until the wake event.
       .barrier          (br_inflight | wfi_halt),
+      // The barrier above also holds for a WFI halt, which is not a transfer
+      // (its fall-through is architectural). The refusal rule needs the
+      // narrower fact: "an unresolved branch may still squash younger work".
+      .branch_in_flight (br_inflight),
       .trap_vector_armed_i(trap_vector_armed),
       .stop             (disp_unsupported),
       .o_take           (disp_take),
@@ -2776,6 +2976,8 @@ module mosaic_core (
       .rob_ack        ({rob_retire_ack_next, rob_retire_ack}),
       .rob_id         ({rob_head1_gen, rob_head1_tag, rob_head_gen, rob_head_tag}),
       .rob_pc         ({rob_head1_pc, rob_head_pc}),
+      .rob_len        ({desc_len1, desc_len0}),
+      .rob_insn       ({desc_insn1, desc_insn0}),
       .pay_valid      ({rob_head1_valid, rob_head_valid}),
       .pay_reg_we     ({desc_reg_we1, desc_reg_we0}),
       .pay_rd         ({desc_rd1, desc_rd0}),
@@ -2799,6 +3001,8 @@ module mosaic_core (
       .ev_trap        (ev_trap),
       .ev_seq         (ev_seq),
       .ev_pc          (ev_pc),
+      .ev_len         (ev_len),
+      .ev_insn        (ev_insn),
       .ev_id          (ev_id),
       .ev_reg_we      (ev_reg_we),
       .ev_rd          (ev_rd),
@@ -2874,7 +3078,25 @@ module mosaic_core (
   // above -- and the mux feeds the device serializer below, which is the last
   // point before the endpoint.
   assign ep_req_valid = sq_drain_valid | lq_req_valid;
-  assign ep_req       = sq_drain_valid ? sq_drain_req : lq_req;
+
+  // The AMO overlay (I-039). The operation and operand of the one atomic
+  // read-modify-write the load queue is carrying live in mosaic_amo_unit; when
+  // the load queue offers that macro (matched by its whole identity) they are
+  // merged into the request here. A store drain, and any ordinary load, is
+  // unchanged: `amo_active_c` is high only for the load-queue offer of the held
+  // AMO.
+  logic amo_active_c;
+  assign amo_active_c = amo_hit && !sq_drain_valid;
+
+  always_comb begin
+    ep_req            = sq_drain_valid ? sq_drain_req : lq_req;
+    ep_req.store_data = amo_active_c ? amo_hit_operand : ep_req.store_data;
+    ep_req.is_amo     = amo_active_c;
+    ep_req.amo_op     = amo_active_c ? amo_hit_op : mosaic_pkg::AMO_ADD;
+    ep_req.aq         = amo_active_c && amo_hit_aq;
+    ep_req.rl         = amo_active_c && amo_hit_rl;
+  end
+
   assign sq_drain_ready = ep_req_ready;
   assign lq_req_ready   = ep_req_ready && !sq_drain_valid;
 
@@ -2915,6 +3137,16 @@ module mosaic_core (
 
   assign ser_addr_c      = ep_req.base + ep_req.imm;
   assign ser_is_device_c = mosaic_uop_pkg::is_device_addr(ser_addr_c);
+  // An atomic read-modify-write is non-idempotent for exactly the same reason a
+  // device is: it has a side effect that a squashed or repeated instruction must
+  // not perform. So it takes the *same* serialization path -- presented once,
+  // only when it is the ROB head and cannot be squashed, and a barrier for
+  // everything else while it is held -- and the only thing the memory system is
+  // told differently is the atomic attribute itself. Keeping the device
+  // attribute separate (`ser_hold_dev_q`) is what stops an AMO to RAM being
+  // reported to the memory system as an MMIO access.
+  assign ser_is_amo_c    = ep_req.is_amo;
+  assign ser_serialize_c = ser_is_device_c || ser_is_amo_c;
 
   // The identity of the ROB head, built exactly as every other identity in this
   // file is (one uop per macro, one hart), so the comparison below is a whole
@@ -2944,13 +3176,13 @@ module mosaic_core (
   // the upstream is told "accepted" only when the endpoint actually takes it, so
   // the payload stays stable in between by the project-wide transport rule.
   assign ep_req_ready  = ser_hold_valid_q ? 1'b0
-                       : (ser_is_device_c ? (ser_nonspec_c && !ser_dev_out_q)
+                       : (ser_serialize_c ? (ser_nonspec_c && !ser_dev_out_q)
                                           : ser_ep_req_ready);
   // A device offer never passes through combinationally: it is always taken into
   // the hold first, so the access is presented to the endpoint in exactly one
   // cycle-window owned by this register -- the property the RETRY control below
   // removes.
-  assign ser_req_valid = ser_hold_valid_q ? 1'b1 : (ep_req_valid && !ser_is_device_c);
+  assign ser_req_valid = ser_hold_valid_q ? 1'b1 : (ep_req_valid && !ser_serialize_c);
   assign ser_req       = ser_hold_valid_q ? ser_hold_q : ep_req;
 
 `ifdef MOSAIC_CORE_MUTANT_DEV_AS_RAM
@@ -2963,10 +3195,18 @@ module mosaic_core (
   // counters disagree with the memory system's address-based classification.
   assign ser_out_dev_c = 1'b0;
 `else
-  assign ser_out_dev_c = ser_hold_valid_q;
+  // The PMA attribute of the transaction the endpoint is being offered. It is
+  // the *held* transaction's attribute and nothing else: an AMO to RAM is held
+  // too and must not be reported as a device, while an access that is not held
+  // at all (only an ordinary, non-serialized one can be) is by construction not
+  // a device. Reading the latch alone would report a stale attribute for that
+  // direct access -- the previous held transaction's -- which is exactly the
+  // misclassification CASE=mmio.exactly_once's "every access carries the device
+  // attribute its region demands" check names.
+  assign ser_out_dev_c = ser_hold_valid_q && ser_hold_dev_q;
 `endif
 
-  assign ser_take_c = ep_req_valid && ep_req_ready && ser_is_device_c;
+  assign ser_take_c = ep_req_valid && ep_req_ready && ser_serialize_c;
   assign ser_accept_c = ser_req_valid && ser_ep_req_ready;
   assign ser_owner_c  = ser_hold_valid_q ? ser_owner_q : sq_drain_valid;
 
@@ -2978,6 +3218,7 @@ module mosaic_core (
     if (rst) begin
       ser_hold_valid_q <= 1'b0;
       ser_dev_out_q    <= 1'b0;
+      ser_hold_dev_q   <= 1'b0;
       dev_txn_ctr_q    <= 32'd0;
       ram_txn_ctr_q    <= 32'd0;
       dev_wait_ctr_q   <= 32'd0;
@@ -2987,6 +3228,9 @@ module mosaic_core (
         ser_hold_q       <= ep_req;
         ser_hold_valid_q <= 1'b1;
         ser_dev_out_q    <= 1'b1;
+        // The PMA attribute of *this* transaction, not of whatever the mux
+        // happens to offer after it. An AMO (also serialized) latches 0.
+        ser_hold_dev_q   <= ser_is_device_c;
         // The owner travels with the held transaction: the queue that offered
         // it may have moved on (its request was accepted), and by the time the
         // endpoint takes the transaction the mux may be presenting a different
@@ -3039,6 +3283,37 @@ module mosaic_core (
 `else
   assign o_dbg_mmio = 32'd0;
 `endif
+
+  // --------------------------------------------------------------------------
+  // The atomic read-modify-write's issue record (I-039)
+  // --------------------------------------------------------------------------
+  // The one AMO the load queue is carrying. It is written when the load queue
+  // accepts the macro and read back, by identity, when the queue offers it; the
+  // operation and operand are merged into the endpoint request in the queue mux
+  // above. `amo_taken_c` is the cycle the serializer takes the transaction: from
+  // then on the fields are latched in `ser_hold_q` and the endpoint, and a second
+  // copy here would be a second thing to keep in step.
+  assign amo_taken_c = ser_take_c && ep_req.is_amo;
+
+  mosaic_amo_unit u_amo (
+      .clk            (clk),
+      .rst            (rst),
+      .alloc_valid_i  (amo_alloc_c),
+      .alloc_id_i     (disp_mem_full_id),
+      .alloc_op_i     (disp_mem_amo_op),
+      .alloc_aq_i     (disp_mem_amo_aq),
+      .alloc_rl_i     (disp_mem_amo_rl),
+      .alloc_operand_i(disp_mem_data),
+      .taken_i        (amo_taken_c),
+      .flush_i        (lq_flush),
+      .probe_id_i     (lq_req.id),
+      .match_o        (amo_hit),
+      .op_o           (amo_hit_op),
+      .aq_o           (amo_hit_aq),
+      .rl_o           (amo_hit_rl),
+      .operand_o      (amo_hit_operand),
+      .busy_o         (amo_busy)
+  );
 
   mosaic_lsu_endpoint u_lsu (
       .clk                  (clk),
@@ -3374,11 +3649,17 @@ module mosaic_core (
   // store inserted on the flush edge survives, is never authorised (its ROB
   // entry is gone) and blocks the queue head for ever; CASE=fence.code_and_data_order's
   // FENCE.I redirect is what exposed it.
+  // An AMO is also refused while the AMO issue record is occupied (I-039): at
+// most one atomic read-modify-write is resident in the load queue, so the
+// record that carries its operation and operand can be a single entry. An
+// ordinary load is not refused -- it simply queues behind the AMO, which is
+// exactly the ordering the atomic needs.
+  assign amo_alloc_c = disp_mem_valid && disp_mem_is_amo && disp_mem_ready;
   assign disp_mem_ready = !fence_block_younger_c && !rob_flush_pulse &&
       (disp_mem_is_store
       ? (disp_store_faults ? (lsu_wb_ready && !lq_result_valid)
                            : (sq_alloc_ready && lsu_wb_ready && !lq_result_valid))
-      : lq_alloc_ready);
+      : (lq_alloc_ready && (!disp_mem_is_amo || !amo_busy)));
 
   assign lq_alloc_valid  = disp_mem_valid && !disp_mem_is_store && disp_mem_ready;
   assign sq_alloc_valid  = disp_mem_valid &&  disp_mem_is_store && !disp_store_faults &&

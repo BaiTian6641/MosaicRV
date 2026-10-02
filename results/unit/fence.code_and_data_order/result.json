@@ -6,11 +6,10 @@
   "seed": 1,
   "max_cycles": 4000000,
   "checks": 16,
-  "failures": 1,
+  "failures": 0,
   "image": "",
   "expect": "",
   "tool": "Verilator 5.052 2026-09-05",
-  "timestamp": "2026-10-02T02:24:34Z",
-  "first_mismatch": "",
-  "failed_checks": ["no macro was refused as unsupported: 9"]
+  "timestamp": "2026-10-02T03:33:47Z",
+  "first_mismatch": ""
 }

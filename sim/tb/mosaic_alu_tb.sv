@@ -71,6 +71,10 @@ module mosaic_alu_tb (
       .XLEN(64)
   ) u_branch_target (
       .pc           (bt_pc),
+      // The unit test drives base-ISA instructions only, so the length is four.
+      // I-041's compressed jumps are covered end-to-end by
+      // CASE=compressed.cross_boundary, which drives the real core.
+      .insn_len     (3'd4),
       .imm          (bt_imm),
       .is_branch    (bt_is_branch),
       .is_jal       (bt_is_jal),

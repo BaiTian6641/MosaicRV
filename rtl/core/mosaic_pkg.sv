@@ -32,6 +32,14 @@ package mosaic_pkg;
   // RV32I has no OP-32 at all, and the W forms have no RV32 meaning.
   localparam logic [6:0] OP_32        = 7'b0111011;
   localparam logic [6:0] OP_SYSTEM    = 7'b1110011;  // ecall ebreak mret csr*
+  // OP_AMO is the A extension's atomic-memory opcode. It is *not* decoded by
+  // mosaic_decoder: CASE=decode.rv64im_reserved pins every opcode outside
+  // RV64IM as illegal, and that enumeration belongs to the decoder's owner.
+  // The integration recognises it from the raw word in mosaic_core.sv, the same
+  // division of ownership WFI uses (see mosaic_core.sv section 2a). It is named
+  // here because both the core's front end and the testbench's reference need
+  // the same literal.
+  localparam logic [6:0] OP_AMO       = 7'b0101111;  // amoadd..amomaxu, lr, sc
 
   // funct3
   localparam logic [2:0] F3_ADD_SUB  = 3'b000;
@@ -81,13 +89,38 @@ package mosaic_pkg;
   typedef enum logic [2:0] {
     MEM_NONE  = 3'b000,
     MEM_LOAD  = 3'b001,
-    MEM_STORE = 3'b010
+    MEM_STORE = 3'b010,
+    // An atomic read-modify-write (A extension, work package I-039). It is a
+    // third class and not a load or a store because its effect is neither: the
+    // old value is read *and* the new one written as one indivisible step at a
+    // shared serialization point. A consumer that treated it as either one
+    // would either write memory speculatively or return a stale value.
+    MEM_AMO   = 3'b011
   } mem_kind_e;
 
   localparam logic [2:0] SZ_BYTE = 3'd0;
   localparam logic [2:0] SZ_HALF = 3'd1;
   localparam logic [2:0] SZ_WORD = 3'd2;
   localparam logic [2:0] SZ_DBL  = 3'd3;
+
+  // --------------------------------------------------------- A extension ops
+  // The nine AMO operations, in the order the encoding's funct5 field names
+  // them. `AMO_MIN`/`AMO_MAX` are the *signed* comparisons and `AMO_MINU`/
+  // `AMO_MAXU` the unsigned ones -- the boundary the card calls out, and the
+  // reason signedness is a property of the operation and not of the access.
+  // LR and SC share the opcode (funct5 00010/00011) but are I-040's; they are
+  // not named here because this package enumerates only what I-039 builds.
+  typedef enum logic [3:0] {
+    AMO_ADD  = 4'd0,
+    AMO_SWAP = 4'd1,
+    AMO_XOR  = 4'd2,
+    AMO_AND  = 4'd3,
+    AMO_OR   = 4'd4,
+    AMO_MIN  = 4'd5,
+    AMO_MAX  = 4'd6,
+    AMO_MINU = 4'd7,
+    AMO_MAXU = 4'd8
+  } amo_op_e;
 
   // ------------------------------------------------------------------ system
   typedef enum logic [1:0] {
@@ -136,6 +169,13 @@ package mosaic_pkg;
     mem_kind_e   mem_kind;
     logic [2:0]  mem_size;
     logic        mem_signed;
+    // A extension (MEM_AMO only). `amo_op` names the read-modify-write; `aq` and
+    // `rl` are the acquire/release ordering bits, carried through to the memory
+    // transaction so the serialization point can honour them rather than
+    // treating them as a performance hint (the card's named Fail mode).
+    amo_op_e     amo_op;
+    logic        amo_aq;
+    logic        amo_rl;
 
     logic        is_branch;
     logic [2:0]  branch_funct;

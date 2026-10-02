@@ -11,12 +11,15 @@
 //
 // Contract
 // --------
-//   * `link` is `pc + 4`, always, for every instruction and every alignment. In
-//     IALIGN=32 a jump target that is not 4-byte aligned traps before fetch, so
-//     no "aligned link" rule exists and none is invented here.
-//   * `target` is the address control transfers to when `is_taken`, and `pc + 4`
-//     when it is not. A not-taken branch therefore needs no separate "sequential
-//     next PC" path anywhere else in the core: this port is always safe to use.
+//   * `link` is `pc + insn_len`, always: four bytes for a base-ISA instruction,
+//     two for a compressed one (I-041). The length is an input because it is a
+//     property of the instruction, and inferring it from the PC's alignment
+//     would be wrong -- a 32-bit instruction may start at a two-byte-aligned
+//     address. In IALIGN=16 the two-byte form is the only other case.
+//   * `target` is the address control transfers to when `is_taken`, and the
+//     sequential next instruction (`pc + insn_len`) when it is not. A not-taken
+//     branch therefore needs no separate "sequential next PC" path anywhere
+//     else in the core: this port is always safe to use.
 //   * `JALR` clears bit 0 of the computed target and **nothing else**. Bit 1 is
 //     not cleared: the misaligned-target *report* (instruction-address-misaligned
 //     or instruction-access-fault, `EXC_INSN_MISALIGNED` / `EXC_INSN_ACCESS`) is
@@ -63,6 +66,8 @@ module mosaic_branch_target #(
     parameter int XLEN = 64
 ) (
     input  wire [XLEN-1:0] pc,
+    input  wire [2:0]   insn_len,      // the instruction's own length in bytes
+                                        // (4, or 2 for a compressed jump)
     input  wire [XLEN-1:0] imm,        // already sign-extended by the decoder
     input  wire         is_branch,    // a conditional branch: BEQ..BGEU
     input  wire         is_jal,       // unconditional jump with its own immediate
@@ -80,7 +85,12 @@ module mosaic_branch_target #(
     // NEGATIVE CONTROL: the wrong link distance.
     link = pc + {{(XLEN - 3){1'b0}}, 3'd2};
 `else
-    link = pc + {{(XLEN - 3){1'b0}}, 3'd4};
+    // The link value is `pc + the instruction's own length`. It was `pc + 4`
+    // while every instruction was four bytes; a compressed JALR is two, and its
+    // return address is the byte after it. The length is an input rather than a
+    // constant precisely because it is a property of the instruction, not of
+    // this unit.
+    link = pc + {{(XLEN - 3){1'b0}}, insn_len};
 `endif
 
     sum = pc + imm;

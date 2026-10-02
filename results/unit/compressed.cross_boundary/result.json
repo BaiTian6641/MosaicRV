@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "case": "compressed.cross_boundary",
+  "verdict": "PASS",
+  "detail": "checks=97 runs=11 reserved_encodings=7 retires=66 compressed=14 straddling=1 cycles=1022 seed=1",
+  "seed": 1,
+  "max_cycles": 4000000,
+  "checks": 98,
+  "failures": 0,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-02T03:35:26Z",
+  "first_mismatch": ""
+}

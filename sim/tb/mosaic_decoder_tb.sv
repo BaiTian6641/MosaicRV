@@ -78,16 +78,23 @@ module mosaic_decoder_tb (
     // The struct itself, as one vector, so the driver can prove that the named
     // ports above carry exactly the bits of decode_ctl_t and that none of the
     // break-out assignments was fat-fingered. Field order is the declaration
-    // order of mosaic_pkg::decode_ctl_t, with `valid` at the MSB.
-    output logic [134:0] o_ctl_bits
+    // order of mosaic_pkg::decode_ctl_t, with `valid` at the MSB. The width is
+    // taken from the package's declaration order, field by field: 141 bits
+    // (135 before the A extension's amo_op/amo_aq/amo_rl were added). tb_decoder.cpp
+    // derives the same layout from the same order and fails if the two disagree.
+    output logic [140:0] o_ctl_bits
 );
   mosaic_pkg::decode_ctl_t ctl;
 
   assign o_ctl_bits = ctl;
 
   mosaic_decoder u_dec (
-      .insn (insn),
-      .ctl  (ctl)
+      .insn_raw (insn),
+      // CASE=decode.rv64im_reserved is the exhaustive 32-bit enumeration, so the
+      // compressed arm is disabled here; the C forms are proved end-to-end by
+      // CASE=compressed.cross_boundary through the real core.
+      .insn16   (1'b0),
+      .ctl      (ctl)
   );
 
   assign o_valid        = ctl.valid;

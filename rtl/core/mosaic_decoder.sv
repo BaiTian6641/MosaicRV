@@ -110,7 +110,14 @@
 // it raises IMPORTSTAR under -Wall, and under -Wall that warning is an error.
 
 module mosaic_decoder (
-    input  wire  [31:0]             insn,
+    // `insn_raw` is the instruction window the fetch unit delivered. For a
+    // 32-bit instruction the whole word is the encoding; for a 16-bit
+    // compressed instruction only `insn_raw[15:0]` is, and `insn16` says
+    // which it is. The compressed forms are expanded to their base-ISA
+    // equivalents below, so every arm of the decode -- and every consumer of
+    // `ctl` -- is the same code it was before C existed.
+    input  wire  [31:0]             insn_raw,
+    input  wire                     insn16,
     output mosaic_pkg::decode_ctl_t ctl
 );
 
@@ -159,6 +166,320 @@ module mosaic_decoder (
 `else
   localparam bit MutCsrIntent  = 1'b0;
 `endif
+`ifdef MOSAIC_DECODER_MUTANT_C_RESERVED_EXEC
+  localparam bit MutCReservedExec = 1'b1;  // a reserved compressed encoding is
+                                           // expanded and executed instead of
+                                           // being refused as illegal (I-041)
+`else
+  localparam bit MutCReservedExec = 1'b0;
+`endif
+
+  // ==========================================================================
+  // C (compressed) decompression -- work package I-041
+  // ==========================================================================
+  // A 16-bit instruction is *expanded* to the base-ISA instruction it is
+  // shorthand for, and the existing 32-bit decode then runs unchanged. That is
+  // the whole layering decision: there is one decoder, one `decode_ctl_t` and
+  // one meaning for every field, and nothing downstream of this module knows
+  // the C extension exists. The alternative -- a second control-word producer
+  // for 16-bit forms -- is the "second opinion about what the machine does"
+  // this file's header already refuses.
+  //
+  // Three outcomes per encoding, and each is stated rather than implied:
+  //
+  //   * an expansion exists (the encoding is defined RV64C) -> that word is
+  //     decoded, `ctl.valid` is set, and the instruction executes;
+  //   * the encoding is reserved -> `ok` is 0 and the compressed arm drives
+  //     nothing, so `ctl` is exactly CTL_ILLEGAL (never a half-decoded word);
+  //   * the encoding is a defined HINT (c.nop, c.addi x0, c.li x0, c.lui x0,
+  //     c.slli x0, c.srli/c.srai/c.andi x0, c.mv x0, c.add x0) -> it expands to
+  //     an instruction whose destination is x0, so it is *legal* and writes
+  //     nothing. A hint that trapped would be a wrong machine.
+  //
+  // The F and D extension's compressed forms (c.fld, c.fsd, c.fldsp, c.fsdsp)
+  // are refused as illegal because p0 has no floating point; that is an
+  // unimplemented extension, not a reserved encoding, and the report for I-041
+  // says so.
+  //
+  // `force` is the mutation hook: when MutCReservedExec is set the reserved
+  // tests are skipped, so a reserved encoding is expanded "as if" and executes
+  // -- the exact defect CASE=compressed.cross_boundary's third control injects.
+  typedef struct packed {
+    logic        ok;     // legal compressed encoding (reserved -> 0)
+    logic [31:0] word;   // the equivalent base-ISA instruction
+  } cexp_t;
+
+  // The compressed register fields name x8..x15.
+  function automatic logic [4:0] c_creg(input logic [2:0] field);
+    c_creg = {2'b01, field};
+  endfunction
+
+  // Base-ISA instruction builders: each takes the fields its format defines and
+  // places them exactly where the ISA puts them, so an expansion cannot be
+  // "almost right" about one bit position.
+  function automatic logic [31:0] rv_r(input logic [6:0] f7, input logic [4:0] rs2,
+                                       input logic [4:0] rs1, input logic [2:0] f3,
+                                       input logic [4:0] rd,  input logic [6:0] op);
+    rv_r = {f7, rs2, rs1, f3, rd, op};
+  endfunction
+
+  function automatic logic [31:0] rv_i(input logic [11:0] imm, input logic [4:0] rs1,
+                                       input logic [2:0] f3,   input logic [4:0] rd,
+                                       input logic [6:0] op);
+    rv_i = {imm, rs1, f3, rd, op};
+  endfunction
+
+  function automatic logic [31:0] rv_s(input logic [11:0] imm, input logic [4:0] rs2,
+                                       input logic [4:0] rs1,  input logic [2:0] f3,
+                                       input logic [6:0] op);
+    rv_s = {imm[11:5], rs2, rs1, f3, imm[4:0], op};
+  endfunction
+
+  // B/J formats always have an even immediate: their bit 0 is not encoded and
+  // is hard-wired zero, so the builders take bits [12:1] / [20:1] and there is
+  // no variable bit that is silently never read.
+  function automatic logic [31:0] rv_b(input logic [12:1] imm, input logic [4:0] rs2,
+                                       input logic [4:0] rs1,  input logic [2:0] f3,
+                                       input logic [6:0] op);
+    rv_b = {imm[12], imm[10:5], rs2, rs1, f3, imm[4:1], imm[11], op};
+  endfunction
+
+  function automatic logic [31:0] rv_u(input logic [19:0] imm, input logic [4:0] rd,
+                                       input logic [6:0] op);
+    rv_u = {imm, rd, op};
+  endfunction
+
+  function automatic logic [31:0] rv_j(input logic [20:1] imm, input logic [4:0] rd,
+                                       input logic [6:0] op);
+    rv_j = {imm[20], imm[10:1], imm[11], imm[19:12], rd, op};
+  endfunction
+
+  // The expansion itself: quadrant, then funct3, then the sub-encodings whose
+  // meaning is a second field. Each `ok` assignment is one of the reserved
+  // cases the RV64C text names.
+  function automatic cexp_t c_expand(input logic [15:0] c, input logic force_reserved);
+    cexp_t       r;
+    logic [2:0]  cf3;
+    logic [4:0]  rdp, rs1p, rs2p;
+    logic [11:0] imm12;
+    logic [12:1] imm13;
+    logic [20:1] imm21;
+    logic [19:0] imm20;
+    // The CI-format immediate (c.addi, c.addiw, c.li, c.andi): imm[5] is the
+    // encoding's bit 12 and imm[4:0] are its bits 6:2, sign-extended to 12 bits.
+    // The register field sits between the two halves, so the immediate is *not*
+    // a slice of the instruction: taking `c[12:7]` reads the destination
+    // register as the low immediate bits, which is what CASE=compressed.
+    // cross_boundary's reference caught (a `c.addi x6, 1` that added 6).
+    logic [11:0] ci_imm;
+
+    ci_imm = {{6{c[12]}}, c[12], c[6:2]};
+
+    r.ok   = 1'b1;
+    r.word = rv_i(12'd0, 5'd0, mosaic_pkg::F3_ADD_SUB, 5'd0, mosaic_pkg::OP_IMM);
+
+    cf3  = c[15:13];
+    rdp  = c_creg(c[4:2]);
+    rs1p = c_creg(c[9:7]);
+    rs2p = c_creg(c[4:2]);
+
+    case (c[1:0])
+      // ------------------------------------------------------- quadrant 0
+      2'b00: begin
+        case (cf3)
+          3'b000: begin  // c.addi4spn: addi rd', x2, nzuimm
+            imm12  = {2'b00, c[10:7], c[12:11], c[5], c[6], 2'b00};
+            r.ok   = force_reserved || (imm12 != 12'd0);   // nzuimm == 0 reserved
+            r.word = rv_i(imm12, 5'd2, mosaic_pkg::F3_ADD_SUB, rdp, mosaic_pkg::OP_IMM);
+          end
+          3'b001, 3'b101: r.ok = 1'b0;  // c.fld / c.fsd: no D extension in p0
+          3'b010: begin  // c.lw: lw rd', uimm(rs1')
+            imm12  = {5'b00000, c[5], c[12:10], c[6], 2'b00};
+            r.word = rv_i(imm12, rs1p, 3'b010, rdp, mosaic_pkg::OP_LOAD);
+          end
+          3'b011: begin  // c.ld: ld rd', uimm(rs1')
+            imm12  = {4'b0000, c[6:5], c[12:10], 3'b000};
+            r.word = rv_i(imm12, rs1p, 3'b011, rdp, mosaic_pkg::OP_LOAD);
+          end
+          3'b100: r.ok = 1'b0;  // reserved
+          3'b110: begin  // c.sw: sw rs2', uimm(rs1')
+            imm12  = {5'b00000, c[5], c[12:10], c[6], 2'b00};
+            r.word = rv_s(imm12, rs2p, rs1p, 3'b010, mosaic_pkg::OP_STORE);
+          end
+          3'b111: begin  // c.sd: sd rs2', uimm(rs1')
+            imm12  = {4'b0000, c[6:5], c[12:10], 3'b000};
+            r.word = rv_s(imm12, rs2p, rs1p, 3'b011, mosaic_pkg::OP_STORE);
+          end
+          default: r.ok = 1'b0;
+        endcase
+      end
+
+      // ------------------------------------------------------- quadrant 1
+      2'b01: begin
+        case (cf3)
+          3'b000: begin  // c.nop (rd=0, imm=0) / c.addi: addi rd, rd, imm
+            imm12  = ci_imm;
+            r.word = rv_i(imm12, c[11:7], mosaic_pkg::F3_ADD_SUB, c[11:7],
+                          mosaic_pkg::OP_IMM);
+          end
+          3'b001: begin  // c.addiw (RV64): addiw rd, rd, imm
+            imm12  = ci_imm;
+            r.ok   = force_reserved || (c[11:7] != 5'd0);   // rd == x0 reserved
+            r.word = rv_i(imm12, c[11:7], mosaic_pkg::F3_ADD_SUB, c[11:7],
+                          mosaic_pkg::OP_IMM_32);
+          end
+          3'b010: begin  // c.li: addi rd, x0, imm (rd == x0 is a hint)
+            imm12  = ci_imm;
+            r.word = rv_i(imm12, 5'd0, mosaic_pkg::F3_ADD_SUB, c[11:7],
+                          mosaic_pkg::OP_IMM);
+          end
+          3'b011: begin
+            if (c[11:7] == 5'd2) begin  // c.addi16sp: addi x2, x2, nzimm
+              imm12  = {{2{c[12]}}, c[12], c[4:3], c[5], c[2], c[6], 4'b0000};
+              r.ok   = force_reserved || (imm12 != 12'd0);   // nzimm == 0 reserved
+              r.word = rv_i(imm12, 5'd2, mosaic_pkg::F3_ADD_SUB, 5'd2,
+                            mosaic_pkg::OP_IMM);
+            end else begin  // c.lui: lui rd, nzimm (rd == x0 a hint, imm == 0 reserved)
+              imm20  = {{2{c[12]}}, c[12], c[6:2], 12'b0};
+              r.ok   = force_reserved || (c[12] || (c[6:2] != 5'd0));
+              r.word = rv_u(imm20, c[11:7], 7'b0110111);
+            end
+          end
+          3'b100: begin
+            case (c[11:10])
+              2'b00: begin  // c.srli
+                imm12  = {6'b000000, c[12], c[6:2]};
+                r.word = rv_i(imm12, rs1p, mosaic_pkg::F3_SRL_SRA, rs1p,
+                              mosaic_pkg::OP_IMM);
+              end
+              2'b01: begin  // c.srai
+                imm12  = {6'b010000, c[12], c[6:2]};
+                r.word = rv_i(imm12, rs1p, mosaic_pkg::F3_SRL_SRA, rs1p,
+                              mosaic_pkg::OP_IMM);
+              end
+              2'b10: begin  // c.andi
+                imm12  = ci_imm;
+                r.word = rv_i(imm12, rs1p, mosaic_pkg::F3_AND, rs1p,
+                              mosaic_pkg::OP_IMM);
+              end
+              default: begin
+                if (!c[12]) begin
+                  case (c[6:5])
+                    2'b00: r.word = rv_r(7'b0100000, rs2p, rs1p, 3'b000, rs1p,
+                                         mosaic_pkg::OP_MUL_DIV);  // c.sub
+                    2'b01: r.word = rv_r(7'b0000000, rs2p, rs1p, 3'b100, rs1p,
+                                         mosaic_pkg::OP_MUL_DIV);  // c.xor
+                    2'b10: r.word = rv_r(7'b0000000, rs2p, rs1p, 3'b110, rs1p,
+                                         mosaic_pkg::OP_MUL_DIV);  // c.or
+                    default: r.word = rv_r(7'b0000000, rs2p, rs1p, 3'b111, rs1p,
+                                           mosaic_pkg::OP_MUL_DIV);  // c.and
+                  endcase
+                end else begin
+                  case (c[6:5])
+                    2'b00: r.word = rv_r(7'b0100000, rs2p, rs1p, 3'b000, rs1p,
+                                         mosaic_pkg::OP_32);  // c.subw
+                    2'b01: r.word = rv_r(7'b0000000, rs2p, rs1p, 3'b000, rs1p,
+                                         mosaic_pkg::OP_32);  // c.addw
+                    default: r.ok = 1'b0;   // reserved
+                  endcase
+                end
+              end
+            endcase
+          end
+          3'b101: begin  // c.j: jal x0, offset
+            imm21  = {{9{c[12]}}, c[12], c[8], c[10:9], c[6], c[7], c[2], c[11],
+                      c[5:3]};
+            r.word = rv_j(imm21, 5'd0, mosaic_pkg::OP_JAL);
+          end
+          3'b110: begin  // c.beqz: beq rs1', x0, offset
+            imm13  = {{4{c[12]}}, c[12], c[6:5], c[2], c[11:10], c[4:3]};
+            r.word = rv_b(imm13, 5'd0, rs1p, 3'b000, mosaic_pkg::OP_BRANCH);
+          end
+          default: begin  // c.bnez: bne rs1', x0, offset
+            imm13  = {{4{c[12]}}, c[12], c[6:5], c[2], c[11:10], c[4:3]};
+            r.word = rv_b(imm13, 5'd0, rs1p, 3'b001, mosaic_pkg::OP_BRANCH);
+          end
+        endcase
+      end
+
+      // ------------------------------------------------------- quadrant 2
+      2'b10: begin
+        case (cf3)
+          3'b000: begin  // c.slli (rd == x0 is a hint)
+            imm12  = {6'b000000, c[12], c[6:2]};
+            r.word = rv_i(imm12, c[11:7], mosaic_pkg::F3_SLL, c[11:7],
+                          mosaic_pkg::OP_IMM);
+          end
+          3'b001, 3'b101: r.ok = 1'b0;  // c.fldsp / c.fsdsp: no D extension
+          3'b010: begin  // c.lwsp: lw rd, uimm(x2)
+            imm12  = {4'b0000, c[3:2], c[12], c[6:4], 2'b00};
+            r.ok   = force_reserved || (c[11:7] != 5'd0);   // rd == x0 reserved
+            r.word = rv_i(imm12, 5'd2, 3'b010, c[11:7], mosaic_pkg::OP_LOAD);
+          end
+          3'b011: begin  // c.ldsp: ld rd, uimm(x2)
+            imm12  = {3'b000, c[4:2], c[12], c[6:5], 3'b000};
+            r.ok   = force_reserved || (c[11:7] != 5'd0);   // rd == x0 reserved
+            r.word = rv_i(imm12, 5'd2, 3'b011, c[11:7], mosaic_pkg::OP_LOAD);
+          end
+          3'b100: begin
+            if (!c[12]) begin
+              if (c[6:2] == 5'd0) begin  // c.jr: jalr x0, 0(rs1)
+                r.ok   = force_reserved || (c[11:7] != 5'd0);  // rs1 == x0 reserved
+                r.word = rv_i(12'd0, c[11:7], 3'b000, 5'd0, mosaic_pkg::OP_JALR);
+              end else begin  // c.mv: add rd, x0, rs2 (rd == x0 a hint)
+                r.word = rv_r(7'b0000000, c[6:2], 5'd0, 3'b000, c[11:7],
+                              mosaic_pkg::OP_MUL_DIV);
+              end
+            end else if (c[6:2] == 5'd0) begin
+              if (c[11:7] == 5'd0) begin  // c.ebreak
+                r.word = 32'h0010_0073;
+              end else begin  // c.jalr: jalr x1, 0(rs1)
+                r.word = rv_i(12'd0, c[11:7], 3'b000, 5'd1, mosaic_pkg::OP_JALR);
+              end
+            end else begin  // c.add: add rd, rd, rs2 (rd == x0 a hint)
+              r.word = rv_r(7'b0000000, c[6:2], c[11:7], 3'b000, c[11:7],
+                            mosaic_pkg::OP_MUL_DIV);
+            end
+          end
+          3'b110: begin  // c.swsp: sw rs2, uimm(x2)
+            imm12  = {4'b0000, c[8:7], c[12:9], 2'b00};
+            r.word = rv_s(imm12, c[6:2], 5'd2, 3'b010, mosaic_pkg::OP_STORE);
+          end
+          default: begin  // c.sdsp: sd rs2, uimm(x2)
+            imm12  = {3'b000, c[9:7], c[12:10], 3'b000};
+            r.word = rv_s(imm12, c[6:2], 5'd2, 3'b011, mosaic_pkg::OP_STORE);
+          end
+        endcase
+      end
+
+      default: r.ok = 1'b0;
+    endcase
+    return r;
+  endfunction
+
+  // The word every arm below decodes. For a 32-bit instruction it is the input
+  // window itself; for a 16-bit one it is the expansion, and `expand_ok` is the
+  // expansion's own statement that the encoding is not reserved.
+  function automatic cexp_t c_word(input logic [31:0] raw, input logic is16);
+    cexp_t r;
+    if (is16) begin
+      r = c_expand(raw[15:0], MutCReservedExec);
+    end else begin
+      r.ok   = 1'b1;
+      r.word = raw;
+    end
+    return r;
+  endfunction
+
+  logic [31:0] insn;
+  logic        expand_ok;
+
+  always_comb begin
+    cexp_t e;
+    e = c_word(insn_raw, insn16);
+    insn      = e.word;
+    expand_ok = e.ok;
+  end
 
   // ------------------------------------------------------- field extraction
   localparam logic [6:0] F7_BASE = 7'b0000000;  // the "first" of a funct3 pair
@@ -261,6 +582,10 @@ module mosaic_decoder (
       mem_kind:     mosaic_pkg::MEM_NONE,
       mem_size:     mosaic_pkg::SZ_BYTE,
       csr_op:       mosaic_pkg::CSR_NONE,
+      // `amo_op` is an enum, so it cannot be covered by the `'0` default arm
+      // (an implicit bit-to-enum conversion is rejected); it is named
+      // explicitly and left at the operation the encoding space starts with.
+      amo_op:       mosaic_pkg::AMO_ADD,
       default:      '0
   };
 
@@ -272,7 +597,14 @@ module mosaic_decoder (
     ctl  = CTL_ILLEGAL;
     legal = 1'b0;
 
-    case (opcode)
+    // A reserved compressed encoding has no base-ISA equivalent at all, so it
+    // drives *nothing*: `legal` stays low and the fixup below emits exactly
+    // CTL_ILLEGAL. Note the order -- the expansion's own `ok` is consulted
+    // before the 32-bit case, not after, so a reserved encoding cannot be
+    // "decoded anyway" by whatever word the expansion happened to leave behind.
+    if (insn16 && !expand_ok) begin
+      legal = 1'b0;
+    end else case (opcode)
       // ------------------------------------------------------------- loads
       mosaic_pkg::OP_LOAD: begin
         ctl.uses_rs1  = 1'b1;

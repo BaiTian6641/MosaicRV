@@ -142,6 +142,13 @@ module mosaic_lsu_endpoint_tb (
     up_req_s.size       = up_req_size[SIZE_W-1:0];
     up_req_s.signed_    = up_req_signed;
     up_req_s.store_data = up_req_store_data;
+    // The A-extension fields (I-039) exist in `lsu_req_t` and are driven here so
+    // the packet is fully assigned. This wrapper is CASE=lsu.size_fault_boundaries'
+    // and exercises no atomic access; the AMO path has its own case.
+    up_req_s.is_amo     = 1'b0;
+    up_req_s.amo_op     = mosaic_pkg::AMO_ADD;
+    up_req_s.aq         = 1'b0;
+    up_req_s.rl         = 1'b0;
   end
 
   // The downstream response packet the driver presents.

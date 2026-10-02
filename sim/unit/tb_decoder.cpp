@@ -1413,13 +1413,13 @@ class Bench {
   // Without this, a typo in one of the break-out assignments would either hide
   // a decoder bug or invent one.
   bool CheckBreakout(const Ref& r, const std::string& where) {
-    // 135 bits: 2 + 3 + 15 + 64 + 6 + 7 + 8 + 2 + 5 + 5 + 12 + 3. The first
+    // 141 bits. The first
     // field pushed lands at the most significant end, because that is how a
     // packed struct is laid out. `is_wfi` is one of the five system bits: the
     // decoder leaves it 0 for every encoding (the core's front end recognises
     // WFI), and it is carried here so the break-out accounting covers every
     // field the package declares.
-    const int kTotalBits = 135;
+    const int kTotalBits = 141;
     uint64_t chunk[3] = {0, 0, 0};
     int nbits = 0;
     // Fields are laid out MSB first, and inside a field the value's bit 0 sits
@@ -1438,6 +1438,10 @@ class Bench {
     push(r.imm, 64);
     push(r.alu_op, 4);      push(r.uses_alu, 1);  push(r.reg_write, 1);
     push(r.mem_kind, 3);    push(r.mem_size, 3);   push(r.mem_signed, 1);
+    // The A extension's fields sit here in the package's declaration order. The
+    // decoder never drives them (AMO is decoded by the core, not here), so
+    // they are always the illegal constant's: AMO_ADD, no acquire, no release.
+    push(0, 4);             push(0, 1);            push(0, 1);
     push(r.is_branch, 1);   push(r.branch_funct, 3);
     push(r.is_jal, 1);      push(r.is_jalr, 1);    push(r.is_auipc, 1);
     push(r.writes_link, 1);
@@ -1452,16 +1456,16 @@ class Bench {
                "decode_ctl_t is " + std::to_string(kTotalBits) +
                    " bits wide and every one is accounted for");
 
-    // 135 bits is five 32-bit Verilator words, not three 64-bit ones.
+    // 141 bits is five 32-bit Verilator words, not three 64-bit ones.
     const uint64_t w0 = top_->o_ctl_bits[0], w1 = top_->o_ctl_bits[1];
     const uint64_t w2 = top_->o_ctl_bits[2], w3 = top_->o_ctl_bits[3];
     const uint64_t w4 = top_->o_ctl_bits[4];
     const uint64_t dut_lo = w0 | (w1 << 32);
     const uint64_t dut_mid = w2 | (w3 << 32);
-    const uint64_t dut_top = w4 & 0x7Full;
+    const uint64_t dut_top = w4 & 0x1FFFull;
     const uint64_t my_lo = chunk[0];
     const uint64_t my_mid = chunk[1];
-    const uint64_t my_top = chunk[2] & 0x7Full;
+    const uint64_t my_top = chunk[2] & 0x1FFFull;
     if (my_lo == dut_lo && my_mid == dut_mid && my_top == dut_top) return true;
     rep_.Mismatch(where + " (testbench break-out vs decode_ctl_t)",
                   mosaic::Hex(my_lo) + "|" + mosaic::Hex(my_mid) + "|" +

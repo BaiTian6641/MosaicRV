@@ -157,6 +157,13 @@ module mosaic_retire (
     input  logic [RET_WIDTH-1:0]            rob_ack,
     input  logic [RET_WIDTH*RET_ID_W-1:0]   rob_id,    // {gen, tag}
     input  logic [RET_WIDTH*RET_XLEN-1:0]   rob_pc,
+    // I-041: the retiring instruction's own length (2 or 4 bytes) and its own
+    // bits, from the macro descriptor. The event stream is the architectural
+    // record, so an instruction's true length belongs on it -- a consumer must
+    // not have to infer it from the PC (alignment does not decide it) or from
+    // the previous instruction (a compressed instruction's PC is not pc+4).
+    input  logic [RET_WIDTH*RET_SIZE_W-1:0] rob_len,
+    input  logic [RET_WIDTH*32-1:0]         rob_insn,
 
     // -------------------------------------- what the instruction did execute
     // The payload bus: what the retiring instruction's architectural effects
@@ -213,6 +220,8 @@ module mosaic_retire (
     output logic [RET_WIDTH-1:0]            ev_trap,
     output logic [RET_WIDTH*RET_SEQ_W-1:0]  ev_seq,
     output logic [RET_WIDTH*RET_XLEN-1:0]   ev_pc,
+    output logic [RET_WIDTH*RET_SIZE_W-1:0] ev_len,
+    output logic [RET_WIDTH*32-1:0]         ev_insn,
     output logic [RET_WIDTH*RET_ID_W-1:0]   ev_id,
     output logic [RET_WIDTH-1:0]            ev_reg_we,
     output logic [RET_WIDTH*RET_RD_W-1:0]   ev_rd,
@@ -496,6 +505,8 @@ module mosaic_retire (
 
     ev_seq        = '0;
     ev_pc         = '0;
+    ev_len        = '0;
+    ev_insn       = '0;
     ev_id         = '0;
     ev_reg_we     = lane_effect & pay_reg_we;
     ev_rd         = '0;
@@ -518,6 +529,8 @@ module mosaic_retire (
 
       if (ev_valid_q[i]) begin
         ev_pc[i*RET_XLEN +: RET_XLEN] = rob_pc[i*RET_XLEN +: RET_XLEN];
+        ev_len[i*RET_SIZE_W +: RET_SIZE_W] = rob_len[i*RET_SIZE_W +: RET_SIZE_W];
+        ev_insn[i*32 +: 32]        = rob_insn[i*32 +: 32];
         ev_id[i*RET_ID_W  +: RET_ID_W]  = rob_id[i*RET_ID_W  +: RET_ID_W];
       end
 

@@ -708,6 +708,13 @@ module mosaic_store_queue #(
     drain_req_o.size       = ent_q[drain_idx_c].size;
     drain_req_o.signed_    = 1'b0;
     drain_req_o.store_data = ent_q[drain_idx_c].data;
+    // A store drain is never an atomic read-modify-write (I-039). The fields
+    // exist in the packet and must be driven, not left unassigned: an
+    // unassigned field is a value the endpoint would branch on.
+    drain_req_o.is_amo     = 1'b0;
+    drain_req_o.amo_op     = mosaic_pkg::AMO_ADD;
+    drain_req_o.aq         = 1'b0;
+    drain_req_o.rl         = 1'b0;
   end
 
   logic drain_accept_c;

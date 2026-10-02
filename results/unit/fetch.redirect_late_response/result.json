@@ -2,7 +2,7 @@
   "schema_version": 1,
   "case": "fetch.redirect_late_response",
   "verdict": "PASS",
-  "detail": "fetch contract holds: 235640 comparisons over 6099 cycles, seed 1",
+  "detail": "fetch contract holds: 235720 comparisons over 6101 cycles, seed 1",
   "seed": 1,
   "max_cycles": 200000,
   "checks": 12,
@@ -10,6 +10,6 @@
   "image": "",
   "expect": "",
   "tool": "Verilator 5.052 2026-09-05",
-  "timestamp": "2026-10-01T21:09:44Z",
+  "timestamp": "2026-10-02T03:33:44Z",
   "first_mismatch": ""
 }

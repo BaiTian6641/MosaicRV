@@ -261,6 +261,9 @@ module mosaic_cluster (
   // predicate does not depend on the base.
   mosaic_branch_target #(.XLEN(CL_XLEN)) u_btgt (
       .pc           (iq_grant_meta.pc),
+      // I-041: the link value and the sequential next PC are `pc + length`, and
+      // the length is the delivered instruction's (2 for a compressed jump).
+      .insn_len     (iq_grant_meta.insn_len),
       .imm          (iq_grant_imm),
       .is_branch    (iq_grant_meta.class_ == mosaic_uop_pkg::UOP_BRANCH &&
                      !iq_grant_meta.is_jal && !iq_grant_meta.is_jalr),

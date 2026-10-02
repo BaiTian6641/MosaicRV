@@ -307,6 +307,14 @@ module mosaic_retire_tb (
   logic [TB_RET_WIDTH-1:0] rob_ack;
   logic [TB_RET_WIDTH*TB_RET_ID_W-1:0]  rob_id;
   logic [TB_RET_WIDTH*TB_RET_XLEN-1:0]  rob_pc;
+  // I-041: the retire unit now carries the instruction's own length and bits.
+  // This unit case drives base-ISA instructions only, so the length is four and
+  // the bits are left zero; the compressed forms are proved end-to-end by
+  // CASE=compressed.cross_boundary, which drives the real core.
+  logic [TB_RET_WIDTH*TB_RET_SIZE_W-1:0] rob_len;
+  logic [TB_RET_WIDTH*32-1:0]            rob_insn;
+  assign rob_len  = {(TB_RET_WIDTH*TB_RET_SIZE_W){1'b1}};   // every lane: 4 bytes
+  assign rob_insn = {(TB_RET_WIDTH*32){1'b0}};
 
   assign rob_valid[0] = rob_head_valid_o;
   assign rob_ready[0] = rob_head_ready_o;
@@ -394,6 +402,8 @@ module mosaic_retire_tb (
   logic [TB_RET_WIDTH*(1)-1:0] n_o_pay_missing;
   logic [TB_RET_WIDTH*(1)-1:0] n_o_csr_unsupported;
   logic [TB_RET_WIDTH*TB_RET_XLEN-1:0] n_ev_pc;
+  logic [TB_RET_WIDTH*TB_RET_SIZE_W-1:0] n_ev_len;
+  logic [TB_RET_WIDTH*32-1:0] n_ev_insn;
   logic [TB_RET_WIDTH*TB_RET_XLEN-1:0] n_ev_value;
   logic [TB_RET_WIDTH*TB_RET_XLEN-1:0] n_ev_csr_value;
   logic [TB_RET_WIDTH*TB_RET_XLEN-1:0] n_ev_store_addr;
@@ -530,6 +540,8 @@ module mosaic_retire_tb (
       .rob_ack            (rob_ack),
       .rob_id             (rob_id),
       .rob_pc             (rob_pc),
+      .rob_len            (rob_len),
+      .rob_insn           (rob_insn),
 
       .pay_valid          (pay_valid),
       .pay_reg_we         (pay_reg_we),
@@ -558,6 +570,8 @@ module mosaic_retire_tb (
       .ev_trap            (n_ev_trap),
       .ev_seq             (n_ev_seq),
       .ev_pc              (n_ev_pc),
+      .ev_len             (n_ev_len),
+      .ev_insn            (n_ev_insn),
       .ev_id              (n_ev_id),
       .ev_reg_we          (n_ev_reg_we),
       .ev_rd              (n_ev_rd),
