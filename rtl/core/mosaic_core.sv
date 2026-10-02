@@ -3542,7 +3542,17 @@ module mosaic_core (
     end else begin
       case (cf_state)
         CF_IDLE: if (cache_en_i && sys_exec && sys_fence_i_q) cf_state <= CF_D;
+`ifdef MOSAIC_CACHE_MUTANT_FENCEI_NO_FLUSH
+        // NEGATIVE CONTROL: the fence writes the data cache back and then stops,
+        // never invalidating the instruction cache. The patched bytes do reach
+        // memory (so the store itself is not the defect) and the front end keeps
+        // executing the line it already holds, which is exactly the
+        // self-modifying-code hazard FENCE.I exists to close. The case's
+        // "FENCE.I made the patched instruction visible" comparison names it.
+        CF_D:    if (dcache_flush_done) cf_state <= CF_IDLE;
+`else
         CF_D:    if (dcache_flush_done) cf_state <= CF_I;
+`endif
         CF_I:    if (icache_flush_done) cf_state <= CF_IDLE;
         default: cf_state <= CF_IDLE;
       endcase
@@ -3550,8 +3560,15 @@ module mosaic_core (
   end
 
   assign dcache_flush     = (cf_state == CF_D);
+`ifdef MOSAIC_CACHE_MUTANT_FENCEI_NO_FLUSH
+  // NEGATIVE CONTROL (continued): the instruction cache is never asked to
+  // invalidate, so no flush acknowledgement is waited for either.
+  assign icache_flush     = 1'b0;
+  assign cache_fence_busy = (cf_state == CF_D);
+`else
   assign icache_flush     = (cf_state != CF_IDLE);
   assign cache_fence_busy = (cf_state != CF_IDLE);
+`endif
   assign wb3_valid    = port3_taken_sys ? sys_wb_valid : lsu_wb_valid;
   assign wb3_ev       = port3_taken_sys ? sys_wb_ev : lsu_wb_ev;
   assign lsu_wb_ready = lsu_wb_ready_int && !port3_taken_sys;

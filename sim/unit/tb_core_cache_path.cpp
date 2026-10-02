@@ -930,18 +930,13 @@ std::string Hexu(uint64_t v) {
   return buf;
 }
 
-std::vector<std::string> Split(const std::string& text, char sep) {  std::vector<std::string> out;
-  std::string cur;
-  for (char c : text) {
-    if (c == sep) {
-      if (!cur.empty()) out.push_back(cur);
-      cur.clear();
-    } else {
-      cur.push_back(c);
-    }
+// The index of the program's park loop in a retirement stream, or `kNoPark`.
+constexpr size_t kNoPark = ~size_t(0);
+size_t ParkIndex(const std::vector<Retire>& stream) {
+  for (size_t i = 0; i < stream.size(); i++) {
+    if (stream[i].pc == g_park_pc) return i;
   }
-  if (!cur.empty()) out.push_back(cur);
-  return out;
+  return kNoPark;
 }
 
 }  // namespace
@@ -964,27 +959,13 @@ int main(int argc, char** argv) {
   const uint32_t retire_n = dut.o_geom_retire_width_o;
 
   // ---------------------------------------------------------------- phase 1+2
-  // Debug hook (CACHE_PATH_RUNS): select which runs execute and in what order,
-  // so an anomaly can be attributed to `cache_en_i` or to run order.
   CoreRun off_run(&dut, &reporter);
-  CoreRun on_run(&dut, &reporter);
-  const char* runs_sel = std::getenv("CACHE_PATH_RUNS");
-  const std::string sel = (runs_sel != nullptr) ? runs_sel : "off,on";
+  RunRec off = off_run.Run(false, retire_n);
+  const std::vector<Retire> off_stream = off_run.observed();
 
-  RunRec off;
-  RunRec on;
-  std::vector<Retire> off_stream;
-  std::vector<Retire> on_stream;
-  for (const std::string& tok : Split(sel, ',')) {
-    if (tok == "off") {
-      off = off_run.Run(false, retire_n);
-      off_stream = off_run.observed();
-    } else if (tok == "on") {
-      on = on_run.Run(true, retire_n);
-      on_stream = on_run.observed();
-    }
-  }
-  const bool full_compare = off_stream.size() != 0 && on_stream.size() != 0;
+  CoreRun on_run(&dut, &reporter);
+  RunRec on = on_run.Run(true, retire_n);
+  const std::vector<Retire> on_stream = on_run.observed();
 
   {
     std::printf("cache.integrated_path: retire_width=%u off{cycles=%llu retires=%zu "
@@ -996,6 +977,15 @@ int main(int argc, char** argv) {
                 (unsigned long long)(off.words.size() > 1 ? off.words[1] : 0),
                 (unsigned long long)(off.words.size() > 2 ? off.words[2] : 0),
                 (unsigned long long)(off.words.size() > 3 ? off.words[3] : 0));
+    std::printf("cache.integrated_path: on{cycles=%llu retires=%zu imem=%llu dmem=%llu "
+                "finished=%d words=[%llx %llx %llx %llx]}\n",
+                (unsigned long long)on.cycles, on_stream.size(),
+                (unsigned long long)on.imem_beats, (unsigned long long)on.dmem_beats,
+                on.finished ? 1 : 0,
+                (unsigned long long)(on.words.size() > 0 ? on.words[0] : 0),
+                (unsigned long long)(on.words.size() > 1 ? on.words[1] : 0),
+                (unsigned long long)(on.words.size() > 2 ? on.words[2] : 0),
+                (unsigned long long)(on.words.size() > 3 ? on.words[3] : 0));
     for (size_t i = 0; i < off_stream.size() && i < 8; i++) {
       std::printf("  off retire[%zu] pc=%llx rd=%u we=%d val=%llx len=%u\n", i,
                   (unsigned long long)off_stream[i].pc, off_stream[i].rd,
@@ -1008,25 +998,7 @@ int main(int argc, char** argv) {
                   on_stream[i].we ? 1 : 0, (unsigned long long)on_stream[i].value,
                   on_stream[i].len);
     }
-    for (size_t k = 0; k < 6; k++) {
-      if (off_stream.size() > k) {
-        const size_t i = off_stream.size() - 1 - k;
-        std::printf("  off tail[%zu] pc=%llx rd=%u we=%d val=%llx len=%u\n", i,
-                    (unsigned long long)off_stream[i].pc, off_stream[i].rd,
-                    off_stream[i].we ? 1 : 0, (unsigned long long)off_stream[i].value,
-                    off_stream[i].len);
-      }
-      if (on_stream.size() > k) {
-        const size_t i = on_stream.size() - 1 - k;
-        std::printf("  on tail[%zu] pc=%llx rd=%u we=%d val=%llx len=%u\n", i,
-                    (unsigned long long)on_stream[i].pc, on_stream[i].rd,
-                    on_stream[i].we ? 1 : 0, (unsigned long long)on_stream[i].value,
-                    on_stream[i].len);
-      }
-    }
   }
-  if (!full_compare) return 0;
-
   reporter.Check(off.finished, "the cache-off run reaches the exit protocol");
   reporter.Check(on.finished, "the cache-on run reaches the exit protocol");
   reporter.Check(off.passed && on.passed, "both runs report PASS through tohost");
@@ -1046,8 +1018,16 @@ int main(int argc, char** argv) {
     for (size_t i = 0; i <= off_park; i++) {
       const Retire& a = off_stream[i];
       const Retire& b = on_stream[i];
-      if (a.pc != b.pc || a.rd != b.rd || a.we != b.we || a.value != b.value ||
-          a.len != b.len) {
+      // The programme counter and the instruction's own length are present on
+      // every retirement. `gpr_write_rd` and `gpr_write_data` are only valid when
+      // the instruction writes an architectural register (config/contracts/
+      // event_v1.json, both fields), so a record with `gpr_write_valid` low is
+      // compared on the fields that exist -- the payload bus holds whatever the
+      // last writer at that reorder-buffer index left there, which is not an
+      // architectural value and is not equal between two runs.
+      const bool head_ok = a.pc == b.pc && a.len == b.len && a.we == b.we;
+      const bool body_ok = !a.we || (a.rd == b.rd && a.value == b.value);
+      if (!head_ok || !body_ok) {
         stream_equal = false;
         mismatch_at = i;
         break;
@@ -1210,7 +1190,13 @@ int main(int argc, char** argv) {
   dir.Reset();
   {
     const uint64_t c = 0x80004000ull;   // index 0
-    dir.SetFault(c & ~0x1full, ~0x1full);
+    // `SetFaultRead` fails a read whose address matches `base` once the low bits
+    // selected by `mask` are ignored: the predicate is `addr & ~mask == base`. So
+    // the mask is the set of bits that do *not* matter -- 0x1f makes every beat of
+    // the line fail. Passing `~0x1f` here made the predicate compare the low five
+    // bits of the address against the line base, which is never true, so the
+    // refill succeeded and the phase tested nothing.
+    dir.SetFault(c, 0x1full);
     bool timed_out = false;
     uint64_t b0 = 0, b1 = 0;
     Rsp r1 = dir.Transact(false, c, 3, 0, 0, 0, &timed_out, &b0, &b1);

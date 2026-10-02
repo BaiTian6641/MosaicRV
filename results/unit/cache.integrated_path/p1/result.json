@@ -1,16 +1,15 @@
 {
   "schema_version": 1,
   "case": "cache.integrated_path",
-  "verdict": "FAIL",
+  "verdict": "PASS",
   "detail": "cache integration: on/off identical, caches used, FENCE.I visible, MMIO bypassed, directed controls clean",
   "seed": 1,
   "max_cycles": 4000000,
-  "checks": 34,
-  "failures": 8,
+  "checks": 36,
+  "failures": 0,
   "image": "",
   "expect": "",
   "tool": "verilator",
-  "timestamp": "2026-10-02T13:21:47Z",
-  "first_mismatch": "cache-on retirement stream: expected identical to cache-off, got retirement 2089: off <end>, on pc=0x800000a4 rd=0 we=0 val=0x0",
-  "failed_checks": ["the cache-on run reaches the exit protocol", "both runs report PASS through tohost", "cache-on and cache-off retire the same instructions", "cache-on and cache-off leave the same data words", "a faulted refill reaches the CPU as a fault", "the faulted refill did not mark the line valid", "the next access retries the refill rather than hitting a bad line", "the retried refill faults again while poisoned"]
+  "timestamp": "2026-10-02T13:30:38Z",
+  "first_mismatch": ""
 }

@@ -1984,6 +1984,9 @@
   },
   "cache.integrated_path": {
    "task": "I-042",
+   "profiles": [
+    "p1"
+   ],
    "top": "mosaic_core_tb",
    "rtl": [
     "rtl/core/mosaic_pkg.sv",
@@ -2011,7 +2014,9 @@
     "rtl/core/mosaic_fpu.sv",
     "rtl/core/mosaic_fp_unit.sv",
     "rtl/core/mosaic_cache.sv",
-    "rtl/core/mosaic_mshr.sv"
+    "rtl/core/mosaic_mshr.sv",
+    "rtl/core/mosaic_l1_cache_path.sv",
+    "rtl/core/mosaic_cache_line_bridge.sv"
    ],
    "sv": [
     "sim/tb/mosaic_core_tb.sv"

@@ -42,6 +42,15 @@
 //     `flush_done` rises only when the flush *and* the width adapter are idle, so
 //     a writeback's bytes have reached the memory service before the core treats
 //     the flush as complete -- the ordering the self-modifying-code case needs.
+//     "The adapter is idle" is load-bearing and not decoration: a flush of a
+//     dirty line is issued as *beats* through the memory service, each of which
+//     is acknowledged, so the wrapper must keep accepting memory responses for
+//     the whole of S_FLUSH and must not leave S_FLUSH until the adapter has
+//     drained. Leaving when the cache's own flush completes -- the cache treats
+//     acceptance of a writeback as completion, the adapter does not -- stops
+//     accepting the acknowledgements of beats already in flight, and the fence
+//     deadlocks with the front end held off forever. That was a real defect here,
+//     caught by this case's self-modifying-code phase.
 //
 // R5  **Disabled means absent.** With `en_i` low the module is a wire: request,
 //     response, and identity pass straight through with no added state. A profile
@@ -258,8 +267,17 @@ module mosaic_l1_cache_path #(
   assign cache_flush_valid    = (state == S_FLUSH) && !flush_sent;
 
   // ------------------------------------------------------- classification
+`ifdef MOSAIC_CACHE_MUTANT_DEVICE_CACHED
+  // NEGATIVE CONTROL: the platform map's cacheability rule is ignored and every
+  // non-atomic access is treated as cacheable, so a UART access is read as part
+  // of a 32-byte line and a device register is installed in the cache. The case
+  // names it twice: the device accesses no longer reach memory once each, and a
+  // device address appears on the memory side as a line refill.
+  assign cacheable_c = en_i && !cpu_req_i.amo;
+`else
   assign cacheable_c = en_i && mosaic_cfg_pkg::mosaic_pa_cacheable(cpu_req_i.addr) &&
                        !cpu_req_i.amo;
+`endif
   assign req_block_c = flush_i;
   assign flush_pending_c = flush_i && !flush_ack_r;
 
