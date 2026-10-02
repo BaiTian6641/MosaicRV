@@ -1725,3 +1725,55 @@ system-instruction trap publishes no event at all, so a consumer of the stream s
 no cause. A verification package that finds nothing on a machine this young is usually not
 looking; this one found three things, named them, and left them to a package that owns the fix.
 That package is running now, together with the corpus sweep's re-run after it lands.
+
+---
+
+## 2026-10-01 — state of the machine, for whoever picks this up next
+
+Recorded after a session that started by recovering from an interruption and ended with the
+out-of-order core running the whole p0 corpus. Everything below is re-derivable from the repository
+(`config/status/implementation_status.json` is the ledger; `tests/unit/registry.json` is the case
+registry; `results/reports/` holds one report per package; `results/PROGRESS.md` is this file).
+
+**Delivered: 39 work packages; 49 registered cases; advertised ISA: .**
+
+| Area | What is true now |
+|---|---|
+| Scalar base | `rv64im_zicsr_zihpm` advertised. Every implementation and verification task the ladder names for those four capabilities is recorded with evidence. |
+| The core | Fetch, decode, rename, dispatch, two clusters, banked register file, scoreboarded writeback, ROB, two-wide retire, recovery, LSU endpoint, speculative store queue, load queue with byte-perfect forwarding, CSR file, traps, interrupts, `FENCE`/`FENCE.I`, non-speculative MMIO. |
+| End-to-end | `core.corpus_sweep`: 13 programs x 3 inputs = 39 runs, all matching `tools/host_oracle.py`; 2.77 M retires. `core.trap_csr_program` runs `p08_misaligned` and `p13_romstore` from the reset vector through crt0. |
+| Precision | V-013 compares per-slot retirement against an independent program-order model (1195 checks, five card situations, x0 across 56 directed instructions, trace-gap detector). V-014 (precise trap state) is running. |
+| Interface | `config/contracts/event_v1.json` frozen; three producers agree; 33 negative controls. |
+| Gates | `make check` green (config, contracts, event contract, records, coverage, capability matrix, upstream, isolation); lint 34/34 clean; `slang-tidy` clean; `tools/check_records.py` green. |
+
+**What is NOT true, and must not be read into the table above.** No capability beyond
+`I/M/Zicsr/Zihpm` may be advertised: `Zifencei` waits on V-014 (running), `Zicntr` on I-076, the A
+and C families on packages not started, S-mode on I-044/I-047/I-048. There is no cache, no
+multi-hart, no FP, no vector, no hypervisor, no lockstep, no ASIC/FPGA evidence. The
+differentiated part of this project — dynamic ownership, aggregation, cohort execution — has
+modules and cases (lease, remote link, result FIFO, WB arbiter, steering not started) but no
+integrated demonstration, and the plan is explicit that the dynamic/fixed comparison has to be
+measured on equal resources rather than inherited from a paper. The fabric remainder (I-029
+steering, I-030 quota and forward-progress, I-031 ownership FSM, I-032 bank-aware allocation) and
+the bypass's integration into the live cluster are the next implementation work after V-014;
+Stage 3 continues with AMO (I-039), LR/SC (I-040), the C extension (I-041) and then S-mode and the
+p1/Linux contract (I-044..I-048).
+
+**Three process facts that this session earned the hard way**, for the next agent:
+
+1. **Two lanes in one core file costs more than it saves.** Two collisions this session: one lane's
+   in-flight core edit left the wrapper's port list unfinished, which made six *passing* cases fail
+   at elaboration, and one commit of mine swept another lane's in-flight RTL into a commit labelled
+   for a different package. Both were caught and both are recorded, but the rule is now: name the
+   file owners in the brief, and commit only what you have verified.
+2. **Every number in the ledger has a command behind it, and the number in the *record* is the one
+   observed.** Two packages this session reported a check count that differed by one from the
+   RESULT line, and both times the observed figure went into the ledger with the discrepancy noted.
+   A record that quotes a lane's summary instead of the tool's output is how a project starts
+   believing its own prose.
+3. **The most valuable packages this session were the ones that found something.** LWU refused by
+   the decoder, the event payload tied to zero, ECALL publishing no event, the response owner
+   recorded at the wrong moment, a reset latch surviving a restart, a decode buffer swapping the
+   first two instructions, rename's committed map fed the wrong generation counter. None of those
+   were caught by a program passing; all of them were caught by a case that compared a *rule*
+   against a model written from the specification.
