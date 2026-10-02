@@ -77,8 +77,6 @@ constexpr int kMaxRunCycles = 400000;
 constexpr int kDrainCycles = 64;
 
 constexpr uint64_t kRamBase = 0x80000000ull;
-constexpr uint64_t kToHost = 0x80001000ull;
-constexpr uint64_t kSigBase = 0x80000400ull;
 
 // The program's data addresses. The set index of a direct-mapped 32-byte line is
 // (addr >> 5) & 7; the loop's instructions live in lines 0 and 1 (0x00..0x3f), so
@@ -101,10 +99,6 @@ uint64_t g_park_pc = 0;
 
 // The instruction encodings this program uses (all 32-bit; no compressed
 // instruction is emitted, so every PC is 4-aligned).
-uint32_t EncR(int f7, int rs2, int rs1, int f3, int rd, int op) {
-  return (uint32_t(f7) << 25) | (uint32_t(rs2) << 20) | (uint32_t(rs1) << 15) |
-         (uint32_t(f3) << 12) | (uint32_t(rd) << 7) | uint32_t(op);
-}
 uint32_t EncI(int imm, int rs1, int f3, int rd, int op) {
   return (uint32_t(imm & 0xfff) << 20) | (uint32_t(rs1) << 15) | (uint32_t(f3) << 12) |
          (uint32_t(rd) << 7) | uint32_t(op);
@@ -482,17 +476,22 @@ template <typename Wide>
 uint64_t PayloadLane(const Wide& wide, uint32_t lane) {
   return uint64_t(wide[lane * 2]) | (uint64_t(wide[lane * 2 + 1]) << 32);
 }
-inline uint64_t PayloadLane(uint64_t value, uint32_t) { return value; }
 uint64_t PackedLane(uint64_t packed, uint32_t lane, uint32_t width) {
   const uint64_t mask = (width >= 64) ? ~0ull : ((1ull << width) - 1ull);
   return (packed >> (lane * width)) & mask;
 }
 
-constexpr int kRetN = 2;   // p1 retire width; taken from the DUT at runtime below
-
 class CoreRun {
  public:
   CoreRun(Vmosaic_core_tb* dut, Reporter* rep) : dut_(dut), rep_(rep) {
+    // `CACHE_PATH_TRACE=<cycle>` (and `CACHE_PATH_TRACE_N=<count>`) prints the
+    // retirement event bus, the fetch requests and their responses, and the trap
+    // and debug ports for a window of cycles; `CACHE_PATH_DUMP` prints the
+    // assembled program and the first data transactions. They exist because a
+    // stall in a machine this wide is not diagnosable from a failure message: the
+    // payload observation in results/reports/I-042-cache-path.md §1 was resolved
+    // with this trace, by seeing the fetch unit accept a response for a request it
+    // had not made.
     const char* t = std::getenv("CACHE_PATH_TRACE");
     if (t != nullptr) trace_ = std::atoi(t);
     const char* tn = std::getenv("CACHE_PATH_TRACE_N");
@@ -524,12 +523,12 @@ class CoreRun {
     dmem.Reset();
 
     // Reset the DUT.
-    for (int i = 0; i < kResetCycles; i++) Cycle(&mem, &imem, &dmem, cache_en, true, retire_n);
+    for (int i = 0; i < kResetCycles; i++) Cycle(&imem, &dmem, cache_en, true, retire_n);
     RunRec rec;
     uint32_t last_commit = 0;
     int stalled = 0;
     for (int i = 0; i < kMaxRunCycles; i++) {
-      Cycle(&mem, &imem, &dmem, cache_en, false, retire_n);
+      Cycle(&imem, &dmem, cache_en, false, retire_n);
       rec.cycles++;
       if (debug_ < 20 && dut_->o_commit_o == last_commit) {
         if (++stalled == 400) {
@@ -554,7 +553,7 @@ class CoreRun {
         last_commit = dut_->o_commit_o;
       }
       if (mem.finished()) {
-        for (int d = 0; d < kDrainCycles; d++) Cycle(&mem, &imem, &dmem, cache_en, false, retire_n);
+        for (int d = 0; d < kDrainCycles; d++) Cycle(&imem, &dmem, cache_en, false, retire_n);
         break;
       }
     }
@@ -588,8 +587,7 @@ class CoreRun {
     return v;
   }
 
-  void Cycle(MemoryModel* mem, Bus* imem, Bus* dmem, bool cache_en, bool rst,
-             uint32_t retire_n) {
+  void Cycle(Bus* imem, Bus* dmem, bool cache_en, bool rst, uint32_t retire_n) {
     dut_->rst = rst ? 1 : 0;
     dut_->fab_dyn_i = 0;
     dut_->cache_en_i = cache_en ? 1 : 0;
@@ -842,16 +840,7 @@ class Directed {
     return out;
   }
 
-  void Flush() {
-    dut_->cb_flush_i = 1;
-    for (int i = 0; i < 2000 && dut_->cb_flush_done_o == 0; i++) Tick(false, true);
-    dut_->cb_flush_i = 0;
-    Tick(false, true);
-  }
-
   uint64_t bus_beats() const { return bus_.accepted(); }
-  const Rsp& Current() const { return bus_.Current(); }
-  bool HasRsp() const { return bus_.HasRsp(); }
   const std::vector<Bus::Txn>& txns() const { return bus_.txns(); }
   void SetFault(uint64_t base, uint64_t mask) { bus_.SetFaultRead(base, mask); }
   void ClearFault() { bus_.ClearFault(); }

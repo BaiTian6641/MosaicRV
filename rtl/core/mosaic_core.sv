@@ -1319,7 +1319,11 @@ module mosaic_core (
   // execute past the halt.
   // The front end is also held off while the cache fence (below) is writing the
   // data cache back and invalidating the instruction cache: a fetch issued in
-  // that window would race the two steps it is ordering.
+  // that window would race the two steps it is ordering. The declaration sits
+  // here rather than with the rest of the cache-path signals below, because
+  // `want_imem_req` reads it and slang rejects a use that precedes its
+  // declaration (Verilator accepts either order, so only the second tool sees it).
+  logic                     cache_fence_busy;
   assign want_imem_req      = !core_stop && !recovering && !wfi_halt && !cache_fence_busy;
   // The sequential program counter. RISC-V instructions are 2 or 4 bytes, so the
   // byte after the instruction being answered is `its PC + its own length` --
@@ -1376,7 +1380,6 @@ module mosaic_core (
   logic                     icache_flush_done;
   logic                     dcache_flush;
   logic                     dcache_flush_done;
-  logic                     cache_fence_busy;
 
   // The data side: the LSU endpoint's memory port is the wrapper's CPU side and
   // the endpoint's slot on the PTE/data arbiter is its memory side.
