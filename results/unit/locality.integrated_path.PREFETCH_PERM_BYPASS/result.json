@@ -10,7 +10,7 @@
   "image": "",
   "expect": "",
   "tool": "verilator",
-  "timestamp": "2026-10-02T20:35:28Z",
+  "timestamp": "2026-10-02T20:46:38Z",
   "first_mismatch": "prefetch data-port addresses: expected only the program's own accesses, got unexpected 0x80200000",
   "failed_checks": ["prefetch: no locality structure reaches an address outside the program's own normal memory", "both: no locality structure reaches an address outside the program's own normal memory"]
 }

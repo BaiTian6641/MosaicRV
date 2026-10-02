@@ -10,7 +10,7 @@
   "image": "",
   "expect": "",
   "tool": "verilator",
-  "timestamp": "2026-10-02T20:34:46Z",
+  "timestamp": "2026-10-02T20:45:56Z",
   "first_mismatch": "the store's read-for-ownership: expected the buffer is not consulted, got 1 lookups (0 hits, 1 misses)",
   "failed_checks": ["a store's read-for-ownership does not consult the locality buffer"]
 }

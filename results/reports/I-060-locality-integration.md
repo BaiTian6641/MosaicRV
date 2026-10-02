@@ -253,15 +253,50 @@ integration:
 | `rtl/core/mosaic_rob.sv` (functional PC read port) | `9bae53e491567d0f` |
 | `rtl/core/mosaic_llb.sv` (replacement observation) | `8a4bb1c0a9bc5f4c` |
 | `sim/tb/mosaic_core_tb.sv` | `e0a1588a2d87ec53` |
-| `sim/unit/tb_core_locality.cpp` (new) | `e7dd7ed65ca5a36c` |
+| `sim/unit/tb_core_locality.cpp` (new) | `37860d770cb37b63` |
 | `tools/run_locality_controls.py` (new) | `f13df897ed4313e0` |
 
 ## Cases re-run after the change
 
-* p1: `locality.integrated_path` PASS; `cache.integrated_path` PASS;
-  `llb.stale_copy_invalidation` PASS; `prefetch.fault_and_pollution` PASS.
-* `core.act_dut` (ACT4, p1): `ran=127 passed=127 expected=127`, exit 0.
-* The card's other named cases: `core.corpus_sweep`, `core.mem_program`,
-  `memory.qos_no_starvation`, `fabric.integrated`, `boot.p1_contract`,
-  `sv39.walk_and_faults`, `tlb.sfence_vma`, `mmio.exactly_once`,
-  `core.trap_csr_program` -- all PASS (see the run log for the profile).
+```
+PASS core.act_dut                 task=V-043   (ACT4 p1: applicable=127 generated=127
+                                                run=127 passed=127 failed=0)
+PASS core.corpus_sweep            task=I-023
+PASS core.mem_program             task=I-023
+PASS cache.integrated_path        task=I-042
+PASS llb.stale_copy_invalidation  task=I-060
+PASS prefetch.fault_and_pollution task=I-063
+PASS memory.qos_no_starvation     task=I-062
+PASS fabric.integrated            task=I-090
+PASS boot.p1_contract             task=I-048
+PASS sv39.walk_and_faults         task=I-045
+PASS tlb.sfence_vma               task=I-046
+PASS mmio.exactly_once            task=I-038
+PASS core.trap_csr_program        task=I-023   (p0: the case is p0-only)
+PASS locality.integrated_path     task=I-060   (this package)
+```
+
+## Gates
+
+* `make check PROFILE=p1` rc 0: config, contracts, the event contract and its 36
+  negative controls, records (78 delivered packages, 93 registered cases), the
+  exclusion ledger and its 13 negative controls, coverage, the capability
+  matrix and its 5 negative controls, upstream, isolation.
+* `python3 tools/lint_rtl.py --profile p0` and `--profile p1`: **63 source files
+  clean** in both. `mosaic_locality_path.sv` adds no `STYLE-13` (every
+  `always_comb` in it is named); the two `STYLE-13` warnings `mosaic_l1_cache_path.sv`
+  carries are on the two unnamed blocks that predate this package.
+* `make lint-slang PROFILE=p1` rc 0.
+* `make lint-cpp PROFILE=p1` rc 0: **43 files clean**. `make lint-cpp PROFILE=p0`
+  rc 0: **75 files clean**. The p1 run skips the C++ sources whose cases have
+  never been built in this tree (their generated `V*_tb.h` does not exist) --
+  the same pre-existing state `results/reports/I-063-prefetch.md` records; `make
+  test` runs `unit` before `lint-cpp`, which regenerates every header. The 41
+  stale `Vmosaic_core_tb.h` files an earlier `unit` run had left in p1's other
+  `obj_dir`s were removed, because `lint-cpp` puts every `obj_dir` on the
+  include path and the compiler otherwise picks an obsolete core testbench
+  header ahead of the current one; the case that regenerates each is `make
+  unit`.
+* The new driver `sim/unit/tb_core_locality.cpp` compiles clean under the same
+  `-Wall -Wextra -Wshadow` flags `lint-cpp` uses (only Verilator's own headers
+  warn).

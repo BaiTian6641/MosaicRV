@@ -10,7 +10,7 @@
   "image": "",
   "expect": "",
   "tool": "verilator",
-  "timestamp": "2026-10-02T20:35:06Z",
+  "timestamp": "2026-10-02T20:46:17Z",
   "first_mismatch": "locality-llb retirement stream: expected identical to the baseline, got retirement 206: baseline pc=0x80000050 rd=7 we=1 val=0x69, llb pc=0x80000050 rd=7 we=1 val=0x64",
   "failed_checks": ["the llb run retires the same instructions through the park as the baseline", "the llb run leaves the same signature words", "the both run retires the same instructions through the park as the baseline", "the both run leaves the same signature words"]
 }
