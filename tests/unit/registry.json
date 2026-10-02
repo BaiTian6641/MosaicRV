@@ -1517,8 +1517,7 @@
     "sim/common/event_tap.cpp"
    ],
    "max_cycles": 4000000,
-   "seed": 1,
-   "pending": true
+   "seed": 1
   },
   "mmio.side_effect_model": {
    "task": "V-019",

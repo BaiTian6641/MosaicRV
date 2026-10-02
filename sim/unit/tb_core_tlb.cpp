@@ -443,8 +443,11 @@ void RunDirected(Vmosaic_core_tb* dut, mosaic::Reporter* reporter, MemoryModel* 
       Fail("directed/stale-without-fence",
            "a modified PTE was picked up without an SFENCE.VMA");
     }
-    // The required fence form: rs1 = the address, rs2 = x0 (all address spaces).
-    bench.Fence(true, va, false, 0);
+    // The required fence form: rs1 = x0, rs2 = x0 (all address spaces and all
+    // addresses). The by-address form is covered by the matrix below, and this
+    // one is deliberately the broadest, so a cache that ignores fences fails
+    // here and a cache that fenced the wrong address fails there.
+    bench.Fence(false, 0, false, 0);
     const uint64_t r1 = bench.pte_reads();
     const TlbObs c = bench.Request(va, kKindLoad, kPrivS, kSatpSv39, RootPpn(), 0, false, false);
     (*comparisons)++;
@@ -623,7 +626,10 @@ void RunDirected(Vmosaic_core_tb* dut, mosaic::Reporter* reporter, MemoryModel* 
     bench.Cycle();
     bench.Cycle(true);              // cancel with the walk in flight
     bench.Settle(8);
-    if (bench.cancel_ctr() == 0) Fail("directed/cancel", "the cache did not count the cancel");
+    if (bench.cancel_ctr() == 0) {
+      reporter->Mismatch("directed/cancel", "the cache counts the cancellation", "0");
+      Fail("directed/cancel", "the cache did not count the cancel");
+    }
     const uint64_t r1 = bench.pte_reads();
     const TlbObs o = bench.Request(Va(0x1C), kKindLoad, kPrivS, kSatpSv39, RootPpn(),
                                    5, false, false);

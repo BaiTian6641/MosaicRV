@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "case": "tlb.sfence_vma",
+  "verdict": "FAIL",
+  "detail": "contract violated: directed/satp-write: an entry survived the satp write",
+  "seed": 1,
+  "max_cycles": 4000000,
+  "checks": 1,
+  "failures": 1,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-02T07:31:14Z",
+  "first_mismatch": "directed/satp-write: expected 0x0000000080025000, got 0x0000000080020000",
+  "failed_checks": ["no contract violation"]
+}

@@ -39,7 +39,7 @@ SLANG_TIDY ?= slang-tidy
 # toolchain will turn into a silently different netlist.
 VERILATOR_LINT_FLAGS := --lint-only -Wall -Wno-DECLFILENAME
 
-.PHONY: all help check check-config check-contracts check-event-contract check-coverage check-capability-matrix check-upstream check-upstream-pinned check-isolation check-docs manifest lint lint-slang lint-cpp \
+.PHONY: all help check check-config check-contracts check-event-contract check-records check-exclusions check-coverage check-capability-matrix check-upstream check-upstream-pinned check-isolation check-docs manifest lint lint-slang lint-cpp \
         unit sim synth-generic test clean distclean verify-tools
 
 all: check check-docs manifest lint unit
@@ -106,6 +106,18 @@ check-event-contract: check-valid-profile
 # two packages) that every test passed through.
 check-records:
 	$(PYTHON) tools/check_records.py
+
+# The exclusion ledger (V-020): every disabled checker, skipped case or suite,
+# waived field, unimplemented reference feature, timeout and generation failure
+# is registered with a reason, a specification basis, an alternative
+# verification and an end condition. Every alternative verification must name a
+# case that exists and has a recorded PASS; a registered case with no recorded
+# PASS that the ledger does not name is an unregistered exclusion and fails. The
+# --negative pass mutates one input at a time and requires every mutation to be
+# rejected, so the ledger is under test rather than merely present.
+check-exclusions:
+	$(PYTHON) tools/check_exclusions.py
+	$(PYTHON) tools/check_exclusions.py --negative
 
 # ------------------------------------------------------------- config -> RTL
 
@@ -250,7 +262,7 @@ check-upstream-pinned:
 check-isolation:
 	$(PYTHON) tools/check_isolation.py
 
-check: check-config check-contracts check-event-contract check-records check-coverage check-capability-matrix check-upstream check-isolation
+check: check-config check-contracts check-event-contract check-records check-exclusions check-coverage check-capability-matrix check-upstream check-isolation
 
 # ---------------------------------------------------------------------- clean
 

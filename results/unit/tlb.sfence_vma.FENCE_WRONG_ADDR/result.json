@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "case": "tlb.sfence_vma",
+  "verdict": "FAIL",
+  "detail": "contract violated: directed/fence-by-addr: entry 0 survived a fence that must have invalidated it",
+  "seed": 1,
+  "max_cycles": 4000000,
+  "checks": 1,
+  "failures": 1,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-02T07:30:55Z",
+  "first_mismatch": "directed/fence-by-addr: expected entry 0 invalidated (a walk), got 0 PTE reads",
+  "failed_checks": ["no contract violation"]
+}

@@ -1,0 +1,195 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://mosaicrv.invalid/schema/exclusion_ledger.schema.json",
+  "title": "MosaicRV exclusion ledger (V-020)",
+  "description": "One entry per exclusion: every disabled checker, skipped case or suite, waived field, unimplemented reference feature, timeout that stands in for a verdict, and generation step that can drop a test. Each entry records why the exclusion exists, its specification basis (or an explicit statement that there is none), what covers the behaviour instead (naming a case or checker that exists and passes, or explicitly nothing), the cases and fields affected, and the condition that would let the exclusion be removed. tools/check_exclusions.py validates this file, refuses any registry case without a recorded PASS that is not named here, and carries negative controls that must themselves be rejected.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "comment",
+    "kind_semantics",
+    "exclusions"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "comment": {
+      "type": "string",
+      "minLength": 1
+    },
+    "kind_semantics": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "What each exclusion kind means, stated once so the ledger is self-describing and a kind can never be added without a definition.",
+      "required": [
+        "disabled_checker",
+        "skip",
+        "waiver",
+        "unimplemented_reference_feature",
+        "timeout",
+        "generation_failure"
+      ],
+      "properties": {
+        "disabled_checker": {
+          "type": "string",
+          "minLength": 1
+        },
+        "skip": {
+          "type": "string",
+          "minLength": 1
+        },
+        "waiver": {
+          "type": "string",
+          "minLength": 1
+        },
+        "unimplemented_reference_feature": {
+          "type": "string",
+          "minLength": 1
+        },
+        "timeout": {
+          "type": "string",
+          "minLength": 1
+        },
+        "generation_failure": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "exclusions": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "kind",
+          "subjects",
+          "reason",
+          "spec_clause",
+          "alternative_verification",
+          "affected_cases",
+          "affected_scope",
+          "end_condition"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^EX-[0-9]{3}$",
+            "description": "Stable identifier, unique within the ledger."
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "disabled_checker",
+              "skip",
+              "waiver",
+              "unimplemented_reference_feature",
+              "timeout",
+              "generation_failure"
+            ]
+          },
+          "subjects": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "description": "The concrete things excluded: checker names, suite names, file paths, CSR/field names, model features. This is the machine-readable enumeration; a grouped entry must still list every member."
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Why the exclusion exists. An exclusion with no reason is a silent skip."
+          },
+          "spec_clause": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The specification clause that makes the excluded behaviour a requirement, or an explicit statement that no clause applies and why."
+          },
+          "alternative_verification": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "status",
+              "cases",
+              "checks",
+              "note"
+            ],
+            "properties": {
+              "status": {
+                "type": "string",
+                "enum": [
+                  "covered",
+                  "open"
+                ],
+                "description": "covered: something that exists and passes covers the behaviour. open: nothing does; this is a carried gap."
+              },
+              "cases": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "description": "Registry case names that cover the behaviour. Each must exist in tests/unit/registry.json and have a recorded PASS."
+              },
+              "checks": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "description": "Tool paths (relative to the repository root) that cover the behaviour. Each must exist and be referenced by the Makefile."
+              },
+              "note": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "affected_cases": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "case",
+                "fields"
+              ],
+              "properties": {
+                "case": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "fields": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "description": "The fields, phases or outputs of that case the exclusion concerns. May be empty when the whole case is affected."
+                }
+              }
+            },
+            "description": "Registry cases the exclusion touches. Every `case` must exist in tests/unit/registry.json. May be empty for an exclusion that is not tied to any registered case, in which case affected_scope names what it touches."
+          },
+          "affected_scope": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Files, targets, suites or models the exclusion touches, so a global exclusion still says what it concerns."
+          },
+          "end_condition": {
+            "type": "string",
+            "minLength": 1,
+            "description": "What would let this exclusion be removed. An empty end condition is an exclusion with no exit."
+          }
+        }
+      }
+    }
+  }
+}

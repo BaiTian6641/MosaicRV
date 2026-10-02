@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "case": "tlb.sfence_vma",
+  "verdict": "FAIL",
+  "detail": "contract violated: directed/stale-after-fence: the fence did not make the new mapping visible",
+  "seed": 1,
+  "max_cycles": 4000000,
+  "checks": 1,
+  "failures": 1,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-02T07:30:44Z",
+  "first_mismatch": "directed/stale-after-fence: expected 0x0000000080022000, got 0x0000000080021000",
+  "failed_checks": ["no contract violation"]
+}

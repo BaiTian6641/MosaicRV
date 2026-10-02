@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "case": "tlb.sfence_vma",
+  "verdict": "FAIL",
+  "detail": "contract violated: directed/ad-dirty: a store was served from an entry whose D was clear",
+  "seed": 1,
+  "max_cycles": 4000000,
+  "checks": 1,
+  "failures": 1,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-02T07:31:24Z",
+  "first_mismatch": "directed/ad-dirty: expected a store walk (D clear), got 0 PTE reads",
+  "failed_checks": ["no contract violation"]
+}

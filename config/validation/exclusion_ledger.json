@@ -1,0 +1,1596 @@
+{
+  "schema_version": 1,
+  "comment": "The machine-readable exclusion ledger (V-020). Every entry is one thing this project does not check, with the reason, the specification basis (or an explicit statement that none applies), what covers the behaviour instead (naming a case or checker that exists and passes, or explicitly nothing), the cases and fields affected, and what would let the exclusion be removed. tools/check_exclusions.py validates this file against config/schema/exclusion_ledger.schema.json, refuses any registered case that has no recorded PASS unless it is named here, refuses an alternative verification that names a case which does not exist or does not pass, and refuses an empty end condition. The rule the ledger exists to enforce: an exclusion that is not written here is an unregistered exclusion, and an unregistered exclusion is a failure, not a footnote.",
+  "kind_semantics": {
+    "disabled_checker": "A checker, lint pass or gate that is switched off or short-circuited for some inputs. The check exists but does not run for the named subjects.",
+    "skip": "A case, suite, phase, profile, seed or stimulus that is not run. The check exists and would run; the input is withheld.",
+    "waiver": "A comparison that is deliberately not made for a named field, output or word, so a difference there cannot fail the run. A waiver must name independent verification that passes; a waiver that synchronises the DUT to the reference and thereby removes the independent check is the failure mode this kind exists to forbid.",
+    "unimplemented_reference_feature": "A feature the DUT or a reference model does not implement, so the comparison either cannot be made or is made against a weaker oracle. Named per model and per feature.",
+    "timeout": "A wall-clock or cycle budget that ends a run and stands in for a verdict. A timeout that is reported as FAIL is honest; one that is reported as PASS or silently skipped is not.",
+    "generation_failure": "A step that produces the tests themselves (ELF generation, manifest generation, test selection) and can drop a test from the total. The end condition for this kind is that the count is closed against the generation manifest."
+  },
+  "exclusions": [
+    {
+      "id": "EX-001",
+      "kind": "disabled_checker",
+      "subjects": [
+        "C++ sources whose Vmosaic_*_tb.h has not been generated yet",
+        "sim/unit/tb_fifo.cpp (the observed instance)"
+      ],
+      "reason": "make lint-cpp compiles every sim/**/*.cpp with -Ibuild/<profile>/unit/*/obj_dir on the include path. A driver includes the Verilator-generated header for its own testbench, and that header exists only after the corresponding unit case has been built. On a partially-built tree the compile fails with a missing header that says nothing about the C++.",
+      "spec_clause": "No ISA clause applies: this is a build-ordering property of the Verilator flow, not a specification requirement.",
+      "alternative_verification": {
+        "status": "covered",
+        "cases": [
+          "fifo.backpressure"
+        ],
+        "checks": [
+          "tools/run_unit.py"
+        ],
+        "note": "The file that is skipped is compiled by the case that owns it: fifo.backpressure builds sim/unit/tb_fifo.cpp and passes. make test orders unit before lint-cpp, so in the gate nothing is skipped; the residual risk is a direct `make lint-cpp` on a clean tree."
+      },
+      "affected_cases": [
+        {
+          "case": "fifo.backpressure",
+          "fields": [
+            "cpp"
+          ]
+        }
+      ],
+      "affected_scope": "Makefile lint-cpp target; sim/unit/*.cpp",
+      "end_condition": "Every case's generated header exists before lint-cpp runs (a build-everything step, or lint-cpp depending on unit), so the skip branch never fires and the skipped count printed by the target is always zero."
+    },
+    {
+      "id": "EX-002",
+      "kind": "disabled_checker",
+      "subjects": [
+        "any rtl/ source with neither a module nor a package"
+      ],
+      "reason": "tools/lint_rtl.py returns \"no module or package; skipped\" for a file that declares neither, because there is nothing for Verilator to elaborate standalone. A file that is only an include fragment would pass lint without being linted.",
+      "spec_clause": "No ISA clause applies: this is a property of the lint harness, not of the design.",
+      "alternative_verification": {
+        "status": "open",
+        "cases": [],
+        "checks": [],
+        "note": "Nothing covers it. No file under rtl/ lacks both a module and a package today, so the branch is dormant; the exclusion is recorded so that if one is added it is a named gap rather than an invisible one."
+      },
+      "affected_cases": [],
+      "affected_scope": "tools/lint_rtl.py; rtl/**",
+      "end_condition": "The skip branch is deleted or turned into a hard failure (a file with neither construct is not RTL and should not be in rtl/), at which point a dormant exclusion becomes a real check."
+    },
+    {
+      "id": "EX-003",
+      "kind": "disabled_checker",
+      "subjects": [
+        "make synth-generic",
+        "tools/synth_check.py",
+        "whole-design Yosys synthesis"
+      ],
+      "reason": "Yosys 0.69 cannot parse SystemVerilog assignment patterns (`'{a: 1'b1}`). The target reports BLOCKED (exit 2) and the Makefile maps that to a pass with the words \"BLOCKED (tool limitation), not a design failure\". No synthesis of the design is therefore performed by the gate.",
+      "spec_clause": "No ISA clause applies: synthesis is a physical-feasibility check, not an architectural one.",
+      "alternative_verification": {
+        "status": "open",
+        "cases": [],
+        "checks": [],
+        "note": "Nothing synthesises the whole design. tools/lint_rtl.py and slang-tidy parse and type-check the same source, which is a weaker property (no netlist is produced)."
+      },
+      "affected_cases": [],
+      "affected_scope": "Makefile synth-generic target; tools/synth_check.py; rtl/**",
+      "end_condition": "A synthesis flow that parses the assignment patterns the RTL uses (a newer Yosys, or the patterns rewritten) runs and `make synth-generic` exits 0 without the BLOCKED mapping."
+    },
+    {
+      "id": "EX-004",
+      "kind": "disabled_checker",
+      "subjects": [
+        "markdown under results/ and tests/ excluded from the docs/verification.md planning inventory"
+      ],
+      "reason": "The plan document's own embedded checker asserts that the repository's markdown is exactly the planning inventory. Implementation evidence has since been written under results/ and tests/, so the wrapper applies one declared deviation: those prefixes are removed from the inventory before the embedded checker runs.",
+      "spec_clause": "No ISA clause applies: docs/verification.md is a planning-document contract, not a specification requirement.",
+      "alternative_verification": {
+        "status": "covered",
+        "cases": [],
+        "checks": [
+          "tools/check_records.py",
+          "tools/check_docs.py"
+        ],
+        "note": "Every other check in docs/verification.md runs unmodified, and tools/check_records.py independently requires that every report a delivered package names exists on disk. The deviation is printed on every run rather than implied."
+      },
+      "affected_cases": [],
+      "affected_scope": "tools/check_docs.py; docs/verification.md; results/**/*.md; tests/**/*.md",
+      "end_condition": "The planning inventory statement in docs/verification.md is updated to admit implementation evidence as a separate category, so no deviation is needed."
+    },
+    {
+      "id": "EX-005",
+      "kind": "skip",
+      "subjects": [
+        "ACT4 D",
+        "ACT4 F",
+        "ACT4 ZfaD",
+        "ACT4 ZfaF",
+        "ACT4 ZfaZfh",
+        "ACT4 ZfaZfhD",
+        "ACT4 ZfaZvfh",
+        "ACT4 Zfbfmin",
+        "ACT4 Zfh",
+        "ACT4 ZfhD",
+        "ACT4 Zfhmin",
+        "ACT4 ZfhminD"
+      ],
+      "reason": "The p0 bring-up core has no floating-point unit, so the F/D ACT4 ELFs cannot execute on it. tools/run_act_dut.py records every deferred suite with its reason in suite_manifest.json rather than silently dropping it.",
+      "spec_clause": "RISC-V ISA manual, F/D extension chapters (floating-point registers and operations).",
+      "alternative_verification": {
+        "status": "covered",
+        "cases": [
+          "fp.operation_matrix"
+        ],
+        "checks": [
+          "tools/check_capability_matrix.py"
+        ],
+        "note": "F/D is not advertised by any delivered profile (capability_ladder min_profile p2 and I-050 is undelivered), so no committed capability rests on this skip. fp.operation_matrix verifies the FPU unit that exists."
+      },
+      "affected_cases": [
+        {
+          "case": "core.bringup_vs_reference",
+          "fields": [
+            "act4_suites"
+          ]
+        }
+      ],
+      "affected_scope": "tools/run_act_dut.py; config/capability/models.json (act4)",
+      "end_condition": "A profile that claims F/D has its ACT4 suites generated and executed on a DUT, and the suite manifest lists no deferred F/D suite."
+    },
+    {
+      "id": "EX-006",
+      "kind": "skip",
+      "subjects": [
+        "ACT4 Zaamo",
+        "ACT4 Zabha",
+        "ACT4 Zacas",
+        "ACT4 ZacasZabha",
+        "ACT4 Zalrsc",
+        "ACT4 Ziccamoa",
+        "ACT4 Ziccamoc"
+      ],
+      "reason": "The ACT4 runner executes only the p0 applicable suites I/M/Zicsr/Zifencei. The A-extension suites are deferred because p0 does not claim A.",
+      "spec_clause": "RISC-V ISA manual, A extension (atomic memory operations and LR/SC).",
+      "alternative_verification": {
+        "status": "covered",
+        "cases": [
+          "amo.linearization",
+          "lrsc.reservation_progress"
+        ],
+        "checks": [],
+        "note": "p0 does not claim A; p1 does, and the A semantics are verified at unit level by the two named cases, both passing. No ACT4 A ELF is executed on a DUT (see EX-012)."
+      },
+      "affected_cases": [
+        {
+          "case": "amo.linearization",
+          "fields": []
+        },
+        {
+          "case": "lrsc.reservation_progress",
+          "fields": []
+        }
+      ],
+      "affected_scope": "tools/run_act_dut.py; config/profiles/p0.json",
+      "end_condition": "An ACT4 A-extension ELF executes on a DUT whose profile claims A, and the suite manifest lists no deferred A suite."
+    },
+    {
+      "id": "EX-007",
+      "kind": "skip",
+      "subjects": [
+        "ACT4 Zca",
+        "ACT4 Zcb",
+        "ACT4 ZcbM",
+        "ACT4 ZcbZba",
+        "ACT4 ZcbZbb",
+        "ACT4 Zcd",
+        "ACT4 Zcmop",
+        "ACT4 ZihintntlZca"
+      ],
+      "reason": "p0 does not claim C, so the compressed-instruction ACT4 suites are deferred by the runner.",
+      "spec_clause": "RISC-V ISA manual, C extension (compressed instructions).",
+      "alternative_verification": {
+        "status": "covered",
+        "cases": [
+          "compressed.cross_boundary"
+        ],
+        "checks": [],
+        "note": "p0 does not claim C; p1 does, and the decompressor is verified by the named case, which passes. No ACT4 C ELF is executed on a DUT (see EX-012)."
+      },
+      "affected_cases": [
+        {
+          "case": "compressed.cross_boundary",
+          "fields": []
+        }
+      ],
+      "affected_scope": "tools/run_act_dut.py; config/profiles/p0.json",
+      "end_condition": "An ACT4 C-extension ELF executes on a DUT whose profile claims C, and the suite manifest lists no deferred C suite."
+    },
+    {
+      "id": "EX-008",
+      "kind": "skip",
+      "subjects": [
+        "ACT4 Misalign",
+        "ACT4 MisalignD",
+        "ACT4 MisalignF",
+        "ACT4 MisalignZca",
+        "ACT4 Zicclsm"
+      ],
+      "reason": "p0 traps misaligned accesses before memory; the ACT4 misaligned suites need a trap handler frame the p0 bring-up core does not have.",
+      "spec_clause": "RISC-V ISA manual, misaligned load/store behaviour; RISC-V Privileged Spec, exception causes 4 and 6.",
+      "alternative_verification": {
+        "status": "covered",
+        "cases": [
+          "lsu.size_fault_boundaries"
+        ],
+        "checks": [],
+        "note": "The DUT's own misalignment trap behaviour is verified by the named case, which passes, and core.corpus_sweep folds p08_misaligned's trap-log records."
+      },
+      "affected_cases": [
+        {
+          "case": "lsu.size_fault_boundaries",
+          "fields": []
+        },
+        {
+          "case": "core.corpus_sweep",
+          "fields": [
+            "p08_misaligned"
+          ]
+        }
+      ],
+      "affected_scope": "tools/run_act_dut.py; config/memory/p0.json",
+      "end_condition": "A DUT with a trap handler frame runs the ACT4 misaligned suites, and the suite manifest lists none deferred."
+    },
+    {
+      "id": "EX-009",
+      "kind": "skip",
+      "subjects": [
+        "ACT4 Zicntr",
+        "ACT4 Zihpm"
+      ],
+      "reason": "The counter CSR suites need an S/U trap frame the p0 bring-up core does not have; the runner defers them.",
+      "spec_clause": "RISC-V Privileged Spec, Zicntr/Zihpm counter CSRs (cycle, time, instret and the HPM counters).",
+      "alternative_verification": {
+        "status": "covered",
+        "cases": [
+          "csr.precise_trap_mret",
+          "csr.rule_ledger"
+        ],
+        "checks": [],
+        "note": "Zihpm is advertised at p0 and its read-only-zero behaviour is verified by the named CSR cases, which pass; Zicntr is not advertised (see EX-025)."
+      },
+      "affected_cases": [
+        {
+          "case": "csr.rule_ledger",
+          "fields": [
+            "mcycle",
+            "minstret"
+          ]
+        }
+      ],
+      "affected_scope": "tools/run_act_dut.py; config/csr/mode_m.json",
+      "end_condition": "A DUT with an S/U trap frame runs the ACT4 counter suites, and the suite manifest lists none deferred."
+    },
+    {
+      "id": "EX-010",
+      "kind": "skip",
+      "subjects": [
+        "ACT4 Zicbom",
+        "ACT4 Zicbop",
+        "ACT4 Zicboz"
+      ],
+      "reason": "p0 has no cache, so the cache-block-management ACT4 suites are deferred by the runner.",
+      "spec_clause": "RISC-V ISA manual, Zicbom/Zicbop/Zicboz cache-block management.",
+      "alternative_verification": {
+        "status": "covered",
+        "cases": [
+          "cache.refill_evict_fault"
+        ],
+        "checks": [],
+        "note": "Zicbom/Zicbop are not advertised (capability_ladder lists I-043 as undelivered); the cache that exists is verified by the named case, which passes."
+      },
+      "affected_cases": [
+        {
+          "case": "cache.refill_evict_fault",
+          "fields": []
+        }
+      ],
+      "affected_scope": "tools/run_act_dut.py; config/profiles/p0.json",
+      "end_condition": "A DUT with cache-block management runs the ACT4 CMO suites, and the suite manifest lists none deferred."
+    },
+    {
+      "id": "EX-011",
+      "kind": "skip",
+      "subjects": [
+        "ACT4 Zba",
+        "ACT4 Zbb",
+        "ACT4 Zbc",
+        "ACT4 Zbkb",
+        "ACT4 Zbkc",
+        "ACT4 Zbkx",
+        "ACT4 Zbs",
+        "ACT4 Zihintntl",
+        "ACT4 Zihintpause",
+        "ACT4 Zimop",
+        "ACT4 Zknd",
+        "ACT4 Zkne",
+        "ACT4 Zknh",
+        "ACT4 Zksed",
+        "ACT4 Zksh",
+        "ACT4 Ziccif",
+        "ACT4 Ziccrse",
+        "ACT4 Zicfilp",
+        "ACT4 Zicfiss"
+      ],
+      "reason": "These extensions are not in the p0 profile and are not advertised by any delivered profile (the capability ladder either does not list them or lists an undelivered implementation task), so their ACT4 suites are deferred.",
+      "spec_clause": "RISC-V ISA manual, the B, crypto, hint, MOP and forward-compatibility extension chapters.",
+      "alternative_verification": {
+        "status": "covered",
+        "cases": [
+          "decode.rv64im_reserved"
+        ],
+        "checks": [],
+        "note": "An encoding the profile does not implement must be refused, and the named case verifies that reserved and unimplemented encodings raise illegal-instruction, which passes. Nothing is committed for these extensions, so no capability is waived."
+      },
+      "affected_cases": [
+        {
+          "case": "decode.rv64im_reserved",
+          "fields": []
+        }
+      ],
+      "affected_scope": "tools/run_act_dut.py; config/capability_ladder.json",
+      "end_condition": "A profile claims one of these extensions and its ACT4 suite is generated and executed, at which point it leaves this group and gets its own entry."
+    },
+    {
+      "id": "EX-012",
+      "kind": "skip",
+      "subjects": [
+        "ACT4 ELFs for the p1-advertised extensions A, C, Zicond, Zmmul and CMO"
+      ],
+      "reason": "tools/run_act_dut.py executes only the p0 applicable suites (I/M/Zicsr/Zifencei). The extensions A, C, Zicond, Zmmul and CMO are advertised at p1 (their implementation tasks are delivered), but no ACT4 ELF for any of them is executed on a DUT.",
+      "spec_clause": "RISC-V ISA manual, A and C extension chapters and the Zicond/Zmmul/CMO extension specifications.",
+      "alternative_verification": {
+        "status": "open",
+        "cases": [],
+        "checks": [],
+        "note": "Unit cases cover the semantics (amo.linearization, lrsc.reservation_progress, compressed.cross_boundary, muldiv.kill_and_edges, cache.refill_evict_fault), but those are the DUT's own directed tests, not the independent ACT4 corpus. There is no ACT4 evidence for any advertised p1 extension."
+      },
+      "affected_cases": [
+        {
+          "case": "amo.linearization",
+          "fields": []
+        },
+        {
+          "case": "lrsc.reservation_progress",
+          "fields": []
+        },
+        {
+          "case": "compressed.cross_boundary",
+          "fields": []
+        }
+      ],
+      "affected_scope": "tools/run_act_dut.py; config/capability_ladder.json; config/profiles/p1.json",
+      "end_condition": "An ACT4 ELF for each advertised p1 extension executes on a p1 DUT and passes, closing the ACT4 count for that extension."
+    },
+    {
+      "id": "EX-013",
+      "kind": "skip",
+      "subjects": [
+        "PMP permission rows in a profile with no PMP entry",
+        "S/U permission rows in a profile with no S or U mode"
+      ],
+      "reason": "sim/unit/tb_core_priv.cpp marks a matrix row `skip_without_pmp` or `skip_without_su` and `continue`s past it when the profile cannot make the row meaningful. Under p0 those rows do not run.",
+      "spec_clause": "RISC-V Privileged Spec, PMP (physical memory protection) and the S/U privilege levels.",
+      "alternative_verification": {
+        "status": "covered",
+        "cases": [
+          "privilege.permission_matrix"
+        ],
+        "checks": [],
+        "note": "The same case runs the PMP and S/U rows under --profile p1 and passes with all 75 rows matching the ISA; under p0 the skipped rows are counted and printed rather than silently dropped."
+      },
+      "affected_cases": [
+        {
+          "case": "privilege.permission_matrix",
+          "fields": [
+            "pmp_rows",
+            "su_rows"
+          ]
+        }
+      ],
+      "affected_scope": "sim/unit/tb_core_priv.cpp",
+      "end_condition": "Every matrix row runs in every profile that claims the feature it needs, so no row is skipped and the skip counters are always zero."
+    },
+    {
+      "id": "EX-014",
+      "kind": "skip",
+      "subjects": [
+        "tlb.sfence_vma"
+      ],
+      "reason": "The case is registered in tests/unit/registry.json with \"pending\": true: it was fixed before its driver existed (the project's deliberate order), and it has no recorded result. A pending case is not evidence.",
+      "spec_clause": "RISC-V Privileged Spec, SFENCE.VMA and the TLB maintenance contract.",
+      "alternative_verification": {
+        "status": "open",
+        "cases": [],
+        "checks": [],
+        "note": "Nothing covers SFENCE.VMA at the integrated level yet. The case is under active construction by its lane (I-046)."
+      },
+      "affected_cases": [
+        {
+          "case": "tlb.sfence_vma",
+          "fields": [
+            "result"
+          ]
+        }
+      ],
+      "affected_scope": "tests/unit/registry.json; results/unit/tlb.sfence_vma/",
+      "end_condition": "The driver lands, the case passes from a clean build, a result.json is recorded, and the pending marker is cleared by the integration lead."
+    },
+    {
+      "id": "EX-015",
+      "kind": "skip",
+      "subjects": [
+        "p1, p2 and p3 builds for the unit campaign"
+      ],
+      "reason": "Most registered cases were built and run under --profile p0 only. A case whose geometry is derived from the generated package should size itself for another profile, but no second profile was elaborated for these cases.",
+      "spec_clause": "No ISA clause applies: this is a verification-coverage limit over the profile matrix, not a behaviour.",
+      "alternative_verification": {
+        "status": "open",
+        "cases": [],
+        "checks": [],
+        "note": "Nothing covers the un-run profiles. Each case asserts the p0 geometry it decodes and fails loudly on a change rather than silently testing a different claim, so the limit is visible rather than hidden."
+      },
+      "affected_cases": [
+        {
+          "case": "muldiv.kill_and_edges",
+          "fields": [
+            "profile"
+          ]
+        },
+        {
+          "case": "rename.same_cycle_chain",
+          "fields": [
+            "profile"
+          ]
+        },
+        {
+          "case": "prf.read_bank_collision",
+          "fields": [
+            "profile"
+          ]
+        },
+        {
+          "case": "lease.conflict_and_cancel",
+          "fields": [
+            "profile"
+          ]
+        },
+        {
+          "case": "completion.fu_collision",
+          "fields": [
+            "profile"
+          ]
+        },
+        {
+          "case": "wb.same_bank_many_producers",
+          "fields": [
+            "profile"
+          ]
+        },
+        {
+          "case": "remote.kill_with_delayed_response",
+          "fields": [
+            "profile"
+          ]
+        },
+        {
+          "case": "rename.bank_bias_exhaustion",
+          "fields": [
+            "profile"
+          ]
+        },
+        {
+          "case": "steering.capacity_locality",
+          "fields": [
+            "profile"
+          ]
+        },
+        {
+          "case": "rob.out_of_order_children",
+          "fields": [
+            "profile"
+          ]
+        }
+      ],
+      "affected_scope": "tools/run_unit.py; config/geometry/*.json; config/profiles/*.json",
+      "end_condition": "Each case runs under every profile whose geometry it claims, so a geometry change is exercised rather than merely guarded."
+    },
+    {
+      "id": "EX-016",
+      "kind": "skip",
+      "subjects": [
+        "seeds other than the registered seed 1"
+      ],
+      "reason": "Each registered case runs at its registered seed. A randomised case that passes at one seed has not been swept; the seed is part of the registry entry precisely so it is fixed rather than tuned.",
+      "spec_clause": "No ISA clause applies: this is a stimulus-coverage property, not a behaviour.",
+      "alternative_verification": {
+        "status": "open",
+        "cases": [],
+        "checks": [],
+        "note": "No seed sweep is part of the gate. interrupt.boundary_replay was re-run by hand at four other seeds and passed, but that run is not registered evidence and does not cover the other randomised cases."
+      },
+      "affected_cases": [
+        {
+          "case": "interrupt.boundary_replay",
+          "fields": [
+            "seed"
+          ]
+        },
+        {
+          "case": "alu.boundaries",
+          "fields": [
+            "seed"
+          ]
+        },
+        {
+          "case": "iq.wakeup_insert_select",
+          "fields": [
+            "seed"
+          ]
+        },
+        {
+          "case": "predictor.btb_aliasing",
+          "fields": [
+            "seed"
+          ]
+        }
+      ],
+      "affected_scope": "tests/unit/registry.json; tools/run_unit.py",
+      "end_condition": "A seed sweep runs for the randomised cases and its results are registered, so a passing case is a property of the stimulus family rather than of one seed."
+    },
+    {
+      "id": "EX-017",
+      "kind": "skip",
+      "subjects": [
+        "event contract for p1, p2 and p3"
+      ],
+      "reason": "tools/check_event_contract.py resolves the frozen field widths against one profile's geometry and is invoked with --profile p0 only. A geometry change in another profile is not checked against the frozen interface.",
+      "spec_clause": "No ISA clause applies: the event interface is a project contract (config/contracts/event_v1.json), not a specification requirement.",
+      "alternative_verification": {
+        "status": "covered",
+        "cases": [
+          "core.event_payload"
+        ],
+        "checks": [
+          "tools/check_event_contract.py"
+        ],
+        "note": "The interface is fully checked for p0, the reference profile the schema names, and core.event_payload verifies the p0 producers against it."
+      },
+      "affected_cases": [
+        {
+          "case": "core.event_payload",
+          "fields": []
+        }
+      ],
+      "affected_scope": "tools/check_event_contract.py; config/contracts/event_v1.json; config/geometry/*.json",
+      "end_condition": "The checker is run for every profile, or the schema declares p0 the only profile the interface is defined for."
+    },
+    {
+      "id": "EX-018",
+      "kind": "skip",
+      "subjects": [
+        "an interrupt taken while a device access is in flight"
+      ],
+      "reason": "The MMIO serializer's core_can_trap gate holds off a trap while a device access is in flight, but no case drives an interrupt during a device access, so the gate is argued from the structure rather than measured.",
+      "spec_clause": "RISC-V Privileged Spec, precise traps: a trapping instruction must not have committed its side effects.",
+      "alternative_verification": {
+        "status": "open",
+        "cases": [],
+        "checks": [],
+        "note": "Nothing measures it. irq.replay_timeline covers interrupts without device traffic; mmio.exactly_once covers device traffic without interrupts."
+      },
+      "affected_cases": [
+        {
+          "case": "mmio.exactly_once",
+          "fields": [
+            "irq"
+          ]
+        },
+        {
+          "case": "irq.replay_timeline",
+          "fields": [
+            "device_access"
+          ]
+        }
+      ],
+      "affected_scope": "sim/unit/tb_core_mmio.cpp; rtl/core/mosaic_core.sv",
+      "end_condition": "A case asserts an interrupt while a device access is in flight and checks that the access either commits with its side effect or is cancelled with none."
+    },
+    {
+      "id": "EX-019",
+      "kind": "skip",
+      "subjects": [
+        "a second hart",
+        "cross-hart memory ordering",
+        "cross-hart I-cache synchronisation"
+      ],
+      "reason": "p0 is one hart with one memory port. Every cross-hart property is therefore confirmed only by construction: there is no second hart to race against.",
+      "spec_clause": "RISC-V ISA manual, FENCE and the memory model; the cross-hart ordering obligations cannot be exercised without a second hart.",
+      "alternative_verification": {
+        "status": "open",
+        "cases": [],
+        "checks": [],
+        "note": "Nothing covers multi-hart behaviour. The single-hart cases state the absence explicitly (I-037, I-039, I-040, I-044)."
+      },
+      "affected_cases": [
+        {
+          "case": "fence.code_and_data_order",
+          "fields": [
+            "cross_hart"
+          ]
+        },
+        {
+          "case": "lrsc.reservation_progress",
+          "fields": [
+            "second_agent"
+          ]
+        },
+        {
+          "case": "amo.linearization",
+          "fields": [
+            "second_agent"
+          ]
+        }
+      ],
+      "affected_scope": "config/profiles/p0.json; rtl/core/mosaic_core.sv",
+      "end_condition": "A multi-hart profile exists and a case exercises ordering between harts."
+    },
+    {
+      "id": "EX-020",
+      "kind": "skip",
+      "subjects": [
+        "x04_wfi in the ISA audit"
+      ],
+      "reason": "The p0 ISA audit's M-mode instruction allow-list is {\"mret\"}, so x04_wfi is outside it; its disassembly is printed by the termination-suite dis target instead.",
+      "spec_clause": "RISC-V ISA manual, WFI; RISC-V Privileged Spec, WFI in M-mode is a legal hint.",
+      "alternative_verification": {
+        "status": "covered",
+        "cases": [
+          "exit.protocol_termination"
+        ],
+        "checks": [],
+        "note": "The termination suite runs x04_wfi and the named case verifies the protocol termination it produces, which passes."
+      },
+      "affected_cases": [
+        {
+          "case": "exit.protocol_termination",
+          "fields": [
+            "x04_wfi"
+          ]
+        }
+      ],
+      "affected_scope": "tests/programs/audit/check_p0_isa.py; tests/programs/termination/",
+      "end_condition": "The audit allow-list includes the M-mode hint instructions the profile executes, so WFI is audited like every other executed instruction."
+    },
+    {
+      "id": "EX-021",
+      "kind": "skip",
+      "subjects": [
+        "rename's lane-1 source read path in the integrated core"
+      ],
+      "reason": "The integrated core is one-wide (the ROB has a single allocation port) and ties rename's lane-1 read ports off, so the initial-mapping recognition is exercised only on lane 0.",
+      "spec_clause": "No ISA clause applies: this is a microarchitectural width, not an architectural behaviour.",
+      "alternative_verification": {
+        "status": "covered",
+        "cases": [
+          "rename.same_cycle_chain"
+        ],
+        "checks": [],
+        "note": "The two-wide rename bypass path is verified standalone by the named case, which passes; the integrated one-wide tie-off is a configuration the core has chosen."
+      },
+      "affected_cases": [
+        {
+          "case": "rename.same_cycle_chain",
+          "fields": []
+        }
+      ],
+      "affected_scope": "rtl/core/mosaic_core.sv; rtl/core/mosaic_rename.sv",
+      "end_condition": "The integrated core dispatches two-wide and the lane-1 source path runs in the core case."
+    },
+    {
+      "id": "EX-022",
+      "kind": "skip",
+      "subjects": [
+        "UNDRAINED_STORE sub-cases \"the TOHOST store never retired\" and \"the data port busy at the window close\""
+      ],
+      "reason": "The exit case's harness mutants for those two sub-cases are implemented but unreachable with the bring-up core; only the completeness sub-case is demonstrated.",
+      "spec_clause": "No ISA clause applies: this is the termination protocol of the harness, not the ISA.",
+      "alternative_verification": {
+        "status": "covered",
+        "cases": [
+          "exit.protocol_termination"
+        ],
+        "checks": [],
+        "note": "The reachable sub-case and the drain rules are verified by the named case, which passes; the unreachable mutants are declared rather than counted."
+      },
+      "affected_cases": [
+        {
+          "case": "exit.protocol_termination",
+          "fields": [
+            "UNDRAINED_STORE"
+          ]
+        }
+      ],
+      "affected_scope": "sim/harness/tb_harness.cpp; sim/tb/harness_tb.sv",
+      "end_condition": "A core with an in-flight store at window close makes the sub-cases reachable and they are run."
+    },
+    {
+      "id": "EX-023",
+      "kind": "skip",
+      "subjects": [
+        "lease reconfiguration FREEZE/DRAIN/REVOKED/INSTALL"
+      ],
+      "reason": "Reconfiguration is not implemented; reset is cold. A reset that preserves in-flight work is neither implemented nor verified.",
+      "spec_clause": "No ISA clause applies: the lease protocol is a project contract (rtl/core/mosaic_lease.sv), not an ISA requirement.",
+      "alternative_verification": {
+        "status": "covered",
+        "cases": [
+          "lease.conflict_and_cancel"
+        ],
+        "checks": [],
+        "note": "The implemented lease contract (conflict, cancel, generation wrap) is verified by the named case, which passes; the unimplemented reconfiguration is declared, not faked."
+      },
+      "affected_cases": [
+        {
+          "case": "lease.conflict_and_cancel",
+          "fields": [
+            "reconfigure"
+          ]
+        }
+      ],
+      "affected_scope": "rtl/core/mosaic_lease.sv",
+      "end_condition": "Reconfiguration is implemented and a case exercises each transition."
+    },
+    {
+      "id": "EX-024",
+      "kind": "skip",
+      "subjects": [
+        "a device access coalesced with RAM by store-to-load forwarding"
+      ],
+      "reason": "A device load is issued only at the ROB head, at which point every older store has retired and drained, and device and RAM regions are disjoint, so no covering store can forward into a device access. The forwarding exclusion in the load and store queues is a guard, not a measured behaviour.",
+      "spec_clause": "RISC-V Privileged Spec, PMA/I/O ordering: a non-idempotent device access must not be merged with an ordinary one.",
+      "alternative_verification": {
+        "status": "open",
+        "cases": [],
+        "checks": [],
+        "note": "Nothing measures the guard, because the state that would exercise it is unreachable in this profile. The observable control is the device-attribute mutant in mmio.exactly_once."
+      },
+      "affected_cases": [
+        {
+          "case": "mmio.exactly_once",
+          "fields": [
+            "forwarding"
+          ]
+        }
+      ],
+      "affected_scope": "rtl/core/mosaic_lsu_endpoint.sv; config/memory/p0.json",
+      "end_condition": "A coalescer or cache makes the merge reachable and a case drives it, at which point the guard becomes load-bearing evidence."
+    },
+    {
+      "id": "EX-025",
+      "kind": "skip",
+      "subjects": [
+        "Zicntr advertisement at p0"
+      ],
+      "reason": "config/profiles/p0.json lists Zicntr among its extensions, but config/capability_ladder.json gates Zicntr on implementation tasks I-019 and I-076, and I-076 is undelivered, so the capability is not advertised. A capability the profile names but the ladder withholds is a declared gap, not an oversight.",
+      "spec_clause": "RISC-V Privileged Spec, Zicntr counter CSRs (cycle, time, instret).",
+      "alternative_verification": {
+        "status": "covered",
+        "cases": [
+          "csr.precise_trap_mret",
+          "csr.rule_ledger"
+        ],
+        "checks": [],
+        "note": "The counter CSRs that exist are verified by the named cases, which pass; the advertisement gate is the ladder's, and it is correctly withholding."
+      },
+      "affected_cases": [
+        {
+          "case": "csr.rule_ledger",
+          "fields": [
+            "mcycle",
+            "minstret",
+            "time"
+          ]
+        }
+      ],
+      "affected_scope": "config/capability_ladder.json; config/profiles/p0.json",
+      "end_condition": "I-076 is delivered and the ladder advertises Zicntr, or p0's extension list stops naming it."
+    },
+    {
+      "id": "EX-026",
+      "kind": "waiver",
+      "subjects": [
+        "mcycle in the reset-state comparison"
+      ],
+      "reason": "mcycle counts clocks, so it is supposed to differ between runs of different reset lengths; comparing it would fail a correct machine.",
+      "spec_clause": "docs/validation-plan.md section 3 rule 4: a counter that counts clocks is not part of reset state.",
+      "alternative_verification": {
+        "status": "covered",
+        "cases": [
+          "reset.replay_determinism"
+        ],
+        "checks": [],
+        "note": "minstret is compared and does not differ, which is the architectural half of the same comparison; the named case passes."
+      },
+      "affected_cases": [
+        {
+          "case": "reset.replay_determinism",
+          "fields": [
+            "mcycle"
+          ]
+        }
+      ],
+      "affected_scope": "sim/unit/tb_reset.cpp",
+      "end_condition": "The waiver is replaced by a comparison of mcycle's delta against the run length, so the counter is checked rather than ignored."
+    },
+    {
+      "id": "EX-027",
+      "kind": "waiver",
+      "subjects": [
+        "writes to MOSAIC_TOHOST and MOSAIC_FROMHOST in the memory and ledger comparisons"
+      ],
+      "reason": "A write to the protocol registers is a protocol event in the frozen memory model, not a byte store, so those bytes are compared on the data port only and excluded from the memory and ledger comparisons.",
+      "spec_clause": "docs/validation-plan.md: the test protocol is a harness convention (config/profiles/p0.json test_protocol), not an ISA requirement.",
+      "alternative_verification": {
+        "status": "covered",
+        "cases": [
+          "mem.visibility_provenance",
+          "exit.protocol_termination"
+        ],
+        "checks": [],
+        "note": "The protocol words are compared on the data port by mem.visibility_provenance and their termination meaning is checked by exit.protocol_termination; both pass."
+      },
+      "affected_cases": [
+        {
+          "case": "mem.visibility_provenance",
+          "fields": [
+            "tohost",
+            "fromhost"
+          ]
+        }
+      ],
+      "affected_scope": "sim/common/memory_model.cpp; sim/unit/tb_core_visibility.cpp",
+      "end_condition": "The protocol registers are modelled as ordinary memory words (the plan's direction) so no byte needs excluding."
+    },
+    {
+      "id": "EX-028",
+      "kind": "waiver",
+      "subjects": [
+        "the event's store and CSR identity fields in the retire delta"
+      ],
+      "reason": "The event's store/CSR fields are inert in the bring-up stream, so the retire case identifies a store by its retired PC and its own decode and does not compare the store or CSR identity fields.",
+      "spec_clause": "config/contracts/event_v1.json: the fields exist and carry meaning; the waiver is that this case does not read them.",
+      "alternative_verification": {
+        "status": "covered",
+        "cases": [
+          "core.event_payload"
+        ],
+        "checks": [],
+        "note": "The payload fields are compared directly by the named case, which passes."
+      },
+      "affected_cases": [
+        {
+          "case": "retire.width_and_order",
+          "fields": [
+            "ev_store",
+            "ev_csr"
+          ]
+        }
+      ],
+      "affected_scope": "sim/unit/tb_retire.cpp",
+      "end_condition": "The retire case compares the store and CSR identity fields directly, so the waiver is removed."
+    },
+    {
+      "id": "EX-029",
+      "kind": "waiver",
+      "subjects": [
+        "CSR architectural state in the retire delta"
+      ],
+      "reason": "The retire case reconstructs the GPR delta only; mepc/mcause are read where the trap event needs them and no CSR snapshot sequence is rebuilt.",
+      "spec_clause": "RISC-V Privileged Spec, CSR write semantics (this is V-014's subject).",
+      "alternative_verification": {
+        "status": "covered",
+        "cases": [
+          "trap.precise_state"
+        ],
+        "checks": [],
+        "note": "CSR state around traps is verified by the named case, which passes."
+      },
+      "affected_cases": [
+        {
+          "case": "retire.width_and_order",
+          "fields": [
+            "csr_state"
+          ]
+        }
+      ],
+      "affected_scope": "sim/unit/tb_retire.cpp",
+      "end_condition": "The retire case rebuilds a CSR snapshot sequence, or the waiver is recorded as permanent because V-014 owns it."
+    },
+    {
+      "id": "EX-030",
+      "kind": "waiver",
+      "subjects": [
+        "ev_id",
+        "ev_store_addr",
+        "ev_store_data",
+        "ev_trap_cause"
+      ],
+      "reason": "The integrated core case's architectural comparison uses ev_pc, ev_rd, ev_reg_we, ev_value and the ev_valid/ev_trap/ev_store lanes; the identity, store-payload and trap-cause fields are not compared.",
+      "spec_clause": "config/contracts/event_v1.json: every field states when it is valid; the waiver is that this case does not read four of them.",
+      "alternative_verification": {
+        "status": "covered",
+        "cases": [
+          "core.event_payload",
+          "trap.precise_state"
+        ],
+        "checks": [],
+        "note": "ev_id and the trap fields are covered by the two named cases, which pass; the store payload fields are covered only in part (see EX-031)."
+      },
+      "affected_cases": [
+        {
+          "case": "core.corpus_sweep",
+          "fields": [
+            "ev_id",
+            "ev_trap_cause"
+          ]
+        },
+        {
+          "case": "fabric.fixed_two_cluster",
+          "fields": [
+            "ev_id",
+            "ev_store_addr",
+            "ev_store_data",
+            "ev_trap_cause"
+          ]
+        }
+      ],
+      "affected_scope": "sim/unit/tb_core_sweep.cpp; sim/unit/tb_core.cpp",
+      "end_condition": "The core cases compare the identity, store-payload and trap-cause fields, so the waiver is removed."
+    },
+    {
+      "id": "EX-031",
+      "kind": "unimplemented_reference_feature",
+      "subjects": [
+        "ev_store_addr",
+        "ev_store_data"
+      ],
+      "reason": "A store's payload lives in the store queue and getting it to the retire event needs a port the store queue does not have, so the fields remain unwired. The core cases classify retired stores by decoding the image at the retired PC and compare the memory image byte for byte instead.",
+      "spec_clause": "config/contracts/event_v1.json reconciliation F-4; RISC-V ISA manual, store semantics (the memory image is the architectural effect).",
+      "alternative_verification": {
+        "status": "open",
+        "cases": [],
+        "checks": [],
+        "note": "The memory image is compared byte for byte (core.mem_program, mem.visibility_provenance, both passing), which covers the architectural effect but not the event fields themselves."
+      },
+      "affected_cases": [
+        {
+          "case": "core.mem_program",
+          "fields": [
+            "ev_store_addr",
+            "ev_store_data"
+          ]
+        },
+        {
+          "case": "mem.visibility_provenance",
+          "fields": [
+            "ev_store_addr",
+            "ev_store_data"
+          ]
+        }
+      ],
+      "affected_scope": "rtl/core/mosaic_store_queue.sv; sim/unit/tb_core_mem.cpp",
+      "end_condition": "The store queue exports the payload and the retire event carries it, so the fields can be compared."
+    },
+    {
+      "id": "EX-032",
+      "kind": "waiver",
+      "subjects": [
+        "Verilator --timing"
+      ],
+      "reason": "No case in the tree needs a Verilator scheduled delay: the harness owns the clock. Providing a --timing example would put Verilator's scheduler inside the loop being calibrated.",
+      "spec_clause": "docs/validation-plan.md V-010: the sampling instant must be the settled pre-edge value; a scheduler delay is the failure mode, not a requirement.",
+      "alternative_verification": {
+        "status": "covered",
+        "cases": [
+          "harness.sampling_calibration"
+        ],
+        "checks": [],
+        "note": "The checkable half of the requirement -- that Verilator's time never advanced and no event is pending -- is asserted by the named case, which passes."
+      },
+      "affected_cases": [
+        {
+          "case": "harness.sampling_calibration",
+          "fields": [
+            "timing"
+          ]
+        }
+      ],
+      "affected_scope": "sim/tb/mosaic_bringup_tb.sv; tools/run_unit.py",
+      "end_condition": "A case that genuinely needs a scheduled delay exists and exercises --timing, so the other half of the sentence has an instance."
+    },
+    {
+      "id": "EX-033",
+      "kind": "waiver",
+      "subjects": [
+        "the PRF read path for a bypassed operand"
+      ],
+      "reason": "The local bypass delivers a result to a consumer without a register-file read. That is the intended optimisation, and it means the PRF read path is exercised only by misses.",
+      "spec_clause": "No ISA clause applies: this is a microarchitectural optimisation whose architectural result must be identical.",
+      "alternative_verification": {
+        "status": "covered",
+        "cases": [
+          "prf.read_bank_collision",
+          "bypass.local_raw_chain"
+        ],
+        "checks": [],
+        "note": "The register-file read path is verified by prf.read_bank_collision and the bypass by bypass.local_raw_chain; both pass, and the bypass case's NO_FALLBACK control forbids a design that bypassed everything."
+      },
+      "affected_cases": [
+        {
+          "case": "bypass.local_raw_chain",
+          "fields": [
+            "prf_read"
+          ]
+        }
+      ],
+      "affected_scope": "rtl/core/mosaic_bypass.sv; rtl/core/mosaic_prf.sv",
+      "end_condition": "A case drives a bypass miss that forces the PRF read for the same operand, so both paths are exercised in one run."
+    },
+    {
+      "id": "EX-034",
+      "kind": "unimplemented_reference_feature",
+      "subjects": [
+        "mepc[1:0] read-only zero for a profile that claims the C extension"
+      ],
+      "reason": "config/csr/mode_m.json declares mepc's low two bits unmodifiable for the IALIGN=32 rule, and the generated MOSAIC_CSR_WMASK_MEPC masks both bits. The C extension requires IALIGN=16 (only mepc[0] read-only zero). p1 claims C, so the p1 mask is wrong for C; the case prints the rounded-down mepc as a note rather than asserting it.",
+      "spec_clause": "RISC-V Privileged Spec, mepc: the low bit is always zero; with IALIGN=16 only mepc[0] is read-only zero. config/csr/mode_m.json records the p0 IALIGN=32 reading of the same clause.",
+      "alternative_verification": {
+        "status": "open",
+        "cases": [],
+        "checks": [],
+        "note": "Nothing covers the p1 IALIGN=16 mask. core.event_payload pins the p0 rule (mepc's low two bits read-only zero) and compressed.cross_boundary records the p0 rounding as a note; the CSR config, the generated package and that expectation must move together."
+      },
+      "affected_cases": [
+        {
+          "case": "compressed.cross_boundary",
+          "fields": [
+            "mepc"
+          ]
+        },
+        {
+          "case": "core.event_payload",
+          "fields": [
+            "mepc"
+          ]
+        }
+      ],
+      "affected_scope": "config/csr/mode_m.json; config/profiles/p1.json; tools/gen_manifest.py",
+      "end_condition": "The CSR config, the generated mask and core.event_payload's expectation move to mepc[1] writable together when a C-claiming profile is exercised."
+    },
+    {
+      "id": "EX-035",
+      "kind": "unimplemented_reference_feature",
+      "subjects": [
+        "a DUT-side MEM_VISIBLE producer"
+      ],
+      "reason": "The MEM_VISIBLE event record has no producer in the RTL. The record in the trace is emitted by the harness from the accepted data-port transaction, not by the core.",
+      "spec_clause": "config/contracts/event_v1.json reconciliation F-4: the record is defined and its producer is pending.",
+      "alternative_verification": {
+        "status": "open",
+        "cases": [],
+        "checks": [],
+        "note": "mem.visibility_provenance proves the rule over the DUT's data port (and passes), but not that the DUT can emit the record itself."
+      },
+      "affected_cases": [
+        {
+          "case": "mem.visibility_provenance",
+          "fields": [
+            "MEM_VISIBLE"
+          ]
+        },
+        {
+          "case": "core.event_payload",
+          "fields": [
+            "MEM_VISIBLE"
+          ]
+        }
+      ],
+      "affected_scope": "rtl/core/mosaic_retire.sv; config/contracts/event_v1.json",
+      "end_condition": "The retire unit emits a MEM_VISIBLE record for each architectural memory visibility and a case compares it against the harness model."
+    },
+    {
+      "id": "EX-036",
+      "kind": "unimplemented_reference_feature",
+      "subjects": [
+        "a lane-0 event for an asynchronous interrupt"
+      ],
+      "reason": "The retire unit's trap hook takes the trap the system unit resolved; an asynchronous interrupt is a third source of trap_decision and was left alone, so a consumer watching only the event stream sees a PC jump with no record when an interrupt is taken.",
+      "spec_clause": "RISC-V Privileged Spec, interrupts; config/contracts/event_v1.json, the TRAP record's emit rule.",
+      "alternative_verification": {
+        "status": "open",
+        "cases": [],
+        "checks": [],
+        "note": "interrupt.boundary_replay verifies the interrupt unit (and passes) but does not watch the retire event stream; nothing checks that an interrupt produces a TRAP record."
+      },
+      "affected_cases": [
+        {
+          "case": "core.event_payload",
+          "fields": [
+            "trap"
+          ]
+        },
+        {
+          "case": "interrupt.boundary_replay",
+          "fields": [
+            "event_stream"
+          ]
+        }
+      ],
+      "affected_scope": "rtl/core/mosaic_retire.sv; rtl/core/mosaic_interrupt.sv",
+      "end_condition": "The same trap hook covers the interrupt source and a case asserts a TRAP record with the interrupt's mepc."
+    },
+    {
+      "id": "EX-037",
+      "kind": "unimplemented_reference_feature",
+      "subjects": [
+        "ev_trap_epc",
+        "ev_insn",
+        "ev_pc_after"
+      ],
+      "reason": "These ports are declared in the frozen interface but absent from the RTL, so their fields are zero-filled in the stream. An asynchronous trap's epc is not expressible at all until ev_trap_epc exists.",
+      "spec_clause": "config/contracts/event_v1.json reconciliation F-3 (pending RTL producers).",
+      "alternative_verification": {
+        "status": "open",
+        "cases": [],
+        "checks": [],
+        "note": "Nothing covers the absent ports. core.event_payload verifies the fields that do have producers, and passes; the pending list is printed by check_event_contract on every run."
+      },
+      "affected_cases": [
+        {
+          "case": "core.event_payload",
+          "fields": [
+            "ev_trap_epc",
+            "ev_insn",
+            "ev_pc_after"
+          ]
+        },
+        {
+          "case": "mem.visibility_provenance",
+          "fields": [
+            "pc_after",
+            "trap_epc"
+          ]
+        }
+      ],
+      "affected_scope": "rtl/core/mosaic_retire.sv; config/contracts/event_v1.json",
+      "end_condition": "The ports are wired and their fields are compared, at which point the pending list is empty."
+    },
+    {
+      "id": "EX-038",
+      "kind": "unimplemented_reference_feature",
+      "subjects": [
+        "a v1-to-v2 event-record migration reader"
+      ],
+      "reason": "A stored v1 binary record is undecodable by the v2 codec and there is no converter. No v1 record is stored in the tree, so nothing breaks, but a consumer holding one must keep a v1 decoder.",
+      "spec_clause": "config/contracts/event_v1.json, the schema version and its revisions.",
+      "alternative_verification": {
+        "status": "covered",
+        "cases": [
+          "core.event_payload"
+        ],
+        "checks": [
+          "tools/check_event_contract.py"
+        ],
+        "note": "The v2 codec is checked structurally against the schema and exercised by the named case, both passing; only the migration path is absent, and no stored record needs it."
+      },
+      "affected_cases": [
+        {
+          "case": "core.event_payload",
+          "fields": []
+        }
+      ],
+      "affected_scope": "sim/common/event_codec.cpp; config/contracts/event_v1.json",
+      "end_condition": "A migration reader exists, or the interface declares that only the current version is supported and no older record may be presented."
+    },
+    {
+      "id": "EX-039",
+      "kind": "unimplemented_reference_feature",
+      "subjects": [
+        "Spike's misaligned-access behaviour"
+      ],
+      "reason": "Spike services misaligned accesses natively instead of trapping and exposes no option to change it, so p08_misaligned's trap expectations are NOT_CLAIMED against Spike.",
+      "spec_clause": "RISC-V ISA manual, misaligned load/store: an implementation may either service or trap, and the profile chooses trap; Spike chooses service.",
+      "alternative_verification": {
+        "status": "covered",
+        "cases": [
+          "lsu.size_fault_boundaries",
+          "core.corpus_sweep"
+        ],
+        "checks": [
+          "tools/check_capability_matrix.py"
+        ],
+        "note": "The capability matrix records Spike as outside p08 and the DUT's own trap behaviour is verified by lsu.size_fault_boundaries and core.corpus_sweep, which pass; NEMU, XiangShan, Sail and ACT4 remain as adjudicators for p08."
+      },
+      "affected_cases": [
+        {
+          "case": "core.corpus_sweep",
+          "fields": [
+            "p08_misaligned"
+          ]
+        },
+        {
+          "case": "lsu.size_fault_boundaries",
+          "fields": []
+        }
+      ],
+      "affected_scope": "config/capability/models.json (spike); tests/programs/audit/spike_crosscheck.py",
+      "end_condition": "Spike gains a trap-on-misaligned mode (or a patch is applied), so p08 can be adjudicated by Spike too."
+    },
+    {
+      "id": "EX-040",
+      "kind": "unimplemented_reference_feature",
+      "subjects": [
+        "Spike's store-to-read-only-region fault cause"
+      ],
+      "reason": "Spike reports cause 6 for an aligned store to a non-writable region where the specification requires cause 7, because the cross-check harness models boot_rom as unmapped rather than read-only. p13_romstore is NOT_CLAIMED against Spike.",
+      "spec_clause": "RISC-V Privileged Spec, cause 7 (store/AMO access fault) for a store to a region whose PMA forbids writes.",
+      "alternative_verification": {
+        "status": "open",
+        "cases": [],
+        "checks": [],
+        "note": "The capability matrix records p13_romstore as adjudicable by mosaicrv alone: the DUT is the only model that models boot_rom as read-only, so there is no independent oracle for this program."
+      },
+      "affected_cases": [
+        {
+          "case": "core.corpus_sweep",
+          "fields": [
+            "p13_romstore"
+          ]
+        }
+      ],
+      "affected_scope": "config/capability/models.json (spike); config/memory/p0.json (boot_rom)",
+      "end_condition": "A reference model that models boot_rom as read-only (or a Spike memory-map option) adjudicates p13 independently."
+    },
+    {
+      "id": "EX-041",
+      "kind": "unimplemented_reference_feature",
+      "subjects": [
+        "NEMU as a MosaicRV verification path"
+      ],
+      "reason": "NEMU is built and its Difftest ABI is checked, but no MosaicRV adapter produces or consumes the Difftest state layout. NEMU running proves the reference works, not that MosaicRV was compared against it.",
+      "spec_clause": "No ISA clause applies: Difftest is a comparison framework, not a specification.",
+      "alternative_verification": {
+        "status": "open",
+        "cases": [],
+        "checks": [],
+        "note": "Nothing compares the DUT to NEMU. The harness's own injected-mismatch control (harness.injected_mismatch) proves the harness can detect a difference, but it injects the difference itself."
+      },
+      "affected_cases": [
+        {
+          "case": "harness.injected_mismatch",
+          "fields": []
+        },
+        {
+          "case": "core.bringup_vs_reference",
+          "fields": []
+        }
+      ],
+      "affected_scope": "config/capability/models.json (nemu); tools/check_nemu_abi.py; sim/harness",
+      "end_condition": "A MosaicRV Difftest adapter exists and a case runs the DUT against NEMU, closing the independent-check loop."
+    },
+    {
+      "id": "EX-042",
+      "kind": "unimplemented_reference_feature",
+      "subjects": [
+        "NEMU's Zifencei support"
+      ],
+      "reason": "Zifencei is not separately established for the pinned NEMU build, so it cannot be relied on to adjudicate FENCE.I.",
+      "spec_clause": "RISC-V ISA manual, Zifencei (instruction-fetch fence).",
+      "alternative_verification": {
+        "status": "covered",
+        "cases": [
+          "fence.code_and_data_order"
+        ],
+        "checks": [],
+        "note": "The DUT's own FENCE.I behaviour is verified by the named case, which passes; the missing piece is NEMU's ability to adjudicate it, which no case uses yet."
+      },
+      "affected_cases": [
+        {
+          "case": "fence.code_and_data_order",
+          "fields": []
+        }
+      ],
+      "affected_scope": "config/capability/models.json (nemu)",
+      "end_condition": "A probe establishes Zifencei for the pinned NEMU build, at which point the claim is upgraded."
+    },
+    {
+      "id": "EX-043",
+      "kind": "unimplemented_reference_feature",
+      "subjects": [
+        "a differential run against Sail"
+      ],
+      "reason": "Sail's capability is claimed from the model's shipped ISA coverage, not from a differential run against our core. ACT's recorded 51/51 replay is a Sail self-replay, not a comparison against MosaicRV.",
+      "spec_clause": "No ISA clause applies: this is about how the reference's capability was established, not about a behaviour.",
+      "alternative_verification": {
+        "status": "open",
+        "cases": [],
+        "checks": [],
+        "note": "Nothing compares the DUT to Sail. The ACT4 ELF generation uses Sail as a reference word source, but that is per-test expected values, not a differential run of the core."
+      },
+      "affected_cases": [
+        {
+          "case": "core.bringup_vs_reference",
+          "fields": []
+        }
+      ],
+      "affected_scope": "config/capability/models.json (sail)",
+      "end_condition": "A differential run compares the DUT's retired state against Sail on the same ELF, and the result is recorded."
+    },
+    {
+      "id": "EX-044",
+      "kind": "unimplemented_reference_feature",
+      "subjects": [
+        "XiangShan as an architectural oracle"
+      ],
+      "reason": "XiangShan is a second DUT for upstream comparison only; it is not a source of architectural truth and its own CoreMark run is an upstream calibration, not a MosaicRV result.",
+      "spec_clause": "docs/validation-plan.md VR-001..VR-007: agreement with another DUT does not prove correctness, and disagreement does not automatically mean this core is wrong.",
+      "alternative_verification": {
+        "status": "open",
+        "cases": [],
+        "checks": [],
+        "note": "No MosaicRV-vs-XiangShan comparison exists. This is a declared non-use of a model, recorded so it is not mistaken for a pending comparison."
+      },
+      "affected_cases": [
+        {
+          "case": "core.bringup_vs_reference",
+          "fields": []
+        }
+      ],
+      "affected_scope": "config/capability/models.json (xiangshan)",
+      "end_condition": "A package (V-005/V-075) runs both DUTs on the same program and records the differences as observations, not as a pass."
+    },
+    {
+      "id": "EX-045",
+      "kind": "unimplemented_reference_feature",
+      "subjects": [
+        "a complete MosaicRV ACT4 DUT profile"
+      ],
+      "reason": "No UDB, Sail, linker or rvmodel_macros.h profile exists for this core, and no DUT ELF runner is wired into the gate. tools/run_act_dut.py runs only the p0 applicable integer subset; V-043 is not delivered.",
+      "spec_clause": "No ISA clause applies: ACT4 is a test corpus and harness, not a specification.",
+      "alternative_verification": {
+        "status": "covered",
+        "cases": [
+          "core.bringup_vs_reference"
+        ],
+        "checks": [
+          "tools/check_upstream.py"
+        ],
+        "note": "The applicable integer subset is executed by the named case and the upstream identities are audited; both pass. The full privileged/A/C/F/D/V corpus is not run (see EX-012)."
+      },
+      "affected_cases": [
+        {
+          "case": "core.bringup_vs_reference",
+          "fields": [
+            "act4_suites"
+          ]
+        }
+      ],
+      "affected_scope": "config/capability/models.json (act4); tools/run_act_dut.py; config/status/implementation_status.json (V-043)",
+      "end_condition": "V-043 delivers a complete ACT4 profile and every applicable suite executes with N closed against the generation manifest."
+    },
+    {
+      "id": "EX-046",
+      "kind": "unimplemented_reference_feature",
+      "subjects": [
+        "mtval for a system illegal-instruction trap"
+      ],
+      "reason": "The core's trap_tval is head_exc_trap ? exc_tval_head : 0, so an illegal CSR access (cause 2) publishes tval = 0 where the ISA asks for the instruction's encoding. The event reports the same value the trap entry uses, so the case is consistent but the value itself is wrong.",
+      "spec_clause": "RISC-V Privileged Spec, mtval: for an illegal-instruction exception, mtval is written with the faulting instruction's encoding.",
+      "alternative_verification": {
+        "status": "open",
+        "cases": [],
+        "checks": [],
+        "note": "core.event_payload checks that the event and the trap entry agree, and passes; nothing checks the value against the ISA, so the agreement is with a neighbouring defect."
+      },
+      "affected_cases": [
+        {
+          "case": "core.event_payload",
+          "fields": [
+            "tval"
+          ]
+        },
+        {
+          "case": "core.trap_csr_program",
+          "fields": [
+            "tval"
+          ]
+        }
+      ],
+      "affected_scope": "rtl/core/mosaic_core.sv; rtl/core/mosaic_csr.sv",
+      "end_condition": "The core sets tval from the faulting instruction's encoding for a system illegal-instruction trap, and a case asserts the encoding."
+    },
+    {
+      "id": "EX-047",
+      "kind": "unimplemented_reference_feature",
+      "subjects": [
+        "an assembled A-extension corpus program"
+      ],
+      "reason": "No assembled A-extension program exists in tests/programs/**, so the AMO and LR/SC cases assemble their own images and there is no corpus binding for them.",
+      "spec_clause": "RISC-V ISA manual, A extension (the corpus is the project's program set, not a specification requirement).",
+      "alternative_verification": {
+        "status": "covered",
+        "cases": [
+          "amo.linearization",
+          "lrsc.reservation_progress"
+        ],
+        "checks": [],
+        "note": "Both A cases assemble and run their own directed images and pass; the missing piece is a corpus-level binding, which no committed claim needs."
+      },
+      "affected_cases": [
+        {
+          "case": "amo.linearization",
+          "fields": []
+        },
+        {
+          "case": "lrsc.reservation_progress",
+          "fields": []
+        }
+      ],
+      "affected_scope": "tests/programs/**; tests/programs/corpus.json",
+      "end_condition": "An A-extension program is added to the corpus with declared inputs and a host oracle."
+    },
+    {
+      "id": "EX-048",
+      "kind": "timeout",
+      "subjects": [
+        "tools/run_unit.py wall-clock timeout max(60, max_cycles/1000)"
+      ],
+      "reason": "A unit case that hangs must not hang the gate. On TimeoutExpired the runner writes HARNESS TIMEOUT to the log and returns False, so a timeout is a FAIL, never a pass.",
+      "spec_clause": "No ISA clause applies: this is a harness liveness guard, not a behaviour.",
+      "alternative_verification": {
+        "status": "covered",
+        "cases": [
+          "harness.timeout"
+        ],
+        "checks": [
+          "tools/run_unit.py"
+        ],
+        "note": "The harness's own timeout classification is verified by the named case, which passes; a timed-out case is reported FAIL with the log path."
+      },
+      "affected_cases": [
+        {
+          "case": "harness.timeout",
+          "fields": []
+        }
+      ],
+      "affected_scope": "tools/run_unit.py; sim/harness/tb_harness.cpp",
+      "end_condition": "The cycle budget is the contract and every run is guaranteed to terminate within it, so the wall-clock guard never fires; the guard stays as a failure detector."
+    },
+    {
+      "id": "EX-049",
+      "kind": "timeout",
+      "subjects": [
+        "tools/run_act_dut.py per-ELF timeout max(120, max_cycles/1000) and build timeout 1200"
+      ],
+      "reason": "An ACT4 ELF that does not terminate must not hang the run. A timeout ends the run, and the run is recorded FAIL unless the DUT emitted RESULT PASS.",
+      "spec_clause": "No ISA clause applies: this is a runner liveness guard.",
+      "alternative_verification": {
+        "status": "covered",
+        "cases": [
+          "harness.timeout"
+        ],
+        "checks": [],
+        "note": "The harness timeout classification is verified by the named case, which passes; the runner treats anything other than RESULT PASS as FAIL."
+      },
+      "affected_cases": [
+        {
+          "case": "core.bringup_vs_reference",
+          "fields": [
+            "max_cycles"
+          ]
+        }
+      ],
+      "affected_scope": "tools/run_act_dut.py",
+      "end_condition": "Every ELF terminates within its cycle budget and the timeout never fires; the guard stays as a failure detector."
+    },
+    {
+      "id": "EX-050",
+      "kind": "timeout",
+      "subjects": [
+        "a device that never responds"
+      ],
+      "reason": "The MMIO serializer owns a device transaction until its response is consumed and holds the ordinary path while it does; there is no timeout or watchdog in p0. A non-responding device would hang the memory path.",
+      "spec_clause": "No ISA clause applies: a device watchdog is a platform property, not an ISA requirement.",
+      "alternative_verification": {
+        "status": "open",
+        "cases": [],
+        "checks": [],
+        "note": "Nothing covers it. mmio.side_effect_model's memory always responds within a fixed latency, and the harness timeout (EX-048) would eventually fail the run rather than diagnose it."
+      },
+      "affected_cases": [
+        {
+          "case": "mmio.exactly_once",
+          "fields": []
+        },
+        {
+          "case": "mmio.side_effect_model",
+          "fields": []
+        }
+      ],
+      "affected_scope": "rtl/core/mosaic_lsu_endpoint.sv; sim/unit/tb_core_mmio_model.cpp",
+      "end_condition": "The serializer or platform has a response timeout that raises a diagnosable fault, and a case drives a non-responding device."
+    },
+    {
+      "id": "EX-051",
+      "kind": "generation_failure",
+      "subjects": [
+        "an ACT4 applicable suite directory with no ELF"
+      ],
+      "reason": "If an applicable suite directory is missing or contains no ELF, tools/run_act_dut.py raises Blocked (exit 2) rather than running an empty set and reporting success. A generation that produced nothing is never a pass.",
+      "spec_clause": "No ISA clause applies: this is the ACT4 generation step.",
+      "alternative_verification": {
+        "status": "covered",
+        "cases": [
+          "core.bringup_vs_reference"
+        ],
+        "checks": [
+          "tools/run_act_dut.py"
+        ],
+        "note": "The applicable integer subset is executed and counted by the named case, which passes; the BLOCKED path is the declared behaviour when generation fails."
+      },
+      "affected_cases": [
+        {
+          "case": "core.bringup_vs_reference",
+          "fields": [
+            "act4_suites"
+          ]
+        }
+      ],
+      "affected_scope": "tools/run_act_dut.py; ~/mosaic-ref/riscv-arch-test",
+      "end_condition": "Every applicable suite generates at least one ELF, so the Blocked path never fires and N is closed against the generation manifest."
+    },
+    {
+      "id": "EX-052",
+      "kind": "generation_failure",
+      "subjects": [
+        "a corpus ELF missing at run time"
+      ],
+      "reason": "The core corpus cases load a corpus ELF by path. If the program was not generated, the case calls Fail(\"program\", ...) and names the missing build step; it does not run an empty program or pass.",
+      "spec_clause": "No ISA clause applies: this is the corpus generation step (tests/programs/Makefile).",
+      "alternative_verification": {
+        "status": "covered",
+        "cases": [
+          "core.corpus_branch"
+        ],
+        "checks": [
+          "tools/run_unit.py"
+        ],
+        "note": "The named case loads and runs the generated p02_branch ELF and passes; the missing-ELF path is a loud failure by construction."
+      },
+      "affected_cases": [
+        {
+          "case": "core.corpus_branch",
+          "fields": []
+        },
+        {
+          "case": "core.corpus_sweep",
+          "fields": []
+        }
+      ],
+      "affected_scope": "tests/programs/Makefile; sim/unit/tb_core_corpus.cpp",
+      "end_condition": "Every corpus ELF the cases load is generated before the case runs, so the failure path never fires."
+    }
+  ]
+}

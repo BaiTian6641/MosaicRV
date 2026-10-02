@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "case": "tlb.sfence_vma",
+  "verdict": "FAIL",
+  "detail": "contract violated: directed/cancel: the cache did not count the cancel",
+  "seed": 1,
+  "max_cycles": 4000000,
+  "checks": 1,
+  "failures": 1,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-02T07:31:05Z",
+  "first_mismatch": "directed/cancel: expected the cache counts the cancellation, got 0",
+  "failed_checks": ["no contract violation"]
+}

@@ -339,7 +339,7 @@ module mosaic_tlb (
   assign sfence_vpn_c = sfence_va_i[38:12];
 `endif
 
-  always_comb begin
+  always_comb begin : fence_match
     va_match_c   = {TLB_ENTRIES{1'b0}};
     asid_match_c = {TLB_ENTRIES{1'b0}};
     for (int unsigned i = 0; i < TLB_ENTRIES; i++) begin
@@ -348,7 +348,7 @@ module mosaic_tlb (
     end
   end
 
-  always_comb begin
+  always_comb begin : fence_kill
     sfence_kill_c = {TLB_ENTRIES{1'b0}};
 `ifndef MOSAIC_TLB_MUTANT_SFENCE_NOOP
     if (sfence_valid_i && sfence_effective_c) begin
@@ -429,7 +429,7 @@ module mosaic_tlb (
   assign hit_pa_c    = {8'd0, ent_ppn_q[hit_way_c ? idx1_c : idx0_c], xl_va_i[11:0]};
   assign hit_perms_c = ent_perms_q[hit_way_c ? idx1_c : idx0_c];
 
-  always_comb begin
+  always_comb begin : page_cause
     case (xl_kind_i)
       KIND_STORE: page_cause_req_c = 4'd15;
       KIND_FETCH: page_cause_req_c = 4'd12;
@@ -462,7 +462,7 @@ module mosaic_tlb (
                          (ent_vpn_q[inst1_c] == va_q[38:12]) &&
                          (ent_g_q[inst1_c] || (ent_asid_q[inst1_c] == asid_q));
 
-  always_comb begin
+  always_comb begin : install_way
     if (!ent_valid_q[inst0_c])      inst_way_c = 1'b0;
     else if (!ent_valid_q[inst1_c]) inst_way_c = 1'b1;
     else if (inst_match0_c)         inst_way_c = 1'b0;
