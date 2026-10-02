@@ -635,6 +635,16 @@ std::vector<Scenario> BuildScenarios() {
   }
   {
     Scenario s;
+    s.name = "csr-pmpaddr0-read";
+    s.mode = Mod::kM; s.cls = Cls::kCsr; s.cat = Cat::kNoEntry;
+    s.rule = "pmpaddr0 reads back the code-region address the program installed";
+    s.skip_without_pmp = true;
+    s.csr_ops.push_back(CsrOp{false, CSR_PMPADDR0, 0});
+    s.exp = Expect{false, 0};
+    add(s);
+  }
+  {
+    Scenario s;
     s.name = "csr-pmpcfg1-illegal";
     s.mode = Mod::kM; s.cls = Cls::kCsr; s.cat = Cat::kNoEntry;
     s.rule = "for RV64 the odd-numbered pmpcfg registers are illegal";
@@ -1996,6 +2006,11 @@ void RunCase(Vmosaic_core_tb* dut, mosaic::Reporter* reporter, const Geometry& g
         // else: L=0, A=NAPOT, X=1, R=1.
         harness.Check(tag + ": pmpcfg0 reads back the entry the program installed",
                       seen == 0x1Dull, "pmpcfg0=" + U64(seen) + " expected 0x1d");
+      } else if (s.name == "csr-pmpaddr0-read") {
+        harness.Check(tag + ": pmpaddr0 reads back the installed code address",
+                      seen == NapotAddr(kCodeLo, kCodeHi - kCodeLo),
+                      "pmpaddr0=" + U64(seen) + " expected " +
+                          U64(NapotAddr(kCodeLo, kCodeHi - kCodeLo)));
       } else if (s.name == "lock-cfg-write-ignored") {
         harness.Check(tag + ": a locked configuration byte survives a write of zero",
                       seen == 0x0000000091909090ull,
