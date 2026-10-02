@@ -1687,3 +1687,41 @@ as what is. The scalar base is advertised (`rv64im_zicsr_zihpm`). What is missin
 there is no `FENCE` or `FENCE.I` anywhere in the machine — and that package (I-037) is running,
 followed by MMIO (I-038), the fabric remainder (I-029..I-032), and the widening of the corpus
 sweep from the handful of programs each case runs to all of them.
+
+---
+
+## 2026-10-01 — the whole p0 corpus on the out-of-order core, and what that does and does not prove
+
+`core.corpus_sweep` passes from a clean build: **13 programs x 3 input patterns = 39 runs, 39 PASS, 0
+FAIL, 0 STOPPED, 17 484 988 cycles, 2 774 478 retires**, every signature compared against
+`tools/host_oracle.py`'s host computation. The sweep prints the full matrix and states the SHA-256
+of every RTL file it compiled. Its failure path was exercised, not assumed: a deliberately
+perturbed expectation makes it report a mismatch at the right first divergent word. Two
+independent evidence paths now agree on the two trap-dependent programs (`p08_misaligned`,
+`p13_romstore`): the sweep and the trap case.
+
+The machine this runs on is worth stating plainly, because three hours ago it could not run a
+branch: fetch, decode, rename, dispatch, two clusters, banked register file, scoreboarded
+writeback, reorder buffer, two-wide retire, recovery, LSU endpoint, speculative store queue, load
+queue with byte forwarding, CSR file, traps, interrupts, `FENCE` and `FENCE.I` — with the corpus as
+the oracle and a per-slot retire comparison (V-013) watching the parts a final signature cannot
+see.
+
+**What the sweep cannot see, in the lane's own words and mine**: it compares signatures, so a
+defect that corrupts intermediate architectural state and is overwritten before the end would pass
+it. That is exactly why the project has V-013's per-slot delta comparison (1195 checks, five card
+situations produced with exact cycles, x0 asserted across 56 directed instructions, trace-gap
+detector, five failing controls and three invisibility probes documented with reasons) and the
+V-008 event contract (frozen schema, three producers, 33 negative controls). Neither substitutes
+for the other, and a project that had only the sweep would be able to say "39 of 39 pass" while
+being wrong about the machine.
+
+**V-013's three findings are the proof that the verification is doing work.** It reported, and
+deliberately did not fix: `LWU` is refused by the decoder although RV64I requires it (a real ISA
+compliance gap, with the source comment that justifies the refusal being wrong); the core ties the
+retire instance's store and CSR payload to constant zero, so the event stream cannot carry the
+fields the frozen schema declares — the F-4 gap named at freeze time, now measured; and a
+system-instruction trap publishes no event at all, so a consumer of the stream sees a PC jump with
+no cause. A verification package that finds nothing on a machine this young is usually not
+looking; this one found three things, named them, and left them to a package that owns the fix.
+That package is running now, together with the corpus sweep's re-run after it lands.
