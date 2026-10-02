@@ -160,11 +160,13 @@ revision there is none, so every row prints `-`.
 
 Under `SWEEP_DEBUG=1` the driver additionally diffs the DUT's memory model
 against the independent interpretation's, byte for byte, over the signature
-area, the 128-byte scratch buffer and the program-input table. All 39 runs
-report **0 mismatching bytes**:
+area, the 128-byte scratch buffer and the program-input table. The full sweep
+was run that way: **39 runs, every one reporting 0 mismatching bytes**, and the
+independent interpretation `match=1` against the oracle-derived expectation in
+every one of them.
 
 ```
-$ SWEEP_DEBUG=1 build/p0/unit/core.corpus_sweep/core.corpus_sweep ... --only p12_memwalk
+$ SWEEP_DEBUG=1 build/p0/unit/core.corpus_sweep/core.corpus_sweep ...
   [debug] p12_memwalk in0 ref=0x438587e9cc0e086c 0x23456789abcdea0f 0x0000000000000008 0x01234567a39081b7 \
           oracle-derived=0x438587e9cc0e086c ... match=1
   [debug] p12_memwalk in0 memory mismatching bytes in signature+scratch+inputs: 0; dut_retires=71245
@@ -268,8 +270,9 @@ instruction counts and the trap counts — the DUT-side facts — are identical.
 ## 5. Controls: the failure path, fired
 
 A sweep whose failure path has never fired is not evidence that the programs
-pass. Three controls, none of them part of the registered run, each make the
-case fail and are reported here with their exact command and output.
+pass. Three harness-level controls plus three RTL mutants, none of them part of
+the registered run, each make the case fail and are reported here with their
+exact command and output.
 
 **(a) A perturbed expectation** — `--control-expect <program> <input> <word>`
 XORs one bit into the oracle-derived expectation for one case after the program
@@ -321,6 +324,41 @@ RESULT FAIL core.corpus_sweep ... pass=38 fail=0 stopped=1
 
 All three controls exit 1 and name the right location; the registered run exits
 0 with all 39 rows PASS.
+
+**(d) RTL mutants.** The three controls above perturb the harness. The house
+rule wants the DUT itself shown to fail when it should, so three existing
+negative controls in the RTL were built and run, one at a time, from a
+**deleted** build directory each time:
+
+```
+$ python3 - <<'EOF'   # via tools/run_unit.py, VERILATOR_FLAGS + ["-D<DEFINE>"]
+...   run_unit.build_case('p0', 'core.corpus_sweep', entry)   # after shutil.rmtree(build_dir)
+EOF
+$ build/p0/unit/core.corpus_sweep/core.corpus_sweep --case core.corpus_sweep \
+      --seed 1 --max-cycles 4000000
+```
+
+The runner's build-command stamp was re-read after every build: each mutant's
+stamp contains its `-D`, and the shipping stamp contains no `-DMOSAIC…` flag.
+The shipping binary's SHA-256 is identical before and after the campaign, so no
+mutant leaked into it.
+
+| define | injects | binary SHA-256 | exit | runs failing | first failure |
+|---|---|---|---|---|---|
+| *(shipping)* | — | `09a520bd10ce886c75bc525fa25cc00473b9bd78ac475dcef6ec327ce5f4ec19` | 0 | 0/39 | — |
+| `MOSAIC_CORE_MUTANT_STORE_SIZE_WORD` | every store is a word store (`sq_alloc_size` forced to `SZ_WORD`) | `945b7aa43b818d2e320c779a6005d2696de9cf9830bb68faac7518796f01ac34` | 1 | **37/39** | `p01_addsub in0: first divergent signature word 1 -- oracle-derived expectation 0x02468acf13579bdd, DUT 0x0000000013579bdd` |
+| `MOSAIC_CORE_MUTANT_MRET_PC_WRONG` | MRET returns one instruction past `mepc` | `b2e6cfa22ceabdbb55d5ac03fddbe87628c6eade2b8ff66ccbda0eec682c26c0` | 1 | **6/39** (p08 ×3, p13 ×3) | `p08_misaligned in0: first divergent signature word 3 -- oracle-derived expectation 0x101018181c000003, DUT 0x10181c1c00000003` |
+| `MOSAIC_MULDIV_MUTANT_DIV0_ZERO` | `DIV(x, 0)` answers 0 instead of all ones | `737bc72ddca05d49befbabbbf3bf727c4b293ba28ba11bc268aea85e827e7d98` | 1 | **1/39** | `p11_bigmuldiv in2: first divergent signature word 2 -- oracle-derived expectation 0xffffffffffffffff, DUT 0x0000000000000000` |
+
+Two of the 39 runs survive the word-sized-store mutant: **`p02_branch in0` and
+`p10_jalr_link in1`** — the two runs whose whole result is computed in registers
+and whose four signature words all fit in 32 bits, so a word-sized store has
+nothing to truncate that their signatures can see (p13 in0 also fits in 32 bits,
+but its scratch round-trip is read back, so it fails at word 1). That is exactly
+the gap §10 describes, measured rather than assumed, and it is why the corpus
+cases that compare per-instruction retirement streams are not made redundant by
+this sweep. The MRET mutant also moves the DUT-side counters visibly: p08
+retires 71515 (against 71592) and takes 4 traps (against 5).
 
 ## 6. A defect this work found in itself, and fixed
 
@@ -410,7 +448,7 @@ The rest of what the case compiles or depends on:
 | File | SHA-256 |
 |---|---|
 | `sim/tb/mosaic_core_tb.sv` | `55c543e138cca4bd528fbb0047563b54804e785fd792e69f5db5696cc2eb9efa` |
-| `sim/unit/tb_core_sweep.cpp` | `3a98593d75121b358dff49db07dc4ea72e14da5a41b8a97a26c2e3c4f4ac0095` |
+| `sim/unit/tb_core_sweep.cpp` | `56378da2a2856bfe1b05196a08ef5e9fea878d6265be75655f98d2c2296eedc8` |
 | `sim/unit/mem_ref.h` | `21e4fd4248156016ee0ae6b6a57136c413e34f947223a402752b8a60db2e66f4` |
 | `sim/unit/trap_ref.h` | `b0ce3f2721a193bafedc0e76493e6531a749390268dc8e1b77bc2526e253f8d6` |
 | `sim/common/elf_loader.cpp` | `87786a8c186d6a7a8883d591bb5fa625084b9fc10745aab81cc746f2ec5a862f` |
@@ -439,11 +477,12 @@ An honest list, because "39 PASS" is only as strong as the comparison behind it.
    **not**, and a defect those cases do not cover for the other nine programs
    would not be caught by either. The per-cycle invariants (§2) and the byte-level
    memory diff under `SWEEP_DEBUG` narrow the gap but do not close it.
-2. **The memory diff is not part of the registered run.** All 39 runs were
-   verified to have zero mismatching bytes in signature/scratch/inputs, but that
-   is a `SWEEP_DEBUG=1` observation, not a check the registered case asserts. The
-   registered case asserts only the signature words (and the reference's agreement
-   with the oracle).
+2. **The memory diff is not asserted by the registered run.** The full sweep was
+   verified under `SWEEP_DEBUG=1` to have zero mismatching bytes in
+   signature/scratch/inputs and `match=1` from the interpretation in all 39 runs,
+   but that is an observation from a debug switch, not a check the registered
+   case fails on. The registered case asserts the signature words and the
+   interpretation's agreement with the oracle-derived expectation.
 3. **No timing or throughput is asserted.** Cycles and retires are printed, not
    compared. A correct but much slower machine passes. Conversely, nothing here
    would catch a machine that retires extra dead instructions.
