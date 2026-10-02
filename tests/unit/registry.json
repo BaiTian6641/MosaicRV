@@ -2134,7 +2134,7 @@
    "seed": 1
   },
   "vec.integrated": {
-   "task": "I-059",
+   "task": "I-059a",
    "top": "mosaic_core_tb",
    "rtl": [
     "rtl/core/mosaic_pkg.sv",
