@@ -228,12 +228,17 @@ module mosaic_core (
     output logic [31:0]                 o_mem_dev_txn,
     output logic [31:0]                 o_mem_ram_txn,
     output logic [31:0]                 o_mem_dev_wait,
+    // The cycles device transactions spent held in the serializer's register
+    // waiting for the endpoint. With `o_mem_dev_txn` it is the device path's own
+    // cost, measured: the register boundary the serializer adds to an access.
+    output logic [31:0]                 o_mem_dev_hold,
     // The device attribute and the identity of the access the endpoint is
     // serving, aligned with the data port: a testbench reads them in the cycle
     // it accepts a transaction and can require the attribute to match the
     // address's region and every device identity to appear exactly once.
     output logic                        o_mem_dmem_dev,
     output logic [CORE_MEM_ID_W-1:0]    o_mem_dmem_id,
+    output logic [31:0]                 o_dbg_mmio,
 
     // -------------------------------------------------------------- evidence
     output logic [31:0]                 o_commit_ctr,
@@ -693,9 +698,11 @@ module mosaic_core (
   mosaic_uop_pkg::lsu_req_t   ser_hold_q;
   logic                       ser_out_dev_c;
   logic                       ser_accept_c;
+  logic                       ser_owner_q;
+  logic                       ser_owner_c;
   logic [CORE_MEM_ID_W-1:0]   rob_head_id;
   logic                       rob_boundary_ok;
-  logic [31:0]                dev_txn_ctr_q, ram_txn_ctr_q, dev_wait_ctr_q;
+  logic [31:0]                dev_txn_ctr_q, ram_txn_ctr_q, dev_wait_ctr_q, dev_hold_ctr_q;
 
   logic                       lsu_wb_valid, lsu_wb_ready;
   mosaic_uop_pkg::wb_event_t  lsu_wb_ev, store_wb_ev, lq_wb_ev;
@@ -2961,6 +2968,7 @@ module mosaic_core (
 
   assign ser_take_c = ep_req_valid && ep_req_ready && ser_is_device_c;
   assign ser_accept_c = ser_req_valid && ser_ep_req_ready;
+  assign ser_owner_c  = ser_hold_valid_q ? ser_owner_q : sq_drain_valid;
 
   // The response being consumed is what ends the device transaction's life.
   logic ser_rsp_consumed;
@@ -2973,11 +2981,19 @@ module mosaic_core (
       dev_txn_ctr_q    <= 32'd0;
       ram_txn_ctr_q    <= 32'd0;
       dev_wait_ctr_q   <= 32'd0;
+      dev_hold_ctr_q   <= 32'd0;
     end else begin
       if (ser_take_c) begin
         ser_hold_q       <= ep_req;
         ser_hold_valid_q <= 1'b1;
         ser_dev_out_q    <= 1'b1;
+        // The owner travels with the held transaction: the queue that offered
+        // it may have moved on (its request was accepted), and by the time the
+        // endpoint takes the transaction the mux may be presenting a different
+        // request entirely. Recording the owner here and publishing it when the
+        // *endpoint* accepts is what keeps a response with the queue it belongs
+        // to.
+        ser_owner_q      <= sq_drain_valid;
       end
       if (ser_hold_valid_q && ser_req_valid && ser_ep_req_ready) begin
 `ifdef MOSAIC_CORE_MUTANT_DEV_RETRY
@@ -3000,14 +3016,29 @@ module mosaic_core (
           !ser_dev_out_q) begin
         dev_wait_ctr_q <= dev_wait_ctr_q + 32'd1;
       end
+      if (ser_hold_valid_q) begin
+        dev_hold_ctr_q <= dev_hold_ctr_q + 32'd1;
+      end
     end
   end
 
   assign o_mem_dev_txn  = dev_txn_ctr_q;
   assign o_mem_ram_txn  = ram_txn_ctr_q;
   assign o_mem_dev_wait = dev_wait_ctr_q;
+  assign o_mem_dev_hold = dev_hold_ctr_q;
   assign o_mem_dmem_dev = ep_txn_dev;
   assign o_mem_dmem_id  = ep_txn_id;
+`ifndef SYNTHESIS
+  // Debug bundle for CASE=mmio.exactly_once while the device path is brought up:
+  //   {31 lq_rsp_valid, 30 sq_rsp_valid, 29 ser_dev_out_q, 28 ser_hold_valid_q,
+  //    27 ep_busy, 26 ep_rsp_valid, 25 ep_owner_q, 24 sq_drain_valid,
+  //    23 lq_req_valid, 22:0 lq_done_ctr}
+  assign o_dbg_mmio = {lq_rsp_valid, sq_rsp_valid, ser_dev_out_q, ser_hold_valid_q,
+                       ep_busy, ep_rsp_valid, ep_owner_q, sq_drain_valid, lq_req_valid,
+                       lq_done_ctr[22:0]};
+`else
+  assign o_dbg_mmio = 32'd0;
+`endif
 
   mosaic_lsu_endpoint u_lsu (
       .clk                  (clk),
@@ -3045,11 +3076,19 @@ module mosaic_core (
   // transaction's response (`accept_c` requires ST_IDLE), so the owner recorded
   // at acceptance is exact and a response can never be delivered to the wrong
   // queue.
+  // The owner is recorded when the *endpoint* accepts the transaction it is
+  // presenting -- `ser_accept_c`, which is the same handshake the endpoint
+  // uses -- and not when the queues' offer is taken. The difference is
+  // load-bearing under backpressure: the endpoint may still be serving an older
+  // transaction when a device offer is taken into the serializer's register, and
+  // recording the owner at the take would hand that older transaction's response
+  // to the new owner. That defect is reachable at any memory latency above one
+  // cycle; CASE=mmio.exactly_once's four-cycle latency is what exposed it.
   always_ff @(posedge clk) begin
     if (rst) begin
       ep_owner_q <= 1'b0;
-    end else if (ep_req_valid && ep_req_ready) begin
-      ep_owner_q <= sq_drain_valid;
+    end else if (ser_accept_c) begin
+      ep_owner_q <= ser_owner_c;
     end
   end
   assign lq_rsp_valid = ep_rsp_valid && !ep_owner_q;

@@ -215,8 +215,10 @@ module mosaic_core_tb (
     output logic [31:0] o_mem_dev_txn_o,
     output logic [31:0] o_mem_ram_txn_o,
     output logic [31:0] o_mem_dev_wait_o,
+    output logic [31:0] o_mem_dev_hold_o,
     output logic        o_mem_dmem_dev_o,
     output logic [TB_MEM_ID_W-1:0] o_mem_dmem_id_o,
+    output logic [31:0] o_dbg_mmio_o,
 
     // ------------------------------------------------- CSR / trap / interrupt
     input  logic        irq_soft_i,
@@ -479,8 +481,10 @@ module mosaic_core_tb (
       .o_mem_dev_txn   (o_mem_dev_txn_o),
       .o_mem_ram_txn   (o_mem_ram_txn_o),
       .o_mem_dev_wait  (o_mem_dev_wait_o),
+      .o_mem_dev_hold  (o_mem_dev_hold_o),
       .o_mem_dmem_dev  (o_mem_dmem_dev_o),
       .o_mem_dmem_id   (o_mem_dmem_id_o),
+      .o_dbg_mmio      (o_dbg_mmio_o),
       .o_dbg_redir_bundle(o_dbg_redir_o),
       .o_dbg_fetch_state(o_dbg_fetch_o),
       .o_dbg_deliver_valid(o_dbg_deliver_valid_o),
