@@ -360,6 +360,14 @@ module mosaic_dispatch (
     output logic                        sys_ins_is_sfence_vma,
     output logic                        sys_ins_sfence_has_va,
     output logic                        sys_ins_sfence_has_asid,
+    // V (I-059): a vector macro leaves through this same port, because it is
+    // resolved at the same boundary -- the ROB head -- for the same reason a CSR
+    // instruction is: its configuration (vtype/vl) must be the one left by every
+    // older instruction, and its element progress must not be visible until it
+    // retires. `sys_ins_is_vec` distinguishes it from the scalar system macros;
+    // `sys_ins_vec` is the reduced decode the core's vector engine consumes.
+    output logic                        sys_ins_is_vec,
+    output mosaic_pkg::vec_payload_t    sys_ins_vec,
     output logic [DSP_XLEN-1:0]         sys_ins_src1_val,
     output logic [DSP_XLEN-1:0]         sys_ins_src2_val,
     output logic [DSP_TAG_W-1:0]        sys_ins_dst_tag,
@@ -417,6 +425,13 @@ module mosaic_dispatch (
     // ------------------------------------------------------------ control
     input  logic                        recovering,
     input  logic                        barrier,
+    // V (I-059): a vector macro is in flight (allocated but not yet retired).
+    // Dispatch allocates nothing younger while this is high, so the macro
+    // reaches the ROB head with the machine behind it empty. That is what makes
+    // the vector engine's ownership of the data port safe (no younger load or
+    // store can be outstanding) and makes a precise trap on the macro precise
+    // with respect to everything younger, not merely everything older.
+    input  logic                        vec_block_i,
     // An unresolved control transfer is in flight. Everything younger than it
     // may still be squashed by its redirect, so a macro this stage cannot
     // decode is *held* rather than refused while this is high; see the refusal
@@ -528,6 +543,10 @@ module mosaic_dispatch (
     logic                    sys_sfence_vma;
     logic                    sys_sfence_has_va;
     logic                    sys_sfence_has_asid;
+    // V (I-059): the macro is a vector macro, and the reduced decode the core's
+    // vector engine consumes.
+    logic                    vec;
+    mosaic_pkg::vec_payload_t vec_pay;
   } disp_ent_t;
 
   disp_ent_t            q_mem [0:DSP_DEPTH-1];
@@ -689,7 +708,7 @@ module mosaic_dispatch (
                           queue_has_room && rob_free_any;
 `else
   assign alloc_now      = dec_valid[0] && !l0_unsupported && !recovering && !stop_q &&
-                          !barrier && queue_has_room && rob_free_any;
+                          !barrier && !vec_block_i && queue_has_room && rob_free_any;
 `endif
   assign alloc_ok       = alloc_now && alloc_accepted && rob_alloc_ok;
 
@@ -767,6 +786,12 @@ module mosaic_dispatch (
     end else if (dec_ctl0.is_branch || dec_ctl0.is_jal || dec_ctl0.is_jalr) begin
       new_meta.class_ = mosaic_uop_pkg::UOP_BRANCH;
     end else if (dec_ctl0.is_system || dec_ctl0.is_miscmem) begin
+      new_meta.class_ = mosaic_uop_pkg::UOP_SYSTEM;
+    end else if (dec_ctl0.is_vec) begin
+      // V (I-059). A vector macro is resolved at the architectural boundary like
+      // a system macro -- the class is the same because the route is the same
+      // (the system insert port below), not because the execution is: the core
+      // resolves it with the vector engine.
       new_meta.class_ = mosaic_uop_pkg::UOP_SYSTEM;
     end
     new_meta.pc          = dec_pc0;
@@ -1040,6 +1065,7 @@ module mosaic_dispatch (
         q_mem[i].s2_x0   <= 1'b0;
         q_mem[i].s2_const<= 1'b0;
         q_mem[i].sys     <= 1'b0;
+        q_mem[i].vec     <= 1'b0;
         q_mem[i].sys_fence   <= 1'b0;
         q_mem[i].sys_fence_i <= 1'b0;
       end
@@ -1108,6 +1134,33 @@ module mosaic_dispatch (
         q_mem[push_at].sys_sfence_vma     <= dec_ctl0.is_sfence_vma;
         q_mem[push_at].sys_sfence_has_va  <= dec_ctl0.sfence_has_va;
         q_mem[push_at].sys_sfence_has_asid<= dec_ctl0.sfence_has_asid;
+        // V (I-059). The reduced decode, assembled once here from the control
+        // word the front end produced, so the engine does not re-decode.
+        q_mem[push_at].vec     <= dec_ctl0.is_vec;
+        q_mem[push_at].vec_pay.op_class      <= dec_ctl0.vec_class;
+        q_mem[push_at].vec_pay.kind          <= dec_ctl0.vec_kind;
+        q_mem[push_at].vec_pay.vset_kind     <= dec_ctl0.vec_vset_kind;
+        q_mem[push_at].vec_pay.vset_uimm     <= dec_ctl0.vec_vset_uimm;
+        q_mem[push_at].vec_pay.vtypei        <= dec_ctl0.vec_vtypei;
+        q_mem[push_at].vec_pay.vd            <= dec_ctl0.vec_vd;
+        q_mem[push_at].vec_pay.vs1           <= dec_ctl0.vec_vs1;
+        q_mem[push_at].vec_pay.vs2           <= dec_ctl0.vec_vs2;
+        q_mem[push_at].vec_pay.data          <= dec_ctl0.vec_vd;
+        q_mem[push_at].vec_pay.index         <= dec_ctl0.vec_vs2;
+        q_mem[push_at].vec_pay.family        <= dec_ctl0.vec_family;
+        q_mem[push_at].vec_pay.op            <= dec_ctl0.vec_op;
+        q_mem[push_at].vec_pay.form          <= dec_ctl0.vec_form;
+        q_mem[push_at].vec_pay.lsu_mode      <= dec_ctl0.vec_lsu_mode;
+        q_mem[push_at].vec_pay.idx_sew       <= dec_ctl0.vec_idx_sew;
+        q_mem[push_at].vec_pay.eew_sew       <= dec_ctl0.vec_eew_sew;
+        q_mem[push_at].vec_pay.nf            <= dec_ctl0.vec_nf;
+        q_mem[push_at].vec_pay.mask_en       <= dec_ctl0.vec_mask_en;
+        q_mem[push_at].vec_pay.lsu_we        <= dec_ctl0.vec_lsu_we;
+        q_mem[push_at].vec_pay.lsu_ordered   <= dec_ctl0.vec_lsu_ordered;
+        q_mem[push_at].vec_pay.lsu_fof       <= dec_ctl0.vec_lsu_fof;
+        q_mem[push_at].vec_pay.scalar_from_imm <=
+            (dec_ctl0.vec_form == 2'd2) || (dec_ctl0.vec_kind == 3'd0);
+        q_mem[push_at].vec_pay.imm           <= dec_ctl0.vec_imm;
       end
     end
   end
@@ -1262,7 +1315,7 @@ module mosaic_dispatch (
   assign head_is_mem = (head.meta.class_ == mosaic_uop_pkg::UOP_LOAD) ||
                        (head.meta.class_ == mosaic_uop_pkg::UOP_STORE);
   assign head_is_store = (head.meta.class_ == mosaic_uop_pkg::UOP_STORE);
-  assign head_is_sys = head.sys;
+  assign head_is_sys = head.sys || head.vec;
 
   // A memory macro *captures* its operands into its queue at insert: there is
   // no issue queue behind it to deliver a later wakeup, so an operand that is
@@ -1443,6 +1496,8 @@ module mosaic_dispatch (
     sys_ins_sfence_has_asid  = head.sys_sfence_has_asid;
     sys_ins_src1_val   = sys_src1_val;
     sys_ins_src2_val   = sys_src2_val;
+    sys_ins_is_vec     = head.vec;
+    sys_ins_vec        = head.vec_pay;
     sys_ins_dst_x0     = head.dst_x0;
     sys_ins_dst_tag    = head.dst_x0 ? {DSP_TAG_W{1'b0}} : head.dst_tag;
     sys_ins_dst_gen    = head.dst_x0 ? {DSP_IGEN_W{1'b0}} : head.dst_gen;

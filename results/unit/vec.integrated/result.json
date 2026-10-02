@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "case": "vec.integrated",
+  "verdict": "FAIL",
+  "detail": "contract violated: arith at cycle 400000: max-cycles (400000) exhausted",
+  "seed": 1,
+  "max_cycles": 4000000,
+  "checks": 11,
+  "failures": 5,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-02T16:30:52Z",
+  "first_mismatch": "arith at cycle 400000: max-cycles (400000) exhausted: expected every vector-integration claim holds on this machine, got contract violated",
+  "failed_checks": ["vs-off: vl after vsetvli e32,m1 is VLMAX=4, got 0", "vs-off: vtype low byte is the committed argument, got 0", "vs-off: vlenb is 16, got 0", "vs-off: mstatus.VS is Dirty after the vector instruction, got 0", "no contract violation"]
+}

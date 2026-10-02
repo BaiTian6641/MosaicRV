@@ -50,6 +50,12 @@ package mosaic_pkg;
   localparam logic [6:0] OP_FP       = 7'b1010011;  // fadd.s .. fmv.d.x
   localparam logic [6:0] OP_LOAD_FP  = 7'b0000111;  // flw / fld
   localparam logic [6:0] OP_STORE_FP = 7'b0100111;  // fsw / fsd
+  // V (I-059). OP-V carries the vector arithmetic and vset{i}vl{i} forms; the
+  // vector loads and stores share the scalar FP load/store opcodes and are told
+  // apart by funct3 (010/011 are the scalar forms). Named here for the same
+  // ownership reason OP_AMO/OP_FP are: the integration recognises the encodings
+  // from the raw word and leaves the decoder's reserved set untouched.
+  localparam logic [6:0] OP_V        = 7'b1010111;  // vadd, vsetvli, ...
 
   // funct3
   localparam logic [2:0] F3_ADD_SUB  = 3'b000;
@@ -349,7 +355,74 @@ package mosaic_pkg;
     // all) does not dirty FS, and neither does an FP store (it reads FP state
     // without modifying it).
     logic        fp_modifies_state;
+
+    // ------------------------------------------------------------- vector (I-059)
+    // `is_vec` marks any OP-V macro (or a vector load/store on the FP-load/store
+    // opcodes). It is recognised in mosaic_core.sv's front end rather than in
+    // mosaic_decoder, for the same ownership reason WFI, SRET, SFENCE.VMA, AMO
+    // and OP-FP are: CASE=decode.rv64im_reserved owns the decoder's illegal set,
+    // and OP-V is outside RV64IM. `vec_class` is the I-051 descriptor family the
+    // encoding names; `vec_kind` selects which execution unit consumes the macro
+    // (0 vset, 1 integer ALU, 2 load, 3 store). The legality of the combination
+    // is not decided here: it is decided at execution by querying the I-051
+    // descriptor with the configuration *in effect at that boundary*, because
+    // vsetvli is an instruction and the vtype it establishes is architectural
+    // state, not a decode-time constant.
+    logic        is_vec;
+    logic [4:0]  vec_class;      // I-051 op_class
+    logic [2:0]  vec_kind;       // 0 vset, 1 alu, 2 load, 3 store
+    logic [1:0]  vec_vset_kind;  // 0 vsetvli, 1 vsetivli, 2 vsetvl
+    logic [4:0]  vec_vset_uimm;
+    logic [10:0] vec_vtypei;
+    logic [4:0]  vec_vd;
+    logic [4:0]  vec_vs1;
+    logic [4:0]  vec_vs2;
+    logic        vec_mask_en;
+    logic [4:0]  vec_family;     // I-054/I-055 family
+    logic [3:0]  vec_op;         // operation within the family
+    logic [1:0]  vec_form;       // 0 vv, 1 vx, 2 vi
+    logic [3:0]  vec_lsu_mode;   // I-056 mode
+    logic        vec_lsu_we;
+    logic        vec_lsu_ordered;
+    logic        vec_lsu_fof;    // fault-only-first load
+    logic [3:0]  vec_nf;
+    logic [2:0]  vec_idx_sew;
+    logic [2:0]  vec_eew_sew;    // a load/store's instruction width suffix (3..6)
+    logic [63:0] vec_imm;        // the immediate (vi/vset forms)
   } decode_ctl_t;
+
+  // ---------------------------------------------------------- vector payload
+  // The one packet dispatch hands the core's vector engine when a vector macro
+  // is allocated. It is a separate type from decode_ctl_t because the system
+  // insert port (which carries it) is the decode word's *reduced* form: only the
+  // fields the execution engine needs cross it, and the ROB identity is added by
+  // the core. Keeping it one struct is what makes "the fields dispatch captured
+  // are the fields the engine executes" checkable.
+  typedef struct packed {
+    logic [4:0]  op_class;      // I-051 op_class
+    logic [2:0]  kind;          // 0 vset, 1 alu, 2 load, 3 store
+    logic [1:0]  vset_kind;
+    logic [4:0]  vset_uimm;
+    logic [10:0] vtypei;
+    logic [4:0]  vd;
+    logic [4:0]  vs1;
+    logic [4:0]  vs2;
+    logic [4:0]  data;          // a store's vs3 (the `vd` field of the store)
+    logic [4:0]  index;         // an indexed access's vs2
+    logic [4:0]  family;
+    logic [3:0]  op;
+    logic [1:0]  form;
+    logic [3:0]  lsu_mode;
+    logic [2:0]  idx_sew;
+    logic [2:0]  eew_sew;
+    logic [3:0]  nf;
+    logic        mask_en;
+    logic        lsu_we;
+    logic        lsu_ordered;
+    logic        lsu_fof;
+    logic        scalar_from_imm; // the scalar operand is `imm`, not rs1
+    logic [63:0] imm;
+  } vec_payload_t;
 
   // ------------------------------------------------------ the leaf permission
   // The decision the ISA makes once a *leaf* PTE has been reached: the access

@@ -356,10 +356,12 @@
       "reason": "tools/run_act_dut.py now generates and executes the p1 advertised ACT4 set on the integrated out-of-order core (mosaic_core_tb) and records every pass and fail: 122 of 127 ELFs pass, 5 fail (results/reports/V-043-act4.md). The remaining gaps are (a) Zicond, which the p1 profile claims but the frozen riscv-arch-test checkout has no suite for, (b) Zmmul, Zicntr, Zicbom, Zicbop and CMO, which config/profiles/p1.json claims but tools/check_profile.py --all reports not yet implemented/not advertised, so no applicable ELF is generated, and (c) the privileged-mode corpus, which this configuration does not generate.",
       "spec_clause": "RISC-V ISA manual, A and C extension chapters and the Zicond/Zmmul/CMO extension specifications.",
       "alternative_verification": {
-        "status": "open",
-        "cases": [],
+        "status": "covered",
+        "cases": [
+          "core.act_dut"
+        ],
         "checks": [],
-        "note": "The p1 DUT now executes the ACT4 corpus: CASE=core.act_dut (sim/unit/tb_core_act.cpp) runs every generated ELF on mosaic_core_tb and reports 122/127 passing, with per-ELF logs in results/v043 and the full record in results/reports/V-043-act4.md. The runner is calibrated (a corrupted expected-signature word and an ALU mutant both make it exit 1). The five failing ELFs and the extensions with no suite or no advertised implementation remain open."
+        "note": "The p1 DUT executes the generated ACT4 corpus and now passes ALL of it: CASE=core.act_dut runs every generated ELF on the integrated out-of-order core and reports 127/127 (applicable=127 generated=127 run=127 passed=127 failed=0), verified by the integration lead from a deleted build directory. The five divergences this exclusion was opened against were real defects in advertised extensions (a c.lui immediate shift, an SC reservation granule that our own case agreed with the RTL about, an HPM read-modify-write, and two record defects) and all five are fixed with controls. WHAT THE COVERAGE DOES AND DOES NOT REACH, stated so the entry is not read as more than it is: ACT4 exercises the unprivileged set it can generate for this configuration -- I, M, Zicsr, Zifencei, Zihpm, Zaamo, Zalrsc and Zca -- while S, U, PMP and Sv39 are covered by this project's OWN cases (privilege.permission_matrix at p1, sv39.walk_and_faults, tlb.sfence_vma) and by no external suite, because the ACT4 configuration excludes the privileged and translation suites; those 47 excluded suites are each named with a reason in results/v043/suite_manifest.json, and the residual -- an external reference for the privileged and translation behaviour -- is tracked by EX-041/EX-043/EX-044 rather than by this entry, which was about the unprivileged corpus. fp/fdiv and the fmadd family remain absent by declaration (I-049), so no ACT4 ELF exercises them because the machine does not claim them."
       },
       "affected_cases": [
         {
@@ -420,10 +422,12 @@
       "reason": "The case is registered in tests/unit/registry.json with \"pending\": true: it was fixed before its driver existed (the project's deliberate order), and it has no recorded result. A pending case is not evidence.",
       "spec_clause": "RISC-V Privileged Spec, SFENCE.VMA and the TLB maintenance contract.",
       "alternative_verification": {
-        "status": "open",
-        "cases": [],
+        "status": "covered",
+        "cases": [
+          "tlb.sfence_vma"
+        ],
         "checks": [],
-        "note": "Nothing covers SFENCE.VMA at the integrated level yet. The case is under active construction by its lane (I-046)."
+        "note": "The case this exclusion named as pending is delivered and recorded: tlb.sfence_vma (I-046) passes from a deleted build directory under --profile p1, its pending marker is cleared, and its evidence is in the delivery ledger. The exclusion existed because a case registered before its driver exists is not evidence; that condition no longer holds. NOTE FOR THE NEXT READER: this is now a structural rule rather than an exclusion -- a case marked \"pending\": true in the registry is skipped by tools/check_exclusions.py and by tools/check_records.py, so a case under construction no longer needs a ledger entry at all."
       },
       "affected_cases": [
         {
@@ -978,10 +982,12 @@
       "reason": "A store's payload lives in the store queue and getting it to the retire event needs a port the store queue does not have, so the fields remain unwired. The core cases classify retired stores by decoding the image at the retired PC and compare the memory image byte for byte instead.",
       "spec_clause": "config/contracts/event_v1.json reconciliation F-4; RISC-V ISA manual, store semantics (the memory image is the architectural effect).",
       "alternative_verification": {
-        "status": "open",
-        "cases": [],
+        "status": "covered",
+        "cases": [
+          "core.event_payload"
+        ],
         "checks": [],
-        "note": "The memory image is compared byte for byte (core.mem_program, mem.visibility_provenance, both passing), which covers the architectural effect but not the event fields themselves."
+        "note": "The premise no longer holds: the store payload IS wired to the architectural event record. mosaic_core.sv now builds pay_store_data_vec/pay_store_addr_vec from the store queue's per-lane payload outputs and drives the retire instance's payload inputs (verified by reading the RTL, not by trusting this note), and CASE=core.event_payload checks the store payload's presence and validity rules field by field -- present exactly for a retiring store, with the right size, and absent otherwise -- so the exclusion's end condition ('the store queue exports the payload and the retire event carries it, so the fields can be compared') is met. The byte-for-byte memory comparison named in the old note (core.mem_program, mem.visibility_provenance) remains as well, so the architectural effect and the event payload are both covered."
       },
       "affected_cases": [
         {

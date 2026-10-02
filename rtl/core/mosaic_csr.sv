@@ -260,6 +260,14 @@ module mosaic_csr (
     input  logic [4:0]             fp_fflags_or_i = 5'd0,
     input  logic                   fp_fs_dirty_i = 1'b0,
 
+    // -------------------------------------------------------- vector state (I-059)
+    // `vec_vs_dirty_i` is "a vector instruction that modifies vector state
+    // retires now", which sets mstatus.VS = Dirty (11): vset{i}vl{i}, any
+    // instruction that writes a vector register, and any vstart/vxrm/vxsat
+    // write. Like FS it is a set, never a clear, so a same-cycle software write
+    // to mstatus loses to the dirty transition.
+    input  logic                   vec_vs_dirty_i = 1'b0,
+
     // ------------------------------------------------------------ observability
     output logic [63:0]            o_mstatus_o,
     output logic [63:0]            o_mtvec_o,
@@ -294,6 +302,11 @@ module mosaic_csr (
   // (I-050). The field is writable through the generated mask in every profile;
   // this constant is the value an instruction that modifies FP state leaves.
   localparam logic [63:0] MSTATUS_FS   = 64'h0000_0000_0000_6000;
+
+  // VS (bits 10:9) is the vector-state field, and 2'b11 is its Dirty encoding
+  // (I-059). The field is writable through the generated mask; this constant is
+  // the value an instruction that modifies vector state leaves.
+  localparam logic [63:0] MSTATUS_VS   = 64'h0000_0000_0000_0600;
 
   // The rest of the mstatus fields this profile makes real (I-044). Positions
   // are the RV64 layout the clause cites; writability still comes from the
@@ -1156,6 +1169,12 @@ module mosaic_csr (
 `else
       mstatus_d = mstatus_d | MSTATUS_FS;
 `endif
+    end
+
+    // V (I-059): an instruction that modifies vector state sets mstatus.VS =
+    // Dirty when it commits. Same set-never-clear rule as FS.
+    if (vec_vs_dirty_i) begin
+      mstatus_d = mstatus_d | MSTATUS_VS;
     end
   end
 

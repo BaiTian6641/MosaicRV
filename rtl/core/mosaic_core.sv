@@ -392,6 +392,39 @@ module mosaic_core (
     output logic [31:0]                 o_fp_commit_ctr,
     output logic [31:0]                 o_fp_flags_ctr,
     output logic [31:0]                 o_fp_merge_ctr,
+    // ---------------------------------------------- the vector engine (I-059)
+    // The architectural vector CSRs, the engine's own progress counters, and
+    // three packed observation words. Nothing in the core reads any of them;
+    // they exist so CASE=vec.integrated can state what the integrated machine
+    // did rather than infer it.
+    output logic [63:0]                 o_vec_vtype,
+    output logic [63:0]                 o_vec_vl,
+    output logic [63:0]                 o_vec_vstart,
+    output logic [63:0]                 o_vec_vcsr,
+    output logic [63:0]                 o_vec_vlenb,
+    output logic [63:0]                 o_vec_vlmax,
+    output logic                        o_vec_vill,
+    output logic [31:0]                 o_vec_macro_ctr,
+    output logic [31:0]                 o_vec_elem_ctr,
+    output logic [31:0]                 o_vec_trap_ctr,
+    output logic [31:0]                 o_vec_retire_ctr,
+    output logic [31:0]                 o_vec_fault_ctr,
+    output logic [31:0]                 o_vec_lsu_req_ctr,
+    output logic [31:0]                 o_vec_chain_accept_ctr,
+    output logic [31:0]                 o_vec_chain_refuse_ctr,
+    output logic [31:0]                 o_vec_desc_alloc_ctr,
+    output logic [31:0]                 o_vec_desc_release_ctr,
+    output logic [31:0]                 o_vec_alu_elems,
+    output logic [31:0]                 o_vec_alu_src_rd_ctr,
+    output logic [63:0]                 o_vec_alu_acc,
+    output logic [31:0]                 o_vec_vrf_rd_ctr,
+    output logic [31:0]                 o_vec_vrf_wr_ctr,
+    output logic [31:0]                 o_vec_vrf_bad_ctr,
+    output logic [31:0]                 o_vec_vrf_rows,
+    output logic [31:0]                 o_vec_vrf_banks,
+    output logic [63:0]                 o_vec_dbg0,
+    output logic [63:0]                 o_vec_dbg1,
+    output logic [63:0]                 o_vec_dbg2,
     output logic [31:0]                 o_csr_wr_ctr,
     output logic [31:0]                 o_csr_illegal_wr_ctr,
     output logic [31:0]                 o_csr_trap_ctr,
@@ -987,8 +1020,14 @@ module mosaic_core (
   mosaic_uop_pkg::mem_req_t ep_mem_req;
   logic        ep_mem_rsp_valid, ep_mem_rsp_ready;
   mosaic_uop_pkg::mem_rsp_t ep_mem_rsp;
-  logic [1:0]  mem_owner_q;
-  localparam logic [1:0] MEM_OWN_NONE = 2'd0, MEM_OWN_EP = 2'd1, MEM_OWN_PTW = 2'd2;
+  // V (I-059) adds a fourth owner: the vector engine's packetizer, which drives
+  // the same one data port while a vector macro is at the ROB head. It is given
+  // priority over the endpoint because the memory path is idle when it starts
+  // (launch is gated on `mem_path_idle`) and no younger macro exists to compete
+  // with it.
+  logic [2:0]  mem_owner_q;
+  localparam logic [2:0] MEM_OWN_NONE = 3'd0, MEM_OWN_EP = 3'd1, MEM_OWN_PTW = 3'd2,
+                         MEM_OWN_VEC = 3'd3;
 
   // The load translation stage. In Bare it is a wire (`lq_bypass_c`); with
   // paging it holds the offered load until its translation is known, then either
@@ -1227,6 +1266,7 @@ module mosaic_core (
   // macros off and to make the write wait for the memory path to drain.
   logic                       sys_priv_wr_q;
   logic                       port3_taken_sys;
+  logic                       port3_taken_vec;
   logic                       lsu_wb_ready_int;
   mosaic_uop_pkg::wb_event_t  wb3_ev;
   logic                       wb3_valid;
@@ -1276,6 +1316,234 @@ module mosaic_core (
   logic [CORE_TAG_W-1:0]      disp_sys_dst_tag;
   logic [CORE_IGEN_W-1:0]     disp_sys_dst_gen;
   logic                       disp_sys_dst_x0;
+
+  // ==========================================================================
+  // V (I-059): the integrated vector engine's declarations.
+  // ==========================================================================
+  // One vector macro is staged at a time and resolved at the ROB head, exactly
+  // as a system macro is (section 10b). The stage carries the macro's ROB
+  // identity, the reduced decode dispatch handed over, and the two captured
+  // integer source values (a base address, a stride, an AVL or a scalar).
+  logic                       disp_sys_is_vec;
+  mosaic_pkg::vec_payload_t   disp_sys_vec;
+  logic                       vec_valid_q;
+  logic [CORE_IDX_W-1:0]      vec_index_q;
+  logic [CORE_RGEN_W-1:0]     vec_gen_q;
+  logic [CORE_UOP_W-1:0]      vec_uop_q;
+  mosaic_pkg::vec_payload_t   vec_pay_q;
+  logic [CORE_XLEN-1:0]       vec_src1_q, vec_src2_q;
+  logic [CORE_TAG_W-1:0]      vec_dst_tag_q;
+  logic [CORE_IGEN_W-1:0]     vec_dst_gen_q;
+  logic                       vec_dst_x0_q;
+  logic                       vec_at_head;
+  logic                       vec_block;
+  logic                       vec_is_mem;
+  logic [4:0]                 vec_pay_q_vs1;
+  logic                       vec_pay_q_vtype_dep;
+  // The engine's own small sequencer: idle (waiting for the head to be the
+  // staged macro), running (a unit is executing), done (the completion is owed
+  // to the writeback path), trap (a fault or illegality is owed to the trap
+  // controller).
+  localparam logic [1:0] VEC_IDLE = 2'd0;
+  localparam logic [1:0] VEC_RUN  = 2'd1;
+  localparam logic [1:0] VEC_DONE = 2'd2;
+  localparam logic [1:0] VEC_TRAP = 2'd3;
+  logic [1:0]                 vec_state_q;
+  logic                       vec_launch;
+  logic                       vec_launch_vset;
+  logic                       vec_launch_unit;
+  logic                       vec_unit_done;
+  logic                       vec_unit_illegal;
+  logic [63:0]                vec_trap_cause_q, vec_trap_tval_q;
+  logic [6:0]                 vec_vstart_q;
+  logic                       vec_trap_take;
+  logic                       vec_wb_want;
+  logic                       vec_wb_valid;
+  logic                       vec_wb_pending_q;
+  mosaic_uop_pkg::wb_event_t  vec_wb_ev;
+  logic                       vec_done_q;
+  logic                       vec_macro_leave;
+
+  // mosaic_vec_cfg: the architectural vector configuration and CSR state.
+  logic                       vec_vset_valid, vec_vset_vs_off;
+  logic [1:0]                 vec_vset_kind;
+  logic [4:0]                 vec_vset_rd, vec_vset_uimm;
+  logic [10:0]                vec_vtypei;
+  logic [63:0]                vec_vset_rd_val;
+  logic [63:0]                vec_vtype, vec_vl, vec_vstart;
+  logic [63:0]                vec_vcsr, vec_vlenb, vec_vlmax;
+  logic                       vec_vill;
+  logic [15:0]                vec_cfg_gen;
+  logic                       vec_csr_valid, vec_csr_write, vec_csr_ready;
+  logic                       vec_csr_illegal;
+  logic [11:0]                vec_csr_addr;
+  logic [63:0]                vec_csr_wdata, vec_csr_rdata;
+  logic                       vec_csr_commit;
+  logic                       vec_csr_internal;
+  logic [11:0]                vec_csr_internal_addr;
+  logic [63:0]                vec_csr_internal_wdata;
+
+  // mosaic_vec_desc: the legality authority and the per-macro progress record.
+  logic                       vec_desc_alloc_valid, vec_desc_alloc_ready;
+  logic                       vec_desc_release;
+  logic [4:0]                 vec_desc_class, vec_desc_vd, vec_desc_vs1, vec_desc_vs2;
+  logic                       vec_desc_mask_en;
+  logic                       vec_desc_illegal, vec_desc_vtype_legal, vec_desc_cfg_legal;
+  logic [3:0]                 vec_desc_reason;
+  logic [2:0]                 vec_desc_sew_log2;
+  logic signed [3:0]          vec_desc_lmul_exp;
+  logic [7:0]                 vec_desc_elem_count;
+  logic                       vec_desc_elem_done_valid;
+  logic [6:0]                 vec_desc_elem_done_index;
+  logic                       vec_desc_fault_valid;
+  logic [6:0]                 vec_desc_fault_elem;
+  logic [3:0]                 vec_desc_fault_code;
+  logic                       vec_desc_valid;
+  logic [CORE_IDX_W-1:0]      vec_desc_rob_index;
+  logic [CORE_RGEN_W-1:0]     vec_desc_rob_gen;
+  logic [CORE_UOP_W-1:0]      vec_desc_uop_index;
+  logic [7:0]                 vec_desc_vl;
+  logic [6:0]                 vec_desc_vstart;
+  logic [4:0]                 vec_desc_vd_out;
+  logic [127:0]               vec_desc_bitmap;
+  logic [7:0]                 vec_desc_prefix;
+  logic [7:0]                 vec_desc_elems_done;
+  logic                       vec_desc_fault_valid_out;
+  logic [6:0]                 vec_desc_fault_elem_out;
+  logic [3:0]                 vec_desc_fault_code_out;
+  logic                       vec_desc_accepting;
+  logic [7:0]                 vec_desc_rob_entries_used;
+  logic [15:0]                vec_desc_alloc_ctr, vec_desc_release_ctr;
+
+  // mosaic_vec_alu: the integer/mask/permute lane.
+  localparam logic [16:0]     VEC_ALU_CAPS = 17'b0000000_0100_0001;  // ADDSUB + LOGIC
+  logic                       vec_alu_exec_valid;
+  logic [4:0]                 vec_alu_family;
+  logic [3:0]                 vec_alu_op;
+  logic [1:0]                 vec_alu_form;
+  logic [4:0]                 vec_alu_vd, vec_alu_vs1, vec_alu_vs2;
+  logic [63:0]                vec_alu_scalar;
+  logic                       vec_alu_mask_en;
+  logic                       vec_alu_done, vec_alu_illegal;
+  logic                       vec_alu_sat;
+  logic [7:0]                 vec_alu_elems, vec_alu_cur;
+  logic [63:0]                vec_alu_acc;
+  logic                       vec_alu_trace_valid;
+  logic [7:0]                 vec_alu_trace_elem;
+  logic [31:0]                vec_alu_src_rd_ctr;
+
+  // mosaic_vec_lsu: the memory packetizer.
+  localparam logic [7:0]      VEC_LSU_CAPS = 8'b0000_0001;  // unit-stride only
+  logic                       vec_lsu_exec_valid;
+  logic [3:0]                 vec_lsu_mode;
+  logic                       vec_lsu_we, vec_lsu_ordered;
+  logic [3:0]                 vec_lsu_nf;
+  logic [4:0]                 vec_lsu_vd, vec_lsu_data, vec_lsu_index;
+  logic [2:0]                 vec_lsu_idx_sew;
+  logic [63:0]                vec_lsu_base, vec_lsu_stride;
+  logic                       vec_lsu_mask_en;
+  logic                       vec_lsu_busy, vec_lsu_done, vec_lsu_illegal, vec_lsu_trap;
+  logic [6:0]                 vec_lsu_trap_elem;
+  logic [3:0]                 vec_lsu_trap_code;
+  logic                       vec_lsu_stopped;
+  logic [6:0]                 vec_lsu_stop_elem;
+  logic [7:0]                 vec_lsu_elems;
+  logic [31:0]                vec_lsu_req_ctr;
+
+  // mosaic_vec_restart: the partial-trap / vstart controller.
+  logic                       vec_rst_exec_valid;
+  logic [3:0]                 vec_rst_exec_mode;
+  logic                       vec_rst_exec_we, vec_rst_exec_fof;
+  logic [3:0]                 vec_rst_exec_nf;
+  logic                       vec_rst_stop;
+  logic                       vec_rst_busy, vec_rst_resolved, vec_rst_illegal;
+  logic                       vec_rst_trap;
+  logic [6:0]                 vec_rst_vstart;
+  logic [3:0]                 vec_rst_trap_code;
+  logic                       vec_rst_vl_write;
+  logic [7:0]                 vec_rst_vl_new;
+  logic                       vec_rst_fof_trim, vec_rst_complete, vec_rst_retire_ok;
+  logic                       vec_rst_restart_ready;
+  logic [6:0]                 vec_rst_restart_vstart;
+  logic [7:0]                 vec_rst_elems_committed;
+  logic                       vec_rst_prefix_agree;
+  logic                       vec_rst_elem_done_valid;
+  logic [6:0]                 vec_rst_elem_done_index;
+  logic                       vec_rst_fault_valid;
+  logic [6:0]                 vec_rst_fault_elem;
+  logic [3:0]                 vec_rst_fault_code;
+
+  // mosaic_vec_chain: the element-packet identity discipline (I-058).
+  logic                       vec_chain_p_alloc_valid, vec_chain_p_alloc_ready;
+  logic [CORE_RGEN_W-1:0]     vec_chain_p_gen;
+  logic [4:0]                 vec_chain_p_vd;
+  logic [7:0]                 vec_chain_p_vl;
+  logic                       vec_chain_p_wr_valid, vec_chain_p_wr_accept;
+  logic [6:0]                 vec_chain_p_wr_index;
+  logic [63:0]                vec_chain_p_wr_data;
+  logic [CORE_RGEN_W-1:0]     vec_chain_p_wr_gen;
+  logic                       vec_chain_p_fault_valid;
+  logic [6:0]                 vec_chain_p_fault_elem;
+  logic                       vec_chain_p_cancel, vec_chain_p_done;
+  logic                       vec_chain_accept_valid;
+  logic [6:0]                 vec_chain_accept_index;
+  logic                       vec_chain_valid;
+  logic [CORE_RGEN_W-1:0]     vec_chain_gen;
+  logic [4:0]                 vec_chain_vd;
+  logic                       vec_chain_done, vec_chain_fault;
+  logic [6:0]                 vec_chain_fault_elem;
+  logic [15:0]                vec_chain_pkt_accept_ctr, vec_chain_pkt_refuse_ctr;
+
+  // mosaic_vrf: one read slot and one write port, arbitrated between the ALU and
+  // the LSU. Only one of them runs at a time (one macro in flight).
+  // One lane slot: the ALU and the LSU each own a single read slot and write
+  // port, and only one of them runs at a time, so LANES_MAX is 1 and the
+  // arbiter below is a mux rather than an eight-way fan-out.
+  logic                       vec_vrf_rd_valid;
+  logic [4:0]                 vec_vrf_rd_base;
+  logic [6:0]                 vec_vrf_rd_elem;
+  logic [2:0]                 vec_vrf_rd_sew;
+  logic [3:0]                 vec_vrf_rd_lmul;
+  logic [15:0]                vec_vrf_rd_tag;
+  logic                       vec_vrf_rd_gnt;
+  logic                       vec_vrf_rd_rsp_valid;
+  logic [15:0]                vec_vrf_rd_rsp_tag;
+  logic [63:0]                vec_vrf_rd_rsp_data;
+  logic                       vec_vrf_wr_valid;
+  logic [4:0]                 vec_vrf_wr_base;
+  logic [6:0]                 vec_vrf_wr_elem;
+  logic [2:0]                 vec_vrf_wr_sew;
+  logic [3:0]                 vec_vrf_wr_lmul;
+  logic [63:0]                vec_vrf_wr_data;
+  logic                       vec_vrf_wr_gnt;
+  logic                       vec_lsu_owns_vrf;
+  logic [31:0]                vec_vrf_rd_gnt_ctr, vec_vrf_wr_gnt_ctr, vec_vrf_rd_bad_ctr;
+  logic [31:0]                vec_vrf_rows, vec_vrf_banks;
+
+  // the vector engine's memory port, merged onto the core's one data port
+  logic                       vec_mem_req_valid, vec_mem_req_ready;
+  logic [63:0]                vec_mem_req_addr, vec_mem_req_wdata;
+  logic [7:0]                 vec_mem_req_wmask;
+  logic                       vec_mem_req_we;
+  logic [3:0]                 vec_mem_req_size;
+  logic [6:0]                 vec_mem_req_elem;
+  logic [3:0]                 vec_mem_req_field;
+  logic                       vec_mem_rsp_valid;
+  logic [63:0]                vec_mem_rsp_rdata;
+  logic                       vec_mem_rsp_fault;
+  logic                       vec_mem_rsp_fault_raw;
+  logic [3:0]                 vec_mem_rsp_code;
+  logic [6:0]                 vec_mem_rsp_elem_q;
+  logic [3:0]                 vec_mem_rsp_field_q;
+
+  // vector CSR address decode and the CSR read mux
+  logic                       csr_is_vec;
+  logic [63:0]                csr_rdata_final;
+  logic                       vec_vstart_clear;
+
+  // evidence
+  logic [31:0]                vec_macro_ctr, vec_elem_ctr, vec_trap_ctr, vec_retire_ctr;
+  logic [31:0]                vec_fault_ctr;
 
   // ---------------------------------------------------- the CSR/trap evidence
   logic [31:0] sys_exec_ctr, exc_capture_ctr, exc_gen_mismatch_ctr;
@@ -1942,6 +2210,158 @@ module mosaic_core (
     end
   end
 
+  // ==========================================================================
+  // V decode (I-059)
+  // ==========================================================================
+  // Recognised here rather than in mosaic_decoder for exactly the reason WFI,
+  // SRET, SFENCE.VMA, AMO and OP-FP are: CASE=decode.rv64im_reserved enumerates
+  // every opcode outside RV64IM as illegal, and that enumeration belongs to the
+  // decoder's own case. The integration recognises the encodings it needs from
+  // the raw word and leaves the decoder's illegal set untouched.
+  //
+  // What is decoded here is the *structure* of the encoding -- which family it
+  // names and which registers and immediate it carries. Its *legality* is not
+  // decided here, because vtype is architectural state that vset{i}vl{i}
+  // establishes, and this front end is speculative: the descriptor's legality
+  // matrix is queried at the ROB head (section 7b), where the configuration in
+  // effect is by construction the one every older instruction left.
+  //
+  // Supported: vsetvli/vsetivli/vsetvl; unit-stride vector loads and stores;
+  // the integer arithmetic and logical forms vadd/vsub/vand/vor/vxor in their
+  // vv/vx/vi shapes. Every other OP-V encoding (multiply, divide, widening,
+  // narrowing, extension, reduction, mask, slide, FP, the segmented/indexed/
+  // whole/mask memory modes, vector AMO) is refused -- the machine stops at it
+  // exactly as it stops at any undecoded instruction -- and the report names
+  // each as unreachable.
+  logic        vec_legal_c;
+  logic [5:0]  vec_f6_c;
+  logic [2:0]  vec_f3_c;
+  logic [2:0]  vec_kind_c;
+  logic [4:0]  vec_class_c;
+  logic [1:0]  vec_vset_kind_c;
+  logic [4:0]  vec_vset_uimm_c;
+  logic [10:0] vec_vtypei_c;
+  logic [4:0]  vec_vd_c, vec_vs1_c, vec_vs2_c;
+  logic        vec_mask_en_c;
+  logic [4:0]  vec_family_c;
+  logic [3:0]  vec_op_c;
+  logic [1:0]  vec_form_c;
+  logic [3:0]  vec_lsu_mode_c;
+  logic        vec_lsu_we_c;
+  logic [2:0]  vec_eew_sew_c;
+  logic [63:0] vec_imm_c;
+
+  always_comb begin
+    vec_legal_c     = 1'b0;
+    vec_f6_c        = fetch_out_bits[31:26];
+    vec_f3_c        = fetch_out_bits[14:12];
+    vec_kind_c      = 3'd0;
+    vec_class_c     = 5'd16;   // VOP_VSET
+    vec_vset_kind_c = 2'd0;
+    vec_vset_uimm_c = 5'd0;
+    vec_vtypei_c    = 11'd0;
+    vec_vd_c        = fetch_out_bits[11:7];
+    vec_vs1_c       = fetch_out_bits[19:15];
+    vec_vs2_c       = fetch_out_bits[24:20];
+    vec_mask_en_c   = 1'b0;
+    vec_family_c    = 5'd0;
+    vec_op_c        = 4'd0;
+    vec_form_c      = 2'd0;
+    vec_lsu_mode_c  = 4'd0;
+    vec_lsu_we_c    = 1'b0;
+    vec_eew_sew_c   = 3'd3;
+    vec_imm_c       = 64'd0;
+    if (!fetch_insn16) begin
+      case (fetch_out_bits[6:0])
+        mosaic_pkg::OP_V: begin
+          if (vec_f3_c == 3'b111) begin
+            // ---------------------------------------------------- vset{i}vl{i}
+            vec_kind_c  = 3'd0;
+            vec_class_c = 5'd16;   // VOP_VSET
+            if (fetch_out_bits[31] == 1'b0) begin
+              // vsetvli rd, rs1, vtypei: vtypei = insn[30:20].
+              vec_vset_kind_c = 2'd0;
+              vec_vtypei_c    = fetch_out_bits[30:20];
+              vec_legal_c     = 1'b1;
+            end else if (fetch_out_bits[31:30] == 2'b11) begin
+              // vsetivli rd, uimm, zimm: AVL = uimm, vtypei = zimm[9:0].
+              vec_vset_kind_c = 2'd1;
+              vec_vset_uimm_c = fetch_out_bits[19:15];
+              vec_vtypei_c    = {1'b0, fetch_out_bits[29:20]};
+              vec_legal_c     = 1'b1;
+            end else if (fetch_out_bits[31:30] == 2'b10) begin
+              // vsetvl rd, rs1, rs2: the vtype argument is x[rs2].
+              vec_vset_kind_c = 2'd2;
+              vec_legal_c     = 1'b1;
+            end
+          end else if ((vec_f3_c == 3'b000) || (vec_f3_c == 3'b100) ||
+                       (vec_f3_c == 3'b011)) begin
+            // ------------------------------------------------- integer arith
+            // OPIVV (000), OPIVX (100), OPIVI (011). The OPFVV/OPMVV/OPFVF/
+            // OPMVX forms are vector FP and mask-to-mask, which this
+            // integration does not wire.
+            vec_class_c  = 5'd0;   // VOP_IVV
+            vec_mask_en_c = !fetch_out_bits[25];
+            vec_form_c   = (vec_f3_c == 3'b000) ? 2'd0
+                         : (vec_f3_c == 3'b100) ? 2'd1 : 2'd2;
+            case (vec_f6_c)
+              6'b000000: begin vec_family_c = 5'd0; vec_op_c = 4'd0; vec_legal_c = 1'b1; end  // vadd
+              6'b000010: begin                                                                 // vsub
+                if (vec_form_c != 2'd2) begin
+                  vec_family_c = 5'd0; vec_op_c = 4'd1; vec_legal_c = 1'b1;
+                end
+              end
+              6'b001001: begin vec_family_c = 5'd6; vec_op_c = 4'd0; vec_legal_c = 1'b1; end  // vand
+              6'b001010: begin vec_family_c = 5'd6; vec_op_c = 4'd1; vec_legal_c = 1'b1; end  // vor
+              6'b001011: begin vec_family_c = 5'd6; vec_op_c = 4'd2; vec_legal_c = 1'b1; end  // vxor
+              default: ;
+            endcase
+            if (vec_form_c == 2'd2) begin
+              // The immediate form's scalar operand is the sign-extended 5-bit
+              // `imm` field.
+              vec_imm_c = {{59{fetch_out_bits[19]}}, fetch_out_bits[19:15]};
+            end
+          end
+        end
+        mosaic_pkg::OP_LOAD_FP: begin
+          // A vector load reuses the scalar FP load's opcode; funct3 carries the
+          // element width and bits[31:26] are nf/mew/mop. Only unit-stride with
+          // no fields (nf=0, mew=0, mop=00) is wired; funct3 010/011 are the
+          // scalar flw/fld and are left to the FP arm below.
+          if ((vec_f6_c == 6'd0) &&
+              ((vec_f3_c == 3'b000) || (vec_f3_c == 3'b101) ||
+               (vec_f3_c == 3'b110) || (vec_f3_c == 3'b111))) begin
+            vec_kind_c     = 3'd2;
+            vec_class_c    = 5'd13;  // VOP_VLOAD
+            vec_lsu_mode_c = 4'd0;
+            vec_lsu_we_c   = 1'b0;
+            vec_mask_en_c  = !fetch_out_bits[25];
+            vec_eew_sew_c  = (vec_f3_c == 3'b000) ? 3'd3
+                           : (vec_f3_c == 3'b101) ? 3'd4
+                           : (vec_f3_c == 3'b110) ? 3'd5 : 3'd6;
+            vec_legal_c    = 1'b1;
+          end
+        end
+        mosaic_pkg::OP_STORE_FP: begin
+          if ((vec_f6_c == 6'd0) &&
+              ((vec_f3_c == 3'b000) || (vec_f3_c == 3'b101) ||
+               (vec_f3_c == 3'b110) || (vec_f3_c == 3'b111))) begin
+            vec_kind_c     = 3'd3;
+            vec_class_c    = 5'd14;  // VOP_VSTORE
+            vec_lsu_mode_c = 4'd0;
+            vec_lsu_we_c   = 1'b1;
+            vec_mask_en_c  = !fetch_out_bits[25];
+            vec_eew_sew_c  = (vec_f3_c == 3'b000) ? 3'd3
+                           : (vec_f3_c == 3'b101) ? 3'd4
+                           : (vec_f3_c == 3'b110) ? 3'd5 : 3'd6;
+            vec_legal_c    = 1'b1;
+          end
+        end
+        default: ;
+      endcase
+    end
+  end
+
   always_comb begin
     dbuf_ctl_new = dec_ctl_comb;
     if (fetch_pmp_deny_c) begin
@@ -2025,6 +2445,68 @@ module mosaic_core (
         dbuf_ctl_new.is_lr      = lr_c;
         dbuf_ctl_new.is_sc      = sc_c;
         dbuf_ctl_new.imm        = 64'd0;
+      end
+    end else if (vec_legal_c) begin
+      // V (I-059). The structure is decoded; the legality of the combination
+      // against vtype is decided at the ROB head by the descriptor's matrix.
+      dbuf_ctl_new.valid             = 1'b1;
+      dbuf_ctl_new.illegal           = 1'b0;
+      dbuf_ctl_new.is_vec            = 1'b1;
+      dbuf_ctl_new.vec_class         = vec_class_c;
+      dbuf_ctl_new.vec_kind          = vec_kind_c;
+      dbuf_ctl_new.vec_vset_kind     = vec_vset_kind_c;
+      dbuf_ctl_new.vec_vset_uimm     = vec_vset_uimm_c;
+      dbuf_ctl_new.vec_vtypei        = vec_vtypei_c;
+      dbuf_ctl_new.vec_vd            = vec_vd_c;
+      dbuf_ctl_new.vec_vs1           = vec_vs1_c;
+      dbuf_ctl_new.vec_vs2           = vec_vs2_c;
+      dbuf_ctl_new.vec_mask_en       = vec_mask_en_c;
+      dbuf_ctl_new.vec_family        = vec_family_c;
+      dbuf_ctl_new.vec_op            = vec_op_c;
+      dbuf_ctl_new.vec_form          = vec_form_c;
+      dbuf_ctl_new.vec_lsu_mode      = vec_lsu_mode_c;
+      dbuf_ctl_new.vec_lsu_we        = vec_lsu_we_c;
+      dbuf_ctl_new.vec_lsu_ordered   = 1'b0;
+      dbuf_ctl_new.vec_lsu_fof       = 1'b0;
+      dbuf_ctl_new.vec_nf            = 4'd1;
+      dbuf_ctl_new.vec_idx_sew       = 3'd0;
+      dbuf_ctl_new.vec_eew_sew       = vec_eew_sew_c;
+      dbuf_ctl_new.vec_imm           = vec_imm_c;
+      dbuf_ctl_new.mem_kind          = mosaic_pkg::MEM_NONE;
+      dbuf_ctl_new.alu_op            = mosaic_pkg::ALU_PASSB;
+      dbuf_ctl_new.is_system         = 1'b0;
+      dbuf_ctl_new.is_miscmem        = 1'b0;
+      dbuf_ctl_new.uses_imm          = 1'b0;
+      dbuf_ctl_new.imm               = 64'd0;
+      if (vec_kind_c == 3'd0) begin
+        // vset{i}vl{i}: the architectural destination is the integer rd, and the
+        // only integer source is the AVL in x[rs1] (vsetvli/vsetvl).
+        dbuf_ctl_new.rd        = vec_vd_c;
+        dbuf_ctl_new.reg_write = (vec_vd_c != 5'd0);
+        dbuf_ctl_new.uses_rs1  = (vec_vset_kind_c != 2'd1);
+        dbuf_ctl_new.uses_rs2  = (vec_vset_kind_c == 2'd2);
+        dbuf_ctl_new.rs1       = (vec_vset_kind_c == 2'd1) ? 5'd0 : vec_vs1_c;
+        dbuf_ctl_new.rs2       = vec_vs2_c;
+      end else if (vec_kind_c == 3'd1) begin
+        // Integer arithmetic: no integer destination (the result is a vector
+        // register, which the VRF owns). Only the .vx form names an integer
+        // source; .vv reads two vector registers and .vi an immediate.
+        dbuf_ctl_new.rd        = 5'd0;
+        dbuf_ctl_new.reg_write = 1'b0;
+        dbuf_ctl_new.uses_rs1  = (vec_form_c == 2'd1);
+        dbuf_ctl_new.uses_rs2  = 1'b0;
+        dbuf_ctl_new.rs1       = (vec_form_c == 2'd1) ? vec_vs1_c : 5'd0;
+        dbuf_ctl_new.rs2       = 5'd0;
+      end else begin
+        // Vector load or store: the base address is x[rs1]; neither writes an
+        // integer register. The element register is named by the instruction's
+        // `vd` field and is owned by the VRF.
+        dbuf_ctl_new.rd        = 5'd0;
+        dbuf_ctl_new.reg_write = 1'b0;
+        dbuf_ctl_new.uses_rs1  = 1'b1;
+        dbuf_ctl_new.uses_rs2  = 1'b0;
+        dbuf_ctl_new.rs1       = vec_vs1_c;
+        dbuf_ctl_new.rs2       = 5'd0;
       end
     end else if (fp_load_c) begin
       // flw / fld (I-050). An ordinary memory load whose register operand lives
@@ -2761,6 +3243,58 @@ module mosaic_core (
 
   assign o_fp_merge_ctr = fp_merge_ctr;
 
+  // ---------------------------------------------------- the vector evidence
+  assign o_vec_vtype    = vec_vtype;
+  assign o_vec_vl       = vec_vl;
+  assign o_vec_vstart   = vec_vstart;
+  assign o_vec_vcsr     = vec_vcsr;
+  assign o_vec_vlenb    = vec_vlenb;
+  assign o_vec_vlmax    = vec_vlmax;
+  assign o_vec_vill     = vec_vill;
+  assign o_vec_macro_ctr = vec_macro_ctr;
+  assign o_vec_elem_ctr  = vec_elem_ctr;
+  assign o_vec_trap_ctr  = vec_trap_ctr;
+  assign o_vec_retire_ctr = vec_retire_ctr;
+  assign o_vec_fault_ctr  = vec_fault_ctr;
+  assign o_vec_lsu_req_ctr = vec_lsu_req_ctr;
+  assign o_vec_chain_accept_ctr = {16'd0, vec_chain_pkt_accept_ctr};
+  assign o_vec_chain_refuse_ctr = {16'd0, vec_chain_pkt_refuse_ctr};
+  assign o_vec_desc_alloc_ctr   = {16'd0, vec_desc_alloc_ctr};
+  assign o_vec_desc_release_ctr = {16'd0, vec_desc_release_ctr};
+  assign o_vec_alu_elems        = {24'd0, vec_alu_elems};
+  assign o_vec_alu_src_rd_ctr   = vec_alu_src_rd_ctr;
+  assign o_vec_alu_acc          = vec_alu_acc;
+  assign o_vec_vrf_rd_ctr       = vec_vrf_rd_gnt_ctr;
+  assign o_vec_vrf_wr_ctr       = vec_vrf_wr_gnt_ctr;
+  assign o_vec_vrf_bad_ctr      = vec_vrf_rd_bad_ctr;
+  assign o_vec_vrf_rows         = vec_vrf_rows;
+  assign o_vec_vrf_banks        = vec_vrf_banks;
+  // dbg0: the descriptor's legality decision and the restart controller's
+  // outcome. dbg1: the descriptor's own record and the ALU's element walk.
+  // dbg2: the chain's identity discipline and the vector CSR port's handshake.
+  assign o_vec_dbg0 = { 8'd0, vec_desc_reason[3:0], vec_desc_sew_log2[2:0],
+                        vec_desc_lmul_exp[3:0], vec_desc_elem_count[7:0],
+                        vec_desc_vtype_legal, vec_desc_cfg_legal,
+                        vec_desc_accepting, vec_desc_rob_entries_used[7:0],
+                        vec_desc_fault_valid_out, vec_desc_fault_elem_out[6:0],
+                        vec_desc_fault_code_out[3:0],
+                        vec_rst_complete, vec_rst_retire_ok, vec_rst_fof_trim,
+                        vec_rst_vl_write, vec_rst_restart_ready,
+                        vec_rst_prefix_agree, vec_rst_vl_new[7:0] };
+  assign o_vec_dbg1 = { 3'd0, vec_rst_restart_vstart[6:0], vec_rst_elems_committed[7:0],
+                        vec_desc_vd_out[4:0], vec_desc_vl[7:0],
+                        vec_desc_vstart[6:0], vec_desc_elems_done[7:0],
+                        vec_alu_sat, vec_alu_cur[7:0],
+                        vec_alu_trace_elem[7:0], vec_mem_req_size[3] };
+  assign o_vec_dbg2 = { 6'd0, vec_desc_rob_index[CORE_IDX_W-1:0],
+                        vec_desc_rob_gen[CORE_RGEN_W-1:0],
+                        vec_desc_uop_index[CORE_UOP_W-1:0],
+                        vec_chain_valid, vec_chain_done, vec_chain_fault,
+                        vec_chain_fault_elem[6:0], vec_chain_gen[CORE_RGEN_W-1:0],
+                        vec_chain_vd[4:0], vec_chain_p_alloc_ready,
+                        vec_chain_p_wr_accept, vec_csr_ready, vec_csr_commit,
+                        vec_cfg_gen };
+
   // Port 2 is shared by the shared MUL/DIV unit and the FP unit. They are never
   // offered to the arbiter in the same cycle: FP wins, and the MUL/DIV result is
   // held by its own ready/valid handshake until the next cycle -- the same
@@ -2815,6 +3349,972 @@ module mosaic_core (
       end
     end
   end
+
+  // ==========================================================================
+  // 7b. The integrated vector engine (I-059)
+  // ==========================================================================
+  // One vector *macro* is resolved here, at the ROB head, exactly as a system
+  // macro is in section 10b -- and for the same reasons. A vector instruction's
+  // configuration (vtype/vl/vstart) must be the one every older instruction
+  // left, and its element progress and memory side effects must not be visible
+  // until it retires. Resolving it at the head gives both: the head is the oldest
+  // unretired instruction, so "at the head" *is* "after everything older".
+  //
+  // Dispatch holds allocation while the macro is live (`vec_block` below), so
+  // the machine behind it is empty when it executes. That is what makes the
+  // engine's ownership of the data port and of the VRF safe, and it is the price
+  // this integration pays for not renaming vector registers: the VRF holds the
+  // 32 architectural vector registers, and vector instructions are serialized.
+  //
+  // The engine is a sequencer over the seven I-051..I-058 units:
+  //
+  //   vec_cfg      the vset{i}vl{i} commit point, the seven vector CSRs, and the
+  //                vtype the descriptor and the execution units read
+  //   vec_desc     the legality authority (queried with the live configuration
+  //                when the macro reaches the head) and the element bitmap
+  //   mosaic_vrf   the 32-register vector file, one read slot and one write port
+  //   vec_alu      the integer/mask/permute lane for vadd/vsub/vand/vor/vxor
+  //   vec_lsu      the memory packetizer for unit-stride loads and stores
+  //   vec_restart  the partial-trap/vstart/FOF controller for a memory macro
+  //   vec_chain    the element-packet identity discipline (generation + vl
+  //                bounds), so a packet from a cancelled macro cannot advance
+  //                the descriptor
+  //
+  // Vector FP (`mosaic_vec_fp`) and the families neither the packetizer nor the
+  // ALU implement are deliberately not wired; the report names each.
+
+  // ---------------------------------------------------------- the stage
+  assign vec_at_head = vec_valid_q && rob_head_valid &&
+                       (rob_head_index == vec_index_q) &&
+                       (rob_head_gen == vec_gen_q);
+  // Dispatch allocates nothing while a vector macro is live. `vec_block` is the
+  // level dispatch holds on; it is asserted for the whole life of the staged
+  // macro, from the insert cycle to its retirement (or the redirect that kills
+  // it).
+  assign vec_block   = vec_valid_q;
+
+  // --------------------------------------------------- the CSR address decode
+  // The seven vector CSRs are owned by mosaic_vec_cfg, not by mosaic_csr: their
+  // state is written by vset{i}vl{i} as well as by software, and the two writers
+  // must see one copy. An address in this set is routed to the unit's CSR port;
+  // every other address is the scalar CSR file's.
+  always_comb begin
+    csr_is_vec = 1'b0;
+    case (csr_addr)
+      12'h008, 12'h009, 12'h00A, 12'h00F,
+      12'hC20, 12'hC21, 12'hC22: csr_is_vec = 1'b1;
+      default: csr_is_vec = 1'b0;
+    endcase
+  end
+
+  // The staged vector macro's configuration, as the engine and the units read
+  // it. A live, committed value is correct here precisely because the macro is
+  // resolved at the head: no younger vset can be in flight (dispatch holds
+  // allocation), so this *is* the configuration the macro was issued under.
+  assign vec_vset_vs_off = (o_csr_mstatus[10:9] == 2'b00);
+
+  mosaic_vec_cfg u_vec_cfg (
+      .clk_i            (clk),
+      .rst_i            (rst),
+      .vset_valid_i     (vec_vset_valid),
+      .vset_kind_i      (vec_vset_kind),
+      .vset_rd_i        (vec_vset_rd),
+      .vset_rs1_i       (vec_pay_q_vs1),
+      .vset_rs1_val_i   (vec_src1_q),
+      .vset_rs2_val_i   (vec_src2_q),
+      .vset_uimm_i      (vec_vset_uimm),
+      .vset_vtypei_i    (vec_vtypei),
+      .vset_vs_off_i    (vec_vset_vs_off),
+      .vset_illegal_o   (),
+      .vset_commit_o    (),
+      .vset_rd_we_o     (),
+      .vset_rd_val_o    (vec_vset_rd_val),
+      .o_vtype_o        (vec_vtype),
+      .o_vl_o           (vec_vl),
+      .o_vstart_o       (vec_vstart),
+      .o_vxrm_o         (),
+      .o_vxsat_o        (),
+      .o_vcsr_o         (vec_vcsr),
+      .o_vlenb_o        (vec_vlenb),
+      .o_vlmax_o        (vec_vlmax),
+      .o_vill_o         (vec_vill),
+      .o_cfg_gen_o      (vec_cfg_gen),
+      .snap_capture_i   (1'b0),
+      .snap_valid_o     (),
+      .snap_vtype_o     (),
+      .snap_vl_o        (),
+      .snap_vstart_o    (),
+      .snap_gen_o       (),
+      .replay_valid_i   (1'b0),
+      .replay_gen_i     (16'd0),
+      .replay_ok_o      (),
+      .replay_vtype_o   (),
+      .replay_vl_o      (),
+      .replay_vstart_o  (),
+      .exec_valid_i     (vec_desc_alloc_valid),
+      .exec_vtype_dep_i (vec_pay_q_vtype_dep),
+      .exec_illegal_o   (),
+      .csr_valid_i      (vec_csr_valid),
+      .csr_addr_i       (vec_csr_addr),
+      .csr_write_i      (vec_csr_write),
+      .csr_wdata_i      (vec_csr_wdata),
+      .csr_priv_i       (csr_priv),
+      .csr_vs_off_i     (vec_vset_vs_off),
+      .csr_ready_o      (vec_csr_ready),
+      .csr_illegal_o    (vec_csr_illegal),
+      .csr_rdata_o      (vec_csr_rdata),
+      .csr_commit_o     (vec_csr_commit)
+  );
+
+  // The descriptor's query is combinational and stateful only in its allocate
+  // port: it is queried with the *live* configuration when the macro reaches the
+  // head, and allocated in the cycle the engine launches it.
+  assign vec_desc_class   = vec_pay_q.op_class;
+  // A store has no destination group, and a load has no source groups; naming
+  // the unused groups x0 keeps the overlap rules from firing on fields the
+  // instruction does not use.
+  assign vec_desc_vd      = (vec_pay_q.kind == 3'd3) ? 5'd0 : vec_pay_q.vd;
+  assign vec_desc_vs1     = (vec_pay_q.kind == 3'd1) ? vec_pay_q.vs1 : 5'd0;
+  assign vec_desc_vs2     = (vec_pay_q.kind == 3'd1) ? vec_pay_q.vs2 : 5'd0;
+  assign vec_desc_mask_en = vec_pay_q.mask_en;
+
+  mosaic_vec_desc #(
+      .VLEN        (128),
+      .ELEN        (64),
+      .ROB_INDEX_W (CORE_IDX_W),
+      .ROB_GEN_W   (CORE_RGEN_W),
+      .UOP_INDEX_W (CORE_UOP_W)
+  ) u_vec_desc (
+      .clk_i                 (clk),
+      .rst_i                 (rst),
+      .vtype_i               (vec_vtype),
+      .op_class_i            (vec_desc_class),
+      .vd_i                  (vec_desc_vd),
+      .vs1_i                 (vec_desc_vs1),
+      .vs2_i                 (vec_desc_vs2),
+      .vs3_i                 (5'd0),
+      .mask_en_i             (vec_desc_mask_en),
+      .lane_count_i          (4'd1),
+      .o_vtype_legal_o       (vec_desc_vtype_legal),
+      .o_cfg_legal_o         (vec_desc_cfg_legal),
+      .o_illegal_o           (vec_desc_illegal),
+      .o_reason_o            (vec_desc_reason),
+      .o_sew_log2_o          (vec_desc_sew_log2),
+      .o_lmul_exp_o          (vec_desc_lmul_exp),
+      .o_emul_src_exp_o      (),
+      .o_emul_dst_exp_o      (),
+      .o_elem_count_o        (vec_desc_elem_count),
+      .o_vlen_o              (),
+      .o_vlenb_o             (),
+      .o_lane_count_o        (),
+      .o_class_count_o       (),
+      .alloc_valid_i         (vec_desc_alloc_valid),
+      .alloc_ready_o         (vec_desc_alloc_ready),
+      .alloc_vtype_i         (vec_vtype),
+      .alloc_vl_i            (vec_vl[7:0]),
+      .alloc_vstart_i        (vec_vstart[6:0]),
+      .alloc_vd_i            (vec_pay_q.vd),
+      .alloc_mask_ver_i      (4'd0),
+      .alloc_rob_index_i     (vec_index_q),
+      .alloc_rob_gen_i       (vec_gen_q),
+      .alloc_uop_index_i     (vec_uop_q),
+      .elem_done_valid_i     (vec_desc_elem_done_valid),
+      .elem_done_index_i     (vec_desc_elem_done_index),
+      .fault_valid_i         (vec_desc_fault_valid),
+      .fault_elem_i          (vec_desc_fault_elem),
+      .fault_code_i          (vec_desc_fault_code),
+      .fault_clear_i         (1'b0),
+      .release_i             (vec_desc_release),
+      .o_valid_o             (vec_desc_valid),
+      .o_macro_rob_index_o   (vec_desc_rob_index),
+      .o_macro_rob_gen_o     (vec_desc_rob_gen),
+      .o_macro_uop_index_o   (vec_desc_uop_index),
+      .o_vtype_o             (),
+      .o_vl_o                (vec_desc_vl),
+      .o_vstart_o            (vec_desc_vstart),
+      .o_vd_o                (vec_desc_vd_out),
+      .o_mask_ver_o          (),
+      .o_elem_bitmap_o       (vec_desc_bitmap),
+      .o_prefix_o            (vec_desc_prefix),
+      .o_elems_done_ctr_o    (vec_desc_elems_done),
+      .o_fault_valid_o       (vec_desc_fault_valid_out),
+      .o_fault_elem_o        (vec_desc_fault_elem_out),
+      .o_fault_code_o        (vec_desc_fault_code_out),
+      .o_accepting_elems_o   (vec_desc_accepting),
+      .o_rob_entries_used_o  (vec_desc_rob_entries_used),
+      .o_alloc_ctr_o         (vec_desc_alloc_ctr),
+      .o_release_ctr_o       (vec_desc_release_ctr)
+  );
+
+  // ------------------------------------------------------- the VRF and its two
+  // masters. The ALU and the LSU share one read slot and one write port, exactly
+  // as the standalone binding does; only one of them runs at a time because only
+  // one macro is in flight.
+  logic        vec_alu_rd_valid;
+  logic [4:0]  vec_alu_rd_base;
+  logic [6:0]  vec_alu_rd_elem;
+  logic [2:0]  vec_alu_rd_sew;
+  logic [3:0]  vec_alu_rd_lmul;
+  logic [15:0] vec_alu_rd_tag;
+  logic        vec_alu_rd_gnt;
+  logic        vec_alu_rd_rsp_valid;
+  logic [15:0] vec_alu_rd_rsp_tag;
+  logic [63:0] vec_alu_rd_rsp_data;
+  logic        vec_alu_wr_valid;
+  logic [4:0]  vec_alu_wr_base;
+  logic [6:0]  vec_alu_wr_elem;
+  logic [2:0]  vec_alu_wr_sew;
+  logic [3:0]  vec_alu_wr_lmul;
+  logic [63:0] vec_alu_wr_data;
+  logic        vec_alu_wr_gnt;
+  logic        vec_lsu_rd_valid;
+  logic [4:0]  vec_lsu_rd_base;
+  logic [6:0]  vec_lsu_rd_elem;
+  logic [2:0]  vec_lsu_rd_sew;
+  logic [3:0]  vec_lsu_rd_lmul;
+  logic [15:0] vec_lsu_rd_tag;
+  logic        vec_lsu_rd_gnt;
+  logic        vec_lsu_rd_rsp_valid;
+  logic [15:0] vec_lsu_rd_rsp_tag;
+  logic [63:0] vec_lsu_rd_rsp_data;
+  logic        vec_lsu_wr_valid;
+  logic [4:0]  vec_lsu_wr_base;
+  logic [6:0]  vec_lsu_wr_elem;
+  logic [2:0]  vec_lsu_wr_sew;
+  logic [3:0]  vec_lsu_wr_lmul;
+  logic [63:0] vec_lsu_wr_data;
+  logic        vec_lsu_wr_gnt;
+
+  always_comb begin
+    if (vec_lsu_owns_vrf) begin
+      vec_vrf_rd_valid = vec_lsu_rd_valid;
+      vec_vrf_rd_base  = vec_lsu_rd_base;
+      vec_vrf_rd_elem  = vec_lsu_rd_elem;
+      vec_vrf_rd_sew   = vec_lsu_rd_sew;
+      vec_vrf_rd_lmul  = vec_lsu_rd_lmul;
+      vec_vrf_rd_tag   = vec_lsu_rd_tag;
+      vec_vrf_wr_valid = vec_lsu_wr_valid;
+      vec_vrf_wr_base  = vec_lsu_wr_base;
+      vec_vrf_wr_elem  = vec_lsu_wr_elem;
+      vec_vrf_wr_sew   = vec_lsu_wr_sew;
+      vec_vrf_wr_lmul  = vec_lsu_wr_lmul;
+      vec_vrf_wr_data  = vec_lsu_wr_data;
+    end else begin
+      vec_vrf_rd_valid = vec_alu_rd_valid;
+      vec_vrf_rd_base  = vec_alu_rd_base;
+      vec_vrf_rd_elem  = vec_alu_rd_elem;
+      vec_vrf_rd_sew   = vec_alu_rd_sew;
+      vec_vrf_rd_lmul  = vec_alu_rd_lmul;
+      vec_vrf_rd_tag   = vec_alu_rd_tag;
+      vec_vrf_wr_valid = vec_alu_wr_valid;
+      vec_vrf_wr_base  = vec_alu_wr_base;
+      vec_vrf_wr_elem  = vec_alu_wr_elem;
+      vec_vrf_wr_sew   = vec_alu_wr_sew;
+      vec_vrf_wr_lmul  = vec_alu_wr_lmul;
+      vec_vrf_wr_data  = vec_alu_wr_data;
+    end
+  end
+
+  assign vec_alu_rd_gnt       = vec_vrf_rd_gnt;
+  assign vec_alu_rd_rsp_valid = vec_vrf_rd_rsp_valid;
+  assign vec_alu_rd_rsp_tag   = vec_vrf_rd_rsp_tag;
+  assign vec_alu_rd_rsp_data  = vec_vrf_rd_rsp_data;
+  assign vec_alu_wr_gnt       = vec_vrf_wr_gnt;
+  assign vec_lsu_rd_gnt       = vec_vrf_rd_gnt;
+  assign vec_lsu_rd_rsp_valid = vec_vrf_rd_rsp_valid;
+  assign vec_lsu_rd_rsp_tag   = vec_vrf_rd_rsp_tag;
+  assign vec_lsu_rd_rsp_data  = vec_vrf_rd_rsp_data;
+  assign vec_lsu_wr_gnt       = vec_vrf_wr_gnt;
+
+  mosaic_vrf #(
+      .VLEN       (128),
+      .ELEN       (64),
+      .VREGS      (32),
+      .BANK_W     (32),
+      .BANKS      (32),
+      .LANES_MAX  (1),
+      .RD_PORTS   (2),
+      .WR_PORTS   (1),
+      .RD_LATENCY (1)
+  ) u_vec_vrf (
+      .clk_i             (clk),
+      .rst_i             (rst),
+      .lane_count_i      (4'd1),
+      .plat_i            (2'd0),
+      .rd_valid_i        (vec_vrf_rd_valid),
+      .rd_base_i         (vec_vrf_rd_base),
+      .rd_elem_i         (vec_vrf_rd_elem),
+      .rd_sew_i          (vec_vrf_rd_sew),
+      .rd_lmul_i         (vec_vrf_rd_lmul),
+      .rd_tag_i          (vec_vrf_rd_tag),
+      .rd_gnt_o          (vec_vrf_rd_gnt),
+      .rd_rsp_valid_o    (vec_vrf_rd_rsp_valid),
+      .rd_rsp_tag_o      (vec_vrf_rd_rsp_tag),
+      .rd_rsp_data_o     (vec_vrf_rd_rsp_data),
+      .wr_valid_i        (vec_vrf_wr_valid),
+      .wr_base_i         (vec_vrf_wr_base),
+      .wr_elem_i         (vec_vrf_wr_elem),
+      .wr_sew_i          (vec_vrf_wr_sew),
+      .wr_lmul_i         (vec_vrf_wr_lmul),
+      .wr_data_i         (vec_vrf_wr_data),
+      .wr_gnt_o          (vec_vrf_wr_gnt),
+      .q_valid_i         (1'b0),
+      .q_base_i          (5'd0),
+      .q_elem_i          (7'd0),
+      .q_sew_i           (3'd0),
+      .q_lmul_i          (4'd0),
+      .o_q_valid_o       (),
+      .o_q_phys_reg_o    (),
+      .o_q_row_o         (),
+      .o_q_lo_bit_o      (),
+      .o_q_hi_bit_o      (),
+      .o_q_nbanks_o      (),
+      .o_q_bank0_o       (),
+      .o_q_bank1_o       (),
+      .o_rd_gnt_ctr      (vec_vrf_rd_gnt_ctr),
+      .o_rd_conflict_ctr (),
+      .o_rd_bad_ctr      (vec_vrf_rd_bad_ctr),
+      .o_wr_gnt_ctr      (vec_vrf_wr_gnt_ctr),
+      .o_wr_conflict_ctr (),
+      .o_wr_hazard_ctr   (),
+      .o_wr_bad_ctr      (),
+      .o_busy            (),
+      .o_vlen_o          (),
+      .o_elen_o          (),
+      .o_vregs_o         (),
+      .o_banks_o         (vec_vrf_banks),
+      .o_bank_w_o        (),
+      .o_rows_o          (vec_vrf_rows),
+      .o_regs_per_row_o  (),
+      .o_lane_max_o      (),
+      .o_rd_latency_o    (),
+      .o_rd_ports_o      (),
+      .o_wr_ports_o      (),
+      .o_plat_o          ()
+  );
+
+  // ------------------------------------------------------------- the ALU lane
+  assign vec_alu_family  = vec_pay_q.family;
+  assign vec_alu_op      = vec_pay_q.op;
+  assign vec_alu_form    = vec_pay_q.form;
+  assign vec_alu_vd      = vec_pay_q.vd;
+  assign vec_alu_vs1     = vec_pay_q.vs1;
+  assign vec_alu_vs2     = vec_pay_q.vs2;
+  assign vec_alu_mask_en = vec_pay_q.mask_en;
+
+  mosaic_vec_alu #(
+      .VLEN (128),
+      .ELEN (64),
+      .NFAM (17)
+  ) u_vec_alu (
+      .clk_i              (clk),
+      .rst_i              (rst),
+      .caps_i             (VEC_ALU_CAPS),
+      .cfg_vtype_i        (vec_vtype),
+      .cfg_vl_i           (vec_vl[7:0]),
+      .cfg_vstart_i       (vec_vstart[6:0]),
+      .cfg_vxrm_i         (vec_vcsr[2:1]),
+      .e_valid_i          (1'b0),
+      .e_family_i         (5'd0),
+      .e_op_i             (4'd0),
+      .e_form_i           (2'd0),
+      .e_vs2_i            (64'd0),
+      .e_vs1_i            (64'd0),
+      .e_acc_i            (64'd0),
+      .e_mask_i           (1'b0),
+      .e_scalar_i         (64'd0),
+      .e_index_i          (8'd0),
+      .e_pfx_i            (1'b0),
+      .e_result_o         (),
+      .e_mres_o           (),
+      .e_sat_o            (),
+      .e_illegal_o        (),
+      .e_trap_o           (),
+      .e_access_o         (),
+      .e_write_o          (),
+      .e_rd2_o            (),
+      .e_pfx_o            (),
+      .exec_valid_i       (vec_alu_exec_valid),
+      .exec_family_i      (vec_alu_family),
+      .exec_op_i          (vec_alu_op),
+      .exec_form_i        (vec_alu_form),
+      .exec_vd_i          (vec_alu_vd),
+      .exec_vs1_i         (vec_alu_vs1),
+      .exec_vs2_i         (vec_alu_vs2),
+      .exec_scalar_i      (vec_alu_scalar),
+      .exec_mask_en_i     (vec_alu_mask_en),
+      .exec_busy_o        (),
+      .exec_done_o        (vec_alu_done),
+      .exec_illegal_o     (vec_alu_illegal),
+      .exec_trap_o        (),
+      .exec_trap_elem_o   (),
+      .exec_sat_o         (vec_alu_sat),
+      .exec_elems_o       (vec_alu_elems),
+      .exec_cur_o         (vec_alu_cur),
+      .exec_acc_o         (vec_alu_acc),
+      .exec_trace_valid_o (vec_alu_trace_valid),
+      .exec_trace_elem_o  (vec_alu_trace_elem),
+      .exec_src_rd_ctr_o  (vec_alu_src_rd_ctr),
+      .vrf_rd_valid_o     (vec_alu_rd_valid),
+      .vrf_rd_base_o      (vec_alu_rd_base),
+      .vrf_rd_elem_o      (vec_alu_rd_elem),
+      .vrf_rd_sew_o       (vec_alu_rd_sew),
+      .vrf_rd_lmul_o      (vec_alu_rd_lmul),
+      .vrf_rd_tag_o       (vec_alu_rd_tag),
+      .vrf_rd_gnt_i       (vec_alu_rd_gnt),
+      .vrf_rd_rsp_valid_i (vec_alu_rd_rsp_valid),
+      .vrf_rd_rsp_tag_i   (vec_alu_rd_rsp_tag),
+      .vrf_rd_rsp_data_i  (vec_alu_rd_rsp_data),
+      .vrf_wr_valid_o     (vec_alu_wr_valid),
+      .vrf_wr_base_o      (vec_alu_wr_base),
+      .vrf_wr_elem_o      (vec_alu_wr_elem),
+      .vrf_wr_sew_o       (vec_alu_wr_sew),
+      .vrf_wr_lmul_o      (vec_alu_wr_lmul),
+      .vrf_wr_data_o      (vec_alu_wr_data),
+      .vrf_wr_gnt_i       (vec_alu_wr_gnt)
+  );
+
+  // ------------------------------------------------------- the LSU packetizer
+  assign vec_lsu_mode      = vec_pay_q.lsu_mode;
+  assign vec_lsu_we        = vec_pay_q.lsu_we;
+  assign vec_lsu_ordered   = vec_pay_q.lsu_ordered;
+  assign vec_lsu_nf        = vec_pay_q.nf;
+  assign vec_lsu_vd        = vec_pay_q.vd;
+  assign vec_lsu_data      = vec_pay_q.data;
+  assign vec_lsu_index     = vec_pay_q.index;
+  assign vec_lsu_idx_sew   = vec_pay_q.idx_sew;
+  assign vec_lsu_base      = vec_src1_q;
+  assign vec_lsu_stride    = vec_src2_q;
+  assign vec_lsu_mask_en   = vec_pay_q.mask_en;
+
+  mosaic_vec_lsu #(
+      .VLEN (128),
+      .ELEN (64),
+      .NLSM (8)
+  ) u_vec_lsu (
+      .clk_i              (clk),
+      .rst_i              (rst),
+      .caps_i             (VEC_LSU_CAPS),
+      .cfg_vtype_i        (vec_vtype),
+      .cfg_vl_i           (vec_vl[7:0]),
+      .cfg_vstart_i       (vec_vstart[6:0]),
+      .exec_valid_i       (vec_lsu_exec_valid),
+      .exec_mode_i        (vec_lsu_mode),
+      .exec_we_i          (vec_lsu_we),
+      .exec_ordered_i     (vec_lsu_ordered),
+      .exec_nf_i          (vec_lsu_nf),
+      .exec_vd_i          (vec_lsu_vd),
+      .exec_data_i        (vec_lsu_data),
+      .exec_index_i       (vec_lsu_index),
+      .exec_idx_sew_i     (vec_lsu_idx_sew),
+      .exec_base_i        (vec_lsu_base),
+      .exec_stride_i      (vec_lsu_stride),
+      .exec_mask_en_i     (vec_lsu_mask_en),
+      .busy_o             (vec_lsu_busy),
+      .done_o             (vec_lsu_done),
+      .illegal_o          (vec_lsu_illegal),
+      .trap_o             (vec_lsu_trap),
+      .trap_elem_o        (vec_lsu_trap_elem),
+      .trap_code_o        (vec_lsu_trap_code),
+      .stop_i             (vec_rst_stop),
+      .stopped_o          (vec_lsu_stopped),
+      .stop_elem_o        (vec_lsu_stop_elem),
+      .elems_o            (vec_lsu_elems),
+      .req_ctr_o          (vec_lsu_req_ctr),
+      .vrf_rd_valid_o     (vec_lsu_rd_valid),
+      .vrf_rd_base_o      (vec_lsu_rd_base),
+      .vrf_rd_elem_o      (vec_lsu_rd_elem),
+      .vrf_rd_sew_o       (vec_lsu_rd_sew),
+      .vrf_rd_lmul_o      (vec_lsu_rd_lmul),
+      .vrf_rd_tag_o       (vec_lsu_rd_tag),
+      .vrf_rd_gnt_i       (vec_lsu_rd_gnt),
+      .vrf_rd_rsp_valid_i (vec_lsu_rd_rsp_valid),
+      .vrf_rd_rsp_tag_i   (vec_lsu_rd_rsp_tag),
+      .vrf_rd_rsp_data_i  (vec_lsu_rd_rsp_data),
+      .vrf_wr_valid_o     (vec_lsu_wr_valid),
+      .vrf_wr_base_o      (vec_lsu_wr_base),
+      .vrf_wr_elem_o      (vec_lsu_wr_elem),
+      .vrf_wr_sew_o       (vec_lsu_wr_sew),
+      .vrf_wr_lmul_o      (vec_lsu_wr_lmul),
+      .vrf_wr_data_o      (vec_lsu_wr_data),
+      .vrf_wr_gnt_i       (vec_lsu_wr_gnt),
+      .mem_req_valid_o    (vec_mem_req_valid),
+      .mem_req_ready_i    (vec_mem_req_ready),
+      .mem_req_elem_o     (vec_mem_req_elem),
+      .mem_req_field_o    (vec_mem_req_field),
+      .mem_req_addr_o     (vec_mem_req_addr),
+      .mem_req_wmask_o    (vec_mem_req_wmask),
+      .mem_req_wdata_o    (vec_mem_req_wdata),
+      .mem_req_we_o       (vec_mem_req_we),
+      .mem_req_size_o     (vec_mem_req_size),
+      .mem_req_ordered_o  (),
+      .mem_rsp_valid_i    (vec_mem_rsp_valid),
+      .mem_rsp_elem_i     (vec_mem_rsp_elem_q),
+      .mem_rsp_field_i    (vec_mem_rsp_field_q),
+      .mem_rsp_fault_i    (vec_mem_rsp_fault),
+      .mem_rsp_fault_code_i (vec_mem_rsp_code),
+      .mem_rsp_rdata_i    (vec_mem_rsp_rdata)
+  );
+
+  // ---------------------------------------------------- the restart controller
+  assign vec_rst_exec_mode = vec_pay_q.lsu_mode;
+  assign vec_rst_exec_we   = vec_pay_q.lsu_we;
+  assign vec_rst_exec_fof  = vec_pay_q.lsu_fof;
+  assign vec_rst_exec_nf   = vec_pay_q.nf;
+
+  mosaic_vec_restart #(
+      .VLEN (128),
+      .ELEN (64)
+  ) u_vec_restart (
+      .clk_i              (clk),
+      .rst_i              (rst),
+      .exec_valid_i       (vec_rst_exec_valid),
+      .exec_mode_i        (vec_rst_exec_mode),
+      .exec_we_i          (vec_rst_exec_we),
+      .exec_fof_i         (vec_rst_exec_fof),
+      .exec_nf_i          (vec_rst_exec_nf),
+      .cfg_vtype_i        (vec_vtype),
+      .cfg_vl_i           (vec_vl[7:0]),
+      .cfg_vstart_i       (vec_vstart[6:0]),
+      .lsu_busy_i         (vec_lsu_busy),
+      .lsu_done_i         (vec_lsu_done),
+      .lsu_illegal_i      (vec_lsu_illegal),
+      .lsu_trap_i         (vec_lsu_trap),
+      .lsu_trap_elem_i    (vec_lsu_trap_elem),
+      .lsu_trap_code_i    (vec_lsu_trap_code),
+      .lsu_stopped_i      (vec_lsu_stopped),
+      .lsu_stop_elem_i    (vec_lsu_stop_elem),
+      .lsu_elems_i        (vec_lsu_elems),
+      .intr_i             (1'b0),
+      .stop_o             (vec_rst_stop),
+      .elem_done_valid_o  (vec_rst_elem_done_valid),
+      .elem_done_index_o  (vec_rst_elem_done_index),
+      .fault_valid_o      (vec_rst_fault_valid),
+      .fault_elem_o       (vec_rst_fault_elem),
+      .fault_code_o       (vec_rst_fault_code),
+      .desc_valid_i       (vec_desc_valid),
+      .desc_bitmap_i      (vec_desc_bitmap),
+      .desc_prefix_i      (vec_desc_prefix),
+      .o_busy_o           (vec_rst_busy),
+      .o_resolved_o       (vec_rst_resolved),
+      .o_illegal_o        (vec_rst_illegal),
+      .o_trap_o           (vec_rst_trap),
+      .o_vstart_o         (vec_rst_vstart),
+      .o_trap_code_o      (vec_rst_trap_code),
+      .o_vl_write_o       (vec_rst_vl_write),
+      .o_vl_new_o         (vec_rst_vl_new),
+      .o_fof_trim_o       (vec_rst_fof_trim),
+      .o_complete_o       (vec_rst_complete),
+      .o_retire_ok_o      (vec_rst_retire_ok),
+      .o_restart_ready_o  (vec_rst_restart_ready),
+      .o_restart_vstart_o (vec_rst_restart_vstart),
+      .o_elems_committed_o(vec_rst_elems_committed),
+      .o_prefix_agree_o   (vec_rst_prefix_agree)
+  );
+
+  // ---------------------------------------------------- the chaining network
+  // The element-completion packets the descriptor accepts are the ones the
+  // chaining network validated: right generation, index inside vl, not the same
+  // element twice, and not after a fault or a cancel. A packet from a macro a
+  // redirect discarded therefore cannot advance the descriptor -- the identity
+  // discipline I-058 built, applied at the one place this integration has it.
+  assign vec_chain_p_alloc_valid = vec_launch_unit;
+  assign vec_chain_p_gen         = vec_gen_q;
+  assign vec_chain_p_vd          = vec_pay_q.vd;
+  assign vec_chain_p_vl          = vec_vl[7:0];
+  assign vec_chain_p_wr_valid    = (vec_pay_q.kind == 3'd1) ? vec_alu_trace_valid
+                                                           : vec_rst_elem_done_valid;
+  assign vec_chain_p_wr_index    = (vec_pay_q.kind == 3'd1) ? vec_alu_trace_elem[6:0]
+                                                           : vec_rst_elem_done_index;
+  assign vec_chain_p_wr_data     = 64'd0;
+  assign vec_chain_p_wr_gen      = vec_gen_q;
+  assign vec_chain_p_fault_valid = vec_rst_fault_valid;
+  assign vec_chain_p_fault_elem  = vec_rst_fault_elem;
+  assign vec_chain_p_cancel      = vec_macro_leave;
+  assign vec_chain_p_done        = (vec_pay_q.kind == 3'd1) ? vec_alu_done : vec_rst_resolved;
+
+  mosaic_vec_chain #(
+      .VLEN    (128),
+      .ELEN    (64),
+      .GEN_W   (CORE_RGEN_W),
+      .GROUP_W (5)
+  ) u_vec_chain (
+      .clk_i              (clk),
+      .rst_i              (rst),
+      // The shipping build uses element-granular chaining. The no-chaining
+      // control is a `-D` mutant that ties it low (the architectural result
+      // must be identical either way, which is what makes it a control).
+      .chain_en_i         (1'b1),
+      .p_alloc_valid_i    (vec_chain_p_alloc_valid),
+      .p_alloc_ready_o    (vec_chain_p_alloc_ready),
+      .p_gen_i            (vec_chain_p_gen),
+      .p_vd_i             (vec_chain_p_vd),
+      .p_vl_i             (vec_chain_p_vl),
+      .p_wr_valid_i       (vec_chain_p_wr_valid),
+      .p_wr_index_i       (vec_chain_p_wr_index),
+      .p_wr_data_i        (vec_chain_p_wr_data),
+      .p_wr_gen_i         (vec_chain_p_wr_gen),
+      .p_wr_accept_o      (vec_chain_p_wr_accept),
+      .p_fault_valid_i    (vec_chain_p_fault_valid),
+      .p_fault_elem_i     (vec_chain_p_fault_elem),
+      .p_cancel_i         (vec_chain_p_cancel),
+      .p_done_i           (vec_chain_p_done),
+      .o_accept_valid_o   (vec_chain_accept_valid),
+      .o_accept_index_o   (vec_chain_accept_index),
+      .c0_alloc_valid_i   (1'b0),
+      .c0_alloc_ready_o   (),
+      .c0_gen_i           ({CORE_RGEN_W{1'b0}}),
+      .c0_vs_i            (5'd0),
+      .c0_vl_i            (8'd0),
+      .c0_req_valid_i     (1'b0),
+      .c0_req_index_i     (7'd0),
+      .c0_req_accept_o    (),
+      .c0_rdy_o           (),
+      .c0_data_o          (),
+      .c0_finish_i        (1'b0),
+      .c1_alloc_valid_i   (1'b0),
+      .c1_alloc_ready_o   (),
+      .c1_gen_i           ({CORE_RGEN_W{1'b0}}),
+      .c1_vs_i            (5'd0),
+      .c1_vl_i            (8'd0),
+      .c1_req_valid_i     (1'b0),
+      .c1_req_index_i     (7'd0),
+      .c1_req_accept_o    (),
+      .c1_rdy_o           (),
+      .c1_data_o          (),
+      .c1_finish_i        (1'b0),
+      .war_valid_i        (1'b0),
+      .war_vd_i           (5'd0),
+      .war_elem_i         (7'd0),
+      .war_data_i         (64'd0),
+      .war_grant_o        (),
+      .src_release_ok_o   (),
+      .o_valid_o          (vec_chain_valid),
+      .o_gen_o            (vec_chain_gen),
+      .o_vd_o             (vec_chain_vd),
+      .o_done_o           (vec_chain_done),
+      .o_fault_o          (vec_chain_fault),
+      .o_fault_elem_o     (vec_chain_fault_elem),
+      .o_ready_o          (),
+      .o_pkt_accept_ctr_o (vec_chain_pkt_accept_ctr),
+      .o_pkt_refuse_ctr_o (vec_chain_pkt_refuse_ctr),
+      .o_fwd_ctr_o        (),
+      .o_stall_ctr_o      ()
+  );
+
+  // The descriptor's element progress is exactly the packets the chain accepted.
+  assign vec_desc_elem_done_valid = vec_chain_accept_valid;
+  assign vec_desc_elem_done_index = vec_chain_accept_index;
+  // A fault is recorded by the restart controller and forwarded into the
+  // descriptor and the chain (above); the chain freezes on it.
+  assign vec_desc_fault_valid = vec_rst_fault_valid;
+  assign vec_desc_fault_elem  = vec_rst_fault_elem;
+  assign vec_desc_fault_code  = vec_rst_fault_code;
+
+  // --------------------------------------------------------------------------
+  // The engine sequencer
+  // --------------------------------------------------------------------------
+  // A macro is "at the head and ready to start" when its ROB entry is the head
+  // and nothing else is in flight. Everything that could redirect is excluded
+  // (`recovering`, `redirect_valid`), as is the interrupt offer, so the trap the
+  // macro may take is its own.
+  logic vec_illegal_launch;
+  logic vec_eew_mismatch;
+
+  // The packetizer derives an element's width from vtype.SEW, not from the
+  // instruction's width suffix. A suffix that disagrees is therefore refused
+  // rather than mis-addressed; the report names the widths that remain
+  // unreachable because of it.
+  assign vec_eew_mismatch = ((vec_pay_q.kind == 3'd2) || (vec_pay_q.kind == 3'd3)) &&
+                            (vec_pay_q.eew_sew != vec_vtype[5:3]);
+  assign vec_illegal_launch = vec_vset_vs_off || vec_eew_mismatch ||
+                              ((vec_pay_q.kind != 3'd0) && vec_desc_illegal);
+
+  // Launch waits for the memory path to drain: the vector LSU drives the core's
+  // one data port and must not overtake a store the queue is still draining.
+  assign vec_launch = vec_at_head && (vec_state_q == VEC_IDLE) &&
+                      !vec_wb_pending_q && !vec_done_q &&
+                      !sys_head && !head_exc_trap && !irq_valid && !recovering &&
+                      !redirect_valid && !core_stop &&
+                      (!vec_is_mem || mem_path_idle) &&
+                      vec_desc_alloc_ready;
+
+  assign vec_is_mem      = (vec_pay_q.kind == 3'd2) || (vec_pay_q.kind == 3'd3);
+  assign vec_launch_vset = vec_launch && (vec_pay_q.kind == 3'd0) &&
+                           !vec_illegal_launch;
+  assign vec_launch_unit = vec_launch && (vec_pay_q.kind != 3'd0) && !vec_illegal_launch;
+  assign vec_vset_valid  = vec_launch_vset;
+  assign vec_vset_kind   = vec_pay_q.vset_kind;
+  assign vec_vset_rd     = vec_pay_q.vd;
+  assign vec_vset_uimm   = vec_pay_q.vset_uimm;
+  assign vec_vtypei      = vec_pay_q.vtypei;
+
+  // A unit launch is a one-cycle strobe; dispatch holds the macro at the head
+  // until it retires, so the strobe cannot be re-issued.
+  assign vec_alu_exec_valid = vec_launch_unit && (vec_pay_q.kind == 3'd1);
+  assign vec_lsu_exec_valid = vec_launch_unit && vec_is_mem;
+  assign vec_rst_exec_valid = vec_launch_unit && vec_is_mem;
+  assign vec_desc_alloc_valid = vec_launch_unit;
+  assign vec_desc_release     = vec_macro_leave;
+
+  // The scalar operand of an arithmetic macro: x[rs1] for the .vx form, the
+  // immediate for .vi, unused for .vv.
+  assign vec_alu_scalar = vec_pay_q.scalar_from_imm ? vec_pay_q.imm : vec_src1_q;
+
+  // The staged vset reads x[rs1]; the payload's vs1 is the same field.
+  assign vec_pay_q_vs1 = vec_pay_q.vs1;
+
+  // `vec_pay_q_vtype_dep` is "the descriptor must be legal for this macro to
+  // execute": true for everything except vset (which defines the configuration
+  // rather than depending on it).
+  assign vec_pay_q_vtype_dep = (vec_pay_q.kind != 3'd0);
+
+  assign vec_lsu_owns_vrf = vec_lsu_busy;
+
+  // The completion the arbiter publishes on port 3.
+  always_comb begin
+    vec_wb_ev.id.hart      = 1'b0;
+    vec_wb_ev.id.rob_index = vec_index_q;
+    vec_wb_ev.id.rob_gen   = vec_gen_q;
+    vec_wb_ev.id.uop_index = vec_uop_q;
+    vec_wb_ev.dst.tag      = vec_dst_x0_q ? {CORE_TAG_W{1'b0}} : vec_dst_tag_q;
+    vec_wb_ev.dst.gen      = {{(CORE_PGEN_W - CORE_IGEN_W){1'b0}}, vec_dst_gen_q};
+    vec_wb_ev.dst.x0       = vec_dst_x0_q;
+    // Only vset{i}vl{i} carries a value: the new vl in the integer rd. Every
+    // other vector macro's architectural result is a vector register, which the
+    // engine wrote through the VRF.
+    vec_wb_ev.value_valid  = (vec_pay_q.kind == 3'd0) && !vec_dst_x0_q;
+    vec_wb_ev.value        = (vec_pay_q.kind == 3'd0) ? vec_vset_rd_val : {CORE_XLEN{1'b0}};
+    // A vector macro's exception is taken by the trap controller, not by the
+    // writeback path: the instruction does not retire, and the trap carries a
+    // `vstart` the writeback event has no field for. So the payload is empty
+    // here, exactly as the system unit's is.
+    vec_wb_ev.exc.valid    = 1'b0;
+    vec_wb_ev.exc.cause    = {CORE_XLEN{1'b0}};
+    vec_wb_ev.exc.tval     = {CORE_XLEN{1'b0}};
+    vec_wb_ev.is_store     = 1'b0;
+    vec_wb_ev.is_load      = 1'b0;
+  end
+
+  assign vec_wb_want  = vec_at_head && vec_done_q && !vec_wb_pending_q;
+
+  // -------------------------------------------------------- trap resolution
+  // A memory fault's cause is the access class the instruction performed; its
+  // tval is the faulting element's own address, which the packetizer's element
+  // index and the instruction's EEW name exactly (the packetizer issues one
+  // request per element, so element k is at base + k*EEW/8 for the stride-0
+  // form this integration wires).
+  logic [63:0] vec_trap_cause_mem;
+  logic [63:0] vec_trap_tval_mem;
+  always_comb begin
+    vec_trap_cause_mem = vec_lsu_we ? mosaic_pkg::EXC_STORE_ACCESS
+                                    : mosaic_pkg::EXC_LOAD_ACCESS;
+    case (vec_rst_trap_code)
+      4'd1:    vec_trap_cause_mem = vec_lsu_we ? mosaic_pkg::EXC_STORE_PAGE
+                                               : mosaic_pkg::EXC_LOAD_PAGE;
+      4'd2:    vec_trap_cause_mem = vec_lsu_we ? mosaic_pkg::EXC_STORE_ACCESS
+                                               : mosaic_pkg::EXC_LOAD_ACCESS;
+      default: vec_trap_cause_mem = vec_lsu_we ? mosaic_pkg::EXC_STORE_ACCESS
+                                               : mosaic_pkg::EXC_LOAD_ACCESS;
+    endcase
+    vec_trap_tval_mem = vec_lsu_base +
+        (64'(vec_rst_vstart) << vec_pay_q.eew_sew);
+  end
+
+  // ---------------------------------------------------------- the FSM outputs
+  assign vec_unit_done = (vec_pay_q.kind == 3'd1) ? vec_alu_done
+                                                  : vec_lsu_finished;
+  logic vec_lsu_seen_busy_q;
+  logic vec_lsu_finished;
+  assign vec_lsu_finished = vec_lsu_seen_busy_q && !vec_rst_busy;
+
+  assign vec_macro_leave = (vec_valid_q && rob_retire_ack && vec_at_head) ||
+                           redirect_valid;
+
+  // internal CSR writes: clear vstart when a non-vset macro completes, and set
+  // it to the faulting element when a memory macro traps.
+  assign vec_vstart_clear = vec_wb_valid && (vec_pay_q.kind != 3'd0);
+  assign vec_csr_internal = vec_vstart_clear || (vec_trap_take && vec_is_mem);
+  assign vec_csr_internal_addr  = 12'h008;
+  assign vec_csr_internal_wdata = vec_trap_take ? {57'd0, vec_vstart_q}
+                                                : 64'd0;
+
+  assign vec_csr_valid = vec_csr_internal ? 1'b1
+                       : (csr_is_vec && (sys_exec ||
+                                         (sys_wb_valid && sys_csr_writes_q)));
+  assign vec_csr_addr  = vec_csr_internal ? vec_csr_internal_addr : csr_addr;
+  assign vec_csr_write = vec_csr_internal ? 1'b1
+                                          : (sys_wb_valid && sys_csr_writes_q);
+  assign vec_csr_wdata = vec_csr_internal ? vec_csr_internal_wdata : sys_src1_q;
+
+  assign vec_trap_take = (vec_state_q == VEC_TRAP) && vec_at_head &&
+                         !redirect_valid && !recovering;
+
+  // ------------------------------------------------------- the FSM registers
+  always_ff @(posedge clk) begin
+    if (rst) begin
+      vec_valid_q        <= 1'b0;
+      vec_index_q        <= {CORE_IDX_W{1'b0}};
+      vec_gen_q          <= {CORE_RGEN_W{1'b0}};
+      vec_uop_q          <= {CORE_UOP_W{1'b0}};
+      vec_pay_q          <= '0;
+      vec_src1_q         <= {CORE_XLEN{1'b0}};
+      vec_src2_q         <= {CORE_XLEN{1'b0}};
+      vec_dst_tag_q      <= {CORE_TAG_W{1'b0}};
+      vec_dst_gen_q      <= {CORE_IGEN_W{1'b0}};
+      vec_dst_x0_q       <= 1'b1;
+      vec_state_q        <= VEC_IDLE;
+      vec_done_q         <= 1'b0;
+      vec_wb_pending_q   <= 1'b0;
+      vec_trap_cause_q   <= {CORE_XLEN{1'b0}};
+      vec_trap_tval_q    <= {CORE_XLEN{1'b0}};
+      vec_vstart_q       <= 7'd0;
+      vec_lsu_seen_busy_q<= 1'b0;
+      vec_macro_ctr      <= 32'd0;
+      vec_trap_ctr       <= 32'd0;
+      vec_retire_ctr     <= 32'd0;
+      vec_fault_ctr      <= 32'd0;
+    end else begin
+      if (vec_valid_q && (vec_state_q == VEC_RUN)) begin
+        if (vec_lsu_owns_vrf) vec_lsu_seen_busy_q <= 1'b1;
+      end
+      if (vec_launch_unit) vec_lsu_seen_busy_q <= 1'b0;
+
+      if (redirect_valid) begin
+        vec_valid_q        <= 1'b0;
+        vec_state_q        <= VEC_IDLE;
+        vec_done_q         <= 1'b0;
+        vec_wb_pending_q   <= 1'b0;
+        vec_lsu_seen_busy_q<= 1'b0;
+      end else begin
+        if (vec_valid_q && rob_retire_ack && vec_at_head) begin
+          vec_valid_q      <= 1'b0;
+          vec_state_q      <= VEC_IDLE;
+          vec_done_q       <= 1'b0;
+          vec_wb_pending_q <= 1'b0;
+          vec_retire_ctr   <= vec_retire_ctr + 32'd1;
+        end
+        if (disp_sys_valid && sys_ins_ready_int && disp_sys_is_vec) begin
+          vec_valid_q      <= 1'b1;
+          vec_index_q      <= disp_sys_id[CORE_UOP_W + CORE_RGEN_W +: CORE_IDX_W];
+          vec_gen_q        <= disp_sys_id[CORE_UOP_W +: CORE_RGEN_W];
+          vec_uop_q        <= disp_sys_id[CORE_UOP_W-1:0];
+          vec_pay_q        <= disp_sys_vec;
+          vec_src1_q       <= disp_sys_src1_val;
+          vec_src2_q       <= disp_sys_src2_val;
+          vec_dst_tag_q    <= disp_sys_dst_tag;
+          vec_dst_gen_q    <= disp_sys_dst_gen;
+          vec_dst_x0_q     <= disp_sys_dst_x0;
+          vec_state_q      <= VEC_IDLE;
+          vec_done_q       <= 1'b0;
+          vec_wb_pending_q <= 1'b0;
+          vec_lsu_seen_busy_q <= 1'b0;
+          vec_macro_ctr    <= vec_macro_ctr + 32'd1;
+        end
+
+        case (vec_state_q)
+          VEC_IDLE: begin
+            if (vec_launch) begin
+              if (vec_launch_vset) begin
+                // vset commits this cycle (its registers update at the edge);
+                // its completion is offered next cycle.
+                vec_done_q  <= 1'b1;
+                vec_state_q <= VEC_DONE;
+              end else if (vec_illegal_launch) begin
+                vec_trap_cause_q  <= mosaic_pkg::EXC_ILLEGAL_INSN;
+                vec_trap_tval_q   <= {CORE_XLEN{1'b0}};
+                vec_state_q       <= VEC_TRAP;
+              end else begin
+                vec_state_q <= VEC_RUN;
+              end
+            end
+          end
+          VEC_RUN: begin
+            if (vec_unit_done) begin
+              if (vec_rst_trap && vec_is_mem) begin
+                vec_trap_cause_q <= vec_trap_cause_mem;
+                vec_trap_tval_q  <= vec_trap_tval_mem;
+                vec_vstart_q     <= vec_rst_vstart;
+                vec_fault_ctr    <= vec_fault_ctr + 32'd1;
+                vec_state_q      <= VEC_TRAP;
+              end else if (vec_unit_illegal) begin
+                vec_trap_cause_q <= mosaic_pkg::EXC_ILLEGAL_INSN;
+                vec_trap_tval_q  <= {CORE_XLEN{1'b0}};
+                vec_state_q      <= VEC_TRAP;
+              end else begin
+                vec_done_q  <= 1'b1;
+                vec_state_q <= VEC_DONE;
+              end
+            end
+          end
+          VEC_DONE: begin
+            if (vec_wb_valid) vec_wb_pending_q <= 1'b1;
+          end
+          VEC_TRAP: begin
+            if (vec_trap_take) vec_trap_ctr <= vec_trap_ctr + 32'd1;
+          end
+          default: vec_state_q <= VEC_IDLE;
+        endcase
+      end
+    end
+  end
+
+  assign vec_unit_illegal = (vec_pay_q.kind == 3'd1) ? vec_alu_illegal
+                                                     : vec_rst_illegal;
+
+  // The engine's element counter: every element completion the chain validated.
+  always_ff @(posedge clk) begin
+    if (rst) begin
+      vec_elem_ctr <= 32'd0;
+    end else if (vec_chain_accept_valid) begin
+      vec_elem_ctr <= vec_elem_ctr + 32'd1;
+    end
+  end
+
+  // The vector-state write predicate for mstatus.VS. It is recorded per ROB slot
+  // at allocation (like the FP FS predicate) and read when that slot retires, so
+  // a vector macro a redirect discards never dirties VS.
+  logic vec_state_wr_mem [0:CORE_ROB_N-1];
+  logic vec_vs_dirty;
+  integer vec_i;
+  always_ff @(posedge clk) begin
+    if (rst) begin
+      for (vec_i = 0; vec_i < CORE_ROB_N; vec_i++) vec_state_wr_mem[vec_i] <= 1'b0;
+    end else begin
+      if (desc_wr_valid) begin
+        vec_state_wr_mem[desc_wr_index] <= dbuf_ctl[0].is_vec &&
+                                            (dbuf_ctl[0].vec_kind != 3'd3);
+      end
+      if (rob_flush_pulse) begin
+        for (vec_i = 0; vec_i < CORE_ROB_N; vec_i++) vec_state_wr_mem[vec_i] <= 1'b0;
+      end
+    end
+  end
+  assign vec_vs_dirty = rob_retire_ack && vec_state_wr_mem[rob_head_index];
+
+  // ---------------------------------------------------- the core's CSR read
+  assign csr_rdata_final = csr_is_vec ? vec_csr_rdata : csr_rdata;
+
+  // -------- the vector engine's memory response return path (elem/field echo)
+  // The packetizer identifies a response by the element and field of the
+  // request it answers. The core's data port serves one accepted request at a
+  // time, so the request currently outstanding is exactly the one the latch
+  // holds; the fault flag and its class come from the reply itself.
+  always_ff @(posedge clk) begin
+    if (rst) begin
+      vec_mem_rsp_elem_q  <= 7'd0;
+      vec_mem_rsp_field_q <= 4'd0;
+    end else if (vec_mem_req_valid && vec_mem_req_ready) begin
+      vec_mem_rsp_elem_q  <= vec_mem_req_elem;
+      vec_mem_rsp_field_q <= vec_mem_req_field;
+    end
+  end
+
+  assign vec_mem_rsp_fault = vec_mem_rsp_valid && vec_mem_rsp_fault_raw;
+  // The packetizer's fault classes: 1 page fault, 2 access fault. This
+  // integration has no translation on the vector path (the profile is bare at
+  // reset and the report says so), so a refused access is an access fault.
+  assign vec_mem_rsp_code  = vec_mem_rsp_fault ? 4'd2 : 4'd0;
 
   // ==========================================================================
   // 8. Writeback arbiter
@@ -3019,6 +4519,8 @@ module mosaic_core (
       .sys_ins_is_sfence_vma   (disp_sys_is_sfence_vma),
       .sys_ins_sfence_has_va   (disp_sys_sfence_has_va),
       .sys_ins_sfence_has_asid (disp_sys_sfence_has_asid),
+      .sys_ins_is_vec   (disp_sys_is_vec),
+      .sys_ins_vec      (disp_sys_vec),
       .sys_ins_src1_val (disp_sys_src1_val),
       .sys_ins_src2_val (disp_sys_src2_val),
       .sys_ins_dst_tag  (disp_sys_dst_tag),
@@ -3076,6 +4578,9 @@ module mosaic_core (
       // (its fall-through is architectural). The refusal rule needs the
       // narrower fact: "an unresolved branch may still squash younger work".
       .branch_in_flight (br_inflight),
+      // V (I-059): a vector macro is live, so nothing younger allocates. The
+      // macro then reaches the head with the machine behind it empty.
+      .vec_block_i      (vec_block),
       .trap_vector_armed_i(trap_vector_armed),
       .stop             (disp_unsupported),
       .o_take           (disp_take),
@@ -3133,7 +4638,7 @@ module mosaic_core (
   // strobes it. An *illegal* write is strobed too and refused by the CSR file's
   // generated legality rule; that is what makes the illegal-access trap
   // detectable without a second copy of the table here.
-  assign csr_we = sys_wb_valid && sys_csr_writes_q;
+  assign csr_we = sys_wb_valid && sys_csr_writes_q && !csr_is_vec;
 
   mosaic_csr u_csr (
       .clk_i              (clk),
@@ -3206,6 +4711,7 @@ module mosaic_core (
       .o_frm_o            (o_csr_frm),
       .fp_fflags_or_i     (fp_fflags_or),
       .fp_fs_dirty_i      (fp_fs_dirty),
+      .vec_vs_dirty_i     (vec_vs_dirty),
       .o_misa_o           (),
       .o_mcycle_o         (),
       .o_minstret_o       (),
@@ -3292,7 +4798,7 @@ module mosaic_core (
   // The staging entry is free unless a macro is staged in it; that is what
   // keeps one entry enough, because dispatch holds the macro until it can be
   // taken.
-  assign sys_ins_ready_int = !sys_valid_q;
+  assign sys_ins_ready_int = !sys_valid_q && !vec_valid_q;
 
   // --------------------------------------------------------------------------
   // The fence rule (I-037)
@@ -3380,7 +4886,9 @@ module mosaic_core (
   logic csr_access_illegal;
 
   assign csr_access_illegal = (sys_csr_op_q != mosaic_pkg::CSR_NONE) &&
-                              (csr_illegal || (sys_csr_writes_q && csr_wr_illegal));
+                              (csr_is_vec ? vec_csr_illegal
+                               : (csr_illegal ||
+                                  (sys_csr_writes_q && csr_wr_illegal)));
 
   // SFENCE.VMA's own legality (I-046). The spec makes it an illegal instruction
   // in U-mode, and in S-mode when mstatus.TVM is set ("attempts to ... execute
@@ -3411,7 +4919,7 @@ module mosaic_core (
   assign tlb_sfence_valid = sys_wb_valid && sys_sfence_vma_q && !sys_exc;
   assign tlb_satp_write   = (csr_satp != csr_satp_prev_q);
   assign tlb_sfence_va    = sys_src1_q;
-  assign tlb_sfence_asid  = sys_src2_q;
+  assign tlb_sfence_asid  = sys_src2_q[15:0];
 
   always_comb begin
     sys_exc       = 1'b0;
@@ -3495,7 +5003,7 @@ module mosaic_core (
     sys_wb_ev.dst.gen      = {{(CORE_PGEN_W - CORE_IGEN_W){1'b0}}, sys_dst_gen_q};
     sys_wb_ev.dst.x0       = sys_dst_x0_q;
     sys_wb_ev.value_valid  = !sys_dst_x0_q;
-    sys_wb_ev.value        = sys_csr_reads_q ? csr_rdata : {CORE_XLEN{1'b0}};
+    sys_wb_ev.value        = sys_csr_reads_q ? csr_rdata_final : {CORE_XLEN{1'b0}};
     // A system macro never raises its exception through the writeback path.
     // The retire stream publishes one event per retired macro, and an
     // exception completion would publish a second lane-0 event for a macro
@@ -3510,9 +5018,11 @@ module mosaic_core (
     sys_wb_ev.is_load      = 1'b0;
   end
 
-  assign sys_wb_want  = sys_exec;
+  assign sys_wb_want = sys_exec;
   assign port3_taken_sys = sys_wb_want;
-  assign sys_wb_valid = sys_wb_want && lsu_wb_ready_int;
+  assign port3_taken_vec = vec_wb_want && !port3_taken_sys;
+  assign vec_wb_valid    = vec_wb_want && lsu_wb_ready_int;
+  assign sys_wb_valid    = sys_wb_want && lsu_wb_ready_int;
 
   // ==========================================================================
   // The cache fence (I-042): FENCE.I writes the D-cache back, then invalidates
@@ -3572,9 +5082,11 @@ module mosaic_core (
   assign icache_flush     = (cf_state != CF_IDLE);
   assign cache_fence_busy = (cf_state != CF_IDLE);
 `endif
-  assign wb3_valid    = port3_taken_sys ? sys_wb_valid : lsu_wb_valid;
-  assign wb3_ev       = port3_taken_sys ? sys_wb_ev : lsu_wb_ev;
-  assign lsu_wb_ready = lsu_wb_ready_int && !port3_taken_sys;
+  assign wb3_valid    = port3_taken_sys ? sys_wb_valid
+                      : (port3_taken_vec ? vec_wb_valid : lsu_wb_valid);
+  assign wb3_ev       = port3_taken_sys ? sys_wb_ev
+                      : (port3_taken_vec ? vec_wb_ev : lsu_wb_ev);
+  assign lsu_wb_ready = lsu_wb_ready_int && !port3_taken_sys && !port3_taken_vec;
 
   // MRET updates mstatus in its own execution cycle, exactly as a CSR write
   // would, and its redirect is requested from the cycle its entry is complete --
@@ -3646,8 +5158,8 @@ module mosaic_core (
   // second trap with a stale head. `irq_valid` is already gated this way by
   // `core_can_trap`.
   assign sys_trap_take = sys_trap_q && !redirect_valid && !recovering;
-  assign trap_is_irq   = !head_exc_trap && !sys_trap_take && irq_valid;
-  assign trap_decision = head_exc_trap || sys_trap_take || irq_valid;
+  assign trap_is_irq   = !head_exc_trap && !sys_trap_take && !vec_trap_take && irq_valid;
+  assign trap_decision = head_exc_trap || sys_trap_take || vec_trap_take || irq_valid;
 
 `ifdef MOSAIC_CORE_MUTANT_TRAP_EPC_NEXT
   // NEGATIVE CONTROL: the exception Program Counter is the instruction *after*
@@ -3670,15 +5182,18 @@ module mosaic_core (
 
   assign trap_epc   = trap_is_irq ? trap_epc_irq : trap_epc_sync;
   assign trap_cause = head_exc_trap ? exc_cause_head
-                      : (sys_trap_q ? sys_trap_cause_q : irq_cause);
+                      : (vec_trap_take ? vec_trap_cause_q
+                      : (sys_trap_q ? sys_trap_cause_q : irq_cause));
   // A memory fault carries its own tval through the ROB's exception record; a
   // synchronous system trap carries one only when the ISA defines it -- the
   // instruction access fault of a denied fetch names the address that could not
   // be read, and every other system trap (ECALL, EBREAK, the illegal returns)
   // has no informative value, which this profile writes as zero rather than
-  // guessing an encoding.
+  // guessing an encoding. A vector memory fault names the faulting element's
+  // address, exactly as the scalar access it resembles would.
   assign trap_tval  = head_exc_trap ? exc_tval_head
-                      : (sys_trap_q ? sys_trap_tval_q : {CORE_XLEN{1'b0}});
+                      : (vec_trap_take ? vec_trap_tval_q
+                      : (sys_trap_q ? sys_trap_tval_q : {CORE_XLEN{1'b0}}));
 
   assign csr_trap_valid = trap_decision;
 
@@ -3698,6 +5213,7 @@ module mosaic_core (
   // access latency, and the load's own fault path is unaffected: an error
   // response arrives as the head's exception, which `head_exc_trap` takes.
   assign core_can_trap = rob_head_valid && !rob_head_exc && !sys_head &&
+                         !vec_valid_q &&
                          !redirect_valid && !recovering && !core_stop && !wfi_halt &&
                          !dev_ser_busy;
 
@@ -3837,7 +5353,7 @@ module mosaic_core (
         sys_valid_q <= 1'b0;
       end else if (sys_valid_q && rob_retire_ack && sys_head) begin
         sys_valid_q <= 1'b0;
-      end else if (disp_sys_valid && sys_ins_ready_int) begin
+      end else if (disp_sys_valid && sys_ins_ready_int && !disp_sys_is_vec) begin
         sys_valid_q      <= 1'b1;
         // The identity fields are the truncated uop id's own layout --
         // {rob_index, rob_gen, uop_index}, most significant first, exactly as
@@ -4624,12 +6140,19 @@ module mosaic_core (
   // side (`dc_mem_*`); the endpoint itself talks to that path's CPU side.
   assign dc_mem_rsp_valid  = dmem_rsp_valid && (mem_owner_q == MEM_OWN_EP);
   assign dc_mem_rsp        = dmem_rsp;
+  // The vector engine's slot on the same arbiter (I-059).
+  assign vec_mem_rsp_valid = dmem_rsp_valid && (mem_owner_q == MEM_OWN_VEC);
+  assign vec_mem_rsp_rdata = dmem_rsp.rdata;
+  assign vec_mem_rsp_fault_raw = dmem_rsp.fault;
 
   assign ptw_mem_req_ready = dmem_req_ready && (mem_owner_q == MEM_OWN_NONE);
-  assign dc_mem_req_ready  = dmem_req_ready && (mem_owner_q == MEM_OWN_NONE) &&
+  assign vec_mem_req_ready = dmem_req_ready && (mem_owner_q == MEM_OWN_NONE) &&
                              !ptw_mem_req_valid;
+  assign dc_mem_req_ready  = dmem_req_ready && (mem_owner_q == MEM_OWN_NONE) &&
+                             !ptw_mem_req_valid && !vec_mem_req_valid;
   assign dmem_req_valid    = (mem_owner_q == MEM_OWN_NONE) &&
-                             (ptw_mem_req_valid || dc_mem_req_valid);
+                             (ptw_mem_req_valid || vec_mem_req_valid ||
+                              dc_mem_req_valid);
   always_comb begin
     if (ptw_mem_req_valid) begin
       // A PTE access is always an 8-byte access to the PTE's physical address.
@@ -4642,12 +6165,26 @@ module mosaic_core (
       dmem_req.amo_op = mosaic_pkg::AMO_ADD;
       dmem_req.aq     = 1'b0;
       dmem_req.rl     = 1'b0;
+    end else if (vec_mem_req_valid) begin
+      // The packetizer's one request per element: the 8-byte-aligned beat, the
+      // byte enables relative to it and the lane-positioned data. Never an
+      // atomic, never ordered by aq/rl -- the packetizer orders its own stream.
+      dmem_req.we     = vec_mem_req_we;
+      dmem_req.addr   = vec_mem_req_addr;
+      dmem_req.size   = vec_mem_req_size[2:0];
+      dmem_req.wstrb  = vec_mem_req_wmask;
+      dmem_req.wdata  = vec_mem_req_wdata;
+      dmem_req.amo    = 1'b0;
+      dmem_req.amo_op = mosaic_pkg::AMO_ADD;
+      dmem_req.aq     = 1'b0;
+      dmem_req.rl     = 1'b0;
     end else begin
       dmem_req = dc_mem_req;
     end
   end
   assign dmem_rsp_ready = (mem_owner_q == MEM_OWN_PTW) ? ptw_mem_rsp_ready
                         : (mem_owner_q == MEM_OWN_EP)  ? dc_mem_rsp_ready
+                        : (mem_owner_q == MEM_OWN_VEC) ? 1'b1
                         : 1'b1;
 
   always_ff @(posedge clk) begin
@@ -4655,7 +6192,8 @@ module mosaic_core (
       mem_owner_q <= MEM_OWN_NONE;
     end else begin
       if (dmem_req_valid && dmem_req_ready) begin
-        mem_owner_q <= ptw_mem_req_valid ? MEM_OWN_PTW : MEM_OWN_EP;
+        mem_owner_q <= ptw_mem_req_valid ? MEM_OWN_PTW
+                    : (vec_mem_req_valid ? MEM_OWN_VEC : MEM_OWN_EP);
       end
       if (dmem_rsp_valid && dmem_rsp_ready) begin
         mem_owner_q <= MEM_OWN_NONE;
