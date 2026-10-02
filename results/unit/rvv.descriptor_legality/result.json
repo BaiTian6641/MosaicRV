@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "case": "rvv.descriptor_legality",
+  "verdict": "PASS",
+  "detail": "checks=336 combos=9284 cycles=28",
+  "seed": 1,
+  "max_cycles": 200000,
+  "checks": 336,
+  "failures": 0,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-02T10:26:44Z",
+  "first_mismatch": ""
+}
