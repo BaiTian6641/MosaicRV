@@ -307,6 +307,16 @@ module mosaic_rob #(
     output logic                     obs_exc,
     output logic                     obs_closed,
 
+    // ------------------------------------------------- functional PC read (I-060)
+    // The PC of a live slot by index, for a *functional* consumer: the memory
+    // path's locality prefetcher labels a demand access with the PC of the load
+    // it is serving, and the ROB is the only place that PC lives. It is separate
+    // from `obs_*` on purpose -- the observation view is documented as a
+    // verification surface a functional consumer has no business reading -- and
+    // it is deliberately minimal: the index and the PC, nothing else.
+    input  logic [ROB_INDEX_W-1:0]   rd_index_i,
+    output logic [XLEN-1:0]          rd_pc_o,
+
     // ----------------------------------------------------------------- status
     output logic [ROB_INDEX_W-1:0]   o_head_ptr,
     output logic [ROB_INDEX_W-1:0]   o_alloc_ptr,
@@ -591,6 +601,13 @@ module mosaic_rob #(
   assign obs_done_cnt  = PopCount(obs_done_mask);
   assign obs_exc       = obs_valid && slot_exc[obs_index];
   assign obs_closed    = obs_valid && slot_closed[obs_index];
+
+  // The functional PC read (I-060). Ungated on validity on purpose: the caller
+  // reads the slot of a load it is currently serving, and that slot is live by
+  // construction (the load has not completed, so it cannot have retired). A
+  // caller that read a dead slot would be asking about an instruction that no
+  // longer exists, and no locality decision could be about it.
+  assign rd_pc_o = slot_pc[rd_index_i];
 
   // -------------------------------------------------------------- next state
   // Occupancy is computed once, from a single copy of the pre-edge value, with

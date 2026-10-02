@@ -160,6 +160,19 @@ module mosaic_core (
     // architectural result to be identical.
     input  logic                        cache_en_i,
 
+    // -------------------------------------- the locality path switches (I-060)
+    // Two runtime bits, like `cache_en_i`: the clean-copy locality buffer and
+    // the bounded prefetcher are each off at 0, so every driver that predates
+    // this package (all of them leave these at their default 0) builds the
+    // machine it always built. `loc_snoop_all_i` is the broadcast invalidation
+    // (a shootdown or a global flush) that a coherent fabric would drive; with
+    // one hart it is an input so a case can drive the eighth invalidation
+    // source from the core.
+    input  logic                        loc_llb_en_i,
+    input  logic                        loc_pf_en_i,
+    input  logic [1:0]                  loc_pf_conf_thresh_i,
+    input  logic                        loc_snoop_all_i,
+
     // ----------------------------------------- the runtime lane quota (I-059)
     // A *runtime* control port, like `fab_dyn_i`: the vector engine's lane
     // quota is a resource share, not architectural state, so it is not a CSR
@@ -215,6 +228,27 @@ module mosaic_core (
     // The class of the transaction the data port is carrying: 0 ordinary,
     // 1 AMO, 2 LR, 3 SC (valid while a transaction is in flight).
     output logic [1:0]                  o_mem_dmem_kind,
+
+    // ------------------------------------------------- the locality path (I-060)
+    // What the integrated locality structures did. They are counters, not
+    // control: nothing in the core reads them, and the case that owns the
+    // integration is the only consumer.
+    output logic [31:0]                 o_loc_llb_hit,
+    output logic [31:0]                 o_loc_llb_miss,
+    output logic [31:0]                 o_loc_llb_bypass,
+    output logic [31:0]                 o_loc_llb_fill,
+    output logic [31:0]                 o_loc_llb_fill_refused,
+    output logic [31:0]                 o_loc_llb_inv,
+    output logic [31:0]                 o_loc_mem_line,
+    output logic [31:0]                 o_loc_pf_issued,
+    output logic [31:0]                 o_loc_pf_useful,
+    output logic [31:0]                 o_loc_pf_useless,
+    output logic [31:0]                 o_loc_pf_late,
+    output logic [31:0]                 o_loc_pf_cancelled,
+    output logic [31:0]                 o_loc_pf_admitted,
+    output logic [31:0]                 o_loc_pf_fill,
+    output logic [31:0]                 o_loc_pf_fill_refused,
+    output logic [31:0]                 o_loc_pf_mem,
 
     // ------------------------------------------------------ retire event stream
     output logic [CORE_RET_N-1:0]       ev_valid,
@@ -1111,6 +1145,18 @@ module mosaic_core (
   logic [63:0] ep_tval_c, sq_drain_tval_c;
   logic [63:0] ser_hold_tval_q;
   logic        ptw_take_c;
+
+  // ------------------------------------------------------------ locality (I-060)
+  // The core-side wires of the integrated locality path. Declared here, before
+  // the ROB's functional PC read (which is the first use), because a signal
+  // must exist before the instance that reads it.
+  logic [26:0] loc_vpn_c;
+  logic        loc_inv_store_valid_c;
+  logic [63:0] loc_inv_store_pa_c;
+  logic        loc_fence_valid_c;
+  logic [1:0]  loc_fence_kind_c;
+  logic [26:0] loc_fence_vpn_c;
+  logic [63:0] loc_txn_pc;
   // The PMP commit-path address for the two lanes: the translated physical
   // address when there is one, the effective address otherwise.
   logic [CORE_XLEN-1:0] pmp_store_addr0_c, pmp_store_addr1_c;
@@ -1907,6 +1953,40 @@ module mosaic_core (
       .o_mem_beat      (),
       .o_line_txn      (),
       .o_bypass_txn    (),
+      .loc_llb_en_i    (1'b0),
+      .loc_pf_en_i     (1'b0),
+      .loc_pf_conf_thresh_i (2'd0),
+      .loc_vpn_i       (27'd0),
+      .loc_asid_i      (16'd0),
+      .loc_pc_i        (64'd0),
+      .loc_inv_store_valid_i (1'b0),
+      .loc_inv_store_pa_i    (64'd0),
+      .loc_inv_snoop_valid_i (1'b0),
+      .loc_inv_snoop_pa_i    (64'd0),
+      .loc_inv_snoop_all_i   (1'b0),
+      .loc_fence_valid_i     (1'b0),
+      .loc_fence_kind_i      (2'd0),
+      .loc_fence_vpn_i       (27'd0),
+      .loc_fence_has_vpn_i   (1'b0),
+      .loc_fence_asid_i      (16'd0),
+      .loc_fence_has_asid_i  (1'b0),
+      .loc_ctx_flush_valid_i (1'b0),
+      .o_loc_llb_hit              (),
+      .o_loc_llb_miss             (),
+      .o_loc_llb_bypass           (),
+      .o_loc_llb_fill             (),
+      .o_loc_llb_fill_refused     (),
+      .o_loc_llb_inv              (),
+      .o_loc_mem_line             (),
+      .o_loc_pf_issued            (),
+      .o_loc_pf_useful            (),
+      .o_loc_pf_useless           (),
+      .o_loc_pf_late              (),
+      .o_loc_pf_cancelled         (),
+      .o_loc_pf_admitted          (),
+      .o_loc_pf_fill              (),
+      .o_loc_pf_fill_refused      (),
+      .o_loc_pf_mem               (),
       .dbg_index_i     (3'b0),
       .dbg_valid_o     (),
       .dbg_dirty_o     ()
@@ -1915,6 +1995,7 @@ module mosaic_core (
   // ==========================================================================
   // 2. Decode buffer (2 entries, program order, lane 0 oldest)
   // ==========================================================================
+
   // I-041: the instruction's length is part of what the front end delivered, so
   // it is what tells the decoder which of the two encodings it is looking at,
   // and it is carried with the control word through the buffer so the retire
@@ -2999,6 +3080,12 @@ module mosaic_core (
       .obs_done_cnt    (),
       .obs_exc         (),
       .obs_closed      (),
+      // I-060: the PC of the load the endpoint is serving. The endpoint's
+      // in-flight transaction identity carries the ROB slot the load occupies
+      // (one uop per macro, so the memory macro's slot is the load's slot), and
+      // the ROB is where that slot's PC lives.
+      .rd_index_i      (ep_txn_id[CORE_UOP_W + CORE_RGEN_W +: CORE_IDX_W]),
+      .rd_pc_o         (loc_txn_pc),
       .o_head_ptr      (),
       .o_alloc_ptr     (rob_alloc_ptr),
       .o_occupied      (rob_occupied),
@@ -6505,13 +6592,68 @@ module mosaic_core (
       .o_mem_beat      (),
       .o_line_txn      (),
       .o_bypass_txn    (),
+      .loc_llb_en_i    (loc_llb_en_i),
+      .loc_pf_en_i     (loc_pf_en_i),
+      .loc_pf_conf_thresh_i (loc_pf_conf_thresh_i),
+      .loc_vpn_i       (loc_vpn_c),
+      .loc_asid_i      (csr_satp[59:44]),
+      .loc_pc_i        (loc_txn_pc),
+      .loc_inv_store_valid_i (loc_inv_store_valid_c),
+      .loc_inv_store_pa_i    (loc_inv_store_pa_c),
+      .loc_inv_snoop_valid_i (ext_write_valid),
+      .loc_inv_snoop_pa_i    (ext_write_addr),
+      .loc_inv_snoop_all_i   (loc_snoop_all_i),
+      .loc_fence_valid_i     (loc_fence_valid_c),
+      .loc_fence_kind_i      (loc_fence_kind_c),
+      .loc_fence_vpn_i       (loc_fence_vpn_c),
+      .loc_fence_has_vpn_i   (sys_sfence_has_va_q),
+      .loc_fence_asid_i      (tlb_sfence_asid),
+      .loc_fence_has_asid_i  (sys_sfence_has_asid_q),
+      .loc_ctx_flush_valid_i (tlb_satp_write),
+      .o_loc_llb_hit              (o_loc_llb_hit),
+      .o_loc_llb_miss             (o_loc_llb_miss),
+      .o_loc_llb_bypass           (o_loc_llb_bypass),
+      .o_loc_llb_fill             (o_loc_llb_fill),
+      .o_loc_llb_fill_refused     (o_loc_llb_fill_refused),
+      .o_loc_llb_inv              (o_loc_llb_inv),
+      .o_loc_mem_line             (o_loc_mem_line),
+      .o_loc_pf_issued            (o_loc_pf_issued),
+      .o_loc_pf_useful            (o_loc_pf_useful),
+      .o_loc_pf_useless           (o_loc_pf_useless),
+      .o_loc_pf_late              (o_loc_pf_late),
+      .o_loc_pf_cancelled         (o_loc_pf_cancelled),
+      .o_loc_pf_admitted          (o_loc_pf_admitted),
+      .o_loc_pf_fill              (o_loc_pf_fill),
+      .o_loc_pf_fill_refused      (o_loc_pf_fill_refused),
+      .o_loc_pf_mem               (o_loc_pf_mem),
       .dbg_index_i     (3'b0),
       .dbg_valid_o     (),
       .dbg_dirty_o     ()
   );
 
-  // The endpoint talks to the cache path's CPU side; the cache path's memory side
-  // takes the endpoint's slot on the arbiter.
+  // --------------------------------------------------------------------------
+  // The locality path's core-side wiring (I-060)
+  // --------------------------------------------------------------------------
+  // `loc_txn_pc` is the ROB PC of the load the endpoint is serving (the
+  // prefetcher's control identity); `loc_vpn_c` is the served access's virtual
+  // page; `loc_inv_store_*` is this hart's store/AMO commit, taken at the
+  // endpoint's memory port -- the point at which the store has retired and is
+  // reaching memory, which is exactly "the store committed". A line request the
+  // cache makes for a *bypass* access is not a reuse and never reaches the
+  // locality path, so no other store pulse is needed.
+  assign loc_vpn_c = ep_tval_c[38:12];
+  assign loc_inv_store_valid_c = ep_mem_req_valid && ep_mem_req_ready &&
+                                 (ep_mem_req.we || ep_mem_req.amo);
+  assign loc_inv_store_pa_c = ep_mem_req.addr;
+  // The three fence-like system instructions, each as the system unit's own
+  // writeback pulse. A FENCE and a FENCE.I invalidate every entry; a
+  // SFENCE.VMA invalidates the ASID and/or page it names, and is never treated
+  // as a memory-data fence.
+  assign loc_fence_valid_c = sys_wb_valid &&
+                             (sys_fence_q || sys_fence_i_q || sys_sfence_vma_q) && !sys_exc;
+  assign loc_fence_kind_c  = sys_fence_i_q ? 2'd1 : (sys_sfence_vma_q ? 2'd2 : 2'd0);
+  assign loc_fence_vpn_c   = sys_src1_q[38:12];
+
   assign dc_cpu_req_valid = ep_mem_req_valid;
   assign dc_cpu_req       = ep_mem_req;
   assign ep_mem_req_ready = dc_cpu_req_ready;

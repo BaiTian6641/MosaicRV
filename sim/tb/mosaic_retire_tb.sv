@@ -810,6 +810,8 @@ module mosaic_retire_tb (
       .obs_gen          (rob_obs_gen_n),
       .obs_tag          (rob_obs_tag_n),
       .obs_pc           (rob_obs_pc),
+      .rd_index_i       ({TB_RET_RB_W{1'b0}}),
+      .rd_pc_o          (),
       .obs_num_uops     (rob_obs_numuops_n),
       .obs_done_mask    (rob_obs_done_mask),
       .obs_done_cnt     (rob_obs_donecnt_n),

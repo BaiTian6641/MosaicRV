@@ -294,6 +294,9 @@ module mosaic_prefetch_tb (
     .o_fill_refused_ctr (llb_fill_refused_ctr),
     .o_inv_ctr          (llb_inv_ctr),
     .o_race_refuse_ctr  (llb_race_refuse_ctr)
+,
+    .o_evict_valid_o    (),
+    .o_evict_line_o     ()
   );
 
 endmodule : mosaic_prefetch_tb

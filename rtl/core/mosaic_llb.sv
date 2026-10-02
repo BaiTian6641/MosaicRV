@@ -188,7 +188,16 @@ module mosaic_llb #(
   output logic [31:0]              o_fill_ctr,
   output logic [31:0]              o_fill_refused_ctr,
   output logic [31:0]              o_inv_ctr,
-  output logic [31:0]              o_race_refuse_ctr
+  output logic [31:0]              o_race_refuse_ctr,
+
+  // -------------------------------------------------- replacement observation
+  // I-060 integration: the line a fill displaced this cycle, one cycle wide.
+  // The prefetcher is told when a line it landed leaves the buffer for any
+  // reason, and a displaced line is one of them: a landed prefetch whose copy
+  // is gone (or whose in-flight read is now pointless) must not later be
+  // reported as having helped.
+  output logic                     o_evict_valid_o,
+  output logic [PA_LINE_W-1:0]     o_evict_line_o
 );
 
   localparam logic [1:0] FENCE_SFENCE = 2'd2;
@@ -435,6 +444,15 @@ module mosaic_llb #(
       if (fill_key_c[i]) fill_idx_c = i[IDX_W-1:0];
     end
   end
+
+  // A fill that displaces a valid entry with a different key is a replacement:
+  // the displaced line leaves the buffer. (A fill of the same key replaces the
+  // same line and is not a departure.) The observation is one cycle wide and
+  // names the line that left, so a consumer tracking a line can drop it.
+  logic fill_displaces_c;
+  assign fill_displaces_c = fill_ok_c && !fill_have_free_c && !fill_key_c[fill_idx_c];
+  assign o_evict_valid_o  = fill_displaces_c;
+  assign o_evict_line_o   = ent_line_q[fill_idx_c];
 
   // ==========================================================================
   // The edge

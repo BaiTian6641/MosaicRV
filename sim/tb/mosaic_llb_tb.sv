@@ -81,7 +81,10 @@ module mosaic_llb_tb (
   output logic [31:0]   o_fill_ctr,
   output logic [31:0]   o_fill_refused_ctr,
   output logic [31:0]   o_inv_ctr,
-  output logic [31:0]   o_race_refuse_ctr
+  output logic [31:0]   o_race_refuse_ctr,
+  // I-060 integration: the line a fill displaced this cycle.
+  output logic          o_evict_valid,
+  output logic [26:0]   o_evict_line
 );
 
   mosaic_llb u_llb (
@@ -134,6 +137,9 @@ module mosaic_llb_tb (
     .o_fill_refused_ctr (o_fill_refused_ctr),
     .o_inv_ctr          (o_inv_ctr),
     .o_race_refuse_ctr  (o_race_refuse_ctr)
+,
+    .o_evict_valid_o    (),
+    .o_evict_line_o     ()
   );
 
 endmodule

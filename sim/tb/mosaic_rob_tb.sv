@@ -289,6 +289,8 @@ module mosaic_rob_tb (
       .obs_gen          (obs_gen_o[GEN_W-1:0]),
       .obs_tag          (obs_tag_o[TAG_W-1:0]),
       .obs_pc           (obs_pc_o),
+      .rd_index_i       ({INDEX_W{1'b0}}),
+      .rd_pc_o          (),
       .obs_num_uops     (obs_num_uops_o[CNT_W-1:0]),
       .obs_done_mask    (obs_done_mask),
       .obs_done_cnt     (obs_done_cnt_o[CNT_W-1:0]),

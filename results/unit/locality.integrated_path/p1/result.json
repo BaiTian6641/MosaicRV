@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "case": "locality.integrated_path",
+  "verdict": "FAIL",
+  "detail": "locality integration: on/off identical, structures used, class rule checked, no prefetch reaches a device",
+  "seed": 1,
+  "max_cycles": 4000000,
+  "checks": 37,
+  "failures": 13,
+  "image": "",
+  "expect": "",
+  "tool": "verilator",
+  "timestamp": "2026-10-02T20:23:59Z",
+  "first_mismatch": "the class-check positive control: expected one buffer lookup for the load, got 0 lookups",
+  "failed_checks": ["the baseline run reaches the exit protocol", "the baseline run reaches the exit protocol", "the baseline run reports PASS through tohost", "the llb run reaches the exit protocol", "the llb run reports PASS through tohost", "the prefetch run reaches the exit protocol", "the prefetch run reports PASS through tohost", "the both run reaches the exit protocol", "the both run reports PASS through tohost", "the prefetcher is engaged: it issued prefetches with it on", "the prefetcher is engaged when both structures are on", "a prefetched line is later demanded: the useful counter is non-zero", "the load between the first marker pair consults the buffer"]
+}

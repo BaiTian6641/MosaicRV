@@ -127,6 +127,54 @@ module mosaic_l1_cache_path #(
   output logic [31:0]                   o_line_txn,
   output logic [31:0]                   o_bypass_txn,
 
+  // --------------------------------------------------- the locality path (I-060)
+  // The clean-copy locality buffer and the bounded prefetcher sit on the L1
+  // *line* port when this side is the data side. They are runtime-switched and
+  // default off, so a caller that leaves these ports at their defaults has the
+  // machine it had before. See mosaic_locality_path.sv for the position, the
+  // eight invalidation sources and the prefetcher's gate.
+  input  logic                          loc_llb_en_i,
+  input  logic                          loc_pf_en_i,
+  input  logic [1:0]                    loc_pf_conf_thresh_i,
+  // The in-flight access's context: the virtual page of the effective address
+  // (the LLB's scoped-fence match and the prefetcher's alias label), the ASID
+  // the translation ran under, and the access's control identity (PC) — the
+  // prefetcher's stride table is keyed by it.
+  input  logic [26:0]                   loc_vpn_i,
+  input  logic [15:0]                   loc_asid_i,
+  input  logic [63:0]                   loc_pc_i,
+  // The invalidation sources driven from the core.
+  input  logic                          loc_inv_store_valid_i,
+  input  logic [63:0]                   loc_inv_store_pa_i,
+  input  logic                          loc_inv_snoop_valid_i,
+  input  logic [63:0]                   loc_inv_snoop_pa_i,
+  input  logic                          loc_inv_snoop_all_i,
+  input  logic                          loc_fence_valid_i,
+  input  logic [1:0]                    loc_fence_kind_i,
+  input  logic [26:0]                   loc_fence_vpn_i,
+  input  logic                          loc_fence_has_vpn_i,
+  input  logic [15:0]                   loc_fence_asid_i,
+  input  logic                          loc_fence_has_asid_i,
+  input  logic                          loc_ctx_flush_valid_i,
+  // What the locality path did, so a case can require the structures to be
+  // *used* rather than assume a switch implies an effect.
+  output logic [31:0]                   o_loc_llb_hit,
+  output logic [31:0]                   o_loc_llb_miss,
+  output logic [31:0]                   o_loc_llb_bypass,
+  output logic [31:0]                   o_loc_llb_fill,
+  output logic [31:0]                   o_loc_llb_fill_refused,
+  output logic [31:0]                   o_loc_llb_inv,
+  output logic [31:0]                   o_loc_mem_line,
+  output logic [31:0]                   o_loc_pf_issued,
+  output logic [31:0]                   o_loc_pf_useful,
+  output logic [31:0]                   o_loc_pf_useless,
+  output logic [31:0]                   o_loc_pf_late,
+  output logic [31:0]                   o_loc_pf_cancelled,
+  output logic [31:0]                   o_loc_pf_admitted,
+  output logic [31:0]                   o_loc_pf_fill,
+  output logic [31:0]                   o_loc_pf_fill_refused,
+  output logic [31:0]                   o_loc_pf_mem,
+
   // --------------------------------------------------------- state probe
   input  logic [INDEX_BITS-1:0]         dbg_index_i,
   output logic                          dbg_valid_o,
@@ -185,14 +233,31 @@ module mosaic_l1_cache_path #(
   logic                    cache_flush_valid;
   logic                    cache_flush_ready;
   logic                    cache_flush_done;
-  logic                    bridge_line_req_ready;
-  logic                    bridge_line_rsp_valid;
-  logic [LINE_BITS-1:0]    bridge_line_rsp_rdata;
-  logic                    bridge_line_rsp_fault;
   logic                    bridge_mem_req_valid;
   logic                    bridge_mem_busy;
   mosaic_uop_pkg::mem_req_t bridge_mem_req;
   logic                    bridge_mem_resp_valid;
+
+  // The cache's line port is the locality path's port; the locality path's
+  // memory-side port is the bridge's. `loc_*` names the segment between them.
+  logic                    loc_line_req_valid;
+  logic                    loc_line_req_ready;
+  logic                    loc_line_req_we;
+  logic [ADDR_WIDTH-1:0]   loc_line_req_addr;
+  logic [LINE_BITS-1:0]    loc_line_req_wdata;
+  logic                    loc_line_rsp_valid;
+  logic [LINE_BITS-1:0]    loc_line_rsp_rdata;
+  logic                    loc_line_rsp_fault;
+
+  // The context of the CPU access the cache is serving, latched when the cache
+  // (or the bypass path) accepts it. The line request a miss produces comes
+  // several cycles later, so the context cannot be read from the live request.
+  logic                    cpu_accept_c;
+  logic                    lat_is_load_q;
+  logic [26:0]             lat_vpn_q;
+  logic [15:0]             lat_asid_q;
+  logic [3:0]              lat_perms_q;
+  logic [63:0]             lat_pc_q;
 
   /* verilator lint_off PINCONNECTEMPTY */
   mosaic_cache #(
@@ -244,14 +309,14 @@ module mosaic_l1_cache_path #(
   ) u_bridge (
     .clk             (clk),
     .rst             (rst),
-    .line_req_valid  (cache_mem_req_valid),
-    .line_req_ready  (bridge_line_req_ready),
-    .line_req_we     (cache_mem_req_we),
-    .line_req_addr   (cache_mem_req_addr),
-    .line_req_wdata  (cache_mem_req_wdata),
-    .line_rsp_valid  (bridge_line_rsp_valid),
-    .line_rsp_rdata  (bridge_line_rsp_rdata),
-    .line_rsp_fault  (bridge_line_rsp_fault),
+    .line_req_valid  (loc_line_req_valid),
+    .line_req_ready  (loc_line_req_ready),
+    .line_req_we     (loc_line_req_we),
+    .line_req_addr   (loc_line_req_addr),
+    .line_req_wdata  (loc_line_req_wdata),
+    .line_rsp_valid  (loc_line_rsp_valid),
+    .line_rsp_rdata  (loc_line_rsp_rdata),
+    .line_rsp_fault  (loc_line_rsp_fault),
     .mem_req_valid   (bridge_mem_req_valid),
     .mem_req_ready   (mem_req_ready_i && !bypass_offer_c),
     .mem_req         (bridge_mem_req),
@@ -260,11 +325,81 @@ module mosaic_l1_cache_path #(
     .o_busy          (bridge_mem_busy)
   );
 
-  assign cache_mem_req_ready  = bridge_line_req_ready;
-  assign cache_mem_resp_valid = bridge_line_rsp_valid;
-  assign cache_mem_resp_rdata = bridge_line_rsp_rdata;
-  assign cache_mem_resp_fault = bridge_line_rsp_fault;
+  // ------------------------------------------------------------ the locality
+  // The line port runs through mosaic_locality_path on *both* sides. On the
+  // instruction side the two switches are tied low through `IS_FETCH`, a
+  // constant, so the structures are inert there -- the fetch side is a straight
+  // wire in time as well as in function, because with both enables low every
+  // expression below reduces to the bridge's own handshake.
+  mosaic_locality_path #(
+    .LINE_BYTES (LINE_BYTES),
+    .ADDR_WIDTH (ADDR_WIDTH)
+  ) u_locality (
+    .clk                         (clk),
+    .rst                         (rst),
+    .llb_en_i                    (loc_llb_en_i && en_i && !IS_FETCH),
+    .pf_en_i                     (loc_pf_en_i && en_i && !IS_FETCH),
+    .pf_conf_thresh_i            (loc_pf_conf_thresh_i),
+    .cache_line_req_valid        (cache_mem_req_valid),
+    .cache_line_req_ready        (cache_mem_req_ready),
+    .cache_line_req_we           (cache_mem_req_we),
+    .cache_line_req_addr         (cache_mem_req_addr),
+    .cache_line_req_wdata        (cache_mem_req_wdata),
+    .cache_line_rsp_valid        (cache_mem_resp_valid),
+    .cache_line_rsp_rdata        (cache_mem_resp_rdata),
+    .cache_line_rsp_fault        (cache_mem_resp_fault),
+    .bridge_line_req_valid       (loc_line_req_valid),
+    .bridge_line_req_ready       (loc_line_req_ready),
+    .bridge_line_req_we          (loc_line_req_we),
+    .bridge_line_req_addr        (loc_line_req_addr),
+    .bridge_line_req_wdata       (loc_line_req_wdata),
+    .bridge_line_rsp_valid       (loc_line_rsp_valid),
+    .bridge_line_rsp_rdata       (loc_line_rsp_rdata),
+    .bridge_line_rsp_fault       (loc_line_rsp_fault),
+    .ctx_is_load_i               (lat_is_load_q),
+    .ctx_vpn_i                   (lat_vpn_q),
+    .ctx_asid_i                  (lat_asid_q),
+    .ctx_perms_i                 (lat_perms_q),
+    .ctx_pc_i                    (lat_pc_q),
+    .inv_store_valid_i           (loc_inv_store_valid_i),
+    .inv_store_pa_i              (loc_inv_store_pa_i),
+    .inv_snoop_valid_i           (loc_inv_snoop_valid_i),
+    .inv_snoop_pa_i              (loc_inv_snoop_pa_i),
+    .inv_snoop_all_i             (loc_inv_snoop_all_i),
+    .fence_valid_i               (loc_fence_valid_i),
+    .fence_kind_i                (loc_fence_kind_i),
+    .fence_vpn_i                 (loc_fence_vpn_i),
+    .fence_has_vpn_i             (loc_fence_has_vpn_i),
+    .fence_asid_i                (loc_fence_asid_i),
+    .fence_has_asid_i            (loc_fence_has_asid_i),
+    .ctx_flush_valid_i           (loc_ctx_flush_valid_i),
+    .o_llb_hit_o                 (o_loc_llb_hit),
+    .o_llb_miss_o                (o_loc_llb_miss),
+    .o_llb_bypass_o              (o_loc_llb_bypass),
+    .o_llb_fill_o                (o_loc_llb_fill),
+    .o_llb_fill_refused_o        (o_loc_llb_fill_refused),
+    .o_llb_inv_o                 (o_loc_llb_inv),
+    .o_mem_line_o                (o_loc_mem_line),
+    .o_pf_issued_o               (o_loc_pf_issued),
+    .o_pf_useful_o               (o_loc_pf_useful),
+    .o_pf_useless_o              (o_loc_pf_useless),
+    .o_pf_late_o                 (o_loc_pf_late),
+    .o_pf_cancelled_o            (o_loc_pf_cancelled),
+    .o_pf_admitted_o             (o_loc_pf_admitted),
+    .o_pf_fill_o                 (o_loc_pf_fill),
+    .o_pf_fill_refused_o         (o_loc_pf_fill_refused),
+    .o_pf_mem_o                  (o_loc_pf_mem)
+  );
+
   assign cache_flush_valid    = (state == S_FLUSH) && !flush_sent;
+
+  // The access the cache takes this cycle. It is the same conjunction the S_IDLE
+  // branch uses -- the cache's own ready on the cacheable path, the memory
+  // service's on the bypass path -- so the context latched here is the context
+  // of the access whose line request follows.
+  assign cpu_accept_c = (state == S_IDLE) && !flush_pending_c && cpu_req_valid_i &&
+                        !hold_valid && !req_block_c &&
+                        (cacheable_c ? cache_cpu_req_ready : mem_req_ready_i);
 
   // ------------------------------------------------------- classification
 `ifdef MOSAIC_CACHE_MUTANT_DEVICE_CACHED
@@ -386,7 +521,24 @@ module mosaic_l1_cache_path #(
       mem_beat_r   <= 32'd0;
       line_txn_r   <= 32'd0;
       bypass_txn_r <= 32'd0;
+      lat_is_load_q <= 1'b0;
+      lat_vpn_q     <= 27'd0;
+      lat_asid_q    <= 16'd0;
+      lat_perms_q   <= 4'd0;
+      lat_pc_q      <= 64'd0;
     end else begin
+      // The context of the access just taken. The permission class of the
+      // integrated path is the access's own read/write class ({x,w,r,u} with
+      // x and u zero and r always set): it is the class the endpoint publishes,
+      // it is what a store can never reuse a load's copy under, and the LLB's
+      // key format is unchanged by it.
+      if (cpu_accept_c) begin
+        lat_is_load_q <= !cpu_req_i.we && !cpu_req_i.amo;
+        lat_vpn_q     <= loc_vpn_i;
+        lat_asid_q    <= loc_asid_i;
+        lat_perms_q   <= {1'b0, (cpu_req_i.we || cpu_req_i.amo), 1'b1, 1'b0};
+        lat_pc_q      <= loc_pc_i;
+      end
       if (!flush_i) begin
         flush_sent  <= 1'b0;
         flush_ack_r <= 1'b0;
