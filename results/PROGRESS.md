@@ -2683,3 +2683,59 @@ alone (its ceiling was allocation width); the streaming workload should improve 
 the memory work — if a memory change moves a compute-bound workload, something is wrong and that is a
 finding rather than a win. The stand-in geometry being replaced also removes a modelling lie: the cache the
 machine has was 250× smaller than the one its own configuration declares.
+
+---
+
+## 2026-10-02 — the scalability requirement recorded, and a commit of mine that did not carry the code
+
+**The user set a new requirement, and it is now a specification addition rather than a wish.**
+`docs/scalability-plan.md` records it: fetch/decode queue depth, ROB depth, allocation/rename width,
+decode width, INT/FP/VEC unit counts and load/store counts must be **configuration inputs** whose
+change preserves the architectural contract, and an illegal combination must be rejected by the config
+gate by name. The document's §2 table is the honest inventory — rename/allocation width, ROB, PRF,
+clusters, INT ALUs, MUL/DIV, LSU count, LQ/SQ depth, L1 geometry and MSHRs are already config-driven
+through `config/geometry/*.json` → `gen_manifest` → `mosaic_cfg_pkg.svh`; **decode width, the decoded
+queue depth, commit width, FP unit count and VEC ALU count are still literals**, which is what makes
+"S-1..S-3" real work rather than a rename.
+
+**The comparison target is tabled, with the rule that keeps it honest.** The XiangShan user guide's
+*Typical Configurations* for Kunminghu V2 (read 2026-10-02) gives decode 6 / rename 6 / commit 8 /
+ROB 160 / RAB 256 / 224-192-128 physical registers / LQ 72 / SQ 56 / issue queues 24×4, 18×3, 16 /
+L1I-L1D 64-128 KB / L2 512 KB–1 MB / L3 2–16 MB, and its execution-unit split. Against ours (decode 1,
+rename 2, commit 2, ROB 64, 8 KB L1, one FP pipe, one vector engine) the gap is parameters, not
+design. §4 states the precondition for publishing anything: **absolute-IPC claims only at matched
+configuration** (same workload, same toolchain, same measurement definition), **normalised metrics
+only** (per ROB entry, per KB of L1, retired per issued request) when unmatched, and nothing in the
+document authorises a claim about XiangShan. "Beat" is defined as better IPC at equal
+width/ROB/cache, or better performance *per configuration*, or the properties Kunminghu is not built
+for (per-hart resource ownership with unchanged architectural state; lane-count-independent vector
+state) — not "we are faster" from a 2-wide 64-entry cache-less machine.
+
+**The commit that did not carry the code — my error, recorded because it changes how the next claim
+must be read.** The front-end width work was recorded in the ledger as delivered (`I-014`, case
+`frontend.width_buffering`) and committed as e39b489 — but `git add` carried only
+`config/status/implementation_status.json` and `tests/unit/registry.json`. `rtl/core/mosaic_idec_queue.sv`
+is **untracked** and `git show HEAD:rtl/core/mosaic_core.sv | grep -c idec_queue` is **0**, so the RTL
+behind that ledger entry is in no commit at all. The case did pass in the working tree, so the entry
+is not false; it is *unbacked*, which for a ledger whose whole purpose is "a claim with a command
+behind it" is the same thing. The rule this earns: **after recording a package, verify that every file
+the case depends on is tracked** — `git status --porcelain` on the package's own RTL, not just on the
+files you staged.
+
+**And a cross-lane regression with a prime suspect.** `MemorySubsystem` reports `mmio.exactly_once`
+failing at p0 and p1 (`head_pc=0x8000001c ... unsupported=1 stopped=1`, an illegal-instruction trap)
+while **passing at HEAD** — and the difference between HEAD and the tree is exactly the uncommitted
+front-end change plus the memory lane's in-flight cache edits (different files). p0 runs with
+`cache_en_i=0`, so the memory path is not implicated. The author has been asked to attribute it by
+experiment (only its files applied to a clean HEAD, pathspec-qualified stash, never a bare one), find
+the named first failure, and fix it before I commit the RTL — so that the ledger and the tree agree
+this time.
+
+**Also landed and green in the memory lane so far**: `cache.integrated_path`, `mem.visibility_provenance`,
+`store.wrong_path_visibility`, `lsu.byte_forwarding`, `lsu.size_fault_boundaries`, `sv39.walk_and_faults`,
+`tlb.sfence_vma`, `amo.linearization`, `lrsc.reservation_progress`, `fence.code_and_data_order`,
+`perf.equal_resource_compare`, `cache.refill_evict_fault` and `cache.mshr_nonblocking` at p0, with both
+legacy control scripts 3/3 — and one **real coherence defect the larger L1 exposed**: a bypassed AMO
+masked by a stale clean copy, fixed with a targeted line-invalidate. `locality.integrated_path`'s
+remaining failures are the program's 256 B-L1 address plan and are being updated, which is a program
+fact rather than a design fault and is being recorded as such.
