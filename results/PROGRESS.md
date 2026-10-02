@@ -2061,3 +2061,49 @@ The attempt also left the case **honestly failing**: 105 of 106 checks pass and 
 its own anti-vacuity check, which exists so that a phase with no evidence cannot pass. That is the
 check doing its job — the wrong-path phase had no squashed-but-completed FP operation to observe —
 and the third attempt is constructing the stimulus rather than relaxing the check.
+
+---
+
+## 2026-10-01 — state of the machine, final entry for this session (61 packages)
+
+**Advertised capabilities: I, M, Zicsr, Zifencei, Zihpm, A, C, S, U, PMP, Sv39, Zicsr_Zifencei_pairing, Zaamo, Zalrsc, Zicbom, Zicbop.** `python3 tools/check_coverage.py --verbose` computes that list from
+the ledger; `python3 tools/gen_manifest.py --profile p1` prints the ISA string and privilege modes
+the build manifest is allowed to publish. Nothing in this file is claimed beyond it.
+
+**What the machine is now.** A two-wide out-of-order RV64 core with: a banked register file and a
+scoreboarded writeback path; a reorder buffer, precise traps, M/S/U privilege and PMP; a serial
+Sv39 walker with a TLB and exact `SFENCE.VMA`; blocking L1 caches and an MSHR (both module-level,
+neither wired into the core); an FP rename namespace with NaN-boxing and precise `fflags`; AMO and
+LR/SC; the C extension; `FENCE`/`FENCE.I`; non-speculative MMIO; and a fabric of five modules
+(bypass, steering, quota/arbiter, ownership FSM, bank-aware allocation) that are **verified in
+isolation and not instantiated by the core** — the plan's I-090/V-034 integration is what would make
+them real, and the fixed-versus-dynamic comparison the project's name rests on has not been measured.
+
+**The strongest evidence in the tree** is the external one: **ACT4 passes 127/127 against the
+integrated core**, with N closed against its generation manifest and its PASS macro calibrated. It
+is strong precisely because it is not ours — it found five real defects in advertised extensions
+within minutes (a `c.lui` immediate, an SC reservation granule that our own case agreed with the RTL
+about, an HPM read-modify-write, and two ledger/case expectations that asserted the absence of the
+CSRs the machine was advertising).
+
+**The honest ledger** (`config/validation/exclusion_ledger.json`, checked by
+`tools/check_exclusions.py` in `make check`) records 52 exclusions with reasons, spec bases,
+alternative verifications that must exist **and pass**, and end conditions. Its largest open items
+remain: no external reference (NEMU/Sail/XiangShan) is compared against this core in the normal
+loop; no external suite covers FP, caches or the fabric (the ACT4 config excludes F/D and caches);
+one profile and one seed for most cases; `fsqrt` and the fmadd family are declared absent; `frm` is
+not renamed; and no device watchdog exists.
+
+**Next wave, in dependency order**: V-060/V-061 (the FP verification packages that are now F's only
+remaining gates), I-047/I-048 (the SoC and the p1 Linux contract), the fabric integration and the
+measured fixed-versus-dynamic comparison (I-084), then Stage 4+: vector (I-051+), multi-hart and
+cohort (I-064+), the measurement gates (I-076+) and the RVA23S64 mandatory matrix (I-092..I-098).
+The plan is 239 packages; 61 are delivered, and the remainder is the larger half.
+
+**For whoever continues**, the three habits that produced this state, in order of value: (1) an
+expectation derived from the design under test is not an expectation — use the host, Sail, or a
+specification-derived model, and prefer the external one; (2) a package is delivered when its case
+passes **from a deleted build directory** with controls that fail, and the record carries the number
+the tool printed, not the number the lane's summary remembered; (3) when a lane fails, its
+hypotheses are the asset — two of the three retries in this session succeeded because the failed
+attempt had written down what it suspected and why.
