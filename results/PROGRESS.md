@@ -2849,3 +2849,59 @@ surface — and the insert's own identity (it carries the ROB's `alloc2_index`/`
 sound. If it does not, the insert's identity is wrong. That experiment is running now, and its answer is
 worth more than the hold itself: one outcome means the project has a hidden defect in I-017's territory,
 the other means the insert needs redesigning.
+
+---
+
+## 2026-10-02 — the insert is held, V-013 is green, and the experiment found a latent defect in delivered work
+
+**The hold landed.** 112 lines deleted from `mosaic_dispatch.sv` — `head1_fire`, the
+`c0_from_h1`/`c1_from_h1` operand muxing and the lane-1 PRF/operand blocks — with the depth-8 decoded
+queue and two-wide **allocation** kept, because three selective builds had already shown those to be
+safe. `retire.width_and_order` (V-013) is **PASS**: `checks=1195 events=119 retires=118 comparisons=973
+dual=28 single=63 same_rd=1 trap_blocked=1 store_load=1 cycles=573 seed=1`, p0, clean rebuild, binary
+`sha256 55021a58555ae419`. Ten further cases re-verified PASS (`mmio.exactly_once` p0 and p1,
+`core.act_dut` 127/127, `core.corpus_sweep` 39/39, `perf.equal_resource_compare` 4 workloads × 7 configs,
+`rename.same_cycle_chain`, `frontend.width_buffering`, `rob.out_of_order_children`, `core.corpus_branch`,
+`iq.wakeup_insert_select`), lint 65/65 on both profiles, `check_records` and `check_exclusions` green.
+
+**And the classification experiment is the finding of the session: the defect is not the insert's.**
+With the insert **kept** and only the retire-side lane-1 request forced to zero — the width-1 profile
+route is not constructible, because `mosaic_core.sv` hardwires the two-wide retire connections and
+generating `MOSAIC_RETIRE_WIDTH=1` produces 26 fatal warnings, so a temporary localparam in
+`mosaic_retire.sv` was used and reverted, `git diff rtl/core/mosaic_retire.sv` empty — the result was
+`sha 86c526da628a61a3, exit 1` with **the program-order model comparison passing and the event-110
+wrong-PC/lane-1 failure gone**; the only failure left was the case's own coverage requirement that the
+run retire two slots in one cycle, which a one-slot retire obviously cannot satisfy.
+
+**Read that carefully, because it is a statement about already-delivered work.** The insert's identity
+— it carries the ROB's own `alloc2_index`/`alloc2_gen` — is **likely sound**. What is broken is the
+**retire/ROB lane-1 path**, i.e. `I-017`'s territory: a path that a machine which never allocates two
+macros in a cycle **cannot exercise**, which is why every case that touches it is green at HEAD and why
+the defect sat undetected in delivered work until a queue got deep enough to let two macros be allocated
+together. This is the third time this project has paid for a rule or a path that was correct only
+because nothing exercised it: the dispatch refusal that was accidentally right at depth 2, the 256-byte
+L1 the configuration never matched, and now a retire lane that only two-wide allocation can reach.
+
+**The root-cause line is not found and the package says so.** What is known: the trigger is the
+same-cycle second insert; the failure disappears when the retire side is restricted to one slot; the
+failure's shape (`lane 1` retiring a PC `0x1ac` older than the model expects) is an ordering
+disagreement in the second commit slot. What is not known: which line of the lane-1 path is wrong. The
+held insert therefore ships as **allocation-only**, the feature is recorded as *held with a named
+failing case and a named next experiment*, and the defect is an **open item against I-017** rather than
+a retraction of it — nothing in the delivered configuration fails.
+
+**What the hold costs, measured, not asserted.** A same-tree A/B in which only `mosaic_dispatch.sv`
+differs (insert present vs held) shows cycles and IPC **unchanged on all four workloads**; the hold's
+entire measured effect is the loss of **3 same-cycle pair inserts on `pair_burst`** (`pairs=3 -> 0`) and
+about 0.01 of occupancy. The much larger cycle changes against the numbers printed in
+`results/reports/frontend-width.md` are the sibling L1/geometry change (256 → 32 sets, MSHR 2 → 4), not
+the hold — and the report says so, because attributing a sibling's effect to your own change is how a
+measurement table becomes a story.
+
+**One control is now inert and the suite must not pretend otherwise.** `MOSAIC_ROB_MUTANT_SWAP_PAIR_ORDER`
+fires only when the ROB accepts a two-wide group, so with the insert held it is **inert rather than
+uncaught** (`run_frontend_controls.py` exits 1 on it while `DROP_PAIR_TAIL` and `NO_BYPASS` are still
+caught). The mutant is kept, not deleted; the suite is being changed so its requirement is conditional
+and self-describing — it must be caught **iff the same run exercised the two-wide group**, the run prints
+the inert count in its RESULT line, and the report records that the mutant *was* caught with the insert
+present, so its value is held with the feature rather than lost with it.
