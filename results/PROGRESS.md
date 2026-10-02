@@ -1876,7 +1876,7 @@ exact `SFENCE.VMA` invalidation, take precise traps from all of it, and run the 
 doing so.
 
 **The package that matters most in this stretch is V-020**, because it is the one that says what the
-rest does *not* prove. It records 52 exclusions (0 open), each with a reason, a specification basis,
+rest does *not* prove. It records 52 exclusions (20 of them open, by the checker's own count), each with a reason, a specification basis,
 an alternative verification that must exist **and pass**, and an end condition — and its checker
 rejects any difference that no ledger entry permits. Its own list of the largest open exclusions is
 the most useful paragraph this project has produced, and it is now machine-readable:
