@@ -2113,8 +2113,7 @@
     "sim/unit/tb_vec.cpp"
    ],
    "max_cycles": 200000,
-   "seed": 1,
-   "pending": true
+   "seed": 1
   },
   "harness.reset_traffic": {
    "task": "V-010",

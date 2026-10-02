@@ -1,15 +1,16 @@
 {
   "schema_version": 1,
   "case": "core.mem_program",
-  "verdict": "PASS",
-  "detail": "checks=125 comparisons=9543 cycles=1017 retires=306 loads=63 stores=84 data_txns=147 fwd_bytes=96 mem_bytes=306 programs=2 inputs=3 seed=1",
+  "verdict": "FAIL",
+  "detail": "contract violated: run-p03_loadstore-in0 at cycle 30: the retirement stream follows the reference: retire 2 at 0x0000000080001204 value for x8 expected 0x0000000080000400, got 0x0000000080000204",
   "seed": 1,
   "max_cycles": 4000000,
-  "checks": 126,
-  "failures": 0,
+  "checks": 1,
+  "failures": 1,
   "image": "",
   "expect": "",
   "tool": "Verilator 5.052 2026-09-05",
-  "timestamp": "2026-10-02T13:35:40Z",
-  "first_mismatch": ""
+  "timestamp": "2026-10-02T15:51:29Z",
+  "first_mismatch": "run-p03_loadstore-in0 at cycle 30: the retirement stream follows the reference: retire 2 at 0x0000000080001204 value for x8 expected 0x0000000080000400, got 0x0000000080000204: expected the memory path holds, got contract violated",
+  "failed_checks": ["no contract violation"]
 }

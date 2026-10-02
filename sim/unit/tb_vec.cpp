@@ -6095,6 +6095,768 @@ void RunVecRestartCase(Vmosaic_vec_tb* dut, ClockDriver* clk, Reporter* rep,
                                           " restart cells ran, expected 3");
 }
 
+// ============================================================================
+// I-058 -- vector chaining, element readiness and the two element-granular
+// hazards.  CASE=rvv.chaining_hazards.
+//
+// The oracle here is the chaining rule, not the DUT.  Element i's payload is an
+// element-wise 64-bit integer add of two host arrays (the I-054 datapath's
+// rule, computed here from the host sources); the case checks that the network
+// delivers *that element's* value for *that element*, in order, and only after
+// its producer wrote it.  The network's readiness bitmap, its counters and the
+// descriptor's bitmap are only ever *compared* against the host's numbers.
+//
+// The four `-DMOSAIC_VEC_CHAIN_MUTANT_*` builds each break exactly one of the
+// checks below; the shipping build defines none of them.
+// ============================================================================
+
+// ---- the producer's operation, computed on the host ------------------------
+uint64_t ChainSrcA(int gen, int i) {
+  return 0x2000000000000000ull +
+         0x0101010101010101ull * static_cast<uint64_t>(gen * 16 + i);
+}
+uint64_t ChainSrcB(int i) {
+  return 0x0000FFFF0000FFFFull ^
+         (0x1111111111111111ull * static_cast<uint64_t>(i + 1));
+}
+// element i of the producing macro, by the operation's rule: an element-wise
+// add of the two host sources (wraparound is the same rule either way)
+uint64_t ChainElemVal(int gen, int i) { return ChainSrcA(gen, i) + ChainSrcB(i); }
+
+enum : int { CH_ORDER_ASC = 0, CH_ORDER_DESC = 1, CH_ORDER_INTER = 2, CH_ORDER_COUNT = 3 };
+
+const char* ChainOrderName(int kind) {
+  switch (kind) {
+    case CH_ORDER_ASC: return "ascending";
+    case CH_ORDER_DESC: return "descending";
+    default: return "interleaved";
+  }
+}
+
+// The order the producer's elements complete in.  Ascending writes element 0
+// first; descending writes it last; interleaved writes the even elements and
+// then the odd ones, so element 1 completes after element 6.
+std::vector<int> ChainOrder(int kind, int n) {
+  std::vector<int> o;
+  if (kind == CH_ORDER_DESC) {
+    for (int i = n - 1; i >= 0; --i) o.push_back(i);
+  } else if (kind == CH_ORDER_INTER) {
+    for (int i = 0; i < n; i += 2) o.push_back(i);
+    for (int i = 1; i < n; i += 2) o.push_back(i);
+  } else {
+    for (int i = 0; i < n; ++i) o.push_back(i);
+  }
+  return o;
+}
+
+// --------------------------------------------------------------- the harness
+struct ChainStim {
+  bool rst = false;
+  bool en = true;
+  bool bind = true;
+  // the architectural macro the descriptor tracks
+  bool desc_alloc = false;
+  uint32_t desc_gen = 0;
+  int desc_vl = 0;
+  int desc_vd = 0;
+  bool desc_release = false;
+  // producer
+  bool p_alloc = false;
+  uint32_t p_gen = 0;
+  int p_vd = 0;
+  int p_vl = 0;
+  bool p_wr = false;
+  int p_wr_index = 0;
+  uint64_t p_wr_data = 0;
+  uint32_t p_wr_gen = 0;
+  bool p_fault = false;
+  int p_fault_elem = 0;
+  bool p_cancel = false;
+  bool p_done = false;
+  // consumers
+  bool c0_alloc = false; uint32_t c0_gen = 0; int c0_vs = 0; int c0_vl = 0;
+  bool c0_req = false; int c0_index = 0; bool c0_finish = false;
+  bool c1_alloc = false; uint32_t c1_gen = 0; int c1_vs = 0; int c1_vl = 0;
+  bool c1_req = false; int c1_index = 0; bool c1_finish = false;
+  // WAR overwrite arbiter
+  bool war_valid = false; int war_vd = 0; int war_elem = 0; uint64_t war_data = 0;
+};
+
+struct ChainObs {
+  // combinational handshakes, sampled before the clock edge
+  bool p_alloc_ready = false;
+  bool p_wr_accept = false;
+  bool accept_valid = false;
+  int accept_index = 0;
+  bool c0_alloc_ready = false, c1_alloc_ready = false;
+  bool c0_req_accept = false, c1_req_accept = false;
+  bool c0_rdy = false, c1_rdy = false;
+  uint64_t c0_data = 0, c1_data = 0;
+  bool war_grant = false, src_release_ok = false;
+  // registered state, sampled after the clock edge
+  bool valid = false;
+  uint32_t gen = 0;
+  int vd = 0;
+  bool done = false;
+  bool fault = false;
+  int fault_elem = 0;
+  uint64_t ready_lo = 0, ready_hi = 0;
+  uint32_t pkt_accept = 0, pkt_refuse = 0, fwd = 0, stall = 0;
+  bool desc_valid = false;
+  uint64_t desc_bm_lo = 0, desc_bm_hi = 0;
+  uint32_t desc_gen = 0;
+};
+
+class Chain {
+ public:
+  Chain(Vmosaic_vec_tb* d, ClockDriver* clk) : d_(d), clk_(clk) {}
+
+  void Reset() {
+    ChainStim s;
+    s.rst = true;
+    for (int i = 0; i < 3; ++i) Step(s);
+  }
+
+  ChainObs Step(const ChainStim& s) {
+    d_->clk = 0;
+    d_->rst = s.rst ? 1 : 0;
+
+    // everything else in the wrapper is quiescent: no other vector unit runs,
+    // and the driver owns the descriptor unless the chain is bound.
+    d_->alloc_valid = s.desc_alloc ? 1 : 0;
+    d_->alloc_vtype = Vtype(6, 0, false);
+    d_->alloc_vl = static_cast<uint8_t>(s.desc_vl & 0xFF);
+    d_->alloc_vstart = 0;
+    d_->alloc_vd = static_cast<uint8_t>(s.desc_vd & 0x1F);
+    d_->alloc_mask_ver = 0;
+    d_->alloc_rob_index = 0;
+    d_->alloc_rob_gen = s.desc_gen;
+    d_->alloc_uop_index = 0;
+    d_->elem_done_valid = 0;
+    d_->elem_done_index = 0;
+    d_->fault_valid = 0;
+    d_->fault_elem = 0;
+    d_->fault_code = 0;
+    d_->desc_release = s.desc_release ? 1 : 0;
+    d_->desc_fault_clear = 0;
+    d_->rst_bind_i = 0;
+    d_->rst_exec_valid_i = 0;
+    d_->rst_intr_i = 0;
+    d_->lsu_mem_rsp_fault_code_i = 0;
+    d_->mem_owner_i = 0;
+    d_->mem_rd_valid_i = 0;
+    d_->mem_wr_valid_i = 0;
+    d_->alu_exec_valid_i = 0;
+    d_->alu_caps_i = 0;
+    d_->el_valid_i = 0;
+    d_->lsu_exec_valid_i = 0;
+    d_->lsu_caps_i = 0;
+    d_->lsu_mem_req_ready_i = 0;
+    d_->lsu_mem_rsp_valid_i = 0;
+    d_->fp_exec_valid_i = 0;
+    d_->fp_caps_i = 0;
+    d_->fp_commit_valid_i = 0;
+    d_->fp_flush_i = 0;
+    d_->cfg_vset_valid = 0;
+    d_->cfg_snap_capture = 0;
+    d_->cfg_replay_valid = 0;
+    d_->cfg_exec_valid = 0;
+    d_->cfg_csr_valid = 0;
+
+    d_->chain_en_i = s.en ? 1 : 0;
+    d_->chain_bind_i = s.bind ? 1 : 0;
+    d_->chain_p_alloc_valid_i = s.p_alloc ? 1 : 0;
+    d_->chain_p_gen_i = s.p_gen;
+    d_->chain_p_vd_i = static_cast<uint8_t>(s.p_vd & 0x1F);
+    d_->chain_p_vl_i = static_cast<uint8_t>(s.p_vl & 0xFF);
+    d_->chain_p_wr_valid_i = s.p_wr ? 1 : 0;
+    d_->chain_p_wr_index_i = static_cast<uint8_t>(s.p_wr_index & 0x7F);
+    d_->chain_p_wr_data_i = s.p_wr_data;
+    d_->chain_p_wr_gen_i = s.p_wr_gen;
+    d_->chain_p_fault_valid_i = s.p_fault ? 1 : 0;
+    d_->chain_p_fault_elem_i = static_cast<uint8_t>(s.p_fault_elem & 0x7F);
+    d_->chain_p_cancel_i = s.p_cancel ? 1 : 0;
+    d_->chain_p_done_i = s.p_done ? 1 : 0;
+    d_->chain_c0_alloc_valid_i = s.c0_alloc ? 1 : 0;
+    d_->chain_c0_gen_i = s.c0_gen;
+    d_->chain_c0_vs_i = static_cast<uint8_t>(s.c0_vs & 0x1F);
+    d_->chain_c0_vl_i = static_cast<uint8_t>(s.c0_vl & 0xFF);
+    d_->chain_c0_req_valid_i = s.c0_req ? 1 : 0;
+    d_->chain_c0_req_index_i = static_cast<uint8_t>(s.c0_index & 0x7F);
+    d_->chain_c0_finish_i = s.c0_finish ? 1 : 0;
+    d_->chain_c1_alloc_valid_i = s.c1_alloc ? 1 : 0;
+    d_->chain_c1_gen_i = s.c1_gen;
+    d_->chain_c1_vs_i = static_cast<uint8_t>(s.c1_vs & 0x1F);
+    d_->chain_c1_vl_i = static_cast<uint8_t>(s.c1_vl & 0xFF);
+    d_->chain_c1_req_valid_i = s.c1_req ? 1 : 0;
+    d_->chain_c1_req_index_i = static_cast<uint8_t>(s.c1_index & 0x7F);
+    d_->chain_c1_finish_i = s.c1_finish ? 1 : 0;
+    d_->chain_war_valid_i = s.war_valid ? 1 : 0;
+    d_->chain_war_vd_i = static_cast<uint8_t>(s.war_vd & 0x1F);
+    d_->chain_war_elem_i = static_cast<uint8_t>(s.war_elem & 0x7F);
+    d_->chain_war_data_i = s.war_data;
+
+    d_->eval();
+
+    ChainObs o;
+    o.p_alloc_ready = d_->chain_p_alloc_ready_o != 0;
+    o.p_wr_accept = d_->chain_p_wr_accept_o != 0;
+    o.accept_valid = d_->chain_accept_valid_o != 0;
+    o.accept_index = static_cast<int>(d_->chain_accept_index_o);
+    o.c0_alloc_ready = d_->chain_c0_alloc_ready_o != 0;
+    o.c1_alloc_ready = d_->chain_c1_alloc_ready_o != 0;
+    o.c0_req_accept = d_->chain_c0_req_accept_o != 0;
+    o.c1_req_accept = d_->chain_c1_req_accept_o != 0;
+    o.c0_rdy = d_->chain_c0_rdy_o != 0;
+    o.c1_rdy = d_->chain_c1_rdy_o != 0;
+    o.c0_data = d_->chain_c0_data_o;
+    o.c1_data = d_->chain_c1_data_o;
+    o.war_grant = d_->chain_war_grant_o != 0;
+    o.src_release_ok = d_->chain_src_release_ok_o != 0;
+
+    d_->clk = 1;
+    d_->eval();
+    d_->clk = 0;
+    d_->eval();
+
+    o.valid = d_->chain_valid_o != 0;
+    o.gen = static_cast<uint32_t>(d_->chain_gen_o);
+    o.vd = static_cast<int>(d_->chain_vd_o);
+    o.done = d_->chain_done_o != 0;
+    o.fault = d_->chain_fault_o != 0;
+    o.fault_elem = static_cast<int>(d_->chain_fault_elem_o);
+    o.ready_lo = d_->chain_ready_lo_o;
+    o.ready_hi = d_->chain_ready_hi_o;
+    o.pkt_accept = static_cast<uint32_t>(d_->chain_pkt_accept_ctr_o);
+    o.pkt_refuse = static_cast<uint32_t>(d_->chain_pkt_refuse_ctr_o);
+    o.fwd = static_cast<uint32_t>(d_->chain_fwd_ctr_o);
+    o.stall = static_cast<uint32_t>(d_->chain_stall_ctr_o);
+    o.desc_valid = d_->o_valid != 0;
+    o.desc_bm_lo = d_->o_elem_bitmap_lo;
+    o.desc_bm_hi = d_->o_elem_bitmap_hi;
+    o.desc_gen = static_cast<uint32_t>(d_->o_macro_rob_gen);
+
+    clk_->Tick();
+    return o;
+  }
+
+ private:
+  Vmosaic_vec_tb* d_;
+  ClockDriver* clk_;
+};
+
+// ------------------------------------------------------------------ coverage
+struct ChainCov {
+  bool order_seen[CH_ORDER_COUNT] = {};
+  int order_cells = 0;
+  int onoff_runs = 0;
+  int war_cells = 0;
+  int cancel_cells = 0;
+  int fault_cells = 0;
+  int cycles_on = 0, cycles_off = 0;
+  uint32_t fwd_on = 0, fwd_off = 0;
+  uint32_t stall_on = 0, stall_off = 0;
+  uint32_t pkt_on = 0, pkt_off = 0;
+  int pre_on = 0, pre_off = 0;
+};
+
+// --------------------------------------------------------- the chained run
+struct ChainProgram {
+  bool en = true;
+  int order_kind = CH_ORDER_ASC;
+  int vl = 8;
+  int vd = 4;
+  int gen = 1;
+};
+
+struct ChainResult {
+  std::vector<uint64_t> read_val;
+  std::vector<char> read_ok;
+  bool early_read = false;
+  bool write_refused = false;
+  int cycles = 0;
+  int reads_before_done = 0;
+  int reads_after_done = 0;
+  uint32_t pkt_accept = 0, pkt_refuse = 0, fwd = 0, stall = 0;
+  uint64_t desc_bm_lo = 0, desc_bm_hi = 0;
+  uint32_t desc_gen = 0;
+};
+
+// One full chained program: allocate the architectural macro and its producer
+// under the same generation, allocate the consumer, let the producer write its
+// elements in the program's order while the consumer reads them in element
+// order, then finish.  The loop is the "memory" of the case; everything it
+// observes is recorded for the phases to check against the host's numbers.
+ChainResult RunChained(Chain* ch, const ChainProgram& P) {
+  ChainResult R;
+  R.read_val.assign(P.vl, 0);
+  R.read_ok.assign(P.vl, 0);
+  ch->Reset();
+
+  {
+    ChainStim s;
+    s.en = P.en;
+    s.desc_alloc = true; s.desc_gen = static_cast<uint32_t>(P.gen);
+    s.desc_vl = P.vl; s.desc_vd = P.vd;
+    s.p_alloc = true; s.p_gen = static_cast<uint32_t>(P.gen);
+    s.p_vd = P.vd; s.p_vl = P.vl;
+    (void)ch->Step(s);
+  }
+  {
+    ChainStim s;
+    s.en = P.en;
+    s.c0_alloc = true; s.c0_gen = static_cast<uint32_t>(P.gen);
+    s.c0_vs = P.vd; s.c0_vl = P.vl;
+    (void)ch->Step(s);
+  }
+
+  const std::vector<int> order = ChainOrder(P.order_kind, P.vl);
+  std::vector<char> written(P.vl, 0);
+  int next_wr = 0, next_rd = 0;
+  int guard = 4000;
+  ChainObs o;
+  while (next_rd < P.vl && guard-- > 0) {
+    ChainStim s;
+    s.en = P.en;
+    if (next_wr < P.vl) {
+      s.p_wr = true;
+      s.p_wr_index = order[next_wr];
+      s.p_wr_data = ChainElemVal(P.gen, order[next_wr]);
+      s.p_wr_gen = static_cast<uint32_t>(P.gen);
+    } else {
+      s.p_done = true;
+    }
+    s.c0_req = true;
+    s.c0_index = next_rd;
+    o = ch->Step(s);
+    R.cycles += 1;
+    if (o.p_wr_accept && next_wr < P.vl) {
+      written[order[next_wr]] = 1;
+      next_wr += 1;
+    } else if (next_wr < P.vl && s.p_wr) {
+      R.write_refused = true;
+    }
+    if (o.c0_req_accept) {
+      if (!written[next_rd]) R.early_read = true;
+      R.read_val[next_rd] = o.c0_data;
+      R.read_ok[next_rd] = 1;
+      if (o.done) R.reads_after_done += 1; else R.reads_before_done += 1;
+      next_rd += 1;
+    }
+  }
+
+  {
+    ChainStim s;
+    s.en = P.en;
+    s.p_done = true;
+    s.c0_finish = true;
+    o = ch->Step(s);
+    R.cycles += 1;
+  }
+  R.pkt_accept = o.pkt_accept;
+  R.pkt_refuse = o.pkt_refuse;
+  R.fwd = o.fwd;
+  R.stall = o.stall;
+  R.desc_bm_lo = o.desc_bm_lo;
+  R.desc_bm_hi = o.desc_bm_hi;
+  R.desc_gen = o.desc_gen;
+  return R;
+}
+
+std::string ChainBitmap(uint64_t lo, uint64_t hi) {
+  return mosaic::Hex(hi, 16) + mosaic::Hex(lo, 16);
+}
+
+// ---------------------------------------------------------------- the phases
+// The producer's elements complete in ascending, descending and interleaved
+// order; the consumer must read every element's *own* value, and only after the
+// producer wrote it.  The descending order finishes the last element first, so
+// a macro-level ready bit is caught here.
+void PhaseChainOrder(Chain* ch, Reporter* rep, ChainCov* cov) {
+  const int kVl = 8;
+  for (int kind = 0; kind < CH_ORDER_COUNT; ++kind) {
+    ChainProgram P;
+    P.en = true;
+    P.order_kind = kind;
+    P.vl = kVl;
+    P.vd = 4;
+    P.gen = 1 + kind;
+    const std::string name = std::string("order ") + ChainOrderName(kind);
+
+    ChainResult R = RunChained(ch, P);
+    cov->order_seen[kind] = true;
+    cov->order_cells += 1;
+
+    rep->Check(!R.early_read,
+               name + ": an element was read before its producer wrote it");
+    rep->Check(!R.write_refused, name + ": a producer element packet was refused");
+    for (int i = 0; i < kVl; ++i) {
+      rep->Check(R.read_ok[i] != 0, name + ": element " + Dec(i) + " was never read");
+      const uint64_t want = ChainElemVal(P.gen, i);
+      rep->Check(R.read_val[i] == want,
+                 name + ": element " + Dec(i) + " read " + mosaic::Hex(R.read_val[i]) +
+                     " expected " + mosaic::Hex(want));
+    }
+    rep->Check(R.desc_bm_lo == ((1ull << kVl) - 1ull) && R.desc_bm_hi == 0ull,
+               name + ": descriptor bitmap " + ChainBitmap(R.desc_bm_lo, R.desc_bm_hi) +
+                   " expected the " + Dec(kVl) + " written elements");
+    rep->Check(R.desc_gen == static_cast<uint32_t>(P.gen),
+               name + ": the descriptor generation moved to " + Dec(R.desc_gen) +
+                   ", expected " + Dec(P.gen));
+  }
+}
+
+// The same program with chaining on and off.  The architectural results must be
+// identical field for field; the counters and the cycle counts are the
+// performance difference, reported rather than assumed.
+void PhaseChainOnOff(Chain* ch, Reporter* rep, ChainCov* cov) {
+  ChainProgram P;
+  P.vl = 8;
+  P.vd = 4;
+  P.gen = 9;
+  P.order_kind = CH_ORDER_ASC;
+
+  P.en = true;
+  ChainResult on = RunChained(ch, P);
+  P.en = false;
+  ChainResult off = RunChained(ch, P);
+  cov->onoff_runs += 2;
+  cov->cycles_on = on.cycles;
+  cov->cycles_off = off.cycles;
+  cov->fwd_on = on.fwd;
+  cov->fwd_off = off.fwd;
+  cov->stall_on = on.stall;
+  cov->stall_off = off.stall;
+  cov->pkt_on = on.pkt_accept;
+  cov->pkt_off = off.pkt_accept;
+  cov->pre_on = on.reads_before_done;
+  cov->pre_off = off.reads_before_done;
+
+  for (int i = 0; i < P.vl; ++i) {
+    rep->Check(on.read_ok[i] != 0 && off.read_ok[i] != 0,
+               "on/off: element " + Dec(i) + " unread in a configuration");
+    rep->Check(on.read_val[i] == off.read_val[i],
+               "on/off: element " + Dec(i) + " differs: chaining " +
+                   mosaic::Hex(on.read_val[i]) + " no-chaining " +
+                   mosaic::Hex(off.read_val[i]));
+    rep->Check(on.read_val[i] == ChainElemVal(P.gen, i),
+               "on/off: element " + Dec(i) + " read " +
+                   mosaic::Hex(on.read_val[i]) + " expected " +
+                   mosaic::Hex(ChainElemVal(P.gen, i)));
+  }
+  rep->Check(on.desc_bm_lo == off.desc_bm_lo && on.desc_bm_hi == off.desc_bm_hi,
+             "on/off: the descriptor bitmap differs between chaining " +
+                 ChainBitmap(on.desc_bm_lo, on.desc_bm_hi) + " and no-chaining " +
+                 ChainBitmap(off.desc_bm_lo, off.desc_bm_hi));
+  rep->Check(on.pkt_accept == static_cast<uint32_t>(P.vl) &&
+                 off.pkt_accept == static_cast<uint32_t>(P.vl),
+             "on/off: accepted packet count " + Dec(on.pkt_accept) + "/" +
+                 Dec(off.pkt_accept) + " expected " + Dec(P.vl) + " each");
+
+  // The configurations differ in the intended way: with chaining the reads are
+  // element-granular and most of them land before the producer finished; the
+  // control can read nothing until the whole macro is done.
+  rep->Check(on.fwd > 0 && on.reads_before_done > 0,
+             "on/off: chaining produced no element-granular forward");
+  rep->Check(off.fwd == 0, "on/off: the no-chaining control produced " +
+                              Dec(off.fwd) + " element-granular forwards");
+  rep->Check(off.reads_before_done == 0,
+             "on/off: the no-chaining control read " + Dec(off.reads_before_done) +
+                 " elements before the producer finished");
+  rep->Check(off.stall > on.stall,
+             "on/off: the no-chaining control stalled " + Dec(off.stall) +
+                 " cycles and chaining " + Dec(on.stall) +
+                 "; the control was expected to stall longer");
+  rep->Check(on.cycles < off.cycles,
+             "on/off: chaining took " + Dec(on.cycles) + " cycles, no-chaining " +
+                 Dec(off.cycles) + "; chaining was expected to be faster");
+}
+
+// The WAR hazard.  A source register must not be released -- or overwritten --
+// while a younger macro still needs to read it, and another reader finishing
+// must not release it.
+void PhaseChainWar(Chain* ch, Reporter* rep, ChainCov* cov) {
+  // ---- A: one consumer has read 0..k; element k is releasable, k+1 is not
+  {
+    const int kVl = 6, kGen = 20, kGrp = 6;
+    ch->Reset();
+    { ChainStim s; s.desc_alloc = true; s.desc_gen = kGen; s.desc_vl = kVl; s.desc_vd = kGrp;
+      s.p_alloc = true; s.p_gen = kGen; s.p_vd = kGrp; s.p_vl = kVl; (void)ch->Step(s); }
+    { ChainStim s; s.c0_alloc = true; s.c0_gen = kGen; s.c0_vs = kGrp; s.c0_vl = kVl; (void)ch->Step(s); }
+    for (int i = 0; i < kVl; ++i) {
+      ChainStim s;
+      s.p_wr = true; s.p_wr_index = i; s.p_wr_data = ChainElemVal(kGen, i); s.p_wr_gen = kGen;
+      ChainObs o = ch->Step(s);
+      rep->Check(o.p_wr_accept, "war A: element " + Dec(i) + " packet was refused");
+    }
+    { ChainStim s; s.p_done = true; (void)ch->Step(s); }
+
+    for (int i = 0; i < 3; ++i) {
+      ChainStim s; s.c0_req = true; s.c0_index = i;
+      ChainObs o = ch->Step(s);
+      rep->Check(o.c0_req_accept, "war A: element " + Dec(i) + " was not ready to read");
+      rep->Check(o.c0_data == ChainElemVal(kGen, i),
+                 "war A: element " + Dec(i) + " read " + mosaic::Hex(o.c0_data) +
+                     " expected " + mosaic::Hex(ChainElemVal(kGen, i)));
+    }
+    {   // element 4 has not been read: the overwrite must be held
+      ChainStim s; s.war_valid = true; s.war_vd = kGrp; s.war_elem = 4; s.war_data = 0xDEADBEEFull;
+      ChainObs o = ch->Step(s);
+      rep->Check(!o.war_grant,
+                 "war A: element 4 was released while the consumer had read only elements 0..2");
+      rep->Check(!o.src_release_ok,
+                 "war A: the source group was released with elements 3..5 still unread");
+    }
+    {   // element 1 has been read: it is releasable
+      ChainStim s; s.war_valid = true; s.war_vd = kGrp; s.war_elem = 1;
+      s.war_data = 0xA5A5A5A5A5A5A5A5ull;
+      ChainObs o = ch->Step(s);
+      rep->Check(o.war_grant,
+                 "war A: element 1 was not released after the consumer had read it");
+    }
+    for (int i = 3; i < kVl; ++i) {
+      ChainStim s; s.c0_req = true; s.c0_index = i;
+      ChainObs o = ch->Step(s);
+      rep->Check(o.c0_req_accept, "war A: element " + Dec(i) + " was not ready to read");
+      rep->Check(o.c0_data == ChainElemVal(kGen, i),
+                 "war A: element " + Dec(i) + " read " + mosaic::Hex(o.c0_data) +
+                     " expected " + mosaic::Hex(ChainElemVal(kGen, i)));
+    }
+    {   // every element read: the group is releasable
+      ChainStim s; s.war_valid = true; s.war_vd = kGrp; s.war_elem = 5; s.war_data = 1;
+      ChainObs o = ch->Step(s);
+      rep->Check(o.src_release_ok,
+                 "war A: the source group was not released after every element had been read");
+      rep->Check(o.war_grant,
+                 "war A: element 5 was not releasable after it had been read");
+    }
+    {   // the granted overwrite landed in the element slot
+      ChainStim a; a.c1_alloc = true; a.c1_gen = kGen; a.c1_vs = kGrp; a.c1_vl = kVl;
+      (void)ch->Step(a);
+      ChainStim s; s.c1_req = true; s.c1_index = 1;
+      ChainObs o = ch->Step(s);
+      rep->Check(o.c1_req_accept && o.c1_data == 0xA5A5A5A5A5A5A5A5ull,
+                 "war A: the granted overwrite did not land in element 1: read " +
+                     mosaic::Hex(o.c1_data));
+    }
+    {   // the second consumer read element 1 only, so it still holds element 4 of
+        // the same group -- but a writer to another group is not blocked by it
+      ChainStim s; s.war_valid = true; s.war_vd = kGrp; s.war_elem = 4; s.war_data = 0x22ull;
+      ChainObs o = ch->Step(s);
+      rep->Check(!o.war_grant,
+                 "war A: element 4 was released while a later consumer still needed it");
+      ChainStim t; t.war_valid = true; t.war_vd = kGrp + 1; t.war_elem = 4; t.war_data = 0x11ull;
+      ChainObs p = ch->Step(t);
+      rep->Check(p.war_grant,
+                 "war A: a writer to another group was blocked by a hold on group " +
+                     Dec(kGrp));
+    }
+    cov->war_cells += 1;
+  }
+
+  // ---- B: the other reader finishing must not release the group
+  {
+    const int kVl = 6, kGen = 21, kGrp = 7;
+    ch->Reset();
+    { ChainStim s; s.desc_alloc = true; s.desc_gen = kGen; s.desc_vl = kVl; s.desc_vd = kGrp;
+      s.p_alloc = true; s.p_gen = kGen; s.p_vd = kGrp; s.p_vl = kVl; (void)ch->Step(s); }
+    { ChainStim s; s.c0_alloc = true; s.c0_gen = kGen; s.c0_vs = kGrp; s.c0_vl = kVl;
+      s.c1_alloc = true; s.c1_gen = kGen; s.c1_vs = kGrp; s.c1_vl = kVl;
+      ChainObs o = ch->Step(s);
+      rep->Check(o.c0_alloc_ready && o.c1_alloc_ready,
+                 "war B: two consumers could not register");
+    }
+    for (int i = 0; i < kVl; ++i) {
+      ChainStim s;
+      s.p_wr = true; s.p_wr_index = i; s.p_wr_data = ChainElemVal(kGen, i); s.p_wr_gen = kGen;
+      ChainObs o = ch->Step(s);
+      rep->Check(o.p_wr_accept, "war B: element " + Dec(i) + " packet was refused");
+    }
+    { ChainStim s; s.p_done = true; (void)ch->Step(s); }
+
+    // consumer 1 reads every element and finishes; consumer 0 reads only 0..2
+    for (int i = 0; i < kVl; ++i) {
+      ChainStim s; s.c1_req = true; s.c1_index = i;
+      ChainObs o = ch->Step(s);
+      rep->Check(o.c1_req_accept, "war B: consumer 1 could not read element " + Dec(i));
+    }
+    { ChainStim s; s.c1_finish = true; (void)ch->Step(s); }
+    for (int i = 0; i < 3; ++i) {
+      ChainStim s; s.c0_req = true; s.c0_index = i;
+      ChainObs o = ch->Step(s);
+      rep->Check(o.c0_req_accept, "war B: consumer 0 could not read element " + Dec(i));
+    }
+    {   // the other reader has finished; consumer 0 still needs element 4
+      ChainStim s; s.war_valid = true; s.war_vd = kGrp; s.war_elem = 4; s.war_data = 0xFEEDFACEull;
+      ChainObs o = ch->Step(s);
+      rep->Check(!o.war_grant,
+                 "war B: element 4 was released because the other reader finished, "
+                 "while consumer 0 had not read it");
+      rep->Check(!o.src_release_ok,
+                 "war B: the source group was released because the other reader "
+                 "finished, while consumer 0 still needed elements 3..5");
+    }
+    for (int i = 3; i < kVl; ++i) {
+      ChainStim s; s.c0_req = true; s.c0_index = i;
+      ChainObs o = ch->Step(s);
+      rep->Check(o.c0_req_accept, "war B: consumer 0 could not read element " + Dec(i));
+      rep->Check(o.c0_data == ChainElemVal(kGen, i),
+                 "war B: element " + Dec(i) + " read " + mosaic::Hex(o.c0_data) +
+                     " expected " + mosaic::Hex(ChainElemVal(kGen, i)));
+    }
+    { ChainStim s; s.war_valid = true; s.war_vd = kGrp; s.war_elem = 4; s.war_data = 0xFEEDFACEull;
+      ChainObs o = ch->Step(s);
+      rep->Check(o.src_release_ok && o.war_grant,
+                 "war B: the group stayed held after consumer 0 finished its reads");
+    }
+    cov->war_cells += 1;
+  }
+}
+
+// Instruction cancellation.  A packet produced by a macro that was subsequently
+// cancelled must not be accepted by the descriptor that takes over the slot:
+// each packet carries the generation that produced it, and a mismatch is
+// refused.  A producer fault has the same shape -- the elements after it must
+// not be accepted.
+void PhaseChainCancel(Chain* ch, Reporter* rep, ChainCov* cov) {
+  // ---- the cancelled generation's packet must not reach the new descriptor
+  {
+    const int kVl = 6, kGrp = 5;
+    ch->Reset();
+    { ChainStim s; s.desc_alloc = true; s.desc_gen = 30; s.desc_vl = kVl; s.desc_vd = kGrp;
+      s.p_alloc = true; s.p_gen = 30; s.p_vd = kGrp; s.p_vl = kVl; (void)ch->Step(s); }
+    for (int i = 0; i < 3; ++i) {
+      ChainStim s;
+      s.p_wr = true; s.p_wr_index = i; s.p_wr_data = ChainElemVal(30, i); s.p_wr_gen = 30;
+      ChainObs o = ch->Step(s);
+      rep->Check(o.p_wr_accept, "cancel: the live producer's element " + Dec(i) +
+                                    " packet was refused");
+    }
+    {   // cancel the macro and release its descriptor
+      ChainStim s; s.p_cancel = true; s.desc_release = true; (void)ch->Step(s);
+    }
+    {   // a new descriptor takes the slot, under a new generation
+      ChainStim s; s.desc_alloc = true; s.desc_gen = 31; s.desc_vl = kVl; s.desc_vd = kGrp;
+      s.p_alloc = true; s.p_gen = 31; s.p_vd = kGrp; s.p_vl = kVl;
+      ChainObs o = ch->Step(s);
+      rep->Check(Popcount128(o.desc_bm_lo, o.desc_bm_hi) == 0,
+                 "cancel: the new descriptor did not start clean: bitmap " +
+                     ChainBitmap(o.desc_bm_lo, o.desc_bm_hi));
+      rep->Check(o.desc_gen == 31u,
+                 "cancel: the new descriptor generation is " + Dec(o.desc_gen));
+    }
+    {   // the wrong-path packet: produced by generation 30, offered to generation 31
+      ChainStim s;
+      s.p_wr = true; s.p_wr_index = 3; s.p_wr_data = ChainElemVal(30, 3); s.p_wr_gen = 30;
+      ChainObs o = ch->Step(s);
+      rep->Check(!o.p_wr_accept,
+                 "cancel: a packet from the cancelled generation 30 was accepted by "
+                 "the new descriptor");
+      rep->Check(Popcount128(o.desc_bm_lo, o.desc_bm_hi) == 0,
+                 "cancel: the new descriptor progressed on a stale packet: bitmap " +
+                     ChainBitmap(o.desc_bm_lo, o.desc_bm_hi));
+      rep->Check((o.ready_lo & (1ull << 3)) == 0ull,
+                 "cancel: the stale packet marked element 3 ready");
+    }
+    { ChainStim s; s.c0_alloc = true; s.c0_gen = 31; s.c0_vs = kGrp; s.c0_vl = kVl; (void)ch->Step(s); }
+
+    const int order[6] = {0, 1, 2, 4, 5, 3};
+    std::vector<char> written(kVl, 0);
+    std::vector<uint64_t> got(kVl, 0);
+    int next_wr = 0, next_rd = 0, guard = 200;
+    bool early = false;
+    ChainObs o;
+    while (next_rd < kVl && guard-- > 0) {
+      ChainStim s;
+      if (next_wr < kVl) {
+        s.p_wr = true; s.p_wr_index = order[next_wr];
+        s.p_wr_data = ChainElemVal(31, order[next_wr]); s.p_wr_gen = 31;
+      } else {
+        s.p_done = true;
+      }
+      s.c0_req = true; s.c0_index = next_rd;
+      o = ch->Step(s);
+      if (o.p_wr_accept && next_wr < kVl) { written[order[next_wr]] = 1; next_wr += 1; }
+      if (o.c0_req_accept) {
+        if (!written[next_rd]) early = true;
+        got[next_rd] = o.c0_data;
+        next_rd += 1;
+      }
+    }
+    rep->Check(!early,
+               "cancel: the consumer read an element before the new producer wrote "
+               "it -- a stale packet was forwarded");
+    for (int i = 0; i < kVl; ++i) {
+      rep->Check(got[i] == ChainElemVal(31, i),
+                 "cancel: element " + Dec(i) + " read " + mosaic::Hex(got[i]) +
+                     " expected generation 31's " + mosaic::Hex(ChainElemVal(31, i)));
+    }
+    rep->Check(o.desc_bm_lo == ((1ull << kVl) - 1ull) && o.desc_bm_hi == 0ull,
+               "cancel: the new descriptor bitmap " + ChainBitmap(o.desc_bm_lo, o.desc_bm_hi) +
+                   " expected the new generation's " + Dec(kVl) + " elements");
+    cov->cancel_cells += 1;
+  }
+
+  // ---- a producer fault stops the elements after it
+  {
+    const int kVl = 6, kGen = 32, kGrp = 8;
+    ch->Reset();
+    { ChainStim s; s.desc_alloc = true; s.desc_gen = kGen; s.desc_vl = kVl; s.desc_vd = kGrp;
+      s.p_alloc = true; s.p_gen = kGen; s.p_vd = kGrp; s.p_vl = kVl; (void)ch->Step(s); }
+    for (int i = 0; i < 3; ++i) {
+      ChainStim s;
+      s.p_wr = true; s.p_wr_index = i; s.p_wr_data = ChainElemVal(kGen, i); s.p_wr_gen = kGen;
+      ChainObs o = ch->Step(s);
+      rep->Check(o.p_wr_accept, "fault: element " + Dec(i) + " packet was refused");
+    }
+    { ChainStim s; s.p_fault = true; s.p_fault_elem = 3;
+      ChainObs o = ch->Step(s);
+      rep->Check(o.fault && o.fault_elem == 3,
+                 "fault: the producer's fault at element 3 was not recorded"); }
+    for (int i = 3; i < kVl; ++i) {
+      ChainStim s;
+      s.p_wr = true; s.p_wr_index = i; s.p_wr_data = ChainElemVal(kGen, i); s.p_wr_gen = kGen;
+      ChainObs o = ch->Step(s);
+      rep->Check(!o.p_wr_accept,
+                 "fault: element " + Dec(i) + " was accepted after a producer fault at 3");
+    }
+    { ChainStim s; s.c0_alloc = true; s.c0_gen = kGen; s.c0_vs = kGrp; s.c0_vl = kVl; (void)ch->Step(s); }
+    for (int i = 0; i < 3; ++i) {
+      ChainStim s; s.c0_req = true; s.c0_index = i;
+      ChainObs o = ch->Step(s);
+      rep->Check(o.c0_req_accept && o.c0_data == ChainElemVal(kGen, i),
+                 "fault: committed element " + Dec(i) + " was not readable");
+    }
+    { ChainStim s; s.c0_req = true; s.c0_index = 3;
+      ChainObs o = ch->Step(s);
+      rep->Check(!o.c0_req_accept,
+                 "fault: element 3 was readable past a producer fault at 3"); }
+    cov->fault_cells += 1;
+  }
+}
+
+void RunVecChainCase(Vmosaic_vec_tb* dut, ClockDriver* clk, Reporter* rep,
+                     ChainCov* cov) {
+  Chain ch(dut, clk);
+  PhaseChainOrder(&ch, rep, cov);
+  PhaseChainOnOff(&ch, rep, cov);
+  PhaseChainWar(&ch, rep, cov);
+  PhaseChainCancel(&ch, rep, cov);
+
+  for (int k = 0; k < CH_ORDER_COUNT; ++k) {
+    rep->Check(cov->order_seen[k],
+               std::string("coverage: producer order ") + ChainOrderName(k) + " never ran");
+  }
+  rep->Check(cov->onoff_runs == 2,
+             "coverage: " + Dec(cov->onoff_runs) + " on/off runs, expected 2");
+  rep->Check(cov->war_cells >= 2,
+             "coverage: " + Dec(cov->war_cells) + " WAR cells ran, expected 2");
+  rep->Check(cov->cancel_cells >= 1,
+             "coverage: " + Dec(cov->cancel_cells) + " cancellation cells ran, expected 1");
+  rep->Check(cov->fault_cells >= 1,
+             "coverage: " + Dec(cov->fault_cells) + " fault cells ran, expected 1");
+}
+
 int main(int argc, char** argv) {
   mosaic::Options options;
   std::string error;
@@ -6117,6 +6879,7 @@ int main(int argc, char** argv) {
   LsuCoverage lsu_cov;
   FpCov fp_cov;
   RstCoverage rst_cov;
+  ChainCov chain_cov;
 
   std::string detail;
   bool aborted = false;
@@ -6146,6 +6909,8 @@ int main(int argc, char** argv) {
       RunVecFpCase(&dut, &clk, &reporter, &fp_cov);
     } else if (options.case_id == "rvv.partial_fault_restart") {
       RunVecRestartCase(&dut, &clk, &reporter, &rst_cov);
+    } else if (options.case_id == "rvv.chaining_hazards") {
+      RunVecChainCase(&dut, &clk, &reporter, &chain_cov);
     } else if (options.case_id == "rvv.vtype_layout") {
       RunVtypeLayoutCase(&dut, &unit, &clk, &reporter, &layout_counts);
     } else {
@@ -6207,6 +6972,20 @@ int main(int argc, char** argv) {
                                        Dec(rst_cov.intr_cells) + " fof=" + Dec(rst_cov.fof_cells) +
                                        " restarts=" + Dec(rst_cov.restart_cells) +
                                        " cycles=" + Dec(cycles));
+  }
+  if (options.case_id == "rvv.chaining_hazards") {
+    return reporter.Finish("PASS", "checks=" + Dec(reporter.checks()) + " orders=" +
+                                       Dec(chain_cov.order_cells) + " cycles_on=" +
+                                       Dec(chain_cov.cycles_on) + " cycles_off=" +
+                                       Dec(chain_cov.cycles_off) + " fwd_on=" +
+                                       Dec(chain_cov.fwd_on) + " fwd_off=" +
+                                       Dec(chain_cov.fwd_off) + " stall_on=" +
+                                       Dec(chain_cov.stall_on) + " stall_off=" +
+                                       Dec(chain_cov.stall_off) + " pkt_on=" +
+                                       Dec(chain_cov.pkt_on) + " pkt_off=" +
+                                       Dec(chain_cov.pkt_off) + " pre_on=" +
+                                       Dec(chain_cov.pre_on) + " pre_off=" +
+                                       Dec(chain_cov.pre_off) + " cycles=" + Dec(cycles));
   }
   return reporter.Finish("PASS", "checks=" + Dec(reporter.checks()) + " combos=" +
                                      Dec(VOP_COUNT * 64 * 4 * 2 + 64 + 4) +

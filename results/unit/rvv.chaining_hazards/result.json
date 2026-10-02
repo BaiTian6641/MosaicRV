@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "case": "rvv.chaining_hazards",
+  "verdict": "PASS",
+  "detail": "checks=184 orders=3 cycles_on=10 cycles_off=18 fwd_on=8 fwd_off=0 stall_on=1 stall_off=9 pkt_on=8 pkt_off=8 pre_on=7 pre_off=0 cycles=185",
+  "seed": 1,
+  "max_cycles": 200000,
+  "checks": 184,
+  "failures": 0,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-02T15:51:17Z",
+  "first_mismatch": ""
+}

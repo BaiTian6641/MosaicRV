@@ -1,15 +1,16 @@
 {
   "schema_version": 1,
   "case": "core.act_dut",
-  "verdict": "PASS",
-  "detail": "applicable=127 generated=127 run=127 passed=127 failed=0 act_commit=96493a91448ca50780013fd892daec2c204487ba config=tests/act4/mosaic-p1/test_config.yaml",
+  "verdict": "FAIL",
+  "detail": "applicable=127 generated=127 run=127 passed=0 failed=127 act_commit=96493a91448ca50780013fd892daec2c204487ba config=tests/act4/mosaic-p1/test_config.yaml first_fail=/Users/flare/mosaic-ref/act4-mosaic-p1-work/mosaic-p1/elfs/rv64i/I/I-add-00.elf",
   "seed": 1,
   "max_cycles": 4000000,
   "checks": 130,
-  "failures": 0,
+  "failures": 128,
   "image": "",
   "expect": "",
   "tool": "Verilator 5.052 2026-09-05",
-  "timestamp": "2026-10-02T15:15:09Z",
-  "first_mismatch": ""
+  "timestamp": "2026-10-02T15:51:20Z",
+  "first_mismatch": "",
+  "failed_checks": ["ELF I/I-add-00.elf passed its own self-check (status STOP)", "ELF I/I-addi-00.elf passed its own self-check (status STOP)", "ELF I/I-addiw-00.elf passed its own self-check (status STOP)", "ELF I/I-addw-00.elf passed its own self-check (status STOP)", "ELF I/I-and-00.elf passed its own self-check (status STOP)", "ELF I/I-andi-00.elf passed its own self-check (status STOP)", "ELF I/I-auipc-00.elf passed its own self-check (status STOP)", "ELF I/I-beq-00.elf passed its own self-check (status STOP)", "ELF I/I-bge-00.elf passed its own self-check (status STOP)", "ELF I/I-bgeu-00.elf passed its own self-check (status STOP)", "ELF I/I-blt-00.elf passed its own self-check (status STOP)", "ELF I/I-bltu-00.elf passed its own self-check (status STOP)", "ELF I/I-bne-00.elf passed its own self-check (status STOP)", "ELF I/I-fence-00.elf passed its own self-check (status STOP)", "ELF I/I-jal-00.elf passed its own self-check (status STOP)", "ELF I/I-jalr-00.elf passed its own self-check (status STOP)", "ELF I/I-lb-00.elf passed its own self-check (status STOP)", "ELF I/I-lbu-00.elf passed its own self-check (status STOP)", "ELF I/I-ld-00.elf passed its own self-check (status STOP)", "ELF I/I-lh-00.elf passed its own self-check (status STOP)", "ELF I/I-lhu-00.elf passed its own self-check (status STOP)", "ELF I/I-lui-00.elf passed its own self-check (status STOP)", "ELF I/I-lw-00.elf passed its own self-check (status STOP)", "ELF I/I-lwu-00.elf passed its own self-check (status STOP)", "ELF I/I-nop-00.elf passed its own self-check (status STOP)", "ELF I/I-or-00.elf passed its own self-check (status STOP)", "ELF I/I-ori-00.elf passed its own self-check (status STOP)", "ELF I/I-sb-00.elf passed its own self-check (status STOP)", "ELF I/I-sd-00.elf passed its own self-check (status STOP)", "ELF I/I-sh-00.elf passed its own self-check (status STOP)", "ELF I/I-sll-00.elf passed its own self-check (status STOP)", "ELF I/I-slli-00.elf passed its own self-check (status STOP)"]
 }

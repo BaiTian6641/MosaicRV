@@ -676,17 +676,20 @@ class Harness {
     dut_->eval();
     if (!rst) Observe();
 
-    if (!rst && (dut_->imem_req_valid_o != 0) && (dut_->imem_req_ready_i != 0)) {
+    if (bus_reset_.MayAccept(rst, (dut_->imem_req_valid_o != 0) &&
+                                      (dut_->imem_req_ready_i != 0))) {
       requests_.push_back(dut_->imem_req_addr_o);
       imem_.Accept(dut_->imem_req_addr_o, dut_->imem_req_id_o,
                    dut_->imem_req_epoch_o);
     }
-    if (!rst && (dut_->imem_rsp_valid_i != 0) && (dut_->imem_rsp_ready_o != 0)) {
+    if (bus_reset_.MayDeliver(rst) && (dut_->imem_rsp_valid_i != 0) &&
+        (dut_->imem_rsp_ready_o != 0)) {
       imem_.PopResponse();
     }
     imem_.Advance();
 
-    if (!rst && (dut_->dmem_req_valid_o != 0) && (dut_->dmem_req_ready_i != 0)) {
+    if (bus_reset_.MayAccept(rst, (dut_->dmem_req_valid_o != 0) &&
+                                      (dut_->dmem_req_ready_i != 0))) {
       Dmem::Txn t;
       t.we = dut_->dmem_req_we_o != 0;
       t.addr = dut_->dmem_req_addr_o;
@@ -705,7 +708,8 @@ class Harness {
         exit_code_ = value;
       }
     }
-    if (!rst && (dut_->dmem_rsp_valid_i != 0) && (dut_->dmem_rsp_ready_o != 0)) {
+    if (bus_reset_.MayDeliver(rst) && (dut_->dmem_rsp_valid_i != 0) &&
+        (dut_->dmem_rsp_ready_o != 0)) {
       dmem_.PopResponse();
     }
     dmem_.Advance();
@@ -886,6 +890,10 @@ class Harness {
   uint64_t max_cycles_;
   Imem imem_{img_};
   Dmem dmem_{img_};
+  // The reset-traffic rule (V-010, sim/common/bus_reset_gate.h): while reset
+  // is asserted this model accepts nothing, so no reset-time response can be
+  // queued ahead of a fresh post-reset one.
+  mosaic::BusResetGate bus_reset_;
   uint32_t retire_width_ = 2;
   uint64_t cycles_ = 0;
   std::vector<DutRecord> records_;

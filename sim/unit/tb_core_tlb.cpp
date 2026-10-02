@@ -912,10 +912,14 @@ class CoreHarness {
       }
       o.trap_count++;
     }
-    const bool dmem_accept = (dut_->dmem_req_valid_o != 0) && (dut_->dmem_req_ready_i != 0);
-    const bool dmem_pop = (dut_->dmem_rsp_valid_i != 0) && (dut_->dmem_rsp_ready_o != 0);
-    const bool imem_accept = (dut_->imem_req_valid_o != 0) && (dut_->imem_req_ready_i != 0);
-    const bool imem_pop = (dut_->imem_rsp_valid_i != 0) && (dut_->imem_rsp_ready_o != 0);
+    const bool dmem_accept = bus_reset_.MayAccept(rst, (dut_->dmem_req_valid_o != 0) &&
+                                                       (dut_->dmem_req_ready_i != 0));
+    const bool dmem_pop = bus_reset_.MayDeliver(rst) && (dut_->dmem_rsp_valid_i != 0) &&
+                          (dut_->dmem_rsp_ready_o != 0);
+    const bool imem_accept = bus_reset_.MayAccept(rst, (dut_->imem_req_valid_o != 0) &&
+                                                       (dut_->imem_req_ready_i != 0));
+    const bool imem_pop = bus_reset_.MayDeliver(rst) && (dut_->imem_rsp_valid_i != 0) &&
+                          (dut_->imem_rsp_ready_o != 0);
     const uint64_t dmem_addr = dut_->dmem_req_addr_o;
     const uint64_t dmem_wdata = dut_->dmem_req_wdata_o;
     const bool dmem_we = dut_->dmem_req_we_o != 0;
@@ -958,6 +962,10 @@ class CoreHarness {
   struct Rsp { uint64_t rdata = 0; bool fault = false; };
   struct ImemRsp { uint32_t word = 0; uint64_t id = 0; uint64_t epoch = 0; };
   Vmosaic_core_tb* dut_;
+  // The reset-traffic rule (V-010, sim/common/bus_reset_gate.h): while reset is
+  // asserted this model accepts nothing, so no reset-time response can be
+  // queued ahead of a fresh post-reset one.
+  mosaic::BusResetGate bus_reset_;
   MemoryModel* mem_;
   std::map<uint64_t, uint32_t>* img_;
   uint64_t cycles_ = 0;

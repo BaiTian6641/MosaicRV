@@ -111,6 +111,19 @@ module mosaic_bringup_tb (
     input  wire  [7:0]  h_if_gap,
     input  wire  [7:0]  h_d_gap,
 
+    // ------------------------------------------- V-010 reset-traffic control
+    // The rule this model obeys by default: while `h_rst` is asserted it does
+    // not accept, queue or deliver a request, so a request the core re-offers
+    // during reset (the fetch unit holds its PC at the reset vector and
+    // presents the reset-vector request every reset cycle) produces no response
+    // that could be matched to a fresh post-reset request.  `h_accept_in_reset`
+    // is the negative control for the harness.reset_traffic case: driving it
+    // high restores the pre-rule behaviour (accept reset-time traffic) so the
+    // case can show that it is the case which catches the class.  It is zero in
+    // every other driver, and the zero case is the original model statement for
+    // statement.
+    input  wire         h_accept_in_reset,
+
     // -------------------------------------------- observation (DUT + devices)
     output wire         c_evt_valid,
     output wire         c_evt_trap,
@@ -139,6 +152,13 @@ module mosaic_bringup_tb (
     // much as of the core.  Exposed as observation only; nothing here drives it.
     output wire         h_if_pending,
     output wire         h_d_pending,
+    // V-010: requests the memory model accepted while `h_rst` was asserted.
+    // Zero whenever the reset-traffic rule holds; non-zero only while
+    // `h_accept_in_reset`'s control is engaged.  Exposed so
+    // harness.reset_traffic can assert the bus model accepted nothing during
+    // reset rather than inferring it from the absence of a symptom.
+    output wire  [31:0] h_if_reset_accepts,
+    output wire  [31:0] h_d_reset_accepts,
     // The core's data-port request, exposed so a harness can assert on it
     // without a hierarchical reference.  V-009 reads these to check that the
     // machine posts no data request while reset is asserted, which is half of
@@ -211,6 +231,12 @@ import mosaic_pkg::*;
   logic [63:0] m_d_data;
   logic        m_d_fault;
   logic [7:0]  m_d_wait;      // V-010: extra cycles still owed on a data ack
+
+  // V-010 reset-traffic counters: requests accepted while `h_rst` was asserted.
+  // They can only advance when `h_accept_in_reset` engages the control, because
+  // the default reset branch does not run the accept logic at all.
+  logic [31:0] m_if_reset_accepts;
+  logic [31:0] m_d_reset_accepts;
 
   logic [63:0] m_tohost_value;
   logic        m_tohost_written;
@@ -416,6 +442,8 @@ import mosaic_pkg::*;
   assign h_uart_count     = m_uart_count;
   assign h_if_pending     = m_if_pending;
   assign h_d_pending      = m_d_pending;
+  assign h_if_reset_accepts = m_if_reset_accepts;
+  assign h_d_reset_accepts  = m_d_reset_accepts;
   assign c_dmem_req_o     = c_dmem_req;
   assign c_dmem_we_o      = c_dmem_we;
   assign c_dmem_addr_o    = c_dmem_addr;
@@ -523,10 +551,12 @@ import mosaic_pkg::*;
       m_tohost_commit  <= 1'b0;
       m_tohost_value   <= 64'd0;
       m_uart_count     <= 64'd0;
+      m_if_reset_accepts <= 32'd0;
+      m_d_reset_accepts  <= 32'd0;
       h_rb_data        <= 64'd0;
       h_rb_fault       <= 1'b0;
       h_rb_valid       <= 1'b0;
-    end else if (h_rst) begin
+    end else if (h_rst && !h_accept_in_reset) begin
 `ifdef MOSAIC_RESET_MUTANT_STALE_PENDING
       // MUTANT (V-009 control): an outstanding transaction is not cleared by
       // reset, so a request the environment accepted before the reset is
@@ -583,6 +613,9 @@ import mosaic_pkg::*;
       // it is high for exactly one cycle.  With a non-zero gap the answer is
       // latched at the request and the ack is owed `h_if_gap` further cycles.
       if (c_ifetch_req && !m_if_pending && (m_if_wait == 8'd0)) begin
+        // Reachable while h_rst is high only through the h_accept_in_reset
+        // control; under the rule the reset branch above consumes the cycle.
+        if (h_rst) m_if_reset_accepts <= m_if_reset_accepts + 32'd1;
         m_if_data  <= if_data_c;
         m_if_fault <= if_fault_c;
         if (h_if_gap == 8'd0) begin
@@ -615,6 +648,9 @@ import mosaic_pkg::*;
       // Same shape as the fetch port: `h_d_gap` is zero for every driver but
       // V-010, and the zero case is statement for statement the original.
       if (c_dmem_req && !m_d_pending && (m_d_wait == 8'd0)) begin
+        // Reachable while h_rst is high only through the h_accept_in_reset
+        // control; under the rule the reset branch above consumes the cycle.
+        if (h_rst) m_d_reset_accepts <= m_d_reset_accepts + 32'd1;
         if (h_d_gap == 8'd0) m_d_pending <= 1'b1;
         else                 m_d_wait    <= h_d_gap;
         if (c_dmem_we) begin

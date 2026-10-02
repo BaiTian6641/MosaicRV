@@ -620,7 +620,7 @@ class Harness {
 
     if (!rst) Observe();
 
-    ModelStep();
+    ModelStep(rst);
     Edge();
     ++cycles_;
   }
@@ -775,14 +775,16 @@ class Harness {
   }
 
   // ------------------------------------------------------------------- model
-  void ModelStep() {
-    if (imem_enabled_ && dut_->imem_req_valid_o && dut_->imem_req_ready_i) {
+  void ModelStep(bool rst) {
+    if (bus_reset_.MayAccept(rst, imem_enabled_ && dut_->imem_req_valid_o &&
+                                      dut_->imem_req_ready_i)) {
       const uint64_t addr = dut_->imem_req_addr_o;
       fetch_addrs_.push_back(addr);
       last_fetch_addr_ = addr;
       imem_.Accept(addr, dut_->imem_req_id_o, dut_->imem_req_epoch_o);
     }
-    if (dut_->imem_rsp_valid_i && dut_->imem_rsp_ready_o && imem_.HasResponse()) {
+    if (bus_reset_.MayDeliver(rst) && dut_->imem_rsp_valid_i && dut_->imem_rsp_ready_o &&
+        imem_.HasResponse()) {
       imem_.PopResponse();
     }
     imem_.Advance();
@@ -881,6 +883,10 @@ class Harness {
   Geometry g_;
   uint32_t ret_mask_ = 0;
   Imem imem_{0, nullptr, 0, 1};
+  // The reset-traffic rule (V-010, sim/common/bus_reset_gate.h): while reset is
+  // asserted this model accepts nothing, so no reset-time response can be
+  // queued ahead of a fresh post-reset one.
+  mosaic::BusResetGate bus_reset_;
   bool imem_enabled_ = false;
   ArbIn arb_in_{};
 

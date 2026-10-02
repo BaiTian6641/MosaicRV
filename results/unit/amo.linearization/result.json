@@ -1,15 +1,16 @@
 {
   "schema_version": 1,
   "case": "amo.linearization",
-  "verdict": "PASS",
-  "detail": "checks=699 amo_bindings=30 run_a_txns=150 run_b_txns=191 cycles=1540 seed=1",
+  "verdict": "FAIL",
+  "detail": "contract violated: atomic-coverage: stalled before the program's own end at retire 2 of 158",
   "seed": 1,
   "max_cycles": 4000000,
-  "checks": 700,
-  "failures": 0,
+  "checks": 2,
+  "failures": 1,
   "image": "",
   "expect": "",
   "tool": "Verilator 5.052 2026-09-05",
-  "timestamp": "2026-10-02T12:24:47Z",
-  "first_mismatch": ""
+  "timestamp": "2026-10-02T15:48:22Z",
+  "first_mismatch": "atomic-coverage: stalled before the program's own end at retire 2 of 158: expected the atomic path holds, got contract violated",
+  "failed_checks": ["no contract violation"]
 }

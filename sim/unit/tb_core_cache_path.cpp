@@ -670,7 +670,8 @@ class CoreRun {
     // instruction stream shifts by one instruction. Only a redirect changes the
     // epoch, so a program that does not branch early would see it. Nothing is
     // accepted, presented or counted during reset for that reason.
-    if (!rst && (dut_->imem_req_valid_o != 0) && (dut_->imem_req_ready_i != 0)) {
+    if (bus_reset_.MayAccept(rst, (dut_->imem_req_valid_o != 0) &&
+                                      (dut_->imem_req_ready_i != 0))) {
       Bus::Req r;
       r.we = false;
       r.addr = dut_->imem_req_addr_o;
@@ -686,7 +687,8 @@ class CoreRun {
       }
       imem->Accept(r, rec_cycle_);
     }
-    if (!rst && (dut_->imem_rsp_valid_i != 0) && (dut_->imem_rsp_ready_o != 0)) {
+    if (bus_reset_.MayDeliver(rst) && (dut_->imem_rsp_valid_i != 0) &&
+        (dut_->imem_rsp_ready_o != 0)) {
       if (trace_ > 0 && rec_cycle_ >= uint64_t(trace_) &&
         rec_cycle_ < uint64_t(trace_) + uint64_t(trace_n_)) {
         std::printf("    [imem-pop] cyc=%llu for=%llx data=%08llx fault=%u ready=%u\n",
@@ -700,7 +702,8 @@ class CoreRun {
     }
     imem->Advance();
 
-    if (!rst && (dut_->dmem_req_valid_o != 0) && (dut_->dmem_req_ready_i != 0)) {
+    if (bus_reset_.MayAccept(rst, (dut_->dmem_req_valid_o != 0) &&
+                                      (dut_->dmem_req_ready_i != 0))) {
       Bus::Req r;
       r.we = dut_->dmem_req_we_o != 0;
       r.addr = dut_->dmem_req_addr_o;
@@ -715,7 +718,8 @@ class CoreRun {
       }
       dmem->Accept(r, rec_cycle_);
     }
-    if (!rst && (dut_->dmem_rsp_valid_i != 0) && (dut_->dmem_rsp_ready_o != 0)) dmem->Pop();
+    if (bus_reset_.MayDeliver(rst) && (dut_->dmem_rsp_valid_i != 0) &&
+        (dut_->dmem_rsp_ready_o != 0)) dmem->Pop();
     dmem->Advance();
 
     dut_->clk = 0;
@@ -780,6 +784,10 @@ class CoreRun {
 
  private:
   Vmosaic_core_tb* dut_;
+  // The reset-traffic rule (V-010, sim/common/bus_reset_gate.h): while reset
+  // is asserted this model accepts nothing, so no reset-time response can be
+  // queued ahead of a fresh post-reset one.
+  mosaic::BusResetGate bus_reset_;
   Reporter* rep_;
   std::vector<Retire> observed_;
   uint64_t rec_cycle_ = 0;
@@ -887,7 +895,8 @@ class Directed {
 
     dut_->eval();
 
-    if ((dut_->cb_mem_req_valid_o != 0) && (dut_->cb_mem_req_ready_i != 0)) {
+    if (bus_reset_.MayAccept(rst, (dut_->cb_mem_req_valid_o != 0) &&
+                                      (dut_->cb_mem_req_ready_i != 0))) {
       Bus::Req r;
       r.we = dut_->cb_mem_req_we_o != 0;
       r.addr = dut_->cb_mem_req_addr_o;
@@ -896,7 +905,8 @@ class Directed {
       r.wdata = dut_->cb_mem_req_wdata_o;
       bus_.Accept(r, cycle_);
     }
-    if ((dut_->cb_mem_rsp_valid_i != 0) && (dut_->cb_mem_rsp_ready_o != 0)) bus_.Pop();
+    if (bus_reset_.MayDeliver(rst) && (dut_->cb_mem_rsp_valid_i != 0) &&
+        (dut_->cb_mem_rsp_ready_o != 0)) bus_.Pop();
     bus_.Advance();
 
     dut_->clk = 0;
@@ -909,6 +919,10 @@ class Directed {
   }
 
   Vmosaic_core_tb* dut_;
+  // The reset-traffic rule (V-010, sim/common/bus_reset_gate.h): while reset
+  // is asserted this model accepts nothing, so no reset-time response can be
+  // queued ahead of a fresh post-reset one.
+  mosaic::BusResetGate bus_reset_;
   Bus bus_;
   uint64_t cycle_ = 0;
 };

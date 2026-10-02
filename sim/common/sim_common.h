@@ -26,6 +26,11 @@
 #include <string>
 #include <vector>
 
+// The reset-traffic rule (V-010), shared by every driver that models a bus.
+// Included here so a new driver inherits it by including the common header it
+// already includes, rather than by remembering to add a second include.
+#include "bus_reset_gate.h"
+
 namespace mosaic {
 
 // Exit codes. Kept small and stable: tools/run_tests.py depends on them.

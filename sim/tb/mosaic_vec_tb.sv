@@ -358,7 +358,72 @@ module mosaic_vec_tb (
     output logic                       o_rst_restart_ready_o,
     output logic [6:0]                 o_rst_restart_vstart_o,
     output logic [7:0]                 o_rst_elems_committed_o,
-    output logic                       o_rst_prefix_agree_o
+    output logic                       o_rst_prefix_agree_o,
+
+    // ------------- vector chaining network (I-058) -------------------------
+    // `chain_bind_i` hands the descriptor's element progress to the chaining
+    // network, so only an accepted (correct-generation, in-`vl`, non-faulted)
+    // packet advances architectural progress.
+    /* verilator lint_off UNUSEDSIGNAL */
+    input  logic                       chain_en_i,
+    input  logic                       chain_bind_i,
+    input  logic                       chain_p_alloc_valid_i,
+    input  logic [TB_ROB_GEN_W-1:0]    chain_p_gen_i,
+    input  logic [4:0]                 chain_p_vd_i,
+    input  logic [7:0]                 chain_p_vl_i,
+    input  logic                       chain_p_wr_valid_i,
+    input  logic [6:0]                 chain_p_wr_index_i,
+    input  logic [63:0]                chain_p_wr_data_i,
+    input  logic [TB_ROB_GEN_W-1:0]    chain_p_wr_gen_i,
+    input  logic                       chain_p_fault_valid_i,
+    input  logic [6:0]                 chain_p_fault_elem_i,
+    input  logic                       chain_p_cancel_i,
+    input  logic                       chain_p_done_i,
+    input  logic                       chain_c0_alloc_valid_i,
+    input  logic [TB_ROB_GEN_W-1:0]    chain_c0_gen_i,
+    input  logic [4:0]                 chain_c0_vs_i,
+    input  logic [7:0]                 chain_c0_vl_i,
+    input  logic                       chain_c0_req_valid_i,
+    input  logic [6:0]                 chain_c0_req_index_i,
+    input  logic                       chain_c0_finish_i,
+    input  logic                       chain_c1_alloc_valid_i,
+    input  logic [TB_ROB_GEN_W-1:0]    chain_c1_gen_i,
+    input  logic [4:0]                 chain_c1_vs_i,
+    input  logic [7:0]                 chain_c1_vl_i,
+    input  logic                       chain_c1_req_valid_i,
+    input  logic [6:0]                 chain_c1_req_index_i,
+    input  logic                       chain_c1_finish_i,
+    input  logic                       chain_war_valid_i,
+    input  logic [4:0]                 chain_war_vd_i,
+    input  logic [6:0]                 chain_war_elem_i,
+    input  logic [63:0]                chain_war_data_i,
+    /* verilator lint_on UNUSEDSIGNAL */
+    output logic                       chain_p_alloc_ready_o,
+    output logic                       chain_p_wr_accept_o,
+    output logic                       chain_accept_valid_o,
+    output logic [6:0]                 chain_accept_index_o,
+    output logic                       chain_c0_alloc_ready_o,
+    output logic                       chain_c0_req_accept_o,
+    output logic                       chain_c0_rdy_o,
+    output logic [63:0]                chain_c0_data_o,
+    output logic                       chain_c1_alloc_ready_o,
+    output logic                       chain_c1_req_accept_o,
+    output logic                       chain_c1_rdy_o,
+    output logic [63:0]                chain_c1_data_o,
+    output logic                       chain_war_grant_o,
+    output logic                       chain_src_release_ok_o,
+    output logic                       chain_valid_o,
+    output logic [TB_ROB_GEN_W-1:0]    chain_gen_o,
+    output logic [4:0]                 chain_vd_o,
+    output logic                       chain_done_o,
+    output logic                       chain_fault_o,
+    output logic [6:0]                 chain_fault_elem_o,
+    output logic [63:0]                chain_ready_lo_o,
+    output logic [63:0]                chain_ready_hi_o,
+    output logic [15:0]                chain_pkt_accept_ctr_o,
+    output logic [15:0]                chain_pkt_refuse_ctr_o,
+    output logic [15:0]                chain_fwd_ctr_o,
+    output logic [15:0]                chain_stall_ctr_o
 );
 
   logic [127:0] elem_bitmap;
@@ -372,8 +437,14 @@ module mosaic_vec_tb (
   logic        desc_fault_valid;
   logic [6:0]  desc_fault_elem;
   logic [3:0]  desc_fault_code;
-  assign desc_elem_done_valid = rst_bind_i ? rst_elem_done_valid_o : elem_done_valid;
-  assign desc_elem_done_index = rst_bind_i ? rst_elem_done_index_o : elem_done_index;
+  // I-058: when the chaining network drives the descriptor (`chain_bind_i`),
+  // only a packet the network accepted -- correct generation, inside `vl`, not
+  // after a fault -- advances the descriptor's element bitmap.  The restart
+  // case's binding (I-057) takes precedence, so its behaviour is unchanged.
+  assign desc_elem_done_valid = rst_bind_i ? rst_elem_done_valid_o
+                              : (chain_bind_i ? chain_accept_valid_o : elem_done_valid);
+  assign desc_elem_done_index = rst_bind_i ? rst_elem_done_index_o
+                              : (chain_bind_i ? chain_accept_index_o : elem_done_index);
   assign desc_fault_valid     = rst_bind_i ? rst_fault_valid_o     : fault_valid;
   assign desc_fault_elem      = rst_bind_i ? rst_fault_elem_o      : fault_elem;
   assign desc_fault_code      = rst_bind_i ? rst_fault_code_o      : fault_code;
@@ -1001,6 +1072,90 @@ module mosaic_vec_tb (
       .o_restart_vstart_o (o_rst_restart_vstart_o),
       .o_elems_committed_o (o_rst_elems_committed_o),
       .o_prefix_agree_o   (o_rst_prefix_agree_o)
+  );
+
+  // ==========================================================================
+  // I-058: the chaining network. It holds the per-element readiness scoreboard
+  // and the forwarded element data, validates each element packet against the
+  // descriptor generation that produced it, and arbitrates the WAR overwrite of
+  // a group a younger consumer still holds as a source. `chain_en_i` selects
+  // element-granular chaining (1) or the safe whole-macro no-chaining control
+  // (0); the architectural result must be identical either way.
+  // ==========================================================================
+  mosaic_vec_chain #(
+      .VLEN    (128),
+      .ELEN    (64),
+      .GEN_W   (TB_ROB_GEN_W),
+      .GROUP_W (5)
+  ) u_vec_chain (
+      .clk_i              (clk),
+      .rst_i              (rst),
+
+      .chain_en_i         (chain_en_i),
+
+      .p_alloc_valid_i    (chain_p_alloc_valid_i),
+      .p_alloc_ready_o    (chain_p_alloc_ready_o),
+      .p_gen_i            (chain_p_gen_i),
+      .p_vd_i             (chain_p_vd_i),
+      .p_vl_i             (chain_p_vl_i),
+
+      .p_wr_valid_i       (chain_p_wr_valid_i),
+      .p_wr_index_i       (chain_p_wr_index_i),
+      .p_wr_data_i        (chain_p_wr_data_i),
+      .p_wr_gen_i         (chain_p_wr_gen_i),
+      .p_wr_accept_o      (chain_p_wr_accept_o),
+
+      .p_fault_valid_i    (chain_p_fault_valid_i),
+      .p_fault_elem_i     (chain_p_fault_elem_i),
+      .p_cancel_i         (chain_p_cancel_i),
+      .p_done_i           (chain_p_done_i),
+
+      .o_accept_valid_o   (chain_accept_valid_o),
+      .o_accept_index_o   (chain_accept_index_o),
+
+      .c0_alloc_valid_i   (chain_c0_alloc_valid_i),
+      .c0_alloc_ready_o   (chain_c0_alloc_ready_o),
+      .c0_gen_i           (chain_c0_gen_i),
+      .c0_vs_i            (chain_c0_vs_i),
+      .c0_vl_i            (chain_c0_vl_i),
+      .c0_req_valid_i     (chain_c0_req_valid_i),
+      .c0_req_index_i     (chain_c0_req_index_i),
+      .c0_req_accept_o    (chain_c0_req_accept_o),
+      .c0_rdy_o           (chain_c0_rdy_o),
+      .c0_data_o          (chain_c0_data_o),
+      .c0_finish_i        (chain_c0_finish_i),
+
+      .c1_alloc_valid_i   (chain_c1_alloc_valid_i),
+      .c1_alloc_ready_o   (chain_c1_alloc_ready_o),
+      .c1_gen_i           (chain_c1_gen_i),
+      .c1_vs_i            (chain_c1_vs_i),
+      .c1_vl_i            (chain_c1_vl_i),
+      .c1_req_valid_i     (chain_c1_req_valid_i),
+      .c1_req_index_i     (chain_c1_req_index_i),
+      .c1_req_accept_o    (chain_c1_req_accept_o),
+      .c1_rdy_o           (chain_c1_rdy_o),
+      .c1_data_o          (chain_c1_data_o),
+      .c1_finish_i        (chain_c1_finish_i),
+
+      .war_valid_i        (chain_war_valid_i),
+      .war_vd_i           (chain_war_vd_i),
+      .war_elem_i         (chain_war_elem_i),
+      .war_data_i         (chain_war_data_i),
+      .war_grant_o        (chain_war_grant_o),
+      .src_release_ok_o   (chain_src_release_ok_o),
+
+      .o_valid_o          (chain_valid_o),
+      .o_gen_o            (chain_gen_o),
+      .o_vd_o             (chain_vd_o),
+      .o_done_o           (chain_done_o),
+      .o_fault_o          (chain_fault_o),
+      .o_fault_elem_o     (chain_fault_elem_o),
+      .o_ready_o          ({chain_ready_hi_o, chain_ready_lo_o}),
+
+      .o_pkt_accept_ctr_o (chain_pkt_accept_ctr_o),
+      .o_pkt_refuse_ctr_o (chain_pkt_refuse_ctr_o),
+      .o_fwd_ctr_o        (chain_fwd_ctr_o),
+      .o_stall_ctr_o      (chain_stall_ctr_o)
   );
 
   // ==========================================================================
