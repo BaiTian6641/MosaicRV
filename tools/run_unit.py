@@ -212,13 +212,30 @@ def main() -> int:
             print("FAIL %-28s not registered in tests/unit/registry.json" % case_id)
             status = 1
             continue
+        entry = cases[case_id]
+        # A case may declare the profiles it belongs to (`"profiles": ["p0"]`).
+        # Some cases are machine-mode-only by construction -- their reference
+        # model, their expected CSR table and their standing invariants are p0's
+        # -- and running one against a profile whose DUT owns S/U privilege does
+        # not test the DUT, it tests a model that does not exist. Asking for it
+        # explicitly is an error; asking for `--all` skips it with a line, so the
+        # suite's exit code stays meaningful.
+        profiles = entry.get("profiles")
+        if profiles and args.profile not in profiles:
+            if args.all:
+                print("skip %-28s registered for %s only" % (case_id, "/".join(profiles)))
+                continue
+            print("FAIL %-28s is registered for %s only, not %s"
+                  % (case_id, "/".join(profiles), args.profile))
+            status = 1
+            continue
         try:
-            build_case(args.profile, case_id, cases[case_id])
+            build_case(args.profile, case_id, entry)
         except RuntimeError as exc:
             print("FAIL %-28s %s" % (case_id, exc))
             status = 1
             continue
-        if not execute_case(args.profile, case_id, cases[case_id], args.out, args.seed):
+        if not execute_case(args.profile, case_id, entry, args.out, args.seed):
             status = 1
 
     return status

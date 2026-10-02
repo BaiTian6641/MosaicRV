@@ -42,6 +42,10 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REGISTRY = os.path.join(ROOT, "tests", "unit", "registry.json")
 STATUS = os.path.join(ROOT, "config", "status", "implementation_status.json")
+PROFILES_DIR = os.path.join(ROOT, "config", "profiles")
+KNOWN_PROFILES = tuple(sorted(
+    os.path.splitext(name)[0] for name in os.listdir(PROFILES_DIR)
+    if name.endswith(".json")))
 
 
 def load(path):
@@ -68,6 +72,23 @@ def main() -> int:
                 failures.append("registry: case %s has no %s" % (name, key))
         if not (entry.get("cpp") or entry.get("sv")):
             failures.append("registry: case %s names no driver or wrapper" % name)
+        # A case may declare the profiles it belongs to. The field exists because
+        # some cases are machine-mode-only by construction -- their reference
+        # model and expected CSR table are p0's -- and running one against a
+        # profile whose DUT owns S/U privilege tests a model that does not exist
+        # rather than testing the DUT.
+        profiles = entry.get("profiles")
+        if profiles is not None:
+            if not isinstance(profiles, list) or not profiles:
+                failures.append(
+                    "registry: case %s has a profiles field that is not a "
+                    "non-empty list" % name)
+            else:
+                for prof in profiles:
+                    if prof not in KNOWN_PROFILES:
+                        failures.append(
+                            "registry: case %s declares unknown profile %r"
+                            % (name, prof))
 
     seen = {}
     for name, entry in sorted(cases.items()):

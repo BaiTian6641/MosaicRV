@@ -317,6 +317,9 @@
   },
   "csr.precise_trap_mret": {
    "task": "I-019",
+   "profiles": [
+    "p0"
+   ],
    "top": "mosaic_csr_tb",
    "rtl": [
     "rtl/core/mosaic_pkg.sv",
@@ -794,6 +797,9 @@
   },
   "core.trap_csr_program": {
    "task": "I-023",
+   "profiles": [
+    "p0"
+   ],
    "top": "mosaic_core_tb",
    "rtl": [
     "rtl/core/mosaic_pkg.sv",
