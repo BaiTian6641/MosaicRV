@@ -2675,6 +2675,98 @@
         },
         "forbid": "0x0000000000000001"
       }
+    },
+    {
+      "id": "fflags.value",
+      "csr": "fflags",
+      "address": 1,
+      "field": "value",
+      "bits": "4:0",
+      "kind": "strict",
+      "clause": "RISC-V Unprivileged ISA (20240411), 'F' extension, section 'Floating-Point Control and Status Register': fflags is CSR 0x001, a 5-bit read/write register (NV bit 4, DZ bit 3, OF bit 2, UF bit 1, NX bit 0). The F/D control state is a single 8-bit CSR fcsr = {frm[7:5], fflags[4:0]}, of which fflags is the low field's view; a write of 0x1f leaves all five bits set and a write of 0 leaves them clear. The architectural accumulation of these bits by retiring FP operations is exercised by CASE=fp.precise_flags_and_boxing (a squashed operation contributes nothing, a committed one sets exactly its flags), because a flag is raised by an operation, not by a software write; this rule pins the register's own write/read-back behaviour.",
+      "preconditions": [
+        "profile p0 implements fflags at 0x001",
+        "the hart runs in M-mode (p0 privilege_modes == [M]); every implemented CSR is M-accessible",
+        "the F/D capability is implemented as the I-049 datapath plus the I-050 integration, so the register is real and not read-only zero"
+      ],
+      "positive": {
+        "op": "csrrw",
+        "write": "0x000000000000001f",
+        "traps": 0,
+        "expect": {
+          "read": "0x000000000000001f"
+        }
+      },
+      "negative": {
+        "op": "csrrw",
+        "write": "0x0000000000000000",
+        "traps": 0,
+        "expect": {
+          "read": "0x0000000000000000"
+        },
+        "forbid": "0x000000000000001f"
+      }
+    },
+    {
+      "id": "frm.value",
+      "csr": "frm",
+      "address": 2,
+      "field": "value",
+      "bits": "2:0",
+      "kind": "strict",
+      "clause": "RISC-V Unprivileged ISA (20240411), 'F' extension, section 'Floating-Point Control and Status Register': frm is CSR 0x002, the rounding-mode field fcsr[7:5]; encodings 000 RNE, 001 RTZ, 010 RDN, 011 RUP, 100 RMM, 111 dynamic. Writing 0x7 stores the dynamic mode in all three bits and reading it back returns 0x7; writing 0 returns the default RNE. The reserved encodings 101/110 are stored as written, which the I-049 case already accepts for an instruction's rm field (it resolves a reserved mode as RNE).",
+      "preconditions": [
+        "profile p0 implements frm at 0x002",
+        "the hart runs in M-mode (p0 privilege_modes == [M]); every implemented CSR is M-accessible"
+      ],
+      "positive": {
+        "op": "csrrw",
+        "write": "0x0000000000000007",
+        "traps": 0,
+        "expect": {
+          "read": "0x0000000000000007"
+        }
+      },
+      "negative": {
+        "op": "csrrw",
+        "write": "0x0000000000000000",
+        "traps": 0,
+        "expect": {
+          "read": "0x0000000000000000"
+        },
+        "forbid": "0x0000000000000007"
+      }
+    },
+    {
+      "id": "fcsr.value",
+      "csr": "fcsr",
+      "address": 3,
+      "field": "value",
+      "bits": "7:0",
+      "kind": "strict",
+      "clause": "RISC-V Unprivileged ISA (20240411), 'F' extension, section 'Floating-Point Control and Status Register': fcsr is CSR 0x003, an 8-bit read/write register holding frm in bits 7:5 and fflags in bits 4:0; fflags (0x001) and frm (0x002) are views of the same state. Writing 0xff sets both fields and reading fcsr returns 0xff; writing 0 clears both. The architectural accumulation of fflags is exercised by CASE=fp.precise_flags_and_boxing.",
+      "preconditions": [
+        "profile p0 implements fcsr at 0x003",
+        "the hart runs in M-mode (p0 privilege_modes == [M]); every implemented CSR is M-accessible"
+      ],
+      "positive": {
+        "op": "csrrw",
+        "write": "0x00000000000000ff",
+        "traps": 0,
+        "expect": {
+          "read": "0x00000000000000ff"
+        }
+      },
+      "negative": {
+        "op": "csrrw",
+        "write": "0x0000000000000000",
+        "traps": 0,
+        "expect": {
+          "read": "0x0000000000000000"
+        },
+        "forbid": "0x00000000000000ff"
+      }
     }
+
   ]
 }

@@ -105,6 +105,7 @@ CSR_ROLES = frozenset((
     "pmp-config",          # pmpcfg0, pmpcfg2
     "pmp-address",         # pmpaddr0..pmpaddr15
     "vector-state",        # vstart, vxsat, vxrm, vcsr, vl, vtype, vlenb
+    "fp-state",            # fflags, frm, fcsr (work package I-050)
 ))
 
 

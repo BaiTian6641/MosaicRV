@@ -529,7 +529,9 @@
     "rtl/core/mosaic_redirect_arb.sv",
     "rtl/core/mosaic_muldiv.sv",
     "rtl/core/mosaic_retire.sv",
-    "rtl/core/mosaic_core.sv"
+    "rtl/core/mosaic_core.sv",
+    "rtl/core/mosaic_fpu.sv",
+    "rtl/core/mosaic_fp_unit.sv"
    ],
    "sv": [
     "sim/tb/mosaic_core_tb.sv"
@@ -666,7 +668,9 @@
     "rtl/core/mosaic_redirect_arb.sv",
     "rtl/core/mosaic_muldiv.sv",
     "rtl/core/mosaic_retire.sv",
-    "rtl/core/mosaic_core.sv"
+    "rtl/core/mosaic_core.sv",
+    "rtl/core/mosaic_fpu.sv",
+    "rtl/core/mosaic_fp_unit.sv"
    ],
    "sv": [
     "sim/tb/mosaic_core_tb.sv"
@@ -722,7 +726,9 @@
     "rtl/core/mosaic_redirect_arb.sv",
     "rtl/core/mosaic_muldiv.sv",
     "rtl/core/mosaic_retire.sv",
-    "rtl/core/mosaic_core.sv"
+    "rtl/core/mosaic_core.sv",
+    "rtl/core/mosaic_fpu.sv",
+    "rtl/core/mosaic_fp_unit.sv"
    ],
    "sv": [
     "sim/tb/mosaic_core_tb.sv"
@@ -781,7 +787,9 @@
     "rtl/core/mosaic_redirect_arb.sv",
     "rtl/core/mosaic_muldiv.sv",
     "rtl/core/mosaic_retire.sv",
-    "rtl/core/mosaic_core.sv"
+    "rtl/core/mosaic_core.sv",
+    "rtl/core/mosaic_fpu.sv",
+    "rtl/core/mosaic_fp_unit.sv"
    ],
    "sv": [
     "sim/tb/mosaic_core_tb.sv"
@@ -823,7 +831,9 @@
     "rtl/core/mosaic_retire.sv",
     "rtl/core/mosaic_core.sv",
     "rtl/core/mosaic_csr.sv",
-    "rtl/core/mosaic_interrupt.sv"
+    "rtl/core/mosaic_interrupt.sv",
+    "rtl/core/mosaic_fpu.sv",
+    "rtl/core/mosaic_fp_unit.sv"
    ],
    "sv": [
     "sim/tb/mosaic_core_tb.sv"
@@ -864,7 +874,9 @@
     "rtl/core/mosaic_csr.sv",
     "rtl/core/mosaic_interrupt.sv",
     "rtl/core/mosaic_store_queue.sv",
-    "rtl/core/mosaic_load_queue.sv"
+    "rtl/core/mosaic_load_queue.sv",
+    "rtl/core/mosaic_fpu.sv",
+    "rtl/core/mosaic_fp_unit.sv"
    ],
    "sv": [
     "sim/tb/mosaic_core_tb.sv"
@@ -903,7 +915,9 @@
     "rtl/core/mosaic_retire.sv",
     "rtl/core/mosaic_core.sv",
     "rtl/core/mosaic_csr.sv",
-    "rtl/core/mosaic_interrupt.sv"
+    "rtl/core/mosaic_interrupt.sv",
+    "rtl/core/mosaic_fpu.sv",
+    "rtl/core/mosaic_fp_unit.sv"
    ],
    "sv": [
     "sim/tb/mosaic_core_tb.sv"
@@ -944,7 +958,9 @@
     "rtl/core/mosaic_csr.sv",
     "rtl/core/mosaic_interrupt.sv",
     "rtl/core/mosaic_store_queue.sv",
-    "rtl/core/mosaic_load_queue.sv"
+    "rtl/core/mosaic_load_queue.sv",
+    "rtl/core/mosaic_fpu.sv",
+    "rtl/core/mosaic_fp_unit.sv"
    ],
    "sv": [
     "sim/tb/mosaic_core_tb.sv"
@@ -983,7 +999,9 @@
     "rtl/core/mosaic_retire.sv",
     "rtl/core/mosaic_core.sv",
     "rtl/core/mosaic_csr.sv",
-    "rtl/core/mosaic_interrupt.sv"
+    "rtl/core/mosaic_interrupt.sv",
+    "rtl/core/mosaic_fpu.sv",
+    "rtl/core/mosaic_fp_unit.sv"
    ],
    "sv": [
     "sim/tb/mosaic_core_tb.sv"
@@ -1022,7 +1040,9 @@
     "rtl/core/mosaic_retire.sv",
     "rtl/core/mosaic_core.sv",
     "rtl/core/mosaic_csr.sv",
-    "rtl/core/mosaic_interrupt.sv"
+    "rtl/core/mosaic_interrupt.sv",
+    "rtl/core/mosaic_fpu.sv",
+    "rtl/core/mosaic_fp_unit.sv"
    ],
    "sv": [
     "sim/tb/mosaic_core_tb.sv"
@@ -1063,7 +1083,9 @@
     "rtl/core/mosaic_csr.sv",
     "rtl/core/mosaic_interrupt.sv",
     "rtl/core/mosaic_store_queue.sv",
-    "rtl/core/mosaic_load_queue.sv"
+    "rtl/core/mosaic_load_queue.sv",
+    "rtl/core/mosaic_fpu.sv",
+    "rtl/core/mosaic_fp_unit.sv"
    ],
    "sv": [
     "sim/tb/mosaic_core_tb.sv"
@@ -1117,7 +1139,9 @@
     "rtl/core/mosaic_retire.sv",
     "rtl/core/mosaic_core.sv",
     "rtl/core/mosaic_csr.sv",
-    "rtl/core/mosaic_interrupt.sv"
+    "rtl/core/mosaic_interrupt.sv",
+    "rtl/core/mosaic_fpu.sv",
+    "rtl/core/mosaic_fp_unit.sv"
    ],
    "sv": [
     "sim/tb/mosaic_core_tb.sv"
@@ -1154,7 +1178,9 @@
     "rtl/core/mosaic_redirect_arb.sv",
     "rtl/core/mosaic_muldiv.sv",
     "rtl/core/mosaic_retire.sv",
-    "rtl/core/mosaic_core.sv"
+    "rtl/core/mosaic_core.sv",
+    "rtl/core/mosaic_fpu.sv",
+    "rtl/core/mosaic_fp_unit.sv"
    ],
    "sv": [
     "sim/tb/mosaic_core_tb.sv"
@@ -1193,7 +1219,9 @@
     "rtl/core/mosaic_retire.sv",
     "rtl/core/mosaic_core.sv",
     "rtl/core/mosaic_csr.sv",
-    "rtl/core/mosaic_interrupt.sv"
+    "rtl/core/mosaic_interrupt.sv",
+    "rtl/core/mosaic_fpu.sv",
+    "rtl/core/mosaic_fp_unit.sv"
    ],
    "sv": [
     "sim/tb/mosaic_core_tb.sv"
@@ -1230,7 +1258,9 @@
     "rtl/core/mosaic_redirect_arb.sv",
     "rtl/core/mosaic_muldiv.sv",
     "rtl/core/mosaic_retire.sv",
-    "rtl/core/mosaic_core.sv"
+    "rtl/core/mosaic_core.sv",
+    "rtl/core/mosaic_fpu.sv",
+    "rtl/core/mosaic_fp_unit.sv"
    ],
    "sv": [
     "sim/tb/mosaic_core_tb.sv"
@@ -1285,7 +1315,9 @@
     "rtl/core/mosaic_retire.sv",
     "rtl/core/mosaic_core.sv",
     "rtl/core/mosaic_csr.sv",
-    "rtl/core/mosaic_interrupt.sv"
+    "rtl/core/mosaic_interrupt.sv",
+    "rtl/core/mosaic_fpu.sv",
+    "rtl/core/mosaic_fp_unit.sv"
    ],
    "sv": [
     "sim/tb/mosaic_core_tb.sv"
@@ -1324,7 +1356,9 @@
     "rtl/core/mosaic_retire.sv",
     "rtl/core/mosaic_core.sv",
     "rtl/core/mosaic_csr.sv",
-    "rtl/core/mosaic_interrupt.sv"
+    "rtl/core/mosaic_interrupt.sv",
+    "rtl/core/mosaic_fpu.sv",
+    "rtl/core/mosaic_fp_unit.sv"
    ],
    "sv": [
     "sim/tb/mosaic_core_tb.sv"
@@ -1379,7 +1413,9 @@
     "rtl/core/mosaic_retire.sv",
     "rtl/core/mosaic_core.sv",
     "rtl/core/mosaic_csr.sv",
-    "rtl/core/mosaic_interrupt.sv"
+    "rtl/core/mosaic_interrupt.sv",
+    "rtl/core/mosaic_fpu.sv",
+    "rtl/core/mosaic_fp_unit.sv"
    ],
    "sv": [
     "sim/tb/mosaic_core_tb.sv"
@@ -1398,7 +1434,8 @@
    "top": "mosaic_cache_tb",
    "rtl": [
     "rtl/core/mosaic_pkg.sv",
-    "rtl/core/mosaic_cache.sv"
+    "rtl/core/mosaic_cache.sv",
+    "rtl/core/mosaic_mshr.sv"
    ],
    "sv": [
     "sim/tb/mosaic_cache_tb.sv"
@@ -1432,7 +1469,9 @@
     "rtl/core/mosaic_redirect_arb.sv",
     "rtl/core/mosaic_muldiv.sv",
     "rtl/core/mosaic_retire.sv",
-    "rtl/core/mosaic_core.sv"
+    "rtl/core/mosaic_core.sv",
+    "rtl/core/mosaic_fpu.sv",
+    "rtl/core/mosaic_fp_unit.sv"
    ],
    "sv": [
     "sim/tb/mosaic_core_tb.sv"
@@ -1472,7 +1511,9 @@
     "rtl/core/mosaic_retire.sv",
     "rtl/core/mosaic_core.sv",
     "rtl/core/mosaic_csr.sv",
-    "rtl/core/mosaic_interrupt.sv"
+    "rtl/core/mosaic_interrupt.sv",
+    "rtl/core/mosaic_fpu.sv",
+    "rtl/core/mosaic_fp_unit.sv"
    ],
    "sv": [
     "sim/tb/mosaic_core_tb.sv"
@@ -1511,7 +1552,9 @@
     "rtl/core/mosaic_retire.sv",
     "rtl/core/mosaic_core.sv",
     "rtl/core/mosaic_csr.sv",
-    "rtl/core/mosaic_interrupt.sv"
+    "rtl/core/mosaic_interrupt.sv",
+    "rtl/core/mosaic_fpu.sv",
+    "rtl/core/mosaic_fp_unit.sv"
    ],
    "sv": [
     "sim/tb/mosaic_core_tb.sv"
@@ -1550,7 +1593,9 @@
     "rtl/core/mosaic_retire.sv",
     "rtl/core/mosaic_core.sv",
     "rtl/core/mosaic_csr.sv",
-    "rtl/core/mosaic_interrupt.sv"
+    "rtl/core/mosaic_interrupt.sv",
+    "rtl/core/mosaic_fpu.sv",
+    "rtl/core/mosaic_fp_unit.sv"
    ],
    "sv": [
     "sim/tb/mosaic_core_tb.sv"
@@ -1589,7 +1634,9 @@
     "rtl/core/mosaic_retire.sv",
     "rtl/core/mosaic_core.sv",
     "rtl/core/mosaic_csr.sv",
-    "rtl/core/mosaic_interrupt.sv"
+    "rtl/core/mosaic_interrupt.sv",
+    "rtl/core/mosaic_fpu.sv",
+    "rtl/core/mosaic_fp_unit.sv"
    ],
    "sv": [
     "sim/tb/mosaic_core_tb.sv"
@@ -1627,7 +1674,9 @@
     "rtl/core/mosaic_retire.sv",
     "rtl/core/mosaic_core.sv",
     "rtl/core/mosaic_csr.sv",
-    "rtl/core/mosaic_interrupt.sv"
+    "rtl/core/mosaic_interrupt.sv",
+    "rtl/core/mosaic_fpu.sv",
+    "rtl/core/mosaic_fp_unit.sv"
    ],
    "sv": [
     "sim/tb/mosaic_core_tb.sv"
@@ -1639,8 +1688,7 @@
     "sim/common/event_tap.cpp"
    ],
    "max_cycles": 4000000,
-   "seed": 1,
-   "pending": true
+   "seed": 1
   },
   "cache.mshr_nonblocking": {
    "task": "I-043",
@@ -1657,8 +1705,7 @@
     "sim/unit/tb_cache.cpp"
    ],
    "max_cycles": 200000,
-   "seed": 1,
-   "pending": true
+   "seed": 1
   }
  }
 }

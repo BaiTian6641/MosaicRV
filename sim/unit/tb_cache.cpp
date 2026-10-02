@@ -47,6 +47,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <map>
 #include <set>
 #include <string>
 #include <vector>
@@ -143,6 +144,34 @@ void AssignLine(VlWide<kLineWords>* dst, const uint8_t* data) {
     }
     (*dst)[w] = word;
   }
+}
+
+// The two campaigns share one Verilator top (`mosaic_cache_tb`) that now holds
+// three instances: the two blocking caches (I-042) and the non-blocking read L1
+// (I-043). Each campaign drives its own half and holds the other half quiet, so
+// `--x-initial unique` cannot feed an idle instance random traffic.
+void QuietBlockingCaches(Vmosaic_cache_tb* dut) {
+  dut->dc_req_valid = 0; dut->dc_req_we = 0; dut->dc_req_addr = 0;
+  dut->dc_req_wdata = 0; dut->dc_req_wmask = 0;
+  dut->ic_req_valid = 0; dut->ic_req_we = 0; dut->ic_req_addr = 0;
+  dut->ic_req_wdata = 0; dut->ic_req_wmask = 0;
+  dut->dfl_valid = 0; dut->ifl_valid = 0;
+  dut->ddbg_index = 0; dut->idbg_index = 0;
+  dut->dm_req_ready = 0; dut->dm_resp_valid = 0; dut->dm_resp_fault = 0;
+  dut->im_req_ready = 0; dut->im_resp_valid = 0; dut->im_resp_fault = 0;
+  uint8_t zero[kLineBytes] = {};
+  AssignLine(&dut->dm_resp_rdata, zero);
+  AssignLine(&dut->im_resp_rdata, zero);
+}
+
+void QuietMshr(Vmosaic_cache_tb* dut) {
+  dut->nb_req_valid = 0; dut->nb_req_addr = 0; dut->nb_req_id = 0;
+  dut->nb_cancel_valid = 0; dut->nb_cancel_id = 0;
+  dut->nb_mem_req_ready = 0; dut->nb_mem_resp_valid = 0;
+  dut->nb_mem_resp_addr = 0; dut->nb_mem_resp_fault = 0;
+  dut->nb_dbg_index = 0;
+  uint8_t zero[kLineBytes] = {};
+  AssignLine(&dut->nb_mem_resp_rdata, zero);
 }
 
 class Harness {
@@ -404,6 +433,7 @@ class Harness {
 
     dut_->ddbg_index = d_dbg_index_m_;
     dut_->idbg_index = i_dbg_index_m_;
+    QuietMshr(dut_);
 
     // Memory-side response, one cycle after a read was accepted.
     dut_->dm_resp_valid = d_pend_ ? 1 : 0;
@@ -723,6 +753,679 @@ class Campaign {
   mosaic::Reporter* rep_;
 };
 
+// ===========================================================================
+// I-043 -- CASE=cache.mshr_nonblocking.
+//
+// The DUT is the non-blocking read L1 (`mosaic_mshr`) in the shared wrapper.
+// The oracle is again the contract, not the RTL:
+//
+//   * every accepted request that is not a hit is expected to be answered
+//     exactly once, and the answer's data is the memory word at the requested
+//     address (read out of a flat byte array, not out of any cache model);
+//   * a request issued while its line is poisoned is expected to be answered
+//     with a fault, and a fault is line-level: every waiter coalesced on the
+//     same refill faults with it;
+//   * a request that was cancelled must never be answered, and its refill must
+//     not install the line;
+//   * conservation is checked every cycle: `miss_accepted == responses +
+//     cancels + dbg_waiters`, so a leaked entry or a double-answered request
+//     cannot pass even if every directed check happens to miss it.
+//
+// The memory model here holds *several* reads and lets the campaign choose
+// which one to answer, so "different lines return out of order" is real
+// stimulus rather than an assertion about a single outstanding miss.
+// ===========================================================================
+
+struct PendingRead {
+  uint32_t addr = 0;
+  bool     fault = false;
+  uint8_t  data[kLineBytes] = {};
+};
+
+struct Expectation {
+  uint32_t addr = 0;
+  bool     fault = false;
+};
+
+class MshrHarness {
+ public:
+  MshrHarness(Vmosaic_cache_tb* dut, mosaic::ClockDriver* clk,
+              mosaic::Reporter* rep, uint64_t max_cycles)
+      : dut_(dut), clk_(clk), rep_(rep), max_cycles_(max_cycles) {
+    mem_.assign(kMemBytes, 0);
+    ref_mem_.assign(kMemBytes, 0);
+    FillPattern(&mem_);
+    FillPattern(&ref_mem_);
+  }
+
+  void Phase(const char* name) { phase_ = name; }
+  uint64_t cycles() const { return clk_->cycle(); }
+
+  // ------------------------------------------------------------- reference
+  uint64_t RefWord(uint32_t addr) const { return ReadWordLE(&ref_mem_[addr]); }
+  uint32_t LineOf(uint32_t addr) const { return addr & ~kLineMask; }
+  int SetOf(uint32_t addr) const { return static_cast<int>((addr >> kOffsetBits) & (kSets - 1)); }
+  void PoisonLine(uint32_t line) { poison_.insert(line); }
+
+  // ------------------------------------------------------------- reset
+  void Reset(int cycles) {
+    req_valid_m_ = cancel_valid_m_ = false;
+    resp_drive_ = false;
+    dbg_index_m_ = 0;
+    for (int i = 0; i < cycles; ++i) Tick(/*rst=*/true);
+    Tick(/*rst=*/false);
+  }
+
+  // ------------------------------------------------------------- stimulus
+  void Issue(uint32_t addr, uint32_t id, bool expect_fault, const char* ctx) {
+    if (exp_.count(id) != 0 || cancelled_.count(id) != 0) {
+      Fail(std::string(phase_) + ": " + ctx + " reuses a live request id",
+           "a fresh id", std::to_string(id));
+    }
+    req_valid_m_ = true;
+    req_addr_m_ = addr;
+    req_id_m_ = id;
+    int guard = 0;
+    while (true) {
+      Tick(/*rst=*/false);
+      if (req_accept_) break;
+      if (++guard > 1000) {
+        Fail(std::string(phase_) + ": " + ctx + " was never accepted",
+             "accepted", "back-pressured forever");
+      }
+    }
+    req_valid_m_ = false;
+    Expectation e;
+    e.addr = addr;
+    e.fault = expect_fault;
+    exp_[id] = e;
+  }
+
+  void Cancel(uint32_t id) {
+    if (exp_.count(id) == 0) {
+      Fail(std::string(phase_) + ": cancel of an id that is not live",
+           "a live id", std::to_string(id));
+    }
+    cancel_valid_m_ = true;
+    cancel_id_m_ = id;
+    Tick(/*rst=*/false);
+    cancel_valid_m_ = false;
+    exp_.erase(id);
+    cancelled_.insert(id);
+  }
+
+  // Offer a request for exactly one cycle and report whether the DUT accepted
+  // it. Used to observe back-pressure when the table is full, where `Issue`
+  // (which waits for acceptance) would spin.
+  bool TryIssue(uint32_t addr, uint32_t id, bool expect_fault) {
+    req_valid_m_ = true;
+    req_addr_m_ = addr;
+    req_id_m_ = id;
+    Tick(/*rst=*/false);
+    const bool accepted = req_accept_;
+    req_valid_m_ = false;
+    if (accepted) {
+      Expectation e;
+      e.addr = addr;
+      e.fault = expect_fault;
+      exp_[id] = e;
+    }
+    return accepted;
+  }
+
+  // Deliver every queued read and wait for every entry to drain.
+  void DrainAll() {
+    int guard = 0;
+    while (Outstanding() > 0 || !pending_reads_.empty()) {
+      if (!pending_reads_.empty()) DeliverRead(0);
+      else Tick(/*rst=*/false);
+      if (++guard > 10000) {
+        Fail(std::string(phase_) + ": drain did not finish", "drained", "still busy");
+      }
+    }
+  }
+
+  // Answer one queued memory read. `which` selects the queue entry (0 = the
+  // oldest, -1 = the newest), so the campaign can return responses out of
+  // order. Ticks until at least one read is queued.
+  void DeliverRead(int which) {
+    int guard = 0;
+    while (pending_reads_.empty()) {
+      Tick(/*rst=*/false);
+      if (++guard > 10000) {
+        Fail(std::string(phase_) + ": no pending read to deliver", "a read", "none");
+      }
+    }
+    int idx = (which < 0) ? static_cast<int>(pending_reads_.size()) - 1 : which;
+    if (idx < 0 || idx >= static_cast<int>(pending_reads_.size())) {
+      Fail(std::string(phase_) + ": deliver index out of range", "in range", std::to_string(idx));
+    }
+    const PendingRead r = pending_reads_[idx];
+    pending_reads_.erase(pending_reads_.begin() + idx);
+    resp_drive_ = true;
+    resp_drive_addr_ = r.addr;
+    resp_drive_fault_ = r.fault;
+    std::memcpy(resp_drive_data_, r.data, kLineBytes);
+    Tick(/*rst=*/false);
+  }
+
+  void StallMemory(int cycles) { mem_stall_ = cycles; }
+  void TickFor(int n) { for (int i = 0; i < n; ++i) Tick(/*rst=*/false); }
+  void WaitReads(uint64_t target) {
+    int guard = 0;
+    while (mem_reads_ < target) {
+      Tick(/*rst=*/false);
+      if (++guard > 10000) {
+        Fail(std::string(phase_) + ": timed out waiting for memory reads",
+             std::to_string(target), std::to_string(mem_reads_));
+      }
+    }
+  }
+  void WaitResponses(uint64_t target) {
+    int guard = 0;
+    while (total_responses_ < target) {
+      Tick(/*rst=*/false);
+      if (++guard > 10000) {
+        Fail(std::string(phase_) + ": timed out waiting for responses",
+             "responses", "none");
+      }
+    }
+  }
+
+  // ------------------------------------------------------------- accessors
+  uint64_t MemReads() const { return mem_reads_; }
+  uint64_t TotalResponses() const { return total_responses_; }
+  uint64_t DrainResponses() const { return drain_responses_; }
+  uint64_t MissAccepted() const { return miss_accepted_; }
+  uint64_t Cancels() const { return cancels_; }
+  uint32_t Outstanding() { dut_->eval(); return dut_->nb_dbg_outstanding; }
+  uint32_t Waiters() { dut_->eval(); return dut_->nb_dbg_waiters; }
+  uint32_t MaxOutstanding() const { return max_outstanding_; }
+  size_t   PendingReads() const { return pending_reads_.size(); }
+  bool     MemReqValid() { dut_->eval(); return dut_->nb_mem_req_valid != 0; }
+  bool     ExpEmpty() const { return exp_.empty(); }
+  const std::vector<uint32_t>& RespOrder() const { return resp_order_; }
+  uint64_t EvHit() const { return ev_hit_; }
+  uint64_t EvMiss() const { return ev_miss_; }
+  uint64_t EvCoalesce() const { return ev_coalesce_; }
+  uint64_t EvRefill() const { return ev_refill_; }
+  uint64_t EvFault() const { return ev_fault_; }
+  uint64_t EvCancel() const { return ev_cancel_; }
+  uint64_t EvDrop() const { return ev_drop_; }
+
+  bool DebugValid(uint32_t addr) {
+    dbg_index_m_ = SetOf(addr);
+    dut_->nb_dbg_index = dbg_index_m_;
+    dut_->eval();
+    return dut_->nb_dbg_valid != 0;
+  }
+  void CheckAllInvalid(const char* ctx) {
+    for (int index = 0; index < kSets; ++index) {
+      dbg_index_m_ = index;
+      dut_->nb_dbg_index = index;
+      dut_->eval();
+      if (dut_->nb_dbg_valid != 0) {
+        Fail(std::string(phase_) + ": " + ctx + " set " + std::to_string(index) +
+                 " is valid", "0", "1");
+      }
+    }
+  }
+
+  // ------------------------------------------------------------- one cycle
+  void Tick(bool rst) {
+    if (clk_->cycle() >= max_cycles_) {
+      Fail(std::string(phase_) + ": max-cycles (" + std::to_string(max_cycles_) +
+               ") exhausted", "campaign fits in the cycle budget", "ran out of cycles");
+    }
+
+    // --- drive -------------------------------------------------------------
+    dut_->rst = rst ? 1 : 0;
+    QuietBlockingCaches(dut_);
+    dut_->nb_req_valid  = req_valid_m_ ? 1 : 0;
+    dut_->nb_req_addr   = req_addr_m_;
+    dut_->nb_req_id     = req_id_m_;
+    dut_->nb_cancel_valid = cancel_valid_m_ ? 1 : 0;
+    dut_->nb_cancel_id  = cancel_id_m_;
+    dut_->nb_mem_req_ready = (mem_stall_ == 0) ? 1 : 0;
+    if (mem_stall_ > 0) --mem_stall_;
+    dut_->nb_mem_resp_valid = resp_drive_ ? 1 : 0;
+    dut_->nb_mem_resp_addr  = resp_drive_addr_;
+    dut_->nb_mem_resp_fault = resp_drive_fault_ ? 1 : 0;
+    AssignLine(&dut_->nb_mem_resp_rdata, resp_drive_data_);
+    dut_->nb_dbg_index = dbg_index_m_;
+    dut_->eval();
+
+    // --- sample ------------------------------------------------------------
+    req_accept_ = req_valid_m_ && (dut_->nb_req_ready != 0);
+    const bool mem_read = !rst && (dut_->nb_mem_req_valid != 0) &&
+                          (dut_->nb_mem_req_ready != 0);
+    if (mem_read) {
+      PendingRead r;
+      r.addr = dut_->nb_mem_req_addr;
+      const uint32_t line = LineOf(r.addr);
+      r.fault = poison_.count(line) != 0;
+      if (r.fault) poison_.erase(line);
+      for (int i = 0; i < kLineBytes; ++i) {
+        r.data[i] = r.fault ? 0 : mem_[line + i];
+      }
+      pending_reads_.push_back(r);
+      ++mem_reads_;
+    }
+
+    const bool resp_valid = !rst && (dut_->nb_resp_valid != 0);
+    const uint32_t resp_id = dut_->nb_resp_id;
+    const uint64_t resp_data = dut_->nb_resp_rdata;
+    const bool resp_fault = (dut_->nb_resp_fault != 0);
+
+    if (resp_valid) {
+      ++total_responses_;
+      resp_order_.push_back(resp_id);
+      CheckResponse(resp_id, resp_data, resp_fault);
+      if (hit_resp_pending_ > 0) --hit_resp_pending_;
+      else ++drain_responses_;
+    }
+
+    // --- edge --------------------------------------------------------------
+    dut_->clk = 1;
+    dut_->eval();
+    clk_->Tick();
+    dut_->clk = 0;
+    dut_->eval();
+
+    // --- post-edge: events, occupancy and the conservation identity --------
+    // The DUT's event pulses and its waiter bits are both registered, so they
+    // are sampled *after* the edge: a pulse and the state change it describes
+    // are then observed in the same instant. (A response is combinational, so
+    // it is sampled before the edge; its waiter bit is cleared at this edge.)
+    if (!rst) {
+      if (dut_->nb_ev_hit != 0) { ++ev_hit_; ++hit_resp_pending_; }
+      if (dut_->nb_ev_miss != 0) { ++ev_miss_; ++miss_accepted_; }
+      if (dut_->nb_ev_coalesce != 0) ++ev_coalesce_;
+      if (dut_->nb_ev_refill != 0) ++ev_refill_;
+      if (dut_->nb_ev_fault != 0) ++ev_fault_;
+      if (dut_->nb_ev_cancel != 0) { ++ev_cancel_; ++cancels_; }
+      if (dut_->nb_ev_drop != 0) ++ev_drop_;
+
+      const uint32_t outstanding = dut_->nb_dbg_outstanding;
+      if (outstanding > max_outstanding_) max_outstanding_ = outstanding;
+      if (outstanding > 4u) {
+        Fail(std::string(phase_) + ": more live entries than the table has",
+             "<= 4", std::to_string(outstanding));
+      }
+      const uint64_t waiters = dut_->nb_dbg_waiters;
+      if (miss_accepted_ != drain_responses_ + cancels_ + waiters) {
+        Fail(std::string(phase_) +
+                 ": conservation: accepted misses != responses + cancels + waiters",
+             std::to_string(miss_accepted_),
+             std::to_string(drain_responses_ + cancels_ + waiters));
+      }
+    }
+    resp_drive_ = false;
+  }
+
+ private:
+  [[noreturn]] void Fail(const std::string& where, const std::string& expected,
+                         const std::string& actual) {
+    rep_->Mismatch(where, expected, actual);
+    throw Failure{where};
+  }
+
+  void CheckResponse(uint32_t id, uint64_t data, bool fault) {
+    const auto it = exp_.find(id);
+    if (it == exp_.end()) {
+      if (cancelled_.count(id) != 0) {
+        Fail(std::string(phase_) + ": a cancelled request received a response (id " +
+                 std::to_string(id) + ")", "no response", "a response");
+      }
+      Fail(std::string(phase_) + ": response for an id that was never accepted (id " +
+               std::to_string(id) + ")", "no response", "a response");
+    }
+    if (it->second.fault != fault) {
+      Fail(std::string(phase_) + ": response fault for id " + std::to_string(id),
+           it->second.fault ? "1" : "0", fault ? "1" : "0");
+    }
+    if (!fault) {
+      const uint64_t want = RefWord(it->second.addr);
+      if (data != want) {
+        Fail(std::string(phase_) + ": response data for id " + std::to_string(id),
+             mosaic::Hex(want), mosaic::Hex(data));
+      }
+    }
+    exp_.erase(it);
+  }
+
+  Vmosaic_cache_tb* dut_;
+  mosaic::ClockDriver* clk_;
+  mosaic::Reporter* rep_;
+  uint64_t max_cycles_;
+  std::string phase_;
+
+  std::vector<uint8_t> mem_;
+  std::vector<uint8_t> ref_mem_;
+  std::set<uint32_t>   poison_;
+  std::vector<PendingRead> pending_reads_;
+  std::map<uint32_t, Expectation> exp_;
+  std::set<uint32_t>   cancelled_;
+  std::vector<uint32_t> resp_order_;
+
+  bool     req_valid_m_ = false;
+  uint32_t req_addr_m_ = 0;
+  uint32_t req_id_m_ = 0;
+  bool     cancel_valid_m_ = false;
+  uint32_t cancel_id_m_ = 0;
+  bool     req_accept_ = false;
+  bool     resp_drive_ = false;
+  uint32_t resp_drive_addr_ = 0;
+  bool     resp_drive_fault_ = false;
+  uint8_t  resp_drive_data_[kLineBytes] = {};
+  int      dbg_index_m_ = 0;
+  int      mem_stall_ = 0;
+
+  uint64_t mem_reads_ = 0;
+  uint64_t total_responses_ = 0;
+  uint64_t drain_responses_ = 0;
+  uint64_t miss_accepted_ = 0;
+  uint64_t cancels_ = 0;
+  uint64_t hit_resp_pending_ = 0;
+  uint64_t ev_hit_ = 0, ev_miss_ = 0, ev_coalesce_ = 0, ev_refill_ = 0,
+           ev_fault_ = 0, ev_cancel_ = 0, ev_drop_ = 0;
+  uint32_t max_outstanding_ = 0;
+};
+
+class MshrCampaign {
+ public:
+  MshrCampaign(MshrHarness* h, mosaic::Reporter* rep) : h_(h), rep_(rep) {}
+
+  std::string Run() {
+    ColdReset();
+    RefillAndHit();
+    DuplicateMiss();
+    DifferentLines();
+    CancelOutstanding();
+    CancelBeforeIssue();
+    FaultingRefill();
+    CoalescedFault();
+    MshrFull();
+    CoalescedCancel();
+    IdReuse();
+    return FinalCheck();
+  }
+
+ private:
+  void Check(bool passed, const std::string& what) { rep_->Check(passed, what); }
+
+  void ColdReset() {
+    h_->Phase("cold-reset");
+    h_->Reset(4);
+    h_->CheckAllInvalid("mshr");
+    Check(h_->Outstanding() == 0, "cold-reset: no outstanding entries after reset");
+    Check(h_->Waiters() == 0, "cold-reset: no waiters after reset");
+  }
+
+  void RefillAndHit() {
+    h_->Phase("refill-and-hit");
+    const uint32_t a = Addr(2, 3, 0);
+    const uint64_t reads = h_->MemReads();
+
+    h_->Issue(a, 0, false, "cold load");
+    h_->DeliverRead(0);
+    h_->WaitResponses(1);
+    Check(h_->MemReads() == reads + 1, "refill-and-hit: the cold load reads memory once");
+    Check(h_->EvMiss() == 1 && h_->EvRefill() == 1, "refill-and-hit: miss then refill");
+    Check(h_->DebugValid(a), "refill-and-hit: the refilled line is valid");
+    Check(h_->Outstanding() == 0, "refill-and-hit: the entry is freed after the response");
+
+    const uint64_t reads2 = h_->MemReads();
+    const uint64_t hits = h_->EvHit();
+    h_->Issue(a, 1, false, "second load");
+    h_->WaitResponses(2);
+    Check(h_->EvHit() == hits + 1, "refill-and-hit: the second load hits");
+    Check(h_->MemReads() == reads2, "refill-and-hit: a hit does not read memory");
+    Check(h_->Outstanding() == 0, "refill-and-hit: a hit touches no entry");
+  }
+
+  void DuplicateMiss() {
+    h_->Phase("duplicate-miss");
+    const uint32_t a = Addr(3, 6, 0);
+    const uint32_t word0 = a;
+    const uint32_t word2 = a + 2 * kCpuBytes;
+    const uint64_t reads = h_->MemReads();
+    const uint64_t responses = h_->TotalResponses();
+
+    h_->Issue(word0, 0, false, "duplicate load A");
+    h_->Issue(word2, 1, false, "duplicate load B");
+    h_->WaitReads(reads + 1);
+    Check(h_->MemReads() == reads + 1,
+          "duplicate-miss: two requests to one line issue ONE memory read");
+    Check(h_->EvCoalesce() >= 1, "duplicate-miss: the second request coalesced");
+    Check(h_->Outstanding() == 1, "duplicate-miss: one entry serves both waiters");
+
+    h_->DeliverRead(0);
+    h_->WaitResponses(responses + 2);
+    Check(h_->MemReads() == reads + 1,
+          "duplicate-miss: no second read appears after the responses");
+    Check(h_->Outstanding() == 0, "duplicate-miss: the entry is freed after both answers");
+    Check(h_->DebugValid(a), "duplicate-miss: the line is installed");
+  }
+
+  void DifferentLines() {
+    h_->Phase("different-lines");
+    // Two lines that share a set: their refills evict each other, and the
+    // campaign answers the newer read first, so installation order is reversed
+    // relative to issue order as well.
+    const uint32_t b = Addr(4, 1, 0);
+    const uint32_t c = Addr(5, 1, 0);
+    const uint64_t reads = h_->MemReads();
+    const uint64_t responses = h_->TotalResponses();
+
+    h_->Issue(b, 2, false, "line B");
+    h_->Issue(c, 3, false, "line C");
+    h_->WaitReads(reads + 2);
+    Check(h_->MemReads() == reads + 2, "different-lines: two lines, two reads");
+    Check(h_->Outstanding() == 2, "different-lines: both misses are outstanding");
+    Check(h_->MaxOutstanding() >= 2, "different-lines: MLP reaches two");
+
+    h_->DeliverRead(-1);   // answer C first
+    h_->DeliverRead(0);    // then B
+    h_->WaitResponses(responses + 2);
+
+    const std::vector<uint32_t>& order = h_->RespOrder();
+    Check(order.size() >= 2, "different-lines: two responses arrived");
+    Check(order[order.size() - 2] == 3 && order[order.size() - 1] == 2,
+          "different-lines: responses returned out of issue order with their own ids");
+    Check(h_->Outstanding() == 0, "different-lines: both entries freed");
+  }
+
+  void CancelOutstanding() {
+    h_->Phase("cancel-outstanding");
+    const uint32_t d = Addr(6, 2, 0);
+    const uint64_t reads = h_->MemReads();
+
+    h_->Issue(d, 4, false, "load to be cancelled");
+    while (h_->PendingReads() < 1) h_->TickFor(1);
+    const uint64_t cancels = h_->Cancels();
+    h_->Cancel(4);
+
+    // Deliver the refill that was already in flight when the request died.
+    h_->DeliverRead(0);
+    h_->TickFor(4);
+    Check(h_->Outstanding() == 0,
+          "cancel-outstanding: a response after a cancellation frees the entry (no leak)");
+    Check(!h_->DebugValid(d),
+          "cancel-outstanding: a cancelled refill is NOT installed as valid");
+    Check(h_->Cancels() == cancels + 1,
+          "cancel-outstanding: exactly one cancellation was applied");
+
+    // The line was not installed, so the next request to it must miss again.
+    const uint64_t reads2 = h_->MemReads();
+    const uint64_t responses = h_->TotalResponses();
+    h_->Issue(d, 5, false, "retry after cancellation");
+    h_->WaitReads(reads2 + 1);
+    Check(h_->MemReads() == reads2 + 1,
+          "cancel-outstanding: the retry refills the line a second time");
+    h_->DeliverRead(0);
+    h_->WaitResponses(responses + 1);
+    Check(h_->DebugValid(d), "cancel-outstanding: the retried refill installs the line");
+    Check(h_->MemReads() == reads + 2, "cancel-outstanding: exactly two reads for the line");
+  }
+
+  void CancelBeforeIssue() {
+    h_->Phase("cancel-before-issue");
+    const uint32_t e = Addr(7, 3, 0);
+    const uint64_t reads = h_->MemReads();
+
+    h_->StallMemory(1000);
+    h_->Issue(e, 6, false, "load held before its read");
+    Check(h_->MemReqValid(), "cancel-before-issue: the read is waiting to issue");
+    const uint64_t cancels = h_->Cancels();
+    h_->Cancel(6);
+    Check(h_->Cancels() == cancels + 1, "cancel-before-issue: the cancel was applied");
+    h_->TickFor(2);
+    Check(!h_->MemReqValid(),
+          "cancel-before-issue: a request cancelled before issue withdraws its read");
+    Check(h_->MemReads() == reads, "cancel-before-issue: no memory read was issued");
+    Check(h_->Outstanding() == 0, "cancel-before-issue: the entry is freed");
+    h_->StallMemory(0);
+  }
+
+  void FaultingRefill() {
+    h_->Phase("faulting-refill");
+    const uint32_t f = Addr(8, 4, 0);
+    h_->PoisonLine(h_->LineOf(f));
+    const uint64_t responses = h_->TotalResponses();
+    const uint64_t faults = h_->EvFault();
+
+    h_->Issue(f, 7, true, "load to a poisoned line");
+    h_->DeliverRead(0);
+    h_->WaitResponses(responses + 1);
+    Check(h_->EvFault() == faults + 1, "faulting-refill: ev_fault pulsed once");
+    Check(!h_->DebugValid(f), "faulting-refill: a faulted refill is NOT installed");
+    Check(h_->Outstanding() == 0, "faulting-refill: the faulted entry is freed");
+
+    const uint64_t responses2 = h_->TotalResponses();
+    h_->Issue(f, 0, false, "retry after a faulted refill");
+    h_->DeliverRead(0);
+    h_->WaitResponses(responses2 + 1);
+    Check(h_->DebugValid(f), "faulting-refill: the retry succeeds and installs the line");
+  }
+
+  void CoalescedFault() {
+    h_->Phase("coalesced-fault");
+    const uint32_t g = Addr(9, 5, 0);
+    h_->PoisonLine(h_->LineOf(g));
+    const uint64_t reads = h_->MemReads();
+    const uint64_t responses = h_->TotalResponses();
+
+    h_->Issue(g, 1, true, "coalesced fault A");
+    h_->Issue(g, 2, true, "coalesced fault B");
+    h_->WaitReads(reads + 1);
+    Check(h_->MemReads() == reads + 1,
+          "coalesced-fault: one read for the coalesced pair");
+    Check(h_->Outstanding() == 1, "coalesced-fault: one entry serves both");
+    h_->DeliverRead(0);
+    h_->WaitResponses(responses + 2);
+    Check(h_->Outstanding() == 0, "coalesced-fault: the entry is freed");
+    Check(!h_->DebugValid(g), "coalesced-fault: the faulted line is NOT installed");
+  }
+
+  void MshrFull() {
+    h_->Phase("mshr-full");
+    const uint32_t a0 = Addr(10, 0, 0);
+    const uint32_t a1 = Addr(11, 1, 0);
+    const uint32_t a2 = Addr(12, 2, 0);
+    const uint32_t a3 = Addr(13, 3, 0);
+    const uint32_t a4 = Addr(14, 4, 0);
+    const uint64_t reads = h_->MemReads();
+    const uint64_t responses = h_->TotalResponses();
+
+    h_->Issue(a0, 0, false, "fill 0");
+    h_->Issue(a1, 1, false, "fill 1");
+    h_->Issue(a2, 2, false, "fill 2");
+    h_->Issue(a3, 3, false, "fill 3");
+    h_->WaitReads(reads + 4);
+    Check(h_->Outstanding() == 4, "mshr-full: all four entries are occupied");
+
+    Check(!h_->TryIssue(a4, 5, false),
+          "mshr-full: a fifth miss is back-pressured, not silently dropped");
+    Check(h_->Outstanding() == 4, "mshr-full: the refused request allocated nothing");
+
+    h_->DeliverRead(0);
+    h_->WaitResponses(responses + 1);
+    Check(h_->Outstanding() == 3, "mshr-full: one response frees exactly one entry");
+
+    Check(h_->TryIssue(a4, 5, false),
+          "mshr-full: the miss is accepted once an entry frees");
+    h_->DrainAll();
+    Check(h_->Outstanding() == 0, "mshr-full: the table drains fully (no deadlock)");
+  }
+
+  void CoalescedCancel() {
+    h_->Phase("coalesced-cancel");
+    const uint32_t h = Addr(15, 5, 0);
+    const uint64_t reads = h_->MemReads();
+    const uint64_t responses = h_->TotalResponses();
+
+    h_->Issue(h, 0, false, "coalesced cancel A");
+    h_->Issue(h, 1, false, "coalesced cancel B");
+    h_->WaitReads(reads + 1);
+    Check(h_->Outstanding() == 1, "coalesced-cancel: one entry serves both consumers");
+
+    h_->Cancel(0);
+    h_->DeliverRead(0);
+    h_->WaitResponses(responses + 1);
+    Check(h_->Outstanding() == 0,
+          "coalesced-cancel: the entry frees after the surviving consumer is answered");
+    Check(h_->DebugValid(h), "coalesced-cancel: the surviving consumer installed the line");
+  }
+
+  void IdReuse() {
+    h_->Phase("id-reuse");
+    const uint32_t x = Addr(16, 6, 0);
+    const uint32_t y = Addr(17, 7, 0);
+    const uint64_t responses = h_->TotalResponses();
+
+    h_->Issue(x, 2, false, "id reuse first");
+    h_->DeliverRead(0);
+    h_->WaitResponses(responses + 1);
+    h_->Issue(y, 2, false, "id reuse second");
+    h_->DeliverRead(0);
+    h_->WaitResponses(responses + 2);
+    Check(h_->Outstanding() == 0,
+          "id-reuse: a completed id may be reused with no stale-response aliasing");
+  }
+
+  std::string FinalCheck() {
+    h_->Phase("final");
+    Check(h_->Outstanding() == 0, "final: no live entries");
+    Check(h_->Waiters() == 0, "final: no live waiters");
+    Check(h_->ExpEmpty(), "final: every accepted request was answered or cancelled");
+    Check(h_->MissAccepted() == h_->DrainResponses() + h_->Cancels(),
+          "final: conservation at rest (misses == responses + cancels)");
+    Check(h_->EvHit() > 0 && h_->EvMiss() > 0 && h_->EvCoalesce() > 0 &&
+          h_->EvRefill() > 0 && h_->EvFault() > 0 && h_->EvCancel() > 0,
+          "coverage: hit/miss/coalesce/refill/fault/cancel all reached");
+    Check(h_->MaxOutstanding() >= 4,
+          "coverage: the MSHR table was filled (four misses outstanding at once)");
+    Check(h_->EvDrop() >= 1, "coverage: a cancelled refill was absorbed");
+    Check(h_->MemReads() == h_->EvRefill() + h_->EvFault() + h_->EvDrop(),
+          "invariant: every memory read ends in a refill, a fault or an absorbed drop");
+
+    char detail[256];
+    std::snprintf(detail, sizeof(detail),
+                  "mshr: hit=%llu miss=%llu coalesce=%llu refill=%llu fault=%llu "
+                  "cancel=%llu reads=%llu max_outstanding=%u cycles=%llu",
+                  (unsigned long long)h_->EvHit(), (unsigned long long)h_->EvMiss(),
+                  (unsigned long long)h_->EvCoalesce(), (unsigned long long)h_->EvRefill(),
+                  (unsigned long long)h_->EvFault(), (unsigned long long)h_->EvCancel(),
+                  (unsigned long long)h_->MemReads(), h_->MaxOutstanding(),
+                  (unsigned long long)h_->cycles());
+    return std::string(detail);
+  }
+
+  MshrHarness* h_;
+  mosaic::Reporter* rep_;
+};
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -738,19 +1441,33 @@ int main(int argc, char** argv) {
                             std::string("Verilator ") + Verilated::productVersion());
   mosaic::ClockDriver clk;
   Vmosaic_cache_tb dut;
-  Harness harness(&dut, &clk, &reporter, options.max_cycles);
 
   bool passed = true;
   std::string detail = "campaign did not start";
+  const bool mshr_case = options.case_id == "cache.mshr_nonblocking";
+  const bool cache_case = options.case_id == "cache.refill_evict_fault";
+  if (!mshr_case && !cache_case) {
+    std::fprintf(stderr, "unknown case %s\n", options.case_id.c_str());
+    return mosaic::kExitUsage;
+  }
+
   try {
-    Campaign campaign(&harness, &reporter);
-    detail = campaign.Run();
+    if (mshr_case) {
+      MshrHarness harness(&dut, &clk, &reporter, options.max_cycles);
+      MshrCampaign campaign(&harness, &reporter);
+      detail = campaign.Run();
+      reporter.Check(passed, "every accepted request is answered or cancelled exactly once");
+    } else {
+      Harness harness(&dut, &clk, &reporter, options.max_cycles);
+      Campaign campaign(&harness, &reporter);
+      detail = campaign.Run();
+      reporter.Check(passed, "cache-on and cache-off architectural traces agree");
+    }
   } catch (const Failure& f) {
     passed = false;
     detail = "first failure: " + f.what;
   }
 
-  reporter.Check(passed, "cache-on and cache-off architectural traces agree");
   const bool ok = passed && reporter.failures() == 0;
   return reporter.Finish(ok ? "PASS" : "FAIL", detail);
 }

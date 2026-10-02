@@ -11,6 +11,57 @@
       "mode": "M",
       "csrs": [
         {
+          "name": "fflags",
+          "role": "fp-state",
+          "address": 1,
+          "width": 32,
+          "access": "rwr",
+          "behavior": "warl",
+          "reset": 0,
+          "unmodifiable_bits": [
+            "31:5"
+          ],
+          "writable_fields": [
+            "4:0"
+          ],
+          "wpri_fields": [],
+          "spec_clause": "RISC-V Unprivileged ISA (20240411), 'F' extension, section 'Floating-Point Control and Status Register': fflags is CSR 0x001, a 5-bit read/write register (NV bit 4, DZ bit 3, OF bit 2, UF bit 1, NX bit 0). The F/D control state is a single 8-bit CSR fcsr = {frm[7:5], fflags[4:0]}, of which this register is the low field's view; a write here writes only bits 4:0 of the same state, and the accumulator semantics are exercised by CASE=fp.precise_flags_and_boxing rather than by a write/read-back rule because a flag is raised by an FP operation, not by a software write."
+        },
+        {
+          "name": "frm",
+          "role": "fp-state",
+          "address": 2,
+          "width": 32,
+          "access": "rwr",
+          "behavior": "warl",
+          "reset": 0,
+          "unmodifiable_bits": [
+            "31:3"
+          ],
+          "writable_fields": [
+            "2:0"
+          ],
+          "wpri_fields": [],
+          "spec_clause": "RISC-V Unprivileged ISA (20240411), 'F' extension, section 'Floating-Point Control and Status Register': frm is CSR 0x002, the 3-bit rounding-mode field fcsr[7:5]; encodings 000 RNE, 001 RTZ, 010 RDN, 011 RUP, 100 RMM, 111 dynamic (the instruction's rm field), 101/110 reserved. It is the high field's view of the same fcsr state; the reserved encodings are stored as written and the FP unit resolves a reserved mode as RNE, which is the behaviour fp.operation_matrix already pins for the instruction's rm field."
+        },
+        {
+          "name": "fcsr",
+          "role": "fp-state",
+          "address": 3,
+          "width": 32,
+          "access": "rwr",
+          "behavior": "warl",
+          "reset": 0,
+          "unmodifiable_bits": [
+            "31:8"
+          ],
+          "writable_fields": [
+            "7:0"
+          ],
+          "wpri_fields": [],
+          "spec_clause": "RISC-V Unprivileged ISA (20240411), 'F' extension, section 'Floating-Point Control and Status Register': fcsr is CSR 0x003, an 8-bit read/write register holding frm in bits 7:5 and fflags in bits 4:0; fflags (0x001) and frm (0x002) are the constituent views of the same state. The architectural accumulation of fflags is exercised by CASE=fp.precise_flags_and_boxing, where a retiring floating-point operation merges its flags and a squashed one contributes nothing; this table entry makes fcsr a real, generated, privilege-checked register rather than a hardcoded address."
+        },
+        {
           "name": "mstatus",
           "role": "status",
 "address": 768,

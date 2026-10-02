@@ -602,6 +602,8 @@ module mosaic_decoder (
       // (an implicit bit-to-enum conversion is rejected); it is named
       // explicitly and left at the operation the encoding space starts with.
       amo_op:       mosaic_pkg::AMO_ADD,
+      // `fp_op` (I-050) is likewise an enum and is named for the same reason.
+      fp_op:        mosaic_pkg::FP_ADD,
       default:      '0
   };
 

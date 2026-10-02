@@ -135,7 +135,14 @@ package mosaic_uop_pkg;
     UOP_MULDIV = 3'd2,
     UOP_LOAD   = 3'd3,
     UOP_STORE  = 3'd4,
-    UOP_SYSTEM = 3'd5
+    UOP_SYSTEM = 3'd5,
+    // UOP_FP (I-050): an OP-FP macro. It is a class of its own rather than an
+    // ALU op because it is consumed by the shared floating-point unit through
+    // cluster 0's FP request port, exactly as UOP_MULDIV is consumed by the
+    // shared iterative MUL/DIV unit. The class value 6 was previously free
+    // (`is_other` in mosaic_cluster), so the enumeration is extended, not
+    // renumbered, and every existing class keeps its encoding.
+    UOP_FP     = 3'd6
   } uop_class_e;
 
   // ---------------------------------------------------------- uop metadata
@@ -177,6 +184,25 @@ package mosaic_uop_pkg;
     logic              is_sc;
     logic              is_fence;    // FENCE / FENCE.I, drained by the memory path
     logic              is_fence_i;
+    // F/D (I-050). `fp_op` names the operation `mosaic_fpu` implements; `fp_fmt`
+    // is 1 for a single-precision form and 0 for double; `fp_rm` is the
+    // instruction's rm field (111 means "dynamic", resolved from fcsr.frm by the
+    // FP unit at execution). `fp_dst_fp`, `fp_src1_fp` and `fp_src2_fp` say
+    // which register namespace each operand lives in, so the register-file
+    // rename reads the FP map for an FP source and the integer map otherwise --
+    // and so the FP unit knows which operands are subject to NaN-boxing.
+    mosaic_pkg::fp_op_e fp_op;
+    logic              fp_fmt;
+    logic [2:0]        fp_rm;
+    logic              fp_dst_fp;
+    logic              fp_src1_fp;
+    logic              fp_src2_fp;
+    // The integer-side width (1 = 64-bit) and signedness of an int<->fp
+    // conversion, taken from the rs2 field of the encoding. They are side-band
+    // bits because `fp_op` names only the direction, and the FPU needs the width
+    // and signedness to implement the saturating conversion rule.
+    logic              fp_iw;
+    logic              fp_is;
   } uop_meta_t;
 
   // A source operand. `ready` means "the value in this packet is the final

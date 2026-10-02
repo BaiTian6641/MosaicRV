@@ -247,6 +247,19 @@ module mosaic_csr (
     // platform time
     input  logic [63:0]            mtime_i,
 
+    // --------------------------------------------------------- F/D state (I-050)
+    // `o_fcsr_o`/`o_fflags_o`/`o_frm_o` are the FP control state as read by
+    // software; `o_frm_o` is what the FP unit resolves a dynamic rounding mode
+    // against. `fp_fflags_or_i` is the flags of the FP operations that commit in
+    // this cycle (already ordered by the core against a same-cycle fcsr write),
+    // and `fp_fs_dirty_i` is "an FP instruction that modifies FP state retires
+    // now", which sets mstatus.FS = Dirty.
+    output logic [63:0]            o_fcsr_o,
+    output logic [4:0]             o_fflags_o,
+    output logic [2:0]             o_frm_o,
+    input  logic [4:0]             fp_fflags_or_i = 5'd0,
+    input  logic                   fp_fs_dirty_i = 1'b0,
+
     // ------------------------------------------------------------ observability
     output logic [63:0]            o_mstatus_o,
     output logic [63:0]            o_mtvec_o,
@@ -277,6 +290,10 @@ module mosaic_csr (
   localparam logic [63:0] MSTATUS_MIE  = 64'h0000_0000_0000_0008;
   localparam logic [63:0] MSTATUS_MPIE = 64'h0000_0000_0000_0080;
   localparam logic [63:0] MSTATUS_MPP  = 64'h0000_0000_0000_1800;
+  // FS (bits 14:13) is the FP-state field, and 2'b11 is its Dirty encoding
+  // (I-050). The field is writable through the generated mask in every profile;
+  // this constant is the value an instruction that modifies FP state leaves.
+  localparam logic [63:0] MSTATUS_FS   = 64'h0000_0000_0000_6000;
 
   // The rest of the mstatus fields this profile makes real (I-044). Positions
   // are the RV64 layout the clause cites; writability still comes from the
@@ -338,6 +355,13 @@ module mosaic_csr (
   logic [63:0] mtval_q;
   logic [63:0] mcycle_q;
   logic [63:0] minstret_q;
+
+  // F/D (I-050): the FP control state, one register. fcsr = {frm[7:5],
+  // fflags[4:0]}; fflags (0x001) and frm (0x002) are views of the same storage,
+  // exactly as sstatus is a view of mstatus, so the three addresses cannot
+  // disagree. Only the low 8 bits carry state.
+  logic [7:0]  fcsr_q;
+  logic [7:0]  fcsr_d;
 
   logic [63:0] mstatus_d;
   logic [63:0] mie_d;
@@ -432,6 +456,9 @@ module mosaic_csr (
     addr_impl = 1'b1;
     wr_legal  = 1'b0;
     case (csr_addr_i)
+      mosaic_csr_pkg::MOSAIC_CSR_ADDR_FFLAGS:     wr_legal = mosaic_csr_pkg::MOSAIC_CSR_WRITE_LEGAL_FFLAGS;
+      mosaic_csr_pkg::MOSAIC_CSR_ADDR_FRM:        wr_legal = mosaic_csr_pkg::MOSAIC_CSR_WRITE_LEGAL_FRM;
+      mosaic_csr_pkg::MOSAIC_CSR_ADDR_FCSR:       wr_legal = mosaic_csr_pkg::MOSAIC_CSR_WRITE_LEGAL_FCSR;
       mosaic_csr_pkg::MOSAIC_CSR_ADDR_MSTATUS:    wr_legal = mosaic_csr_pkg::MOSAIC_CSR_WRITE_LEGAL_MSTATUS;
       mosaic_csr_pkg::MOSAIC_CSR_ADDR_MISA:       wr_legal = mosaic_csr_pkg::MOSAIC_CSR_WRITE_LEGAL_MISA;
       mosaic_csr_pkg::MOSAIC_CSR_ADDR_MEDELEG:    wr_legal = mosaic_csr_pkg::MOSAIC_CSR_WRITE_LEGAL_MEDELEG;
@@ -635,6 +662,9 @@ module mosaic_csr (
 
   always_comb begin
     case (csr_addr_i)
+      mosaic_csr_pkg::MOSAIC_CSR_ADDR_FFLAGS:     csr_rdata_stored = {59'b0, fcsr_q[4:0]};
+      mosaic_csr_pkg::MOSAIC_CSR_ADDR_FRM:        csr_rdata_stored = {61'b0, fcsr_q[7:5]};
+      mosaic_csr_pkg::MOSAIC_CSR_ADDR_FCSR:       csr_rdata_stored = {56'b0, fcsr_q};
       mosaic_csr_pkg::MOSAIC_CSR_ADDR_MSTATUS:    csr_rdata_stored = mstatus_q;
       mosaic_csr_pkg::MOSAIC_CSR_ADDR_MISA:       csr_rdata_stored = mosaic_csr_pkg::MOSAIC_CSR_RESET_MISA;
       mosaic_csr_pkg::MOSAIC_CSR_ADDR_MEDELEG:    csr_rdata_stored = medeleg_q;
@@ -839,6 +869,7 @@ module mosaic_csr (
     medeleg_d  = medeleg_q;
     mideleg_d  = mideleg_q;
     mcounteren_d = mcounteren_q;
+    fcsr_d     = fcsr_q;
     `ifdef MOSAIC_CSR_HAS_S
       stvec_d    = stvec_q;
       sscratch_d = sscratch_q;
@@ -934,6 +965,24 @@ module mosaic_csr (
           mstatus_d = (mstatus_q & ~mosaic_csr_pkg::MOSAIC_CSR_WMASK_MSTATUS)
                     | (csr_op_result & mosaic_csr_pkg::MOSAIC_CSR_WMASK_MSTATUS);
 `endif
+        // F/D (I-050): fflags, frm and fcsr are three addresses over one 8-bit
+        // register. A write to one leaves the other field's bits alone, and the
+        // field masks come from the generated table rather than from literals.
+        // The fflags bits are ORed with the flags of the FP operations that
+        // commit in the same cycle (the core orders them against this write)
+        // after the case, so a write here and a retiring FP operation cannot
+        // lose either one.
+        mosaic_csr_pkg::MOSAIC_CSR_ADDR_FCSR:
+          fcsr_d = (fcsr_q & ~mosaic_csr_pkg::MOSAIC_CSR_WMASK_FCSR[7:0])
+                 | (csr_op_result[7:0] & mosaic_csr_pkg::MOSAIC_CSR_WMASK_FCSR[7:0]);
+        mosaic_csr_pkg::MOSAIC_CSR_ADDR_FFLAGS:
+          fcsr_d = (fcsr_q & ~{3'b000, mosaic_csr_pkg::MOSAIC_CSR_WMASK_FFLAGS[4:0]})
+                 | (csr_op_result[7:0]
+                    & {3'b000, mosaic_csr_pkg::MOSAIC_CSR_WMASK_FFLAGS[4:0]});
+        mosaic_csr_pkg::MOSAIC_CSR_ADDR_FRM:
+          fcsr_d = (fcsr_q & ~{mosaic_csr_pkg::MOSAIC_CSR_WMASK_FRM[2:0], 5'b00000})
+                 | (csr_op_result[7:0]
+                    & {mosaic_csr_pkg::MOSAIC_CSR_WMASK_FRM[2:0], 5'b00000});
         mosaic_csr_pkg::MOSAIC_CSR_ADDR_MIE:
           mie_d = (mie_q & ~mosaic_csr_pkg::MOSAIC_CSR_WMASK_MIE)
                 | (csr_op_result & mosaic_csr_pkg::MOSAIC_CSR_WMASK_MIE);
@@ -1063,6 +1112,23 @@ module mosaic_csr (
         end
       end
     `endif
+
+    // F/D (I-050): the flags of the FP operations that commit in this cycle are
+    // ORed into fflags after any software write, so a `csrw fcsr` and a retiring
+    // `fadd` in the same cycle keep both contributions. The core orders the OR
+    // against a same-cycle fcsr write by suppressing the flags of operations
+    // older than it, so the OR is always the younger contribution.
+    fcsr_d[4:0] = fcsr_d[4:0] | fp_fflags_or_i;
+
+    // F/D (I-050): an instruction that modifies FP state sets mstatus.FS =
+    // Dirty (11) when it commits. It is a set, never a clear, so a same-cycle
+    // software write to mstatus loses to the dirty transition -- the
+    // conservative direction. The trap and MRET paths above rewrite only
+    // MIE/MPIE/MPP (and SIE/SPIE/SPP), so FS has exactly this one writer besides
+    // software.
+    if (fp_fs_dirty_i) begin
+      mstatus_d = mstatus_d | MSTATUS_FS;
+    end
   end
 
   // ------------------------------------------------------------------ state
@@ -1080,6 +1146,7 @@ module mosaic_csr (
       medeleg_q  <= mosaic_csr_pkg::MOSAIC_CSR_RESET_MEDELEG;
       mideleg_q  <= mosaic_csr_pkg::MOSAIC_CSR_RESET_MIDELEG;
       mcounteren_q <= mosaic_csr_pkg::MOSAIC_CSR_RESET_MCOUNTEREN;
+      fcsr_q     <= mosaic_csr_pkg::MOSAIC_CSR_RESET_FCSR[7:0];
       // The hart starts in M-mode: reset is M-mode by definition ("M-mode is
       // used for low-level access to a hardware platform and is the first mode
       // entered at reset").
@@ -1113,6 +1180,7 @@ module mosaic_csr (
       medeleg_q  <= medeleg_d;
       mideleg_q  <= mideleg_d;
       mcounteren_q <= mcounteren_d;
+      fcsr_q     <= fcsr_d;
       priv_q     <= priv_d;
       `ifdef MOSAIC_CSR_HAS_S
         stvec_q      <= stvec_d;
@@ -1192,6 +1260,9 @@ module mosaic_csr (
   assign o_misa_o     = mosaic_csr_pkg::MOSAIC_CSR_RESET_MISA;
   assign o_mcycle_o   = mcycle_q;
   assign o_minstret_o = minstret_q;
+  assign o_fcsr_o     = {56'b0, fcsr_q};
+  assign o_fflags_o   = fcsr_q[4:0];
+  assign o_frm_o      = fcsr_q[7:5];
 
 endmodule : mosaic_csr
 

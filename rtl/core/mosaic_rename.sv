@@ -487,6 +487,11 @@ module mosaic_rename (
     // needs no tags at all.
     input  logic                                  alloc_req,
     input  logic [4:0]                            alloc_rd,
+    // F/D (I-050): the destination lives in the FP architectural map
+    // (f0..f31) rather than the integer map. It defaults low, so an
+    // instantiation that predates FP state is bit-identical to the integer-only
+    // design: every FP-specific path in this file is a no-op with the bit low.
+    input  logic                                  alloc_is_fp = 1'b0,
     output logic                                  alloc_accepted,
     output logic                                  alloc_exhausted,  // refused: the group's tags are not there
     output logic                                  alloc_squashed,   // refused: squash owns the cycle
@@ -504,6 +509,7 @@ module mosaic_rename (
     // one each.
     input  logic                                  alloc2_req,
     input  logic [4:0]                            alloc2_rd,
+    input  logic                                  alloc2_is_fp = 1'b0,
     output logic                                  alloc2_accepted,
     output logic                                  alloc2_exhausted,  // refused: the group's tags are not there
     output logic                                  alloc2_squashed,   // refused: squash owns the cycle
@@ -540,6 +546,8 @@ module mosaic_rename (
     // construction, which is exactly what `rs*_bypass` reports.
     input  logic [4:0]                            rs1_addr,
     input  logic [4:0]                            rs2_addr,
+    input  logic                                  rs1_is_fp = 1'b0,
+    input  logic                                  rs2_is_fp = 1'b0,
     output logic                                  rs1_is_x0,
     output logic                                  rs2_is_x0,
     output logic                                  rs1_ready,
@@ -550,6 +558,8 @@ module mosaic_rename (
     output logic [REN_GEN_W-1:0]                  rs2_gen,
     input  logic [4:0]                            rs3_addr,
     input  logic [4:0]                            rs4_addr,
+    input  logic                                  rs3_is_fp = 1'b0,
+    input  logic                                  rs4_is_fp = 1'b0,
     output logic                                  rs3_is_x0,
     output logic                                  rs4_is_x0,
     output logic                                  rs3_ready,
@@ -603,12 +613,14 @@ module mosaic_rename (
     // were.
     input  logic                                  commit_valid,
     input  logic [4:0]                            commit_rd,
+    input  logic                                  commit_is_fp = 1'b0,
     input  logic [REN_TAG_W-1:0]                  commit_tag,
     input  logic [REN_GEN_W-1:0]                  commit_gen,
     output logic                                  commit_accepted,
     output logic                                  commit_x0_dropped,  // a write to x0 retires
     input  logic                                  commit2_valid,
     input  logic [4:0]                            commit2_rd,
+    input  logic                                  commit2_is_fp = 1'b0,
     input  logic [REN_TAG_W-1:0]                  commit2_tag,
     input  logic [REN_GEN_W-1:0]                  commit2_gen,
     output logic                                  commit2_accepted,
@@ -685,6 +697,12 @@ module mosaic_rename (
     output logic [REN_ENTRIES*REN_GEN_W-1:0]      dbg_tag_gen,
     output logic [REN_ARCH_REGS*(REN_TAG_W+REN_GEN_W)-1:0] dbg_spec_map,
     output logic [REN_ARCH_REGS*(REN_TAG_W+REN_GEN_W)-1:0] dbg_cmt_map,
+    // The FP architectural maps (I-050), same packing as the integer pair:
+    // entry j at bits j*MAP_W +: MAP_W is {gen, tag}. A tag of 0 with generation
+    // 0 is the "no FP mapping yet" sentinel -- an f-register that has never been
+    // written reads as architectural zero.
+    output logic [REN_ARCH_REGS*(REN_TAG_W+REN_GEN_W)-1:0] dbg_spec_map_fp,
+    output logic [REN_ARCH_REGS*(REN_TAG_W+REN_GEN_W)-1:0] dbg_cmt_map_fp,
     // The undo window depth. Without it, "the group was journalled as a group"
     // could only be inferred from the free set one squash later; the depth is what
     // says a two-wide group pushed exactly two entries, in the cycle it did so.
@@ -752,6 +770,28 @@ module mosaic_rename (
   logic [REN_GEN_W-1:0] spec_gen [REN_ARCH_REGS];
   logic [REN_TAG_W-1:0] cmt_map  [REN_ARCH_REGS];
   logic [REN_GEN_W-1:0] cmt_gen  [REN_ARCH_REGS];
+
+  // The FP architectural maps (I-050). They share the physical tag space and the
+  // free set with the integer maps -- a physical register is 64 bits and holds
+  // either kind of value -- but they are separate *namespaces*: f0..f31 are
+  // mapped and freed independently of x0..x31, so the same physical tag is never
+  // named by both an integer and an FP mapping at once.
+  //
+  // Reset encodes "this architectural f-register has never been written" as
+  // (tag = 0, gen = 0). That is not a physical tag: tag 0 is the initial mapping
+  // of x0, x0 commits are dropped so tag 0 is never superseded-and-freed, and it
+  // is outside the free set -- so it is never allocated and never written. A
+  // source that resolves to it is exactly the architectural-initial-mapping case
+  // dispatch already folds to a ready zero (`!gen_valid[tag]`), which is what
+  // makes an unwritten f-register read as zero without spending a second
+  // pre-committed tag range on a profile whose free list must still cover the
+  // ROB. The alternative -- pre-committing f0..f31 to 32 more tags -- would drop
+  // the allocatable pool below the ROB size, which the profile rule in
+  // tools/mosaic/config_check.py refuses.
+  logic [REN_TAG_W-1:0] spec_map_fp [REN_ARCH_REGS];
+  logic [REN_GEN_W-1:0] spec_gen_fp [REN_ARCH_REGS];
+  logic [REN_TAG_W-1:0] cmt_map_fp  [REN_ARCH_REGS];
+  logic [REN_GEN_W-1:0] cmt_gen_fp  [REN_ARCH_REGS];
 
   // Free set: one reset bit per entry. Validity of the rest of the per-tag
   // state lives outside the arrays, in gen_valid and wb_done.
@@ -823,6 +863,11 @@ module mosaic_rename (
   logic [REN_GEN_W-1:0] spec_gen_q [REN_ARCH_REGS];
   logic [REN_TAG_W-1:0] cmt_map_q  [REN_ARCH_REGS];
   logic [REN_GEN_W-1:0] cmt_gen_q  [REN_ARCH_REGS];
+  // The same images for the FP maps (I-050).
+  logic [REN_TAG_W-1:0] spec_map_fp_q [REN_ARCH_REGS];
+  logic [REN_GEN_W-1:0] spec_gen_fp_q [REN_ARCH_REGS];
+  logic [REN_TAG_W-1:0] cmt_map_fp_q  [REN_ARCH_REGS];
+  logic [REN_GEN_W-1:0] cmt_gen_fp_q  [REN_ARCH_REGS];
 
 
   // ------------------------------------------------------- allocation scan
@@ -880,7 +925,7 @@ module mosaic_rename (
   logic [REN_ENTRIES-1:0] lane1_scan_mask;
   logic [REN_TAG_W-1:0]   lane1_scan_ptr;
 
-  assign lane0_wants_tag = alloc_req && (alloc_rd != 5'd0);
+  assign lane0_wants_tag = alloc_req && (alloc_is_fp || (alloc_rd != 5'd0));
 
   // The home bank of a tag, exactly as the header's decode states it: the bank
   // field is `tag[TAG_W-1:ROW_W]`, which is `tag >> ROW_W` masked to the bank
@@ -956,7 +1001,7 @@ module mosaic_rename (
   logic [1:0] group_need;
   logic       group_enough;
 
-  assign alloc2_wants_tag = alloc2_req && (alloc2_rd != 5'd0);
+  assign alloc2_wants_tag = alloc2_req && (alloc2_is_fp || (alloc2_rd != 5'd0));
 
   // "Allocation may not proceed this cycle": a squash owns the cycle, and so does
   // the trap path's full restore. Both are states in which the free set is being
@@ -978,8 +1023,8 @@ module mosaic_rename (
 
   assign alloc_squashed  = alloc_req && alloc_blocked;
   assign alloc2_squashed = alloc2_req && alloc_blocked;
-  assign alloc_is_x0     = alloc_req && (alloc_rd == 5'd0) && !alloc_blocked;
-  assign alloc2_is_x0    = alloc2_req && (alloc2_rd == 5'd0) && !alloc_blocked;
+  assign alloc_is_x0     = alloc_req && (alloc_rd == 5'd0) && !alloc_is_fp && !alloc_blocked;
+  assign alloc2_is_x0    = alloc2_req && (alloc2_rd == 5'd0) && !alloc2_is_fp && !alloc_blocked;
 
 `ifdef MOSAIC_RENAME_MUTANT_BIAS_DEADLOCK
   // NEGATIVE CONTROL (I-032): the preference becomes a requirement. When the
@@ -1043,8 +1088,8 @@ module mosaic_rename (
   assign alloc_new_valid  = alloc_accepted;
   assign alloc2_new_valid = alloc2_accepted;
 `else
-  assign alloc_new_valid  = alloc_accepted  && (alloc_rd  != 5'd0);
-  assign alloc2_new_valid = alloc2_accepted && (alloc2_rd != 5'd0);
+  assign alloc_new_valid  = alloc_accepted  && (alloc_is_fp  || (alloc_rd  != 5'd0));
+  assign alloc2_new_valid = alloc2_accepted && (alloc2_is_fp || (alloc2_rd != 5'd0));
 `endif
 
   assign alloc_new_tag   = scan_tag;
@@ -1081,8 +1126,8 @@ module mosaic_rename (
   // instruction commits -- never here, because it is still being read by
   // instructions younger than the one being renamed.
   assign alloc_old_valid = alloc_new_valid;
-  assign alloc_old_tag   = spec_map[alloc_rd];
-  assign alloc_old_gen   = spec_gen[alloc_rd];
+  assign alloc_old_tag   = alloc_is_fp ? spec_map_fp[alloc_rd] : spec_map[alloc_rd];
+  assign alloc_old_gen   = alloc_is_fp ? spec_gen_fp[alloc_rd] : spec_gen[alloc_rd];
 
   // Lane 1's displaced mapping. For a WAW pair -- both lanes of the group writing
   // the same rd -- it is lane 0's *new* destination, because that is the mapping
@@ -1101,10 +1146,14 @@ module mosaic_rename (
   assign alloc2_old_tag   = spec_map[alloc2_rd];
   assign alloc2_old_gen   = spec_gen[alloc2_rd];
 `else
-  assign alloc2_old_tag   = (alloc_new_valid && (alloc2_rd == alloc_rd))
-                            ? alloc_new_tag : spec_map[alloc2_rd];
-  assign alloc2_old_gen   = (alloc_new_valid && (alloc2_rd == alloc_rd))
-                            ? alloc_new_gen : spec_gen[alloc2_rd];
+  assign alloc2_old_tag   = (alloc_new_valid && (alloc2_rd == alloc_rd) &&
+                             (alloc2_is_fp == alloc_is_fp))
+                            ? alloc_new_tag
+                            : (alloc2_is_fp ? spec_map_fp[alloc2_rd] : spec_map[alloc2_rd]);
+  assign alloc2_old_gen   = (alloc_new_valid && (alloc2_rd == alloc_rd) &&
+                             (alloc2_is_fp == alloc_is_fp))
+                            ? alloc_new_gen
+                            : (alloc2_is_fp ? spec_gen_fp[alloc2_rd] : spec_gen[alloc2_rd]);
 `endif
 
   // --------------------------------------------------------- source read ports
@@ -1134,20 +1183,27 @@ module mosaic_rename (
   assign rs3_hits_lane0 = 1'b0;
   assign rs4_hits_lane0 = 1'b0;
 `else
-  assign rs3_hits_lane0 = alloc_new_valid && (rs3_addr == alloc_rd);
-  assign rs4_hits_lane0 = alloc_new_valid && (rs4_addr == alloc_rd);
+  assign rs3_hits_lane0 = alloc_new_valid && (rs3_addr == alloc_rd) &&
+                          (rs3_is_fp == alloc_is_fp);
+  assign rs4_hits_lane0 = alloc_new_valid && (rs4_addr == alloc_rd) &&
+                          (rs4_is_fp == alloc_is_fp);
 `endif
 
   always_comb begin
     // Lane 0's sources, and readiness = "the producer has written its value
     // back". x0 is ready because there is nothing to read, and it returns the
     // zero identity rather than spec_map[0], which is a mapping x0 does not have.
-    rs1_is_x0 = (rs1_addr == 5'd0);
-    rs2_is_x0 = (rs2_addr == 5'd0);
-    rs1_tag   = spec_map[rs1_addr];
-    rs2_tag   = spec_map[rs2_addr];
-    rs1_gen   = spec_gen[rs1_addr];
-    rs2_gen   = spec_gen[rs2_addr];
+    // An f-register is never x0: f0 is a real register, so `rs*_is_x0` is
+    // namespace-qualified. An f-register that has never been written resolves to
+    // tag 0 generation 0 -- the initial-mapping sentinel -- which dispatch folds
+    // to a ready zero through the same `!gen_valid[tag]` rule it uses for an
+    // unwritten integer register.
+    rs1_is_x0 = (rs1_addr == 5'd0) && !rs1_is_fp;
+    rs2_is_x0 = (rs2_addr == 5'd0) && !rs2_is_fp;
+    rs1_tag   = rs1_is_fp ? spec_map_fp[rs1_addr] : spec_map[rs1_addr];
+    rs2_tag   = rs2_is_fp ? spec_map_fp[rs2_addr] : spec_map[rs2_addr];
+    rs1_gen   = rs1_is_fp ? spec_gen_fp[rs1_addr] : spec_gen[rs1_addr];
+    rs2_gen   = rs2_is_fp ? spec_gen_fp[rs2_addr] : spec_gen[rs2_addr];
     rs1_ready = rs1_is_x0 || wb_done[rs1_tag];
     rs2_ready = rs2_is_x0 || wb_done[rs2_tag];
     if (rs1_is_x0) begin
@@ -1162,23 +1218,23 @@ module mosaic_rename (
     // Lane 1's sources. The bypass takes precedence over the map, and its
     // readiness is 0 by construction: the bypass *means* the producer has not
     // written back yet.
-    rs3_is_x0  = (rs3_addr == 5'd0);
-    rs4_is_x0  = (rs4_addr == 5'd0);
+    rs3_is_x0  = (rs3_addr == 5'd0) && !rs3_is_fp;
+    rs4_is_x0  = (rs4_addr == 5'd0) && !rs4_is_fp;
     rs3_bypass = rs3_hits_lane0;
     rs4_bypass = rs4_hits_lane0;
     if (rs3_bypass) begin
       rs3_tag = alloc_new_tag;
       rs3_gen = alloc_new_gen;
     end else begin
-      rs3_tag = spec_map[rs3_addr];
-      rs3_gen = spec_gen[rs3_addr];
+      rs3_tag = rs3_is_fp ? spec_map_fp[rs3_addr] : spec_map[rs3_addr];
+      rs3_gen = rs3_is_fp ? spec_gen_fp[rs3_addr] : spec_gen[rs3_addr];
     end
     if (rs4_bypass) begin
       rs4_tag = alloc_new_tag;
       rs4_gen = alloc_new_gen;
     end else begin
-      rs4_tag = spec_map[rs4_addr];
-      rs4_gen = spec_gen[rs4_addr];
+      rs4_tag = rs4_is_fp ? spec_map_fp[rs4_addr] : spec_map[rs4_addr];
+      rs4_gen = rs4_is_fp ? spec_gen_fp[rs4_addr] : spec_gen[rs4_addr];
     end
     rs3_ready = rs3_is_x0 || (!rs3_bypass && wb_done[rs3_tag]);
     rs4_ready = rs4_is_x0 || (!rs4_bypass && wb_done[rs4_tag]);
@@ -1246,16 +1302,26 @@ module mosaic_rename (
 
   // ----------------------------------------------------------------- commit
   // A commit for x0 writes no architectural state and therefore frees nothing.
-  assign commit_x0_dropped = commit_valid && (commit_rd == 5'd0);
-  assign commit_accepted   = commit_valid && (commit_rd != 5'd0);
+  // f0 is a real register, so the drop rule is namespace-qualified: an FP
+  // destination at index 0 is an ordinary commit.
+  assign commit_x0_dropped = commit_valid && (commit_rd == 5'd0) && !commit_is_fp;
+  assign commit_accepted   = commit_valid && ((commit_rd != 5'd0) || commit_is_fp);
 
   // The mapping this commit supersedes. It is freed here and nowhere else, and
   // the identity check makes a repeated commit of the same mapping a no-op
   // instead of a free of the mapping that was just installed.
+  //
+  // Tag 0 is the FP "never written" sentinel (see the FP map reset): it names no
+  // physical register, so it is never freed. For the integer namespace the guard
+  // is unreachable -- cmt_map[rd] is 0 only for rd == 0, whose commits are
+  // dropped above.
   logic commit_supersedes;
-  assign commit_supersedes = commit_accepted &&
-                             ((cmt_map[commit_rd] != commit_tag) ||
-                              (cmt_gen[commit_rd] != commit_gen));
+  logic [REN_TAG_W-1:0] cmt_old_tag;
+  logic [REN_GEN_W-1:0] cmt_old_gen;
+  assign cmt_old_tag = commit_is_fp ? cmt_map_fp[commit_rd] : cmt_map[commit_rd];
+  assign cmt_old_gen = commit_is_fp ? cmt_gen_fp[commit_rd] : cmt_gen[commit_rd];
+  assign commit_supersedes = commit_accepted && (cmt_old_tag != {REN_TAG_W{1'b0}}) &&
+                             ((cmt_old_tag != commit_tag) || (cmt_old_gen != commit_gen));
 
   // ------------------------------------------------- the second commit lane
   // The identical rule, one instruction further on in program order. Two commits
@@ -1265,8 +1331,8 @@ module mosaic_rename (
   // because by the time lane 1 commits, lane 0's tag really is superseded -- the
   // architectural value of rd after the cycle is lane 1's, and lane 0's tag has
   // no reader left.
-  assign commit2_x0_dropped = commit2_valid && (commit2_rd == 5'd0);
-  assign commit2_accepted   = commit2_valid && (commit2_rd != 5'd0);
+  assign commit2_x0_dropped = commit2_valid && (commit2_rd == 5'd0) && !commit2_is_fp;
+  assign commit2_accepted   = commit2_valid && ((commit2_rd != 5'd0) || commit2_is_fp);
 
   logic commit2_supersedes;
 
@@ -1287,15 +1353,25 @@ module mosaic_rename (
   // left it" true instead of merely intended.
   logic [REN_TAG_W-1:0] cmt_map_l0 [REN_ARCH_REGS];
   logic [REN_GEN_W-1:0] cmt_gen_l0 [REN_ARCH_REGS];
+  // The FP twins of the lane-0 intermediate map (I-050).
+  logic [REN_TAG_W-1:0] cmt_map_fp_l0 [REN_ARCH_REGS];
+  logic [REN_GEN_W-1:0] cmt_gen_fp_l0 [REN_ARCH_REGS];
 
   always_comb begin
     for (int unsigned a = 0; a < REN_ARCH_REGS; a++) begin
       cmt_map_l0[a] = cmt_map[a];
       cmt_gen_l0[a] = cmt_gen[a];
+      cmt_map_fp_l0[a] = cmt_map_fp[a];
+      cmt_gen_fp_l0[a] = cmt_gen_fp[a];
     end
     if (commit_accepted) begin
-      cmt_map_l0[commit_rd] = commit_tag;
-      cmt_gen_l0[commit_rd] = commit_gen;
+      if (commit_is_fp) begin
+        cmt_map_fp_l0[commit_rd] = commit_tag;
+        cmt_gen_fp_l0[commit_rd] = commit_gen;
+      end else begin
+        cmt_map_l0[commit_rd] = commit_tag;
+        cmt_gen_l0[commit_rd] = commit_gen;
+      end
     end
   end
 
@@ -1304,6 +1380,13 @@ module mosaic_rename (
   // the same rd. Against the pre-edge map both lanes would name one superseded
   // tag and lane 0's tag would never come back -- the leak the mutant below
   // injects on purpose.
+  //
+  // The namespace selects which pair of maps is read (I-050); the integer path
+  // is unchanged when `commit2_is_fp` is low.
+  logic [REN_TAG_W-1:0] cmt2_old_tag;
+  logic [REN_GEN_W-1:0] cmt2_old_gen;
+  assign cmt2_old_tag = commit2_is_fp ? cmt_map_fp_l0[commit2_rd] : cmt_map_l0[commit2_rd];
+  assign cmt2_old_gen = commit2_is_fp ? cmt_gen_fp_l0[commit2_rd] : cmt_gen_l0[commit2_rd];
 `ifdef MOSAIC_RENAME_MUTANT_WAW_COMMIT2_PRE_MAP
   // NEGATIVE CONTROL 10 (I-014): the second commit lane works from the
   // *pre-lane-0* committed map -- both the comparison and the tag it releases.
@@ -1322,8 +1405,9 @@ module mosaic_rename (
                                (cmt_gen[commit2_rd] != commit2_gen));
 `else
   assign commit2_supersedes = commit2_accepted &&
-                              ((cmt_map_l0[commit2_rd] != commit2_tag) ||
-                               (cmt_gen_l0[commit2_rd] != commit2_gen));
+                              (cmt2_old_tag != {REN_TAG_W{1'b0}}) &&
+                              ((cmt2_old_tag != commit2_tag) ||
+                               (cmt2_old_gen != commit2_gen));
 `endif
 
   // --------------------------------------------------------------- recovery
@@ -1346,7 +1430,8 @@ module mosaic_rename (
   always_comb begin
     spec_eq_cmt = 1'b1;
     for (int unsigned a = 0; a < REN_ARCH_REGS; a++) begin
-      if ((spec_map[a] != cmt_map[a]) || (spec_gen[a] != cmt_gen[a])) begin
+      if ((spec_map[a] != cmt_map[a]) || (spec_gen[a] != cmt_gen[a]) ||
+          (spec_map_fp[a] != cmt_map_fp[a]) || (spec_gen_fp[a] != cmt_gen_fp[a])) begin
         spec_eq_cmt = 1'b0;
       end
     end
@@ -1416,6 +1501,10 @@ module mosaic_rename (
     owned_from_cmt = {REN_ENTRIES{1'b0}};
     for (int unsigned a = 0; a < REN_ARCH_REGS; a++) begin
       owned_from_cmt[cmt_map_q[a]] = 1'b1;
+      // The FP map's tags are owned too (I-050). Its sentinel tag 0 is already
+      // owned by the integer initial mapping, so this union adds no owner that is
+      // not one.
+      owned_from_cmt[cmt_map_fp_q[a]] = 1'b1;
     end
   end
 
@@ -1455,16 +1544,16 @@ module mosaic_rename (
       free_q[free_tag] = 1'b1;
     end
     if (commit_supersedes) begin
-      free_q[cmt_map[commit_rd]] = 1'b1;
+      free_q[cmt_old_tag] = 1'b1;
     end
     // Lane 1 releases what *lane 1* superseded, which in the same-rd case is
     // lane 0's tag -- hence `cmt_map_l0`, the map as lane 0 left it, and not
     // `cmt_map_q`, which by then also carries lane 1's own install.
     if (commit2_supersedes) begin
 `ifdef MOSAIC_RENAME_MUTANT_WAW_COMMIT2_PRE_MAP
-      free_q[cmt_map[commit2_rd]] = 1'b1;
+      free_q[commit2_is_fp ? cmt_map_fp[commit2_rd] : cmt_map[commit2_rd]] = 1'b1;
 `else
-      free_q[cmt_map_l0[commit2_rd]] = 1'b1;
+      free_q[cmt2_old_tag] = 1'b1;
 `endif
     end
 
@@ -1553,6 +1642,10 @@ module mosaic_rename (
       spec_gen_q[a] = spec_gen[a];
       cmt_map_q[a]  = cmt_map[a];
       cmt_gen_q[a]  = cmt_gen[a];
+      spec_map_fp_q[a] = spec_map_fp[a];
+      spec_gen_fp_q[a] = spec_gen_fp[a];
+      cmt_map_fp_q[a]  = cmt_map_fp[a];
+      cmt_gen_fp_q[a]  = cmt_gen_fp[a];
     end
 
     // A commit is permanent, so it lands first and the squash restore reads the
@@ -1561,19 +1654,31 @@ module mosaic_rename (
     // cycle reaches the speculative map through the committed map rather than
     // being lost.
     if (commit_accepted) begin
-      cmt_map_q[commit_rd] = commit_tag;
-      cmt_gen_q[commit_rd] = commit_gen;
+      if (commit_is_fp) begin
+        cmt_map_fp_q[commit_rd] = commit_tag;
+        cmt_gen_fp_q[commit_rd] = commit_gen;
+      end else begin
+        cmt_map_q[commit_rd] = commit_tag;
+        cmt_gen_q[commit_rd] = commit_gen;
+      end
     end
 
     if (commit2_accepted) begin
-      cmt_map_q[commit2_rd] = commit2_tag;
-      cmt_gen_q[commit2_rd] = commit2_gen;
+      if (commit2_is_fp) begin
+        cmt_map_fp_q[commit2_rd] = commit2_tag;
+        cmt_gen_fp_q[commit2_rd] = commit2_gen;
+      end else begin
+        cmt_map_q[commit2_rd] = commit2_tag;
+        cmt_gen_q[commit2_rd] = commit2_gen;
+      end
     end
 
     if (squash_accepted) begin
       for (int unsigned a = 0; a < REN_ARCH_REGS; a++) begin
         spec_map_q[a] = cmt_map_q[a];
         spec_gen_q[a] = cmt_gen_q[a];
+        spec_map_fp_q[a] = cmt_map_fp_q[a];
+        spec_gen_fp_q[a] = cmt_gen_fp_q[a];
       end
     end
 
@@ -1584,19 +1689,27 @@ module mosaic_rename (
     // NEGATIVE CONTROL: the free set is restored but the speculative map is not,
     // so an architectural register whose writer was discarded still points at a
     // tag that was just reclaimed. The next reader of that register gets whatever
-    // the new owner wrote.
+    // the new owner wrote. The FP maps are restored with the integer map, so the
+    // control's defect is not masked for an FP register.
 `else
     if (flush_restore) begin
       for (int unsigned a = 0; a < REN_ARCH_REGS; a++) begin
         spec_map_q[a] = cmt_map_q[a];
         spec_gen_q[a] = cmt_gen_q[a];
+        spec_map_fp_q[a] = cmt_map_fp_q[a];
+        spec_gen_fp_q[a] = cmt_gen_fp_q[a];
       end
     end
 `endif
 
     if (alloc_new_valid) begin
-      spec_map_q[alloc_rd] = scan_tag;
-      spec_gen_q[alloc_rd] = alloc_new_gen;
+      if (alloc_is_fp) begin
+        spec_map_fp_q[alloc_rd] = scan_tag;
+        spec_gen_fp_q[alloc_rd] = alloc_new_gen;
+      end else begin
+        spec_map_q[alloc_rd] = scan_tag;
+        spec_gen_q[alloc_rd] = alloc_new_gen;
+      end
     end
 
     // Lane 1 lands on the speculative map *after* lane 0, so a WAW pair ends
@@ -1605,8 +1718,13 @@ module mosaic_rename (
     // distinct tags, so the only entry they can both touch is the same rd, and
     // there the later write is the correct one.
     if (alloc2_new_valid) begin
-      spec_map_q[alloc2_rd] = alloc2_new_tag;
-      spec_gen_q[alloc2_rd] = alloc2_new_gen;
+      if (alloc2_is_fp) begin
+        spec_map_fp_q[alloc2_rd] = alloc2_new_tag;
+        spec_gen_fp_q[alloc2_rd] = alloc2_new_gen;
+      end else begin
+        spec_map_q[alloc2_rd] = alloc2_new_tag;
+        spec_gen_q[alloc2_rd] = alloc2_new_gen;
+      end
     end
   end
 
@@ -1758,6 +1876,13 @@ module mosaic_rename (
         spec_gen[a] <= {REN_GEN_W{1'b0}};
         cmt_map[a]  <= REN_TAG_W'(a);
         cmt_gen[a]  <= {REN_GEN_W{1'b0}};
+        // The FP maps reset to the "never written" sentinel (tag 0, gen 0): an
+        // f-register reads as architectural zero until it is first written, and
+        // the sentinel consumes no tag the free list has to account for.
+        spec_map_fp[a] <= {REN_TAG_W{1'b0}};
+        spec_gen_fp[a] <= {REN_GEN_W{1'b0}};
+        cmt_map_fp[a]  <= {REN_TAG_W{1'b0}};
+        cmt_gen_fp[a]  <= {REN_GEN_W{1'b0}};
       end
       // Tags 0..ARCH_REGS-1 are the architectural reset mappings and are
       // therefore owned, not free. See the reset section of the header.
@@ -1779,6 +1904,10 @@ module mosaic_rename (
         spec_gen[a] <= spec_gen_q[a];
         cmt_map[a]  <= cmt_map_q[a];
         cmt_gen[a]  <= cmt_gen_q[a];
+        spec_map_fp[a] <= spec_map_fp_q[a];
+        spec_gen_fp[a] <= spec_gen_fp_q[a];
+        cmt_map_fp[a]  <= cmt_map_fp_q[a];
+        cmt_gen_fp[a]  <= cmt_gen_fp_q[a];
       end
       free_bits <= free_q;
       gen_valid <= genv_q;
@@ -1853,6 +1982,8 @@ module mosaic_rename (
   for (genvar m = 0; m < REN_ARCH_REGS; m++) begin : g_dbg_map
     assign dbg_spec_map[m*REN_MAP_W +: REN_MAP_W] = {spec_gen[m], spec_map[m]};
     assign dbg_cmt_map[m*REN_MAP_W +: REN_MAP_W]  = {cmt_gen[m], cmt_map[m]};
+    assign dbg_spec_map_fp[m*REN_MAP_W +: REN_MAP_W] = {spec_gen_fp[m], spec_map_fp[m]};
+    assign dbg_cmt_map_fp[m*REN_MAP_W +: REN_MAP_W]  = {cmt_gen_fp[m], cmt_map_fp[m]};
   end
 
 endmodule : mosaic_rename

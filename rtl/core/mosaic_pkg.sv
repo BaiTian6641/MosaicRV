@@ -40,6 +40,16 @@ package mosaic_pkg;
   // here because both the core's front end and the testbench's reference need
   // the same literal.
   localparam logic [6:0] OP_AMO       = 7'b0101111;  // amoadd..amomaxu, lr, sc
+  // F/D (I-050). The three OP-FP opcodes, named here for the same reason OP_AMO
+  // is: the decoder's reserved-encoding enumeration belongs to its own case
+  // (CASE=decode.rv64im_reserved counts every opcode outside RV64IM as illegal),
+  // so the integration recognises these encodings from the raw word in
+  // mosaic_core.sv section 2a rather than teaching mosaic_decoder a fifth
+  // opcode family. `mosaic_pkg` holds the literals because the core's front end
+  // and the retire-side FP classification both need the same values.
+  localparam logic [6:0] OP_FP       = 7'b1010011;  // fadd.s .. fmv.d.x
+  localparam logic [6:0] OP_LOAD_FP  = 7'b0000111;  // flw / fld
+  localparam logic [6:0] OP_STORE_FP = 7'b0100111;  // fsw / fsd
 
   // funct3
   localparam logic [2:0] F3_ADD_SUB  = 3'b000;
@@ -310,6 +320,35 @@ package mosaic_pkg;
     logic        csr_writes;
     logic        csr_reads;
     logic        csr_imm_form;
+    // ------------------------------------------------------------------ F/D (I-050)
+    // `is_fp` marks any floating-point instruction: an OP-FP arithmetic/move/
+    // convert, an FP load (OP-FP-LOAD) or an FP store (OP-FP-STORE). It is what
+    // dispatch routes to the FP class and what the retire side uses to set
+    // mstatus.FS. `fp_op`/`fp_fmt`/`fp_rm` are the operation, its format and its
+    // rm field for an OP-FP macro; they are zero for an FP load/store.
+    //
+    // The three namespace bits are per operand, because an FP instruction may
+    // mix namespaces: `fcvt.w.s x1, f2` reads f2 and writes x1, and
+    // `fmv.w.x f1, x2` reads x2 and writes f1. A source the instruction does not
+    // use is presented in the integer namespace, exactly as the decoder presents
+    // an unused source as x0.
+    logic        is_fp;
+    mosaic_pkg::fp_op_e fp_op;
+    logic        fp_fmt;
+    logic [2:0]  fp_rm;
+    logic        fp_dst_fp;     // the destination is an f-register
+    logic        fp_src1_fp;    // rs1 is an f-register
+    logic        fp_src2_fp;    // rs2 is an f-register
+    // The integer-side width (1 = 64-bit) and signedness of an int<->fp
+    // conversion, from the rs2 field of the encoding.
+    logic        fp_iw;
+    logic        fp_is;
+    // "This instruction modifies floating-point state" -- an FP register write
+    // or a write of fflags. It is the mstatus.FS dirtying predicate: a pure read
+    // (`fclass`, `fmv.x.*`, an FP load's address computation is not an FP op at
+    // all) does not dirty FS, and neither does an FP store (it reads FP state
+    // without modifying it).
+    logic        fp_modifies_state;
   } decode_ctl_t;
 
   // ------------------------------------------------------ the leaf permission

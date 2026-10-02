@@ -358,6 +358,17 @@ module mosaic_core (
     output logic [CORE_XLEN-1:0]        o_csr_mscratch,
     output logic [CORE_XLEN-1:0]        o_csr_mie,
     output logic [CORE_XLEN-1:0]        o_csr_mip,
+    // F/D (I-050): the FP control/status state, so a case observes the
+    // architectural fflags/frm/fcsr a program reads rather than inferring them.
+    output logic [CORE_XLEN-1:0]        o_csr_fcsr,
+    output logic [4:0]                  o_csr_fflags,
+    output logic [2:0]                  o_csr_frm,
+    // FP evidence: issue/commit/flags counters and the merge count, plus the
+    // live FP architectural map pointer for diagnosis.
+    output logic [31:0]                 o_fp_issue_ctr,
+    output logic [31:0]                 o_fp_commit_ctr,
+    output logic [31:0]                 o_fp_flags_ctr,
+    output logic [31:0]                 o_fp_merge_ctr,
     output logic [31:0]                 o_csr_wr_ctr,
     output logic [31:0]                 o_csr_illegal_wr_ctr,
     output logic [31:0]                 o_csr_trap_ctr,
@@ -542,6 +553,9 @@ module mosaic_core (
   // rename
   logic                      ren_alloc_req, ren_alloc_accepted, ren_alloc_exhausted;
   logic                      ren_alloc_squashed, ren_alloc_is_x0, ren_alloc_new_valid;
+  // F/D (I-050): the namespace of each renamed operand, driven by dispatch.
+  logic                      ren_alloc_is_fp, ren_rs1_is_fp, ren_rs2_is_fp;
+  logic                      ren_commit_is_fp, ren_commit2_is_fp;
   logic [CORE_TAG_W-1:0]     ren_new_tag;
   logic [CORE_IGEN_W-1:0]    ren_new_gen;
   logic [4:0]                ren_rs1_addr, ren_rs2_addr;
@@ -706,6 +720,53 @@ module mosaic_core (
   logic                      md_dst_valid;
   logic [CORE_TAG_W-1:0]     md_dst_tag_q;
   logic [CORE_IGEN_W-1:0]    md_dst_gen_q;
+
+  // F/D (I-050): the shared floating-point unit's bridge to cluster 0, the
+  // completion it produces, and the retire-side flag sideband.
+  logic                      fp_req_valid, fp_req_ready;
+  mosaic_pkg::fp_op_e        fp_req_op;
+  logic                      fp_req_fmt;
+  logic [2:0]                fp_req_rm;
+  logic                      fp_req_dst_fp, fp_req_src1_fp, fp_req_src2_fp;
+  logic                      fp_req_iw, fp_req_is;
+  logic [CORE_XLEN-1:0]      fp_req_a, fp_req_b;
+  logic [CORE_IDX_W-1:0]     fp_req_rob_index;
+  logic [CORE_RGEN_W-1:0]    fp_req_rob_gen;
+  logic [CORE_UOP_W-1:0]     fp_req_uop_index;
+  logic [CORE_TAG_W-1:0]     fp_req_dst_tag;
+  logic [CORE_IGEN_W-1:0]    fp_req_dst_gen;
+  mosaic_uop_pkg::wb_event_t fp_wb_ev;
+  logic                      fp_wb_valid, fp_wb_ready;
+  logic [4:0]                fp_wb_fflags;
+  // The port-2 merge with the shared MUL/DIV unit: one arbiter port, two
+  // producers, one at a time (the same sharing rule port 3 uses for the memory
+  // path and the CSR/system unit).
+  mosaic_uop_pkg::wb_event_t port2_ev;
+  logic                      port2_valid, port2_ready;
+
+  // The FP flag sideband, indexed by ROB slot (I-050). `fp_flag_v` is set when
+  // an FP completion is taken by the writeback path and cleared on every
+  // redirect and on the slot's own retirement; the generation is stored beside
+  // the flags so a late completion from a discarded instruction cannot be
+  // mistaken for the new owner of a recycled slot. `fp_state_wr` records, per
+  // slot, whether the instruction modifies FP state -- the mstatus.FS dirty
+  // predicate.
+  logic [4:0]                fp_flag_mem [0:CORE_ROB_N-1];
+  logic [CORE_RGEN_W-1:0]    fp_flag_gen_mem [0:CORE_ROB_N-1];
+  logic                      fp_flag_v_mem [0:CORE_ROB_N-1];
+  logic                      fp_state_wr_mem [0:CORE_ROB_N-1];
+  logic                      fp_merge0_v, fp_merge1_v;
+  logic [4:0]                fp_merge0, fp_merge1;
+  logic [4:0]                fp_fflags_or;
+  logic                      fp_fs_dirty;
+  logic [31:0]               fp_merge_ctr;
+  // The FP-load NaN-box predicate, per ROB slot: an flw word load has its upper
+  // 32 bits set on the way back from memory.
+  logic                      fp_load_box_mem [0:CORE_ROB_N-1];
+  // Whether the instruction in a ROB slot writes an f-register (I-050's commit
+  // namespace), recorded at allocation and read at retire.
+  logic                      fp_dst_mem [0:CORE_ROB_N-1];
+  logic                      disp_mem_is_fp;
 
   // retire
   logic [CORE_RET_N-1:0]     ret_req;
@@ -1420,6 +1481,249 @@ module mosaic_core (
     endcase
   end
 
+  // ---------------------------------------------------- F/D decode (I-050)
+  // Recognised here rather than in mosaic_decoder for exactly the reason WFI,
+  // SRET, SFENCE.VMA and AMO are: CASE=decode.rv64im_reserved enumerates every
+  // opcode outside RV64IM as illegal, and that enumeration belongs to the
+  // decoder's own case. The integration recognises the encodings it needs from
+  // the raw word and leaves the decoder's illegal set untouched.
+  //
+  // Two opcode families are decoded: OP-FP (1010011), which dispatch routes to
+  // the shared floating-point unit, and OP-FP-LOAD/OP-FP-STORE (0000111/0100111),
+  // which are ordinary memory macros whose register operand lives in the FP
+  // namespace. A reserved funct7/funct3/rs2 combination leaves `fp_legal_c` low,
+  // so the control word stays fully illegal and the machine stops at it, exactly
+  // as for a reserved AMO.
+  logic        fp_legal_c;
+  logic [6:0]  fp_f7_c;
+  logic [2:0]  fp_f3_c;
+  logic [4:0]  fp_rs2_c;
+  // The encoding fields are continuous assignments, not reads inside the block
+  // below: an always_comb that reads a variable before it writes it is a
+  // combinational loop, which Verilator reports as UNOPTFLAT.
+  assign fp_f7_c  = fetch_out_bits[31:25];
+  assign fp_f3_c  = fetch_out_bits[14:12];
+  assign fp_rs2_c = fetch_out_bits[24:20];
+  mosaic_pkg::fp_op_e fp_op_c;
+  logic        fp_fmt_c;
+  logic        fp_dst_is_fp_c;
+  logic        fp_s1_is_fp_c;
+  logic        fp_s2_is_fp_c;
+  logic        fp_mod_c;
+  logic        fp_uses_rs1_c;
+  logic        fp_uses_rs2_c;
+  logic        fp_reg_write_c;
+  logic [2:0]  fp_rm_c;
+  logic        fp_iw_c;
+  logic        fp_is_c;
+  logic        fp_load_c;
+  logic        fp_store_c;
+  logic [2:0]  fp_mem_size_c;
+
+  always_comb begin
+    fp_legal_c     = 1'b0;
+    fp_op_c        = mosaic_pkg::FP_ADD;
+    fp_fmt_c       = 1'b0;
+    fp_dst_is_fp_c = 1'b0;
+    fp_s1_is_fp_c  = 1'b0;
+    fp_s2_is_fp_c  = 1'b0;
+    fp_mod_c       = 1'b0;
+    fp_uses_rs1_c  = 1'b0;
+    fp_uses_rs2_c  = 1'b0;
+    fp_reg_write_c = 1'b0;
+    fp_rm_c        = 3'b000;
+    fp_iw_c        = 1'b0;
+    fp_is_c        = 1'b0;
+    fp_load_c      = 1'b0;
+    fp_store_c     = 1'b0;
+    fp_mem_size_c  = mosaic_pkg::SZ_WORD;
+    if (!fetch_insn16) begin
+      fp_rm_c  = fp_f3_c;
+      fp_iw_c  = fp_rs2_c[1];
+      fp_is_c  = ~fp_rs2_c[0];
+      case (fetch_out_bits[6:0])
+        mosaic_pkg::OP_FP: begin
+          // Arithmetic, min/max, compare, classify, move and convert all read
+          // an FP register as rs1; the arithmetic and min/max forms also read
+          // rs2. The destination namespace is per operation: an FP-to-integer
+          // form (feq/flt/fle, fclass, fcvt.*.x, fmv.x.*) writes an integer
+          // register and obeys the x0 discard rule; every other form writes an
+          // f-register, where index 0 is the real register f0.
+          fp_s1_is_fp_c  = 1'b1;
+          fp_uses_rs1_c  = 1'b1;
+          fp_dst_is_fp_c = 1'b1;
+          fp_reg_write_c = 1'b1;
+          fp_mod_c       = 1'b1;
+          case (fp_f7_c)
+            7'b0000000: begin fp_op_c = mosaic_pkg::FP_ADD;   fp_fmt_c = 1'b1; fp_uses_rs2_c = 1'b1; fp_legal_c = 1'b1; end
+            7'b0000001: begin fp_op_c = mosaic_pkg::FP_ADD;   fp_fmt_c = 1'b0; fp_uses_rs2_c = 1'b1; fp_legal_c = 1'b1; end
+            7'b0000100: begin fp_op_c = mosaic_pkg::FP_SUB;   fp_fmt_c = 1'b1; fp_uses_rs2_c = 1'b1; fp_legal_c = 1'b1; end
+            7'b0000101: begin fp_op_c = mosaic_pkg::FP_SUB;   fp_fmt_c = 1'b0; fp_uses_rs2_c = 1'b1; fp_legal_c = 1'b1; end
+            7'b0001000: begin fp_op_c = mosaic_pkg::FP_MUL;   fp_fmt_c = 1'b1; fp_uses_rs2_c = 1'b1; fp_legal_c = 1'b1; end
+            7'b0001001: begin fp_op_c = mosaic_pkg::FP_MUL;   fp_fmt_c = 1'b0; fp_uses_rs2_c = 1'b1; fp_legal_c = 1'b1; end
+            7'b0001100: begin fp_op_c = mosaic_pkg::FP_DIV;   fp_fmt_c = 1'b1; fp_uses_rs2_c = 1'b1; fp_legal_c = 1'b1; end
+            7'b0001101: begin fp_op_c = mosaic_pkg::FP_DIV;   fp_fmt_c = 1'b0; fp_uses_rs2_c = 1'b1; fp_legal_c = 1'b1; end
+            // fsqrt is a legal encoding whose datapath I-049 declared absent: it
+            // is decoded and routed, and the unit returns the canonical quiet
+            // NaN with NV rather than a plausible number.
+            7'b0101100: begin fp_op_c = mosaic_pkg::FP_SQRT;  fp_fmt_c = 1'b1; fp_uses_rs2_c = 1'b0; fp_legal_c = 1'b1; end
+            7'b0101101: begin fp_op_c = mosaic_pkg::FP_SQRT;  fp_fmt_c = 1'b0; fp_uses_rs2_c = 1'b0; fp_legal_c = 1'b1; end
+            7'b0010000: begin
+              fp_fmt_c = 1'b1; fp_uses_rs2_c = 1'b1;
+              case (fp_f3_c)
+                3'b000: begin fp_op_c = mosaic_pkg::FP_SGNJ;  fp_legal_c = 1'b1; end
+                3'b001: begin fp_op_c = mosaic_pkg::FP_SGNJN; fp_legal_c = 1'b1; end
+                3'b010: begin fp_op_c = mosaic_pkg::FP_SGNJX; fp_legal_c = 1'b1; end
+                default: ;
+              endcase
+            end
+            7'b0010001: begin
+              fp_fmt_c = 1'b0; fp_uses_rs2_c = 1'b1;
+              case (fp_f3_c)
+                3'b000: begin fp_op_c = mosaic_pkg::FP_SGNJ;  fp_legal_c = 1'b1; end
+                3'b001: begin fp_op_c = mosaic_pkg::FP_SGNJN; fp_legal_c = 1'b1; end
+                3'b010: begin fp_op_c = mosaic_pkg::FP_SGNJX; fp_legal_c = 1'b1; end
+                default: ;
+              endcase
+            end
+            7'b0010100: begin
+              fp_fmt_c = 1'b1; fp_uses_rs2_c = 1'b1;
+              case (fp_f3_c)
+                3'b000: begin fp_op_c = mosaic_pkg::FP_MIN; fp_legal_c = 1'b1; end
+                3'b001: begin fp_op_c = mosaic_pkg::FP_MAX; fp_legal_c = 1'b1; end
+                default: ;
+              endcase
+            end
+            7'b0010101: begin
+              fp_fmt_c = 1'b0; fp_uses_rs2_c = 1'b1;
+              case (fp_f3_c)
+                3'b000: begin fp_op_c = mosaic_pkg::FP_MIN; fp_legal_c = 1'b1; end
+                3'b001: begin fp_op_c = mosaic_pkg::FP_MAX; fp_legal_c = 1'b1; end
+                default: ;
+              endcase
+            end
+            7'b1010000: begin
+              fp_fmt_c = 1'b1; fp_uses_rs2_c = 1'b1;
+              fp_dst_is_fp_c = 1'b0;   // the comparison result is an integer
+              case (fp_f3_c)
+                3'b010: begin fp_op_c = mosaic_pkg::FP_CMP_EQ; fp_legal_c = 1'b1; end
+                3'b001: begin fp_op_c = mosaic_pkg::FP_CMP_LT; fp_legal_c = 1'b1; end
+                3'b000: begin fp_op_c = mosaic_pkg::FP_CMP_LE; fp_legal_c = 1'b1; end
+                default: ;
+              endcase
+            end
+            7'b1010001: begin
+              fp_fmt_c = 1'b0; fp_uses_rs2_c = 1'b1;
+              fp_dst_is_fp_c = 1'b0;
+              case (fp_f3_c)
+                3'b010: begin fp_op_c = mosaic_pkg::FP_CMP_EQ; fp_legal_c = 1'b1; end
+                3'b001: begin fp_op_c = mosaic_pkg::FP_CMP_LT; fp_legal_c = 1'b1; end
+                3'b000: begin fp_op_c = mosaic_pkg::FP_CMP_LE; fp_legal_c = 1'b1; end
+                default: ;
+              endcase
+            end
+            7'b1110000: begin
+              // fmv.x.w: a pure read of FP state; it writes no FP state, so it
+              // does not dirty FS.
+              fp_fmt_c = 1'b1; fp_uses_rs2_c = 1'b0;
+              fp_dst_is_fp_c = 1'b0; fp_mod_c = 1'b0;
+              if (fp_f3_c == 3'b000) begin fp_op_c = mosaic_pkg::FP_MV_X; fp_legal_c = 1'b1; end
+            end
+            7'b1110001: begin
+              fp_fmt_c = 1'b0; fp_uses_rs2_c = 1'b0;
+              fp_dst_is_fp_c = 1'b0; fp_mod_c = 1'b0;
+              if (fp_f3_c == 3'b000) begin fp_op_c = mosaic_pkg::FP_MV_X; fp_legal_c = 1'b1; end
+            end
+            7'b1111000: begin
+              fp_fmt_c = 1'b1; fp_uses_rs2_c = 1'b0;
+              fp_s1_is_fp_c = 1'b0;   // the source is an integer register
+              if (fp_f3_c == 3'b000) begin fp_op_c = mosaic_pkg::FP_MV_W; fp_legal_c = 1'b1; end
+            end
+            7'b1111001: begin
+              fp_fmt_c = 1'b0; fp_uses_rs2_c = 1'b0;
+              fp_s1_is_fp_c = 1'b0;
+              if (fp_f3_c == 3'b000) begin fp_op_c = mosaic_pkg::FP_MV_W; fp_legal_c = 1'b1; end
+            end
+            7'b1100000: begin
+              fp_fmt_c = 1'b1; fp_uses_rs2_c = 1'b0;
+              fp_dst_is_fp_c = 1'b0;   // fp -> integer
+              if (fp_rs2_c == 5'b00000 || fp_rs2_c == 5'b00001 ||
+                  fp_rs2_c == 5'b00010 || fp_rs2_c == 5'b00011) begin
+                fp_op_c = mosaic_pkg::FP_CVT_FI; fp_legal_c = 1'b1;
+              end
+            end
+            7'b1100001: begin
+              fp_fmt_c = 1'b0; fp_uses_rs2_c = 1'b0;
+              fp_dst_is_fp_c = 1'b0;
+              if (fp_rs2_c == 5'b00000 || fp_rs2_c == 5'b00001 ||
+                  fp_rs2_c == 5'b00010 || fp_rs2_c == 5'b00011) begin
+                fp_op_c = mosaic_pkg::FP_CVT_FI; fp_legal_c = 1'b1;
+              end
+            end
+            7'b1101000: begin
+              fp_fmt_c = 1'b1; fp_uses_rs2_c = 1'b0;
+              fp_s1_is_fp_c = 1'b0;   // integer -> fp
+              if (fp_rs2_c == 5'b00000 || fp_rs2_c == 5'b00001 ||
+                  fp_rs2_c == 5'b00010 || fp_rs2_c == 5'b00011) begin
+                fp_op_c = mosaic_pkg::FP_CVT_IF; fp_legal_c = 1'b1;
+              end
+            end
+            7'b1101001: begin
+              fp_fmt_c = 1'b0; fp_uses_rs2_c = 1'b0;
+              fp_s1_is_fp_c = 1'b0;
+              if (fp_rs2_c == 5'b00000 || fp_rs2_c == 5'b00001 ||
+                  fp_rs2_c == 5'b00010 || fp_rs2_c == 5'b00011) begin
+                fp_op_c = mosaic_pkg::FP_CVT_IF; fp_legal_c = 1'b1;
+              end
+            end
+            7'b0100000: begin
+              // fcvt.s.d: double -> single, rounding in the single format.
+              fp_fmt_c = 1'b1; fp_uses_rs2_c = 1'b0;
+              if (fp_rs2_c == 5'b00001) begin fp_op_c = mosaic_pkg::FP_CVT_FS; fp_legal_c = 1'b1; end
+            end
+            7'b0100001: begin
+              // fcvt.d.s: single -> double, exact.
+              fp_fmt_c = 1'b0; fp_uses_rs2_c = 1'b0;
+              if (fp_rs2_c == 5'b00000) begin fp_op_c = mosaic_pkg::FP_CVT_SF; fp_legal_c = 1'b1; end
+            end
+            default: ;
+          endcase
+        end
+        mosaic_pkg::OP_LOAD_FP: begin
+          // flw/fld. The load's address base is an integer register; its result
+          // is written to an f-register. flw's 32-bit result is NaN-boxed on the
+          // way in (the core ORs the upper half), so the register always holds a
+          // boxed single.
+          if (fp_f3_c == 3'b010) begin
+            fp_load_c = 1'b1; fp_mem_size_c = mosaic_pkg::SZ_WORD; fp_legal_c = 1'b1;
+          end else if (fp_f3_c == 3'b011) begin
+            fp_load_c = 1'b1; fp_mem_size_c = mosaic_pkg::SZ_DBL; fp_legal_c = 1'b1;
+          end
+          fp_dst_is_fp_c = 1'b1;
+          fp_uses_rs1_c  = 1'b1;
+          fp_reg_write_c = 1'b1;
+          fp_mod_c       = 1'b1;
+        end
+        mosaic_pkg::OP_STORE_FP: begin
+          // fsw/fsd. The stored datum is an f-register; the address base is an
+          // integer register. A store reads FP state without modifying it, so it
+          // does not dirty FS.
+          if (fp_f3_c == 3'b010) begin
+            fp_store_c = 1'b1; fp_mem_size_c = mosaic_pkg::SZ_WORD; fp_legal_c = 1'b1;
+          end else if (fp_f3_c == 3'b011) begin
+            fp_store_c = 1'b1; fp_mem_size_c = mosaic_pkg::SZ_DBL; fp_legal_c = 1'b1;
+          end
+          fp_s2_is_fp_c  = 1'b1;
+          fp_uses_rs1_c  = 1'b1;
+          fp_uses_rs2_c  = 1'b1;
+          fp_reg_write_c = 1'b0;
+          fp_mod_c       = 1'b0;
+        end
+        default: ;
+      endcase
+    end
+  end
+
   always_comb begin
     dbuf_ctl_new = dec_ctl_comb;
     if (fetch_pmp_deny_c) begin
@@ -1504,6 +1808,78 @@ module mosaic_core (
         dbuf_ctl_new.is_sc      = sc_c;
         dbuf_ctl_new.imm        = 64'd0;
       end
+    end else if (fp_load_c) begin
+      // flw / fld (I-050). An ordinary memory load whose register operand lives
+      // in the FP namespace; the address base is an integer register. The result
+      // is zero-extended and the core NaN-boxes a word load on the way back.
+      dbuf_ctl_new.valid             = 1'b1;
+      dbuf_ctl_new.illegal           = 1'b0;
+      dbuf_ctl_new.uses_rs1          = 1'b1;
+      dbuf_ctl_new.uses_rs2          = 1'b0;
+      dbuf_ctl_new.uses_imm          = 1'b1;
+      dbuf_ctl_new.rs1               = fetch_out_bits[19:15];
+      dbuf_ctl_new.rs2               = 5'd0;
+      dbuf_ctl_new.rd                = fetch_out_bits[11:7];
+      dbuf_ctl_new.reg_write         = 1'b1;
+      dbuf_ctl_new.mem_kind          = mosaic_pkg::MEM_LOAD;
+      dbuf_ctl_new.mem_size          = fp_mem_size_c;
+      dbuf_ctl_new.mem_signed        = 1'b0;
+      dbuf_ctl_new.imm               = {{52{fetch_out_bits[31]}}, fetch_out_bits[31:20]};
+      dbuf_ctl_new.fp_dst_fp         = 1'b1;
+      dbuf_ctl_new.fp_src1_fp        = 1'b0;
+      dbuf_ctl_new.fp_src2_fp        = 1'b0;
+      dbuf_ctl_new.fp_modifies_state = 1'b1;
+    end else if (fp_store_c) begin
+      // fsw / fsd. The stored datum is an f-register; a store reads FP state
+      // without modifying it.
+      dbuf_ctl_new.valid             = 1'b1;
+      dbuf_ctl_new.illegal           = 1'b0;
+      dbuf_ctl_new.uses_rs1          = 1'b1;
+      dbuf_ctl_new.uses_rs2          = 1'b1;
+      dbuf_ctl_new.uses_imm          = 1'b1;
+      dbuf_ctl_new.rs1               = fetch_out_bits[19:15];
+      dbuf_ctl_new.rs2               = fetch_out_bits[24:20];
+      dbuf_ctl_new.rd                = 5'd0;
+      dbuf_ctl_new.reg_write         = 1'b0;
+      dbuf_ctl_new.mem_kind          = mosaic_pkg::MEM_STORE;
+      dbuf_ctl_new.mem_size          = fp_mem_size_c;
+      dbuf_ctl_new.mem_signed        = 1'b0;
+      dbuf_ctl_new.imm               = {{52{fetch_out_bits[31]}}, fetch_out_bits[31:25],
+                                         fetch_out_bits[11:7]};
+      dbuf_ctl_new.fp_dst_fp         = 1'b0;
+      dbuf_ctl_new.fp_src1_fp        = 1'b0;
+      dbuf_ctl_new.fp_src2_fp        = 1'b1;
+      dbuf_ctl_new.fp_modifies_state = 1'b0;
+    end else if (fp_legal_c) begin
+      // OP-FP. The reserved combinations (a bad funct7, a bad funct3 for the
+      // sign-injection/min/max/compare forms, a bad rs2 for a conversion) leave
+      // `fp_legal_c` low and fall out of this chain, so the control word stays
+      // fully illegal rather than half-decoded.
+      dbuf_ctl_new.valid             = 1'b1;
+      dbuf_ctl_new.illegal           = 1'b0;
+      dbuf_ctl_new.is_fp             = 1'b1;
+      dbuf_ctl_new.fp_op             = fp_op_c;
+      dbuf_ctl_new.fp_fmt            = fp_fmt_c;
+      dbuf_ctl_new.fp_rm             = fp_rm_c;
+      dbuf_ctl_new.fp_dst_fp         = fp_dst_is_fp_c;
+      dbuf_ctl_new.fp_src1_fp        = fp_s1_is_fp_c;
+      dbuf_ctl_new.fp_src2_fp        = fp_s2_is_fp_c;
+      dbuf_ctl_new.fp_iw             = fp_iw_c;
+      dbuf_ctl_new.fp_is             = fp_is_c;
+      dbuf_ctl_new.fp_modifies_state = fp_mod_c;
+      dbuf_ctl_new.uses_rs1          = fp_uses_rs1_c;
+      dbuf_ctl_new.uses_rs2          = fp_uses_rs2_c;
+      dbuf_ctl_new.uses_imm          = 1'b0;
+      dbuf_ctl_new.rs1               = fetch_out_bits[19:15];
+      dbuf_ctl_new.rs2               = fetch_out_bits[24:20];
+      dbuf_ctl_new.rd                = fetch_out_bits[11:7];
+      // An integer destination for a comparison, classify, fp-to-integer
+      // conversion or fmv.x.* obeys the x0 discard rule; an FP destination does
+      // not, because f0 is a real register.
+      dbuf_ctl_new.reg_write         = fp_reg_write_c &&
+                                        (fp_dst_is_fp_c ? 1'b1
+                                         : (fetch_out_bits[11:7] != 5'd0));
+      dbuf_ctl_new.imm               = 64'd0;
     end
   end
 
@@ -1625,6 +2001,7 @@ module mosaic_core (
       .rst              (rst),
       .alloc_req        (ren_alloc_req),
       .alloc_rd         (alloc_rd_w),
+      .alloc_is_fp      (ren_alloc_is_fp),
       .alloc_accepted   (ren_alloc_accepted),
       .alloc_exhausted  (ren_alloc_exhausted),
       .alloc_squashed   (ren_alloc_squashed),
@@ -1654,6 +2031,8 @@ module mosaic_core (
       .alloc_bias_bank  (mosaic_cfg_pkg::MOSAIC_PRF_BANK_W'(0)),
       .rs1_addr         (ren_rs1_addr),
       .rs2_addr         (ren_rs2_addr),
+      .rs1_is_fp        (ren_rs1_is_fp),
+      .rs2_is_fp        (ren_rs2_is_fp),
       .rs1_is_x0        (ren_rs1_is_x0),
       .rs2_is_x0        (ren_rs2_is_x0),
       .rs1_ready        (),
@@ -1688,12 +2067,14 @@ module mosaic_core (
       .free_double      (),
       .commit_valid     (ren_commit_valid),
       .commit_rd        (ren_commit_rd),
+      .commit_is_fp     (ren_commit_is_fp),
       .commit_tag       (ren_commit_tag),
       .commit_gen       (ren_commit_gen),
       .commit_accepted  (),
       .commit_x0_dropped(),
       .commit2_valid    (ren_commit2_valid),
       .commit2_rd       (ren_commit2_rd),
+      .commit2_is_fp    (ren_commit2_is_fp),
       .commit2_tag      (ren_commit2_tag),
       .commit2_gen      (ren_commit2_gen),
       .commit2_accepted (),
@@ -1736,6 +2117,8 @@ module mosaic_core (
       .dbg_tag_gen      (),
       .dbg_spec_map     (o_dbg_spec_map),
       .dbg_cmt_map      (),
+      .dbg_spec_map_fp  (),
+      .dbg_cmt_map_fp   (),
       .dbg_j_len        ()
   );
 
@@ -1909,6 +2292,24 @@ module mosaic_core (
       .md_req_uop_index(md_req_uop_index),
       .md_req_dst_tag  (md_req_dst_tag),
       .md_req_dst_gen  (md_req_dst_gen),
+      // F/D (I-050): cluster 0's grant is the one routed to the shared FP unit.
+      .fp_req_valid    (fp_req_valid),
+      .fp_req_ready    (fp_req_ready),
+      .fp_req_op       (fp_req_op),
+      .fp_req_fmt      (fp_req_fmt),
+      .fp_req_rm       (fp_req_rm),
+      .fp_req_dst_fp   (fp_req_dst_fp),
+      .fp_req_src1_fp  (fp_req_src1_fp),
+      .fp_req_src2_fp  (fp_req_src2_fp),
+      .fp_req_iw       (fp_req_iw),
+      .fp_req_is       (fp_req_is),
+      .fp_req_a        (fp_req_a),
+      .fp_req_b        (fp_req_b),
+      .fp_req_rob_index(fp_req_rob_index),
+      .fp_req_rob_gen  (fp_req_rob_gen),
+      .fp_req_uop_index(fp_req_uop_index),
+      .fp_req_dst_tag  (fp_req_dst_tag),
+      .fp_req_dst_gen  (fp_req_dst_gen),
       .o_occupied      (),
       .o_count         (c0_count),
       .o_full          (),
@@ -1970,6 +2371,26 @@ module mosaic_core (
       .md_req_uop_index(),
       .md_req_dst_tag  (),
       .md_req_dst_gen  (),
+      // F/D (I-050): cluster 1's queue never receives an FP macro (dispatch
+      // routes them all to cluster 0), so the port is quiescent and the unit
+      // always "ready".
+      .fp_req_valid    (),
+      .fp_req_ready    (1'b1),
+      .fp_req_op       (),
+      .fp_req_fmt      (),
+      .fp_req_rm       (),
+      .fp_req_dst_fp   (),
+      .fp_req_src1_fp  (),
+      .fp_req_src2_fp  (),
+      .fp_req_iw       (),
+      .fp_req_is       (),
+      .fp_req_a        (),
+      .fp_req_b        (),
+      .fp_req_rob_index(),
+      .fp_req_rob_gen  (),
+      .fp_req_uop_index(),
+      .fp_req_dst_tag  (),
+      .fp_req_dst_gen  (),
       .o_occupied      (),
       .o_count         (c1_count),
       .o_full          (),
@@ -2065,6 +2486,105 @@ module mosaic_core (
   assign md_res_ready = md_wb_ready && md_dst_valid;
 
   // ==========================================================================
+  // 7a. The shared floating-point unit and the FP flag sideband (I-050)
+  // ==========================================================================
+  // The FP unit is reached exactly as the shared MUL/DIV unit is: cluster 0
+  // grants an FP macro to its request port, the unit executes it with the
+  // operands the issue queue captured, and the completion comes back as an
+  // ordinary writeback event. It is speculative -- the operation runs as soon as
+  // its sources are ready -- which is what makes "an executed but squashed FP
+  // operation" a real state for the precise-fflags rule to handle.
+  mosaic_fp_unit u_fp (
+      .clk             (clk),
+      .rst             (rst),
+      .req_valid       (fp_req_valid),
+      .req_ready       (fp_req_ready),
+      .req_op          (fp_req_op),
+      .req_fmt         (fp_req_fmt),
+      .req_rm          (fp_req_rm),
+      .req_dst_fp      (fp_req_dst_fp),
+      .req_src1_fp     (fp_req_src1_fp),
+      .req_src2_fp     (fp_req_src2_fp),
+      .req_iw          (fp_req_iw),
+      .req_is          (fp_req_is),
+      .req_a           (fp_req_a),
+      .req_b           (fp_req_b),
+      .req_rob_index   (fp_req_rob_index),
+      .req_rob_gen     (fp_req_rob_gen),
+      .req_uop_index   (fp_req_uop_index),
+      .req_dst_tag     (fp_req_dst_tag),
+      .req_dst_gen     (fp_req_dst_gen),
+      .frm_i           (o_csr_frm),
+      .flush_i         (redirect_valid),
+      .wb_ev           (fp_wb_ev),
+      .wb_valid        (fp_wb_valid),
+      .wb_ready        (fp_wb_ready),
+      .wb_fflags       (fp_wb_fflags),
+      .wb_modifies_fs  (),
+      .o_busy          (),
+      .o_issue_ctr     (o_fp_issue_ctr),
+      .o_commit_ctr    (o_fp_commit_ctr),
+      .o_flags_ctr     (o_fp_flags_ctr)
+  );
+
+  assign o_fp_merge_ctr = fp_merge_ctr;
+
+  // Port 2 is shared by the shared MUL/DIV unit and the FP unit. They are never
+  // offered to the arbiter in the same cycle: FP wins, and the MUL/DIV result is
+  // held by its own ready/valid handshake until the next cycle -- the same
+  // sharing rule port 3 uses for the memory path and the CSR/system unit.
+  assign port2_valid = fp_wb_valid | md_wb_valid;
+  assign port2_ev    = fp_wb_valid ? fp_wb_ev : md_wb_ev;
+  assign fp_wb_ready = port2_ready;
+  assign md_wb_ready = port2_ready && !fp_wb_valid;
+
+  // ---------------------------------------------------- the FP flag sideband
+  // The flags of a speculative FP completion are recorded against its ROB slot
+  // when the writeback path takes the completion, and merged into fcsr only when
+  // that slot retires. An allocation clears its slot's record (so a recycled
+  // slot cannot inherit stale flags), a completion sets it, and every redirect
+  // or trap clears all records -- which is exactly why a squashed FP operation
+  // contributes nothing to the architectural flags.
+  integer fp_i;
+  always_ff @(posedge clk) begin
+    if (rst) begin
+      for (fp_i = 0; fp_i < CORE_ROB_N; fp_i++) begin
+        fp_flag_v_mem[fp_i]       <= 1'b0;
+        fp_flag_gen_mem[fp_i]     <= {CORE_RGEN_W{1'b0}};
+        fp_flag_mem[fp_i]         <= 5'd0;
+        fp_state_wr_mem[fp_i]     <= 1'b0;
+        fp_load_box_mem[fp_i]     <= 1'b0;
+        fp_dst_mem[fp_i]          <= 1'b0;
+      end
+      fp_merge_ctr <= 32'd0;
+    end else begin
+      if (desc_wr_valid) begin
+        fp_flag_v_mem[desc_wr_index]   <= 1'b0;
+        fp_state_wr_mem[desc_wr_index] <= dbuf_ctl[0].fp_modifies_state;
+        fp_dst_mem[desc_wr_index]      <= dbuf_ctl[0].fp_dst_fp && dbuf_ctl[0].reg_write;
+      end
+      if (fp_wb_valid && fp_wb_ready) begin
+        fp_flag_v_mem[fp_wb_ev.id.rob_index]   <= 1'b1;
+        fp_flag_gen_mem[fp_wb_ev.id.rob_index] <= fp_wb_ev.id.rob_gen;
+        fp_flag_mem[fp_wb_ev.id.rob_index]     <= fp_wb_fflags;
+      end
+      // The FP-load NaN-box predicate, recorded at the load's memory insert.
+      if (disp_mem_valid && disp_mem_ready && !disp_mem_is_store) begin
+        fp_load_box_mem[disp_mem_id[CORE_UOP_W + CORE_RGEN_W +: CORE_IDX_W]] <=
+            disp_mem_is_fp && (disp_mem_size == mosaic_pkg::SZ_WORD);
+      end
+      if (rob_flush_pulse) begin
+        for (fp_i = 0; fp_i < CORE_ROB_N; fp_i++) begin
+          fp_flag_v_mem[fp_i] <= 1'b0;
+        end
+      end
+      if (fp_merge0_v || fp_merge1_v) begin
+        fp_merge_ctr <= fp_merge_ctr + 32'd1;
+      end
+    end
+  end
+
+  // ==========================================================================
   // 8. Writeback arbiter
   // ==========================================================================
   mosaic_wb_arbiter u_wb (
@@ -2076,9 +2596,9 @@ module mosaic_core (
       .wb_ev1              (c1_wb_ev),
       .wb_valid1           (c1_wb_valid),
       .wb_ready1           (c1_wb_ready),
-      .wb_ev2              (md_wb_ev),
-      .wb_valid2           (md_wb_valid),
-      .wb_ready2           (md_wb_ready),
+      .wb_ev2              (port2_ev),
+      .wb_valid2           (port2_valid),
+      .wb_ready2           (port2_ready),
       // The memory path's producer: a load's merged value or a store's
       // destination-less completion. One port, because the two can never be
       // offered in the same cycle (the core holds the store insert while a load
@@ -2188,6 +2708,7 @@ module mosaic_core (
       .dec_bits0        (dbuf_bits[0]),
       .alloc_req        (ren_alloc_req),
       .alloc_rd         (alloc_rd_w),
+      .alloc_is_fp      (ren_alloc_is_fp),
       .alloc_accepted   (ren_alloc_accepted),
       .alloc_exhausted  (ren_alloc_exhausted),
       .alloc_squashed   (ren_alloc_squashed),
@@ -2197,6 +2718,8 @@ module mosaic_core (
       .alloc_new_gen    (ren_new_gen),
       .rs1_addr         (ren_rs1_addr),
       .rs2_addr         (ren_rs2_addr),
+      .rs1_is_fp        (ren_rs1_is_fp),
+      .rs2_is_fp        (ren_rs2_is_fp),
       .rs1_is_x0        (ren_rs1_is_x0),
       .rs2_is_x0        (ren_rs2_is_x0),
       .rs1_tag          (ren_rs1_tag),
@@ -2228,6 +2751,7 @@ module mosaic_core (
       .mem_ins_valid    (disp_mem_valid),
       .mem_ins_ready    (disp_mem_ready),
       .mem_ins_is_store (disp_mem_is_store),
+      .mem_ins_is_fp    (disp_mem_is_fp),
       .mem_ins_id       (disp_mem_id),
       .mem_ins_base     (disp_mem_base),
       .mem_ins_imm      (disp_mem_imm),
@@ -2428,6 +2952,12 @@ module mosaic_core (
       .o_mscratch_o       (o_csr_mscratch),
       .o_mie_o            (o_csr_mie),
       .o_mip_o            (o_csr_mip),
+      // F/D (I-050): the FP control state and the commit-time interfaces.
+      .o_fcsr_o           (o_csr_fcsr),
+      .o_fflags_o         (o_csr_fflags),
+      .o_frm_o            (o_csr_frm),
+      .fp_fflags_or_i     (fp_fflags_or),
+      .fp_fs_dirty_i      (fp_fs_dirty),
       .o_misa_o           (),
       .o_mcycle_o         (),
       .o_minstret_o       (),
@@ -3499,6 +4029,30 @@ module mosaic_core (
   assign ren_commit2_valid = ret_commit_valid[1];
   assign ren_commit2_rd    = ret_commit_rd[2*CORE_RD_W-1:CORE_RD_W];
   assign ren_commit2_tag   = ret_commit_tag[2*CORE_TAG_W-1:CORE_TAG_W];
+
+  // F/D (I-050): the destination namespace of each commit. It is recorded per
+  // ROB slot at allocation, because the retiring instruction's own word cannot
+  // say whether the destination is an f-register (fcvt.w.s writes an integer
+  // register, fcvt.s.w writes an f-register, and both are OP-FP).
+  assign ren_commit_is_fp  = ret_commit_valid[0] && fp_dst_mem[rob_head_index];
+  assign ren_commit2_is_fp = ret_commit_valid[1] && fp_dst_mem[rob_head1_index];
+
+  // The precise-fflags merge and the FS dirty predicate, both evaluated at the
+  // ROB head in program order. A slot's flags are merged only when that slot
+  // retires with the generation its record was written for; a discarded
+  // instruction's record was cleared by the flush and its slot never becomes the
+  // head, so its flags never reach fcsr.
+  assign fp_merge0_v  = rob_retire_ack && fp_flag_v_mem[rob_head_index] &&
+                        (fp_flag_gen_mem[rob_head_index] == rob_head_gen);
+  assign fp_merge0    = fp_merge0_v ? fp_flag_mem[rob_head_index] : 5'd0;
+  assign fp_merge1_v  = rob_retire_ack_next && rob_retire_ack &&
+                        fp_flag_v_mem[rob_head1_index] &&
+                        (fp_flag_gen_mem[rob_head1_index] == rob_head1_gen);
+  assign fp_merge1    = fp_merge1_v ? fp_flag_mem[rob_head1_index] : 5'd0;
+  assign fp_fflags_or = fp_merge0 | fp_merge1;
+  assign fp_fs_dirty  = (rob_retire_ack && fp_state_wr_mem[rob_head_index]) ||
+                        (rob_retire_ack_next && rob_retire_ack &&
+                         fp_state_wr_mem[rob_head1_index]);
 
   // Lane 1 must not retire when the head is a taken branch whose redirect is
   // pending: that entry is the first wrong-path instruction and the redirect is
@@ -4900,7 +5454,13 @@ module mosaic_core (
     lq_wb_ev.dst.gen     = {{(CORE_PGEN_W - CORE_IGEN_W){1'b0}}, lq_result_dst_gen};
     lq_wb_ev.dst.x0      = lq_result_dst_x0;
     lq_wb_ev.value_valid = !lq_result_dst_x0;
-    lq_wb_ev.value       = lq_result_data;
+    // F/D (I-050): an flw's 32-bit result is NaN-boxed on the way into the
+    // f-register -- the load itself zero-extends, and the upper half is set to
+    // all ones here. The predicate was recorded at the load's memory insert
+    // (word-sized FP load), so a double load and an integer load are untouched.
+    lq_wb_ev.value       = fp_load_box_mem[lq_result_id.rob_index]
+                           ? {32'hFFFF_FFFF, lq_result_data[31:0]}
+                           : lq_result_data;
     lq_wb_ev.exc.valid   = lq_result_fault;
     lq_wb_ev.exc.cause   = lq_result_cause;
     lq_wb_ev.exc.tval    = lq_result_tval;

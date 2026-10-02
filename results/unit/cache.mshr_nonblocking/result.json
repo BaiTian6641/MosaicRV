@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "case": "cache.mshr_nonblocking",
+  "verdict": "PASS",
+  "detail": "mshr: hit=1 miss=21 coalesce=3 refill=14 fault=2 cancel=3 reads=17 max_outstanding=4 cycles=78",
+  "seed": 1,
+  "max_cycles": 200000,
+  "checks": 59,
+  "failures": 0,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-02T09:17:53Z",
+  "first_mismatch": ""
+}

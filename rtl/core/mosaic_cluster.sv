@@ -123,6 +123,31 @@ module mosaic_cluster (
     output logic [CL_TAG_W-1:0]         md_req_dst_tag,
     output logic [CL_IGEN_W-1:0]        md_req_dst_gen,
 
+    // ------------------------------------------------------------ FP out (I-050)
+    // The same grant shape as the MUL/DIV port, to the shared floating-point
+    // unit. The operand values are the issue queue's granted source values, which
+    // are final: the queue presents only an entry whose sources are ready.
+    // `fp_req_dst_fp` says the destination is an f-register, so the FP unit knows
+    // whether to NaN-box the result. `fp_req_src1_fp`/`fp_req_src2_fp` say which
+    // operands are subject to the single-precision NaN-box rule.
+    output logic                        fp_req_valid,
+    input  logic                        fp_req_ready,
+    output mosaic_pkg::fp_op_e          fp_req_op,
+    output logic                        fp_req_fmt,
+    output logic [2:0]                  fp_req_rm,
+    output logic                        fp_req_dst_fp,
+    output logic                        fp_req_src1_fp,
+    output logic                        fp_req_src2_fp,
+    output logic                        fp_req_iw,
+    output logic                        fp_req_is,
+    output logic [CL_XLEN-1:0]          fp_req_a,
+    output logic [CL_XLEN-1:0]          fp_req_b,
+    output logic [CL_IDX_W-1:0]         fp_req_rob_index,
+    output logic [CL_RGEN_W-1:0]        fp_req_rob_gen,
+    output logic [CL_UOP_W-1:0]         fp_req_uop_index,
+    output logic [CL_TAG_W-1:0]         fp_req_dst_tag,
+    output logic [CL_IGEN_W-1:0]        fp_req_dst_gen,
+
     // ------------------------------------------------------------ observation
     output logic [CL_DEPTH-1:0]         o_occupied,
     output logic [31:0]                 o_count,
@@ -308,20 +333,21 @@ module mosaic_cluster (
   assign redir_req_taken     = rr_taken_q;
 
   // ----------------------------------------------------------------- routing
-  logic is_alu, is_branch, is_md, is_other;
+  logic is_alu, is_branch, is_md, is_fp, is_other;
   logic unit_accepts;
 
   always_comb begin
     is_alu    = (iq_grant_meta.class_ == mosaic_uop_pkg::UOP_ALU);
     is_branch = (iq_grant_meta.class_ == mosaic_uop_pkg::UOP_BRANCH);
     is_md     = (iq_grant_meta.class_ == mosaic_uop_pkg::UOP_MULDIV);
-    is_other  = !(is_alu || is_branch || is_md);
+    is_fp     = (iq_grant_meta.class_ == mosaic_uop_pkg::UOP_FP);
+    is_other  = !(is_alu || is_branch || is_md || is_fp);
   end
 
   // The resource accepts only when it can take the result. The ALU and the
   // branch resolver produce their answer combinationally, so "can take" is the
   // result register being free (and, for a branch, the request slot too). The
-  // shared unit states its own readiness.
+  // shared units state their own readiness.
   always_comb begin
     unit_accepts = 1'b0;
     if (is_alu) begin
@@ -330,6 +356,8 @@ module mosaic_cluster (
       unit_accepts = res_free && rr_free;
     end else if (is_md) begin
       unit_accepts = md_req_ready;
+    end else if (is_fp) begin
+      unit_accepts = fp_req_ready;
     end else begin
       unit_accepts = 1'b0;   // refused: counted, never silently executed
     end
@@ -353,6 +381,24 @@ module mosaic_cluster (
   assign md_req_uop_index = iq_grant_uop[CL_UOP_W-1:0];
   assign md_req_dst_tag   = iq_grant_dst_tag;
   assign md_req_dst_gen   = iq_grant_dst_gen;
+
+  // -------------------------------------------------------------- FP out
+  assign fp_req_valid     = grant_fire && is_fp;
+  assign fp_req_op        = iq_grant_meta.fp_op;
+  assign fp_req_fmt       = iq_grant_meta.fp_fmt;
+  assign fp_req_rm        = iq_grant_meta.fp_rm;
+  assign fp_req_dst_fp    = iq_grant_meta.fp_dst_fp;
+  assign fp_req_src1_fp   = iq_grant_meta.fp_src1_fp;
+  assign fp_req_src2_fp   = iq_grant_meta.fp_src2_fp;
+  assign fp_req_iw        = iq_grant_meta.fp_iw;
+  assign fp_req_is        = iq_grant_meta.fp_is;
+  assign fp_req_a         = iq_grant_a;
+  assign fp_req_b         = iq_grant_b;
+  assign fp_req_rob_index = iq_grant_uop[CL_UOP_ID_W-1 -: CL_IDX_W];
+  assign fp_req_rob_gen   = iq_grant_uop[CL_IGEN_W + CL_UOP_W - 1 -: CL_RGEN_W];
+  assign fp_req_uop_index = iq_grant_uop[CL_UOP_W-1:0];
+  assign fp_req_dst_tag   = iq_grant_dst_tag;
+  assign fp_req_dst_gen   = iq_grant_dst_gen;
 
   // ------------------------------------------------------------- counters
   logic [31:0] alu_ctr, branch_ctr, md_ctr, refuse_ctr, purge_ctr;

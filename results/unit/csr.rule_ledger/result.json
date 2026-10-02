@@ -1,15 +1,16 @@
 {
   "schema_version": 1,
   "case": "csr.rule_ledger",
-  "verdict": "PASS",
-  "detail": "rules=83 examples=166 checks=4 comparisons=7285 cycles=3373 retires=885 traps=22 seed=1",
+  "verdict": "FAIL",
+  "detail": "contract violated: csr-rule-ledger at cycle 3459: fflags.value positive: the read-back: read 0x0000000000000000, want 0x000000000000001f",
   "seed": 1,
   "max_cycles": 4000000,
-  "checks": 5,
-  "failures": 0,
+  "checks": 3,
+  "failures": 1,
   "image": "",
   "expect": "",
   "tool": "Verilator 5.052 2026-09-05",
-  "timestamp": "2026-10-02T08:37:30Z",
-  "first_mismatch": ""
+  "timestamp": "2026-10-02T09:16:14Z",
+  "first_mismatch": "csr-rule-ledger at cycle 3459: fflags.value positive: the read-back: read 0x0000000000000000, want 0x000000000000001f: expected every ledger rule holds on this machine, got contract violated",
+  "failed_checks": ["no contract violation"]
 }

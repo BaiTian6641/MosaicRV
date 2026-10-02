@@ -174,6 +174,13 @@ module mosaic_dispatch (
     // ----------------------------------------------------- rename allocation
     output logic                        alloc_req,
     output logic [4:0]                  alloc_rd,
+    // F/D (I-050): the namespace each renamed operand lives in. `alloc_is_fp`
+    // selects the FP destination map; `rs1_is_fp`/`rs2_is_fp` select the FP
+    // source map. An instruction that does not use a source presents it in the
+    // integer namespace, exactly as it presents an unused source as x0.
+    output logic                        alloc_is_fp,
+    output logic                        rs1_is_fp,
+    output logic                        rs2_is_fp,
     input  logic                        alloc_accepted,
     input  logic                        alloc_exhausted,
     input  logic                        alloc_squashed,
@@ -264,6 +271,9 @@ module mosaic_dispatch (
     output logic                        mem_ins_valid,
     input  logic                        mem_ins_ready,
     output logic                        mem_ins_is_store,
+    // F/D (I-050): this memory macro's register operand is an f-register (an FP
+    // load), so the core NaN-boxes a 32-bit result on the way back.
+    output logic                        mem_ins_is_fp,
     output logic [DSP_UOP_ID_W-1:0]     mem_ins_id,
     output logic [DSP_XLEN-1:0]         mem_ins_base,
     output logic [DSP_XLEN-1:0]         mem_ins_imm,
@@ -586,6 +596,17 @@ module mosaic_dispatch (
   assign alloc_req = alloc_now;
   assign alloc_rd  = dec_ctl0.rd;
 
+  // F/D (I-050): which architectural map each renamed operand selects. A
+  // destination is an f-register only for the FP instructions that write one
+  // (arithmetic, fsgnj/minmax, fmv.w.x, fcvt int-to-fp, an FP load); an
+  // FP-to-integer move, comparison, fclass or fcvt fp-to-int writes an integer
+  // register and must allocate from the integer map. A source the instruction
+  // does not use is presented in the integer namespace, so its address is x0 and
+  // rename reports it ready with value zero.
+  assign alloc_is_fp = dec_ctl0.fp_dst_fp && dec_ctl0.reg_write;
+  assign rs1_is_fp   = dec_ctl0.uses_rs1 && dec_ctl0.fp_src1_fp;
+  assign rs2_is_fp   = dec_ctl0.uses_rs2 && dec_ctl0.fp_src2_fp;
+
   assign rob_alloc_valid    = alloc_now && alloc_accepted;
   assign rob_alloc_tag      = alloc_is_x0 ? {DSP_TAG_W{1'b0}} : alloc_new_tag;
   assign rob_alloc_pc       = dec_pc0;
@@ -616,7 +637,12 @@ module mosaic_dispatch (
   // --------------------------------------------------------------------------
   always_comb begin
     new_meta.class_ = mosaic_uop_pkg::UOP_ALU;
-    if (dec_ctl0.is_muldiv) begin
+    if (dec_ctl0.is_fp) begin
+      // F/D (I-050). An OP-FP macro is consumed by the shared floating-point
+      // unit through cluster 0's FP request port, exactly as a UOP_MULDIV is
+      // consumed by the shared iterative MUL/DIV unit.
+      new_meta.class_ = mosaic_uop_pkg::UOP_FP;
+    end else if (dec_ctl0.is_muldiv) begin
       new_meta.class_ = mosaic_uop_pkg::UOP_MULDIV;
     end else if (dec_ctl0.mem_kind == mosaic_pkg::MEM_LOAD) begin
       new_meta.class_ = mosaic_uop_pkg::UOP_LOAD;
@@ -662,6 +688,17 @@ module mosaic_dispatch (
     new_meta.is_sc       = (dec_ctl0.mem_kind == mosaic_pkg::MEM_SC);
     new_meta.is_fence    = dec_ctl0.is_miscmem && !dec_ctl0.is_fence_i;
     new_meta.is_fence_i  = dec_ctl0.is_fence_i;
+    // F/D (I-050). The FP unit needs the operation, the format, the rm field and
+    // the namespace of each operand (for NaN-boxing); all four ride in the meta
+    // so the issue queue carries them to the grant without a second decode.
+    new_meta.fp_op       = dec_ctl0.fp_op;
+    new_meta.fp_fmt      = dec_ctl0.fp_fmt;
+    new_meta.fp_rm       = dec_ctl0.fp_rm;
+    new_meta.fp_dst_fp   = dec_ctl0.fp_dst_fp;
+    new_meta.fp_src1_fp  = dec_ctl0.fp_src1_fp;
+    new_meta.fp_src2_fp  = dec_ctl0.fp_src2_fp;
+    new_meta.fp_iw       = dec_ctl0.fp_iw;
+    new_meta.fp_is       = dec_ctl0.fp_is;
   end
 
   // --------------------------------------------------------------------------
@@ -717,9 +754,11 @@ module mosaic_dispatch (
   // Fixed, deterministic, and stated rather than emergent: the first macro of a
   // fetched pair goes to cluster 0 and the second to cluster 1, and a MUL/DIV
   // macro always goes to cluster 0's queue because that queue's grant is the
-  // one routed to the shared unit.
+  // one routed to the shared unit. An FP macro goes to cluster 0 for the same
+  // reason: cluster 0's queue is the one whose grant is routed to the shared
+  // floating-point unit (I-050).
   always_comb begin
-    target_cluster = dec_ctl0.is_muldiv ? 1'b0 : aff_toggle;
+    target_cluster = (dec_ctl0.is_muldiv || dec_ctl0.is_fp) ? 1'b0 : aff_toggle;
   end
 
   // --------------------------------------------------------------------------
@@ -985,6 +1024,11 @@ module mosaic_dispatch (
   assign mem_ins_offer  = head_valid && !recovering && head_is_mem &&
                           s1_val_ready && s2_val_ready;
   assign mem_ins_valid  = mem_ins_offer;
+  // F/D (I-050): an FP load is a memory macro whose destination is an
+  // f-register; `head.meta.fp_dst_fp` is set only for those (an FP arithmetic
+  // macro is never presented on the memory insert bus). A store's register
+  // operand is a source, so `mem_ins_is_fp` is about loads.
+  assign mem_ins_is_fp  = head_is_mem && !head_is_store && head.meta.fp_dst_fp;
   // The system macro captures its one operand for the same reason: it has no
   // issue queue behind it, and its CSR read happens at the architectural
   // boundary, where a source that is still in flight would already be too late.
