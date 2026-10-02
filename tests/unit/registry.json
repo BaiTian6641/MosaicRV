@@ -1028,8 +1028,7 @@
     "sim/common/event_tap.cpp"
    ],
    "max_cycles": 4000000,
-   "seed": 1,
-   "pending": true
+   "seed": 1
   },
   "core.event_payload": {
    "task": "I-017",
@@ -1071,6 +1070,22 @@
    ],
    "max_cycles": 4000000,
    "seed": 1
+  },
+  "rename.journal_window": {
+   "task": "I-018",
+   "top": "mosaic_rename_tb",
+   "rtl": [
+    "rtl/core/mosaic_rename.sv"
+   ],
+   "sv": [
+    "sim/tb/mosaic_rename_tb.sv"
+   ],
+   "cpp": [
+    "sim/unit/tb_rename.cpp"
+   ],
+   "max_cycles": 200000,
+   "seed": 1,
+   "pending": true
   }
  }
 }
