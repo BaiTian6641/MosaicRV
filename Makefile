@@ -123,7 +123,8 @@ check-exclusions:
 
 $(GEN_CFG) $(GEN_ID): config/profiles/$(PROFILE).json config/capability_ladder.json \
                      config/contracts/interfaces.json config/contracts/counters.json \
-                     config/csr/mode_m.json \
+                     config/csr/mode_m.json config/csr/mode_su.json \
+                     config/csr/mode_pmp.json \
                      tools/gen_manifest.py tools/mosaic/config_check.py
 	@$(PYTHON) tools/check_profile.py --profile $(PROFILE)
 	@$(PYTHON) tools/check_contracts.py --profile $(PROFILE)

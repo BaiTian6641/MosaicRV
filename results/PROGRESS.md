@@ -1984,3 +1984,47 @@ The second one is worth a sentence of its own, because it is the failure mode th
 to prevent: a *passing* run silently destroyed the record another package relied on. No test failed,
 no gate went red, and the evidence would have been gone. The fix is small; noticing it required a
 lane that read the ledger instead of only running its own case.
+
+---
+
+## 2026-10-01 — three fixes from ACT4, and the reason our own cases could not have found them
+
+The external suite's five divergences are now three: `c.lui`'s immediate shift and the SC
+reservation disagreement are fixed (ACT4 125/127), and the HPM `csrrs`/`csrrc` divergence is in
+flight. The fixes are the smaller half of what this stretch produced. The larger half is the
+answer to "why did none of our cases catch these?", and it is uncomfortable in a way worth keeping:
+
+**`c.lui`: our case was written around the field that had already failed.** `compressed.cross_boundary`
+was built after the CI-format immediate bug (`c.addi` reading the destination as the immediate) and
+it pinned *that* field position. The same encoding format has other field positions, and `c.lui`'s
+`nzimm` at `rd[17:12]` was never compared against an independent expectation. A case written in
+response to a bug tends to test the bug, not the format.
+
+**SC: our case and our RTL agreed with each other, and both were wrong.** `lrsc.reservation_progress`
+derived its in-granule and out-of-granule addresses from the RTL's own `GRANULE_BITS` constant — so
+the case could not disagree with the design about the granule, which is the one thing a reservation
+case exists to check. It also never issued an SC at an address *different* from its LR, which is the
+only observable the declared reservation size controls. The platform declares
+`reservation_set_size_exp = 3` (8 bytes); the machine used 64. Every check passed, because every
+check was derived from the thing it was checking.
+
+**Zihpm: the ledger said a behaviour was verified that no case mentions.** EX-009 claimed HPM
+read-only-zero behaviour was "verified by the named CSR cases", and no case or table mentions
+`hpmcounter` at all — while `csr.precise_trap_mret` explicitly asserted that `0xb03`/`0xc03`/`0xc04`
+raise illegal instruction. So the project's own case asserted the *absence* of the CSRs its
+advertised `Zihpm` requires. This is the single most useful thing the exclusion ledger has caught so
+far, and it is exactly what V-020 was written for: not a failing test, but a *claim* that had drifted
+away from anything real.
+
+**The generalisation, which is now a rule**: an expectation derived from the design under test is
+not an expectation. This project has met the same failure in four guises now — a reference model
+that had copied the DUT's drain bug, a mutant whose define never reached the compiler, a granule
+constant read from the RTL, and a ledger entry naming coverage that did not exist. The countermeasure
+that actually works is an *external* oracle: Sail, in this case, found in minutes what four hundred
+thousand of our own checks could not, precisely because it does not share a single constant with the
+design.
+
+Two consequences are recorded rather than promised: the mutants for the two fixes are still owed
+(the lane left none, and the next lane is adding them), and the HPM fix will either make `Zihpm`
+true or cause it to be un-advertised — an advertised extension the architectural suite fails is worse
+than one that is honestly withheld.

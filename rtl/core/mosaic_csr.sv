@@ -481,6 +481,13 @@ module mosaic_csr (
     if (pmp_sel_o) addr_impl = 1'b1;
     if (pmp_sel_o) wr_legal  = 1'b1;
 
+    // The Zihpm counter shadows: implemented, read-only zero. `wr_legal` stays 0
+    // because the address itself encodes read-only (csr[11:10] == 2'b11), and the
+    // value is the read mux's `default` arm; what has to be said here is only
+    // that the address is implemented, i.e. that a read answers 0 instead of
+    // raising an illegal instruction.
+    if (csr_is_hpm) addr_impl = 1'b1;
+
     `ifdef MOSAIC_CSR_MUTANT_RO_WRITE_ACCEPTED
       // MUTANT: every implemented CSR is treated as writable, so a write to a
       // read-only register stops raising csr_wr_illegal_o.
@@ -519,6 +526,7 @@ module mosaic_csr (
   logic       csr_counter_ok;
   logic [5:0] csr_counter_bit;
   logic       csr_is_counter;
+  logic       csr_is_hpm;
   logic [63:0] scounteren_view;
 
   assign csr_min_priv_r = csr_addr_i[9:8];
@@ -531,11 +539,33 @@ module mosaic_csr (
   // exception"; S-mode reads are gated by mcounteren alone ("When the ... bit in
   // mcounteren is clear, attempts to read ... while executing in S-mode will
   // cause an illegal instruction exception"). The bit is the counter's own
-  // number, which for the three this profile implements is 0, 1 and 2.
+  // number: 0, 1 and 2 for cycle/time/instret, and HPMn for the Zihpm
+  // hpmcounter_n shadow at 0xC00+n -- which is exactly the low six bits of that
+  // address. A profile whose tables declare no hpmcounter row compiles the whole
+  // block out, because a reference to a constant the package does not declare is
+  // a compile error, not a zero.
   assign csr_is_counter  = (csr_addr_i == CSR_CYCLE) || (csr_addr_i == CSR_TIME) ||
-                           (csr_addr_i == CSR_INSTRET);
+                           (csr_addr_i == CSR_INSTRET) || csr_is_hpm;
   assign csr_counter_bit = (csr_addr_i == CSR_CYCLE)   ? 6'd0 :
-                           (csr_addr_i == CSR_TIME)    ? 6'd1 : 6'd2;
+                           (csr_addr_i == CSR_TIME)    ? 6'd1 :
+                           (csr_addr_i == CSR_INSTRET) ? 6'd2 : csr_addr_i[5:0];
+
+  // The Zihpm counter shadows, from the generated range. With no HPM counter
+  // implemented the whole block is read-only zero, which is what the `default`
+  // arm of the read mux already answers; what this decode decides is that the
+  // addresses are *implemented* (a read must not trap) and that the counter gate
+  // applies to them. MOSAIC_CSR_MUTANT_NO_HPM removes the decode, putting the
+  // reads back to illegal -- the control CASE=core.act_dut's Zihpm ELF names.
+  `ifdef MOSAIC_CSR_HAS_HPM
+    `ifdef MOSAIC_CSR_MUTANT_NO_HPM
+      assign csr_is_hpm = 1'b0;
+    `else
+      assign csr_is_hpm = (csr_addr_i >= mosaic_csr_pkg::MOSAIC_CSR_HPM_FIRST) &&
+                          (csr_addr_i <= mosaic_csr_pkg::MOSAIC_CSR_HPM_LAST);
+    `endif
+  `else
+    assign csr_is_hpm = 1'b0;
+  `endif
 
   // A profile without S-mode has no scounteren, so the U-mode half of the gate
   // has nothing to consult; it reads zero, which is the same answer a register

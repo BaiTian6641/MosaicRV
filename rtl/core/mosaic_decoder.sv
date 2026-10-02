@@ -173,6 +173,13 @@ module mosaic_decoder (
 `else
   localparam bit MutCReservedExec = 1'b0;
 `endif
+`ifdef MOSAIC_DECODER_MUTANT_C_LUI_IMM
+  localparam bit MutCLuiImm    = 1'b1;   // c.lui's 6-bit immediate placed 12 bits
+                                         // too high in rd (0x5000000 for `c.lui
+                                         // x1, 5`), the defect V-043 reported
+`else
+  localparam bit MutCLuiImm    = 1'b0;
+`endif
 
   // ==========================================================================
   // C (compressed) decompression -- work package I-041
@@ -340,7 +347,16 @@ module mosaic_decoder (
               r.word = rv_i(imm12, 5'd2, mosaic_pkg::F3_ADD_SUB, 5'd2,
                             mosaic_pkg::OP_IMM);
             end else begin  // c.lui: lui rd, nzimm (rd == x0 a hint, imm == 0 reserved)
-              imm20  = {{2{c[12]}}, c[12], c[6:2], 12'b0};
+              // The C.LUI immediate is the 6-bit nzimm -- encoding bit 12 is
+              // nzimm[5] and encoding bits 6:2 are nzimm[4:0] -- sign-extended to
+              // 20 bits and placed at imm20[5:0]; `lui rd, imm20` then puts it at
+              // rd[17:12], which is where the ISA defines it. Building imm20 as
+              // if the field sat at imm20[16:12] (and padding the bottom with
+              // 12'b0) shifts the result twelve bits too high: `c.lui x1, 5`
+              // produced 0x5000000 instead of 0x5000. CASE=core.act_dut's
+              // Zca-c.lui-00 ELF is the case that pins this.
+              imm20  = MutCLuiImm ? {{2{c[12]}}, c[12], c[6:2], 12'b0}
+                                  : {{14{c[12]}}, c[12], c[6:2]};
               r.ok   = force_reserved || (c[12] || (c[6:2] != 5'd0));
               r.word = rv_u(imm20, c[11:7], 7'b0110111);
             end

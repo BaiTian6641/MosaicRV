@@ -29,7 +29,7 @@
 //      at all, so the architectural status and the memory traffic cannot
 //      disagree;
 //   4. the **reservation state**, sampled while it stands, whose granule must be
-//      the declared naturally aligned 64-byte block.
+//      the declared naturally aligned XLEN-sized (8-byte) block.
 //
 // ------------------------------------------------------------------- the runs
 //
@@ -99,8 +99,15 @@ constexpr uint64_t kProgressBound = 16;
 // 0x80000000.
 constexpr uint64_t kRamBase    = 0x80000000ull;  // = MOSAIC_RAM_BASE
 constexpr uint64_t kAOff       = 0x400;          // the reserved / SC address
-constexpr uint64_t kA8Off      = 0x408;          // inside A's 64-byte granule
-constexpr uint64_t kA64Off     = 0x440;          // the next granule
+// The reservation set is the naturally aligned XLEN-sized (8-byte) block the
+// platform declares (tests/act4/mosaic-p1/mosaic-p1.yaml's
+// LRSC_RESERVATION_STRATEGY, and the reference model's
+// platform.reservation.reservation_set_size_exp = 3). A's granule is therefore
+// 0x400..0x407: 0x404 is the only *other* address in it, so the in-granule
+// conflicting store is a word store at A+4 -- an 8-byte store there would be
+// misaligned and trap -- and the first address of the next granule is A+8.
+constexpr uint64_t kA8Off      = 0x404;          // inside A's 8-byte granule
+constexpr uint64_t kA64Off     = 0x408;          // the next granule
 constexpr uint64_t kAttOff     = 0x4C0;          // the attempt counter (run B)
 constexpr uint64_t kHandlerOff = 0x600;          // the trap handler
 constexpr uint64_t kA     = kRamBase + kAOff;
@@ -224,6 +231,9 @@ class Asm {
   void EmitStoreD(uint32_t rs1, uint32_t rs2, int32_t imm) {
     emit(EncS(OP_STORE, F3_D, rs1, rs2, imm));
   }
+  void EmitStoreW(uint32_t rs1, uint32_t rs2, int32_t imm) {
+    emit(EncS(OP_STORE, F3_W, rs1, rs2, imm));
+  }
   void EmitLrD(uint32_t rd, uint32_t rs1, uint64_t expect_value) {
     emit_expect(EncAmo(F5_LR, 0, 0, F3_D, rd, rs1, 0), rd, expect_value);
   }
@@ -272,10 +282,18 @@ void EmitHandler(ProgImage* img) {
   img->Put(pc + 12, 0x30200073u);                      // mret
 }
 
+// A location the case reads back out of memory after the run, with the width it
+// must be read at: the in-granule conflicting word (A+4) is only 4-byte aligned,
+// so it cannot be read as a doubleword.
+struct Watch {
+  uint64_t addr;
+  unsigned size;
+};
+
 struct Program {
   ProgImage img;
   std::map<uint64_t, Expect> retires;   // PC -> (rd, value), from the ISA
-  std::vector<uint64_t> watch;          // addresses to read back after the run
+  std::vector<Watch> watch;             // locations to read back after the run
   uint64_t lr_count = 0;
   uint64_t sc_count = 0;
   uint64_t sc_success = 0;
@@ -310,7 +328,7 @@ Program BuildSemantics() {
   a.EmitLrD(1, 10, kVal2);           // lr.d x1, (x10) -> x1 = 0x22
   a.EmitI(0, 11, 5, static_cast<int32_t>(kA8Off));
   a.EmitI(0, 12, 0, static_cast<int32_t>(kInVal));
-  a.EmitStoreD(11, 12, 0);           // sd x12, 0(x11): A+8 = 0x33, in granule
+  a.EmitStoreW(11, 12, 0);           // sw x12, 0(x11): A+4 = 0x33, in granule
   a.EmitScD(2, 3, 10, 1);            // sc.d x2, x3, (x10) -> x2 = 1, no write
 
   // ---- 5. a store outside the granule leaves it standing ------------------
@@ -318,7 +336,7 @@ Program BuildSemantics() {
   a.EmitLrD(1, 10, kVal2);           // lr.d x1, (x10) -> x1 = 0x22
   a.EmitI(0, 13, 5, static_cast<int32_t>(kA64Off));
   a.EmitI(0, 14, 0, static_cast<int32_t>(kOutVal));
-  a.EmitStoreD(13, 14, 0);           // sd x14, 0(x13): A+64 = 0x44, next granule
+  a.EmitStoreD(13, 14, 0);           // sd x14, 0(x13): A+8 = 0x44, next granule
   a.EmitScD(2, 3, 10, 0);            // sc.d x2, x3, (x10) -> x2 = 0, A = 0x55
 
   // ---- 6. an AMO breaks the reservation -----------------------------------
@@ -343,7 +361,7 @@ Program BuildSemantics() {
   p.sc_success = 2;
   p.sc_fail = 5;
   p.ext_inval_expected = 0;
-  p.watch = {kA, kA8, kA64};
+  p.watch = {{kA, 8}, {kA8, 4}, {kA64, 8}};
 
   EmitHandler(&p.img);
   return p;
@@ -399,7 +417,7 @@ Program BuildProgress(uint64_t injections) {
   p.sc_success = 1;
   p.sc_fail = injections;
   p.ext_inval_expected = injections;
-  p.watch = {kA, kAtt};
+  p.watch = {{kA, 8}, {kAtt, 8}};
 
   EmitHandler(&p.img);
   return p;
@@ -731,11 +749,11 @@ class Harness {
       retires_.push_back(r);
     }
     // The declared granule is checked as state: whenever a reservation stands,
-    // the granule the DUT reports must be the 64-byte block containing the
+    // the granule the DUT reports must be the 8-byte block containing the
     // address the LR reserved.
     if (dut_->o_mem_res_valid_o != 0) {
       granule_samples_++;
-      if (dut_->o_mem_res_granule_o != (kA & ~UINT64_C(63))) granule_violations_++;
+      if (dut_->o_mem_res_granule_o != (kA & ~UINT64_C(7))) granule_violations_++;
     }
   }
 
@@ -968,7 +986,7 @@ RunResult RunOnce(Vmosaic_core_tb* dut, mosaic::Reporter* reporter,
   reporter->Check(harness.granule_samples() > 0,
                   label + ": the reservation was observed standing at least once");
   reporter->Check(harness.granule_violations() == 0,
-                  label + ": every observed reservation covered the declared 64-byte "
+                  label + ": every observed reservation covered the declared 8-byte "
                   "granule (" + Dec(harness.granule_violations()) + " violations in " +
                       Dec(harness.granule_samples()) + " samples)");
 
@@ -989,10 +1007,10 @@ RunResult RunOnce(Vmosaic_core_tb* dut, mosaic::Reporter* reporter,
   out.granule_samples = harness.granule_samples();
   out.granule_violations = harness.granule_violations();
   out.injected = harness.injected();
-  for (uint64_t addr : prog.watch) {
+  for (const Watch& w : prog.watch) {
     uint64_t value = 0;
-    if (dut_mem.Read(addr, 8, &value) != mosaic::AccessStatus::kOk) {
-      Fail(label, "the watched address " + U64(addr) + " is not readable RAM");
+    if (dut_mem.Read(w.addr, w.size, &value) != mosaic::AccessStatus::kOk) {
+      Fail(label, "the watched address " + U64(w.addr) + " is not readable RAM");
     }
     out.watched.push_back(value);
   }
@@ -1011,8 +1029,8 @@ void RunSemantics(Vmosaic_core_tb* dut, mosaic::Reporter* reporter,
   //   A    -- block 2's SC wrote 0x22, block 5's SC wrote 0x55, then the AMO
   //           between block 6's LR and SC added 1, and block 6's and 7's SCs
   //           failed, so the location ends at 0x56;
-  //   A+8  -- block 4's in-granule store wrote 0x33 and no SC ever touched it;
-  //   A+64 -- block 5's out-of-granule store wrote 0x44.
+  //   A+4  -- block 4's in-granule store wrote 0x33 and no SC ever touched it;
+  //   A+8  -- block 5's out-of-granule store wrote 0x44.
   const uint64_t expect_a = kVal5 + kAmoDelta;
   reporter->Check(r.watched[0] == expect_a,
                   "semantics: the reserved location holds " + U64(expect_a) + " (saw " +

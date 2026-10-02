@@ -597,6 +597,16 @@ def render_sv_csr_package(bundle: config_check.Bundle) -> str:
     csrs = collect_csrs(bundle)
     modes_list = list(profile["privilege_modes"])
 
+    # The HPM counter shadows (Zihpm). A profile that implements no HPM counter
+    # still implements hpmcounter3..31 as read-only-zero shadows, so the RTL
+    # decodes the whole block from one range instead of naming 29 constants. The
+    # ISA fixes the addresses as the contiguous block 0xC03..0xC1F, so a table
+    # with a hole in it is a configuration error rather than a narrower range.
+    hpm_addrs = sorted(csr["address"] for csr in csrs if csr["name"].startswith("hpmcounter"))
+    if hpm_addrs and hpm_addrs != list(range(hpm_addrs[0], hpm_addrs[-1] + 1)):
+        raise SystemExit("the hpmcounter rows of profile %s are not contiguous: %s"
+                         % (bundle.name, hpm_addrs))
+
     lines = []
     add = lines.append
     add("// GENERATED FILE - do not edit.")
@@ -631,6 +641,11 @@ def render_sv_csr_package(bundle: config_check.Bundle) -> str:
         add("`define MOSAIC_CSR_HAS_S")
     if "U" in modes_list:
         add("`define MOSAIC_CSR_HAS_U")
+    # Same compile-out rule for the Zihpm counter shadows: a profile whose
+    # tables declare no hpmcounter row has no MOSAIC_CSR_HPM_FIRST/LAST to name,
+    # and the CSR file must not name a constant this package does not declare.
+    if hpm_addrs:
+        add("`define MOSAIC_CSR_HAS_HPM")
     add("")
     add("package mosaic_csr_pkg;")
     add("")
@@ -653,6 +668,15 @@ def render_sv_csr_package(bundle: config_check.Bundle) -> str:
     add("  localparam logic MOSAIC_CSR_HAS_U = 1'b%d;" % (1 if "U" in modes_list else 0))
     add("  localparam logic [1:0] MOSAIC_PRIV_LEAST = 2'd%d;"
         % (0 if "U" in modes_list else (1 if "S" in modes_list else 3)))
+    if hpm_addrs:
+        add("")
+        add("  // The Zihpm counter shadows this profile implements, as one range: the ISA")
+        add("  // fixes them at 0xC03..0xC1F, and a profile that implements no HPM counter")
+        add("  // implements every one of them as read-only zero. This range is what the")
+        add("  // CSR file decodes and what its counter gate gates; the per-register")
+        add("  // constants below name the same addresses for the testbench.")
+        add("  localparam logic [11:0] MOSAIC_CSR_HPM_FIRST = 12'h%03x;" % hpm_addrs[0])
+        add("  localparam logic [11:0] MOSAIC_CSR_HPM_LAST  = 12'h%03x;" % hpm_addrs[-1])
     add("")
 
     for csr in csrs:

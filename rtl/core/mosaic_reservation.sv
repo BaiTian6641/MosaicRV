@@ -4,12 +4,21 @@
 // ------------------------------------------------------------------ the state
 //
 // One hart, one reservation: a validity bit and the tag of the granule it
-// covers. The **granule** is the naturally aligned 64-byte block that contains
-// the LR's address. `GRANULE_BITS` is the single place that size is stated. The
-// plan's memory row (docs/implementation-plan.md section 3.2.1) asks for a
-// reservation set of at most 64 contiguous bytes; a 64-byte aligned block is
-// exactly that set, and RVA23's `Za64rs` asks for at least a 64-byte
-// reservation set, so the declaration and the requirement are the same number.
+// covers. The **granule** is the naturally aligned block that contains the LR's
+// address, and its size is a *platform declaration* rather than a free choice:
+// `GRANULE_BITS` is the single place that size is stated. The ACT4 target this
+// core is validated against declares it -- tests/act4/mosaic-p1/mosaic-p1.yaml
+// sets `LRSC_RESERVATION_STRATEGY: "reserve exactly enough to cover the access"`
+// (an XLEN-sized set) and the reference model's
+// `platform.reservation.reservation_set_size_exp` is 3, i.e. 8 bytes, the
+// minimum an RV64 Zalrsc implementation may declare. Reserving *more* than the
+// declaration is architecturally permitted (an SC may fail for any reason, so
+// the converse is a liberty), but it is observable in the other direction: an SC
+// to an address the reference places outside the set succeeds here. That is a
+// real divergence, not a liberty, and it is what the two `Zalrsc-sc.*` ELFs
+// found -- so the set is the declared one, not a larger one. A future profile
+// that advertises `Za64rs` declares a larger set and this constant is where it
+// changes.
 //
 // --------------------------------------------------------- the invalidation set
 //
@@ -122,8 +131,17 @@ module mosaic_reservation (
     output logic [31:0] miss_ctr_o
 );
 
-  // 64 bytes: the granule is `addr[63:6]` and the low six bits are inside it.
-  localparam int unsigned GRANULE_BITS = 6;
+  // 8 bytes -- the XLEN-sized set the platform declares (`GRANULE_BITS` is the
+  // exponent of its size): the granule is `addr[63:3]` and the low three bits
+  // are inside it. MOSAIC_LRSC_MUTANT_GRANULE_64B restores the oversized 64-byte
+  // set the endpoint shipped with, which made an SC to an address the reference
+  // declares outside the set succeed; CASE=core.act_dut's Zalrsc-sc.* ELFs name
+  // it.
+  `ifdef MOSAIC_LRSC_MUTANT_GRANULE_64B
+    localparam int unsigned GRANULE_BITS = 6;
+  `else
+    localparam int unsigned GRANULE_BITS = 3;
+  `endif
   localparam int unsigned GRANULE_W    = 64 - GRANULE_BITS;
 
   logic                valid_q;
