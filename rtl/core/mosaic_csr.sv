@@ -979,10 +979,16 @@ module mosaic_csr (
           fcsr_d = (fcsr_q & ~{3'b000, mosaic_csr_pkg::MOSAIC_CSR_WMASK_FFLAGS[4:0]})
                  | (csr_op_result[7:0]
                     & {3'b000, mosaic_csr_pkg::MOSAIC_CSR_WMASK_FFLAGS[4:0]});
+        // The frm address is a *read/write register of its own*: its three bits
+        // are bits 2:0 of the write operand, and they become fcsr[7:5] because
+        // that is where frm lives inside the one 8-bit register. Taking the
+        // operand's bits 7:5 here -- which is where frm sits inside *fcsr*, but
+        // not inside the 0x002 write -- masked every write to zero and made
+        // `csrw frm` silently do nothing.
         mosaic_csr_pkg::MOSAIC_CSR_ADDR_FRM:
           fcsr_d = (fcsr_q & ~{mosaic_csr_pkg::MOSAIC_CSR_WMASK_FRM[2:0], 5'b00000})
-                 | (csr_op_result[7:0]
-                    & {mosaic_csr_pkg::MOSAIC_CSR_WMASK_FRM[2:0], 5'b00000});
+                 | {(csr_op_result[2:0] & mosaic_csr_pkg::MOSAIC_CSR_WMASK_FRM[2:0]),
+                    5'b00000};
         mosaic_csr_pkg::MOSAIC_CSR_ADDR_MIE:
           mie_d = (mie_q & ~mosaic_csr_pkg::MOSAIC_CSR_WMASK_MIE)
                 | (csr_op_result & mosaic_csr_pkg::MOSAIC_CSR_WMASK_MIE);

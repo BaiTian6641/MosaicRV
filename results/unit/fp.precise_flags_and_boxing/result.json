@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "case": "fp.precise_flags_and_boxing",
+  "verdict": "FAIL",
+  "detail": "checks=105 phases=7 seed=1",
+  "seed": 1,
+  "max_cycles": 4000000,
+  "checks": 106,
+  "failures": 1,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-02T09:51:06Z",
+  "first_mismatch": "",
+  "failed_checks": ["wrong-path: the wrong-path operation executed and produced its flags (0 flagged completions); without this the phase would prove nothing"]
+}

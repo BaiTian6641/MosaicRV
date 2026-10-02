@@ -2028,3 +2028,36 @@ Two consequences are recorded rather than promised: the mutants for the two fixe
 (the lane left none, and the next lane is adding them), and the HPM fix will either make `Zihpm`
 true or cause it to be un-advertised — an advertised extension the architectural suite fails is worse
 than one that is honestly withheld.
+
+---
+
+## 2026-10-01 — I-050's second attempt: two real defects, and a rule that had been passing vacuously
+
+The FP state package is not delivered yet (attempt 3 is running), but its second attempt found
+things worth more than the green line it did not produce:
+
+* **`csrw frm` silently did nothing.** The CSR write took the operand's bits `[7:5]` — `frm`'s place
+  *inside* `fcsr` — instead of `[2:0]`, so a program that set the rounding mode by writing `frm`
+  directly kept whatever mode was already there. A wrong rounding mode is a wrong answer in the last
+  bit of every result, and nothing in this repository would have noticed.
+* **`fadd.s f3,f1,f2` computed `f1+x2`.** `fp_s2_is_fp_c` was never set for OP-FP, so dispatch
+  resolved the *second* FP source through the integer map. The first FP operation with two register
+  operands was reading an integer register for one of them. Both defects are fixed and verified
+  (f1+f2 = 3.0, f2+f1 = 3.0, f1−f1 = 2.0, f2+f2 = 4.0, including from load-produced operands).
+* **The `csr.rule_ledger` failure was a vacuous stimulus, not a broken rule.** The V-017 driver used
+  `ld`/`sd` displacements of `8*index`, which overflow the signed 12-bit immediate for indices ≥ 256:
+  the `fflags` example loaded from unwritten RAM and stored its read-back where the harness never
+  looked. The driver is fixed with two 256-entry windows and a permanent assembler displacement
+  guard — **and the same bug had made the `hpmcounter` rules pass vacuously**, which is the second
+  time this project has found a rule whose stimulus never reached the DUT.
+
+That last one is the lesson of the day and it belongs next to the ACT4 one. An expectation that
+shares a constant with the design is not an expectation (the reservation granule); a rule whose
+stimulus overflows an immediate is not a test (the CSR ledger); a case written around the field that
+already failed does not test the format (`c.lui`). Three different mechanisms, one failure mode: the
+check and the thing checked agreeing about something neither of them verified.
+
+The attempt also left the case **honestly failing**: 105 of 106 checks pass and the one failure is
+its own anti-vacuity check, which exists so that a phase with no evidence cannot pass. That is the
+check doing its job — the wrong-path phase had no squashed-but-completed FP operation to observe —
+and the third attempt is constructing the stimulus rather than relaxing the check.

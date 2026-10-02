@@ -1688,6 +1688,22 @@ module mosaic_core (
             end
             default: ;
           endcase
+          // The second source of every OP-FP form that *has* one is an
+          // f-register: the arithmetic, min/max, sign-injection and compare
+          // families all name fs2. `fp_uses_rs2_c` is set low exactly for the
+          // forms whose rs2 is a field rather than a register (the conversions,
+          // whose rs2 encodes the destination type, and the moves and fclass) --
+          // and for those the namespace does not matter, because dispatch
+          // presents an unused source as address x0.
+          //
+          // Leaving this at its default (0) read fs2 from the INTEGER map, so
+          // `fadd.s f3, f1, f2` added f1 to x2 -- zero in a program that never
+          // touches x2, and whatever happened to be in x2 otherwise. The
+          // single-source forms hid it, and so did any pair whose integer
+          // registers happened to hold the right bits; it is exactly the class of
+          // defect this case exists to find. CASE=fp.precise_flags_and_boxing
+          // found it: two load-produced operands read as one plus zero.
+          fp_s2_is_fp_c = fp_uses_rs2_c;
         end
         mosaic_pkg::OP_LOAD_FP: begin
           // flw/fld. The load's address base is an integer register; its result

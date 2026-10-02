@@ -96,8 +96,21 @@ constexpr uint64_t kStallCycles = 20000;
 // The program's data layout. The literal pool and the read-back slots live in
 // RAM, far above the program text (which is under 12 KiB), so neither can collide
 // with the code or with MOSAIC_TOHOST.
-constexpr uint64_t kLiteralBase = 0x80008000ull;
-constexpr uint64_t kSlotBase = 0x80010000ull;
+//
+// Both pools are addressed as `base register + signed 12-bit displacement`, so
+// each is *two* windows of 256 entries rather than one 344-entry window:
+// 8*255 = 2040 fits the immediate, 8*343 = 2744 does not. When it did not, the
+// encoder masked the field, the effective address wrapped backwards by 1440
+// bytes, the operand loaded from unwritten RAM as zero, and the read-back went
+// to a slot the harness never read -- a stimulus that examines nothing while
+// reporting a mismatch against the ledger. The window is what makes the
+// displacement legal by construction; `Asm::CheckDisp` is what makes a future
+// pool that outgrows it fail loudly instead of silently reading zero.
+constexpr uint64_t kLiteralBase = 0x80008000ull;   // literals 0..255
+constexpr uint64_t kLiteralBase2 = 0x80009000ull;  // literals 256..511
+constexpr uint64_t kSlotBase = 0x80010000ull;      // slots 0..255
+constexpr uint64_t kSlotBase2 = 0x80011000ull;     // slots 256..511
+constexpr int kWindowEntries = 256;
 // The platform's real-time counter, driven by the harness. `time` is a read-only
 // alias of this register, so a value with a distinctive high word makes a broken
 // alias (one that reads zero) fail the rule.
@@ -152,8 +165,27 @@ class Asm {
 
   void Addi(uint32_t rd, uint32_t rs1, int32_t imm) { Emit(I(imm, rs1, 0, rd, 0x13)); }
   void Lui(uint32_t rd, uint32_t imm20) { Emit(U(imm20, rd, 0x37)); }
-  void Ld(uint32_t rd, uint32_t rs1, int32_t imm) { Emit(I(imm, rs1, 3, rd, 0x03)); }
-  void Sd(uint32_t rs2, uint32_t rs1, int32_t imm) { Emit(S(imm, rs2, rs1, 3, 0x23)); }
+  // A load or store displacement is a *signed 12-bit* field: a value outside
+  // [-2048, 2047] is silently truncated by the encoder, so the access goes to a
+  // different address than the one the source names. That is not a hypothetical:
+  // it made three ledger rules read their operand from unwritten RAM and pass it
+  // to the CSR as zero. The guard belongs here, at the one place the field is
+  // formed, rather than at every call site.
+  static void CheckDisp(const char* what, int32_t imm) {
+    if ((imm < -2048) || (imm > 2047)) {
+      Fail("csr-rule-ledger assembler",
+           std::string(what) + " displacement " + std::to_string(imm) +
+           " does not fit the signed 12-bit immediate; widen the pool window");
+    }
+  }
+  void Ld(uint32_t rd, uint32_t rs1, int32_t imm) {
+    CheckDisp("ld", imm);
+    Emit(I(imm, rs1, 3, rd, 0x03));
+  }
+  void Sd(uint32_t rs2, uint32_t rs1, int32_t imm) {
+    CheckDisp("sd", imm);
+    Emit(S(imm, rs2, rs1, 3, 0x23));
+  }
   void Csrrw(uint32_t rd, uint32_t csr, uint32_t rs1) { Emit(I(csr, rs1, 1, rd, 0x73)); }
   void Csrrs(uint32_t rd, uint32_t csr, uint32_t rs1) { Emit(I(csr, rs1, 2, rd, 0x73)); }
   void Csrrc(uint32_t rd, uint32_t csr, uint32_t rs1) { Emit(I(csr, rs1, 3, rd, 0x73)); }
@@ -486,8 +518,20 @@ struct Program {
   uint64_t tohost = 0;
 };
 
-uint64_t SlotAddr(int slot) { return kSlotBase + 8ull * slot; }
-uint64_t LitAddr(int lit) { return kLiteralBase + 8ull * lit; }
+uint64_t SlotAddr(int slot) {
+  return (slot < kWindowEntries ? kSlotBase : kSlotBase2) +
+         8ull * static_cast<uint64_t>(slot % kWindowEntries);
+}
+uint64_t LitAddr(int lit) {
+  return (lit < kWindowEntries ? kLiteralBase : kLiteralBase2) +
+         8ull * static_cast<uint64_t>(lit % kWindowEntries);
+}
+// The base register and displacement the *instructions* use to reach those same
+// addresses. Derived from the same window rule as SlotAddr/LitAddr, so the pool
+// the DUT writes and the pool the harness reads cannot disagree.
+uint32_t LitReg(int lit) { return (lit < kWindowEntries) ? 31u : 29u; }
+uint32_t SlotReg(int slot) { return (slot < kWindowEntries) ? 30u : 27u; }
+int32_t PoolDisp(int index) { return static_cast<int32_t>(8 * (index % kWindowEntries)); }
 
 int RuleKind(int rule) { return MOSAIC_CSR_RULES[rule].kind; }
 bool RuleIsMtvec(int rule) { return MOSAIC_CSR_RULES[rule].address == 0x305; }
@@ -509,8 +553,13 @@ Program BuildProgram(const Geometry& g) {
   Asm asm_(g.reset_vector);
 
   // --- prologue: base registers, the trap vector, then the handler ----------
-  asm_.LaAbs(31, kLiteralBase);   // x31 = literal pool
-  asm_.LaAbs(30, kSlotBase);      // x30 = read-back slots
+  // Two base registers per pool: entries 0..255 and 256..511 (see the window
+  // rule at kLiteralBase). x29/x27 hold the second windows; the trap handler
+  // touches only x28 and mepc, so a trapped example still finds its base.
+  asm_.LaAbs(31, kLiteralBase);   // x31 = literal pool, entries 0..255
+  asm_.LaAbs(29, kLiteralBase2);  // x29 = literal pool, entries 256..511
+  asm_.LaAbs(30, kSlotBase);      // x30 = read-back slots, entries 0..255
+  asm_.LaAbs(27, kSlotBase2);     // x27 = read-back slots, entries 256..511
   asm_.La(5, "handler");
   asm_.Csrrw(0, 0x305, 5);                                   // mtvec <- handler (Direct)
   asm_.La(5, "main");
@@ -551,12 +600,12 @@ Program BuildProgram(const Geometry& g) {
     if (e.op != MOSAIC_EX_CSRR) {
       plan.lit_write = 2 * i;
       program.literals[plan.lit_write] = e.write;
-      asm_.Ld(5, 31, static_cast<int32_t>(8 * plan.lit_write));
+      asm_.Ld(5, LitReg(plan.lit_write), PoolDisp(plan.lit_write));
     }
     if (e.expect_mode == MOSAIC_EXP_CANARY) {
       plan.lit_canary = 2 * i + 1;
       program.literals[plan.lit_canary] = e.expect_lo;
-      asm_.Ld(7, 31, static_cast<int32_t>(8 * plan.lit_canary));
+      asm_.Ld(7, LitReg(plan.lit_canary), PoolDisp(plan.lit_canary));
     }
     // A denied write must leave the state unchanged: read the CSR before the
     // operation and require the same value after it. slot_b is free here because
@@ -567,7 +616,7 @@ Program BuildProgram(const Geometry& g) {
                         ": pre_read and advance share a slot and cannot co-occur");
       }
       asm_.Csrr(6, static_cast<uint32_t>(target));
-      asm_.Sd(6, 30, static_cast<int32_t>(8 * plan.slot_b));
+      asm_.Sd(6, SlotReg(plan.slot_b), PoolDisp(plan.slot_b));
     }
     if (e.op == MOSAIC_EX_CSRR) {
       plan.read_pc = asm_.pc();
@@ -585,12 +634,12 @@ Program BuildProgram(const Geometry& g) {
       asm_.Csrr(7, static_cast<uint32_t>(target));
       plan.read_trap = (e.traps >= 2);
     }
-    asm_.Sd(7, 30, static_cast<int32_t>(8 * plan.slot_a));
+    asm_.Sd(7, SlotReg(plan.slot_a), PoolDisp(plan.slot_a));
     if (e.expect_mode == MOSAIC_EXP_ADVANCE) {
       for (int k = 0; k < e.advance_gap; k++) asm_.Addi(9, 9, 1);
       plan.read2_pc = asm_.pc();
       asm_.Csrr(8, static_cast<uint32_t>(target));
-      asm_.Sd(8, 30, static_cast<int32_t>(8 * plan.slot_b));
+      asm_.Sd(8, SlotReg(plan.slot_b), PoolDisp(plan.slot_b));
     }
     plan.emitted = true;
   };
