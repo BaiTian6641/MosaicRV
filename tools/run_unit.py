@@ -137,7 +137,16 @@ def execute_case(profile: str, case_id: str, entry: dict, out_root: str,
                   seed_override=None) -> bool:
     build_dir = os.path.join(REPO_ROOT, "build", profile, "unit", case_id)
     binary = os.path.join(build_dir, case_id)
-    out_dir = os.path.join(out_root, case_id)
+    # Results are per profile. p0 keeps the historical path
+    # (`results/unit/<case>/result.json`) because the delivery ledger, the
+    # exclusion ledger and several reports cite it; every other profile gets its
+    # own subdirectory under the same case. Before this, a p1 run of a case
+    # overwrote the p0 verdict that other packages cite as their evidence --
+    # which is how a record stops being a record.
+    if profile == "p0":
+        out_dir = os.path.join(out_root, case_id)
+    else:
+        out_dir = os.path.join(out_root, case_id, profile)
     os.makedirs(out_dir, exist_ok=True)
 
     seed = seed_override if seed_override is not None else entry.get("seed", 1)

@@ -1945,3 +1945,42 @@ not to be narrowed or skipped to make it green), and each fix owes a paragraph o
 project's own cases were missing* that let the bug through — for `SC` in particular, `lrsc.
 reservation_progress` passes today, so the ACT4 failure is telling us that case's coverage has a
 hole rather than that the machine is broken in a way we already knew about.
+
+---
+
+## 2026-10-01 — two hygiene defects, one durable fix, and a record that stops lying
+
+The p1-only lint failure and the "sstatus has no known role" crash are both fixed, and one of them
+produced the kind of fix this project wants:
+
+* **The unused `store_q0`/`store_q1` in `mosaic_pmp.sv` were dead weight**, not a missing driver —
+  the store-commit port exposes only its two allow outputs, so the shared query struct's other
+  fields were computed and never read. They are deleted, with a mutant
+  (`STORE_COMMIT_UNGATED`) that exits 1 with `mcause=9 where 7 is required`, and the lane verified
+  the fix by temporarily restoring the pre-fix shape and watching lint fail again.
+* **Every CSR now declares a `role` from a closed set**, the role is emitted into the generated
+  descriptor, and `check_profile` *rejects* a configuration whose CSR has no role or an unknown one
+  (with negative controls observed for p0 at 50/50 and p1 at 37/37). That is the durable form: a
+  configuration that cannot be ambiguous, rather than a case that catches the ambiguity later.
+
+**Two registry-level changes came out of it**, both of which fix problems this file had recorded
+but not solved:
+
+1. **Cases can declare the profiles they belong to.** `csr.precise_trap_mret` is machine-mode-only
+   by construction (a hand-derived 21-row oracle, `mstatus.MPP==3` and `IALIGN=32` as standing
+   invariants, an M-only shadow) while p1's machine has 50 CSR rows and real S/U privilege — so
+   running it under p1 tests a model that does not exist. It is now `"profiles": ["p0"]`, as is
+   `core.trap_csr_program`; the runner skips such a case under `--all` and refuses it explicitly
+   when asked for directly, and the records checker validates the field. Writing the supervisor-mode
+   CSR model is a verification work package, not hygiene, and the lane correctly refused to smuggle
+   it in.
+2. **Results are per profile.** Until today `results/unit/<case>/result.json` was overwritten by
+   whichever profile ran last — the lane's own first p1 run clobbered the p0 PASS that EX-009 and
+   EX-025 cite as their evidence. p0 keeps the historical path (so every existing citation stays
+   true) and every other profile now writes `results/unit/<case>/<profile>/`. Verified by running
+   p1 and checking the p0 verdict is untouched.
+
+The second one is worth a sentence of its own, because it is the failure mode this whole file exists
+to prevent: a *passing* run silently destroyed the record another package relied on. No test failed,
+no gate went red, and the evidence would have been gone. The fix is small; noticing it required a
+lane that read the ledger instead of only running its own case.
