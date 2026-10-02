@@ -2092,6 +2092,48 @@
    ],
    "max_cycles": 200000,
    "seed": 1
+  },
+  "rvv.chaining_hazards": {
+   "task": "I-058",
+   "top": "mosaic_vec_tb",
+   "rtl": [
+    "rtl/core/mosaic_pkg.sv",
+    "rtl/core/mosaic_vec_desc.sv",
+    "rtl/core/mosaic_vec_cfg.sv",
+    "rtl/core/mosaic_vrf.sv",
+    "rtl/core/mosaic_vec_alu.sv",
+    "rtl/core/mosaic_vec_lsu.sv",
+    "rtl/core/mosaic_vec_restart.sv",
+    "rtl/core/mosaic_vec_chain.sv"
+   ],
+   "sv": [
+    "sim/tb/mosaic_vec_tb.sv"
+   ],
+   "cpp": [
+    "sim/unit/tb_vec.cpp"
+   ],
+   "max_cycles": 200000,
+   "seed": 1,
+   "pending": true
+  },
+  "harness.reset_traffic": {
+   "task": "V-010",
+   "top": "mosaic_bringup_tb",
+   "rtl": [
+    "rtl/core/mosaic_bringup_core.sv",
+    "rtl/core/mosaic_pkg.sv"
+   ],
+   "sv": [
+    "sim/tb/mosaic_bringup_tb.sv"
+   ],
+   "cpp": [
+    "sim/unit/tb_reset_traffic.cpp",
+    "sim/common/event_tap.cpp",
+    "sim/common/memory_model.cpp"
+   ],
+   "max_cycles": 4000000,
+   "seed": 1,
+   "pending": true
   }
  }
 }
