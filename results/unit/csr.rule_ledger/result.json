@@ -2,7 +2,7 @@
   "schema_version": 1,
   "case": "csr.rule_ledger",
   "verdict": "PASS",
-  "detail": "rules=54 examples=108 checks=4 comparisons=6407 cycles=3025 retires=753 traps=22 seed=1",
+  "detail": "rules=54 examples=108 checks=4 comparisons=6493 cycles=3064 retires=769 traps=22 seed=1",
   "seed": 1,
   "max_cycles": 4000000,
   "checks": 5,
@@ -10,6 +10,6 @@
   "image": "",
   "expect": "",
   "tool": "Verilator 5.052 2026-09-05",
-  "timestamp": "2026-10-02T05:34:06Z",
+  "timestamp": "2026-10-02T05:41:55Z",
   "first_mismatch": ""
 }

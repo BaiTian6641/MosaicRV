@@ -558,6 +558,17 @@ Program BuildProgram(const Geometry& g) {
       program.literals[plan.lit_canary] = e.expect_lo;
       asm_.Ld(7, 31, static_cast<int32_t>(8 * plan.lit_canary));
     }
+    // A denied write must leave the state unchanged: read the CSR before the
+    // operation and require the same value after it. slot_b is free here because
+    // an example is never both pre_read and advance.
+    if (e.pre_read != 0) {
+      if (e.expect_mode == MOSAIC_EXP_ADVANCE) {
+        Fail("csr-rule-ledger", std::string(MOSAIC_CSR_RULE_IDS[e.rule]) +
+                        ": pre_read and advance share a slot and cannot co-occur");
+      }
+      asm_.Csrr(6, static_cast<uint32_t>(target));
+      asm_.Sd(6, 30, static_cast<int32_t>(8 * plan.slot_b));
+    }
     if (e.op == MOSAIC_EX_CSRR) {
       plan.read_pc = asm_.pc();
       asm_.Csrr(7, static_cast<uint32_t>(target));
@@ -782,6 +793,15 @@ void RunCase(Vmosaic_core_tb* dut, mosaic::Reporter* reporter, const Geometry& g
                       value != e.forbid,
                       "read " + U64(value) + " equals the illegal value " +
                           U64(e.forbid));
+    }
+    if (e.pre_read != 0) {
+      uint64_t before = 0;
+      if (dut_mem.Read(SlotAddr(plan.slot_b), 8, &before) != mosaic::AccessStatus::kOk) {
+        Fail(phase, tag + ": the pre-read slot is not readable");
+      }
+      harness.Compare(tag + ": the denied access left the state unchanged",
+                      before == value,
+                      "before " + U64(before) + ", after " + U64(value));
     }
 
     if (e.negative) {

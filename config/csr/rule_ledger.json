@@ -997,7 +997,8 @@
         "expect": {
           "read": "0x0000000000000000"
         },
-        "forbid": "0xffffffffffffffff"
+        "forbid": "0xffffffffffffffff",
+        "pre_read": true
       },
       "negative": {
         "op": "csrrw",
@@ -1005,7 +1006,8 @@
         "traps": 1,
         "expect": {
           "read": "0x0000000000000000"
-        }
+        },
+        "pre_read": true
       }
     },
     {
@@ -1058,7 +1060,8 @@
         "expect": {
           "read": "0x0000000000000000"
         },
-        "forbid": "0xffffffffffffffff"
+        "forbid": "0xffffffffffffffff",
+        "pre_read": true
       },
       "negative": {
         "op": "csrrw",
@@ -1066,7 +1069,8 @@
         "traps": 1,
         "expect": {
           "read": "0x0000000000000000"
-        }
+        },
+        "pre_read": true
       }
     },
     {
@@ -1119,7 +1123,8 @@
         "expect": {
           "read": "0x0000000000000000"
         },
-        "forbid": "0xffffffffffffffff"
+        "forbid": "0xffffffffffffffff",
+        "pre_read": true
       },
       "negative": {
         "op": "csrrw",
@@ -1127,7 +1132,8 @@
         "traps": 1,
         "expect": {
           "read": "0x0000000000000000"
-        }
+        },
+        "pre_read": true
       }
     },
     {
@@ -1180,7 +1186,8 @@
         "expect": {
           "read": "0x0000000000000000"
         },
-        "forbid": "0xffffffffffffffff"
+        "forbid": "0xffffffffffffffff",
+        "pre_read": true
       },
       "negative": {
         "op": "csrrw",
@@ -1188,7 +1195,8 @@
         "traps": 1,
         "expect": {
           "read": "0x0000000000000000"
-        }
+        },
+        "pre_read": true
       }
     },
     {

@@ -52,7 +52,8 @@
     "V-016",
     "I-032",
     "I-049",
-    "I-042"
+    "I-042",
+    "V-017"
   ],
   "evidence": {
     "I-001": {
@@ -637,6 +638,17 @@
       "verdict": "PASS",
       "notes": "Blocking L1 instruction and data caches. Case PASS from a clean build: 42 checks, trace equivalence between cache-on and cache-off, 167 cycles, with the observed activity recorded (data: 14 hits, 15 misses, 13 refills, 4 writebacks, 2 faults; instruction: 2 hits, 1 miss, 1 refill, 0 faults). Geometry is declared rather than implied: direct-mapped, 8 sets x 32-byte line = 256 bytes, 64-bit words, 32-bit addresses, 24-bit tags; the instruction cache is read-only and the data cache is write-back with write allocation. The card's two fail modes are the two things proven: a dirty eviction preserves every byte (dirty_eviction_preserved) and a faulted refill is never marked valid (fault_refill_invalid), each with its own mutant -- FAULT_VALID, DIRTY_DROP and WRONG_REFILL, all rebuilt from deleted build directories with their -D in the build command and exiting 1 with a named first failure. The valid-bit rule the card asks for is implemented as stated: valid bits are initialised without resetting the data RAM. NOT covered, stated by the lane: the non-blocking/MSHR path is deferred to I-043; coherence between the instruction and data caches after a store (self-modifying code, FENCE.I visibility) is not claimed -- self-modification within one data cache is exercised and V-016 owns the fence.i side; there is no PMA/cacheability input yet (that is I-039/I-093's address-source work); the memory port is line-wide one-beat; and the case is deterministic rather than a random soak. The caches are NOT integrated into the core: they are verified as modules, and wiring them into the fetch and memory paths is outstanding work, recorded here rather than implied.",
       "report": "results/reports/I-042-cache.md"
+    },
+    "V-017": {
+      "cases": [
+        "csr.rule_ledger"
+      ],
+      "commands": [
+        "python3 tools/run_unit.py --profile p0 --case csr.rule_ledger"
+      ],
+      "verdict": "PASS",
+      "notes": "The CSR legality comparator: a machine-readable rule ledger with a positive and a negative example per rule, and a case that visits every rule and fails if any is unvisited. Case PASS from a clean build: 54 rules, 108 examples, 6493 comparisons over 3064 cycles, 769 retires, 22 traps. Deliverables: config/csr/rule_ledger.json (54 rules), config/schema/csr_rules.schema.json, ledger validation wired into tools/mosaic/config_check.py (so a malformed rule fails the config gate), a generated header build/<profile>/sim/mosaic_csr_rules.h, the driver sim/unit/tb_core_csr_rules.cpp and tools/run_csrrules_controls.py. Six controls each differ from the shipping binary and exit 1 with a named first failure, and they are exactly the card's three fail modes plus three RTL rules: SKIP_RULE (a rule silently unvisited), AUTO_WAIVER (a waiver generated from an observed difference instead of a declared rule -- the card's central prohibition), UNIMPL_ZERO (an unimplemented CSR accepted unconditionally as zero), CYCLE_WRITABLE, RO_WRITE_ACCEPTED and NO_FIELD_MASK. The 'reject the adjacent illegal result' requirement is what the example pairs encode: a strict rule's pair differs in one bit, and a WARL-allowed pair is paired with the adjacent pair that must be rejected. Gates green: lint 43 sources clean, slang-tidy exit 0, check_records, check_profile --all, make check, lint-cpp 57 files. NOT covered, stated by the lane: p0 is M-only so a permission error in the wrong mode is unreachable at runtime (the address-encoded minimum-privilege rule is checked structurally instead); mstatus.FS/VS early-dirty is not exercisable because p0 implements neither F/D nor V, so only the WARL encoding of both fields is tested and the precondition is recorded in the ledger; mip.MEIP reads zero (no PLIC) and is tested as read-only-zero; unimplemented CSRs are checked at three representative addresses rather than enumerated; counter values are pinned to ranges because they free-run; and mtvec vectored-entry arithmetic and misa's WARL extension bits are not re-derived here. RTL was read only, not edited.",
+      "report": "results/reports/V-017-csr.md"
     }
   },
   "blocked_tasks": {
