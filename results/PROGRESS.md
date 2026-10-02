@@ -2533,3 +2533,57 @@ lane broker's protocol into a measured aggregation benefit), multi-hart/cohort/p
 measurement and release gates (I-076..I-086), the RVA23S64 mandatory matrix (I-092..I-098), plus the
 smaller open items: the masked mask-prefix forms, the core-level `vstart` illegal routing test, and the
 `tb_vec.cpp` reset-traffic follow-up.
+
+---
+
+## 2026-10-01 — the locality structures are in the machine, and one variable at a time (78 entries)
+
+**The plan's "measured on equal resources, never inherited" requirement now has its locality half**, and
+the step table is the deliverable rather than the fastest number:
+
+| step | cycles | dmem | line memory | LLB hits | prefetch issued | prefetch **useful** |
+|---|---|---|---|---|---|---|
+| baseline (off) | 3016 | 394 | 97 | 0 | 0 | 0 |
+| LLB only | 2236 | 126 | 30 | 67 | 0 | 0 |
+| prefetch only | **3159** | 446 | 97 | 0 | 13 | **0** |
+| both | **2223** | 126 | 17 | 80 | 13 | **13** |
+
+Architecture identical in all four — the retire stream through the park loop and all four signature words,
+checked against the program's own arithmetic. The LLB and the prefetcher are in the core's data path
+behind a default-off switch, with **all eight invalidation sources driven from the core itself** (store/AMO
+commit at the endpoint, the cache's own refill/replacement traffic, an external snoop, a shootdown,
+`FENCE`, `FENCE.I`, `SFENCE.VMA` by ASID and/or page from the system unit's writeback pulse, and a
+`satp`/context change), and the prefetcher egresses through **the same bridge the cache uses** with cache
+priority rather than becoming a fourth arbiter master.
+
+**Two findings in that table are worth more than the fastest number.** The prefetcher **alone is slower
+than the baseline** (3159 against 3016) with zero useful prefetches — the honest negative I-063 had already
+reported on p0, now reproduced in the machine — while the prefetcher **with** the LLB is useful for every
+one of its 13 issues, because the LLB is where a prefetch's value is realised. Neither structure alone
+tells the truth about the pair, which is precisely why the plan insists on changing one variable at a time:
+a project that had measured only "structures on versus off" would have reported a modest win, and a project
+that had measured only the prefetcher would have deleted it.
+
+**The scheduler is deliberately not wired, with a reason rather than a shrug**: I-062's QoS module is a
+self-contained service model with its own queues, timestamps and windowed eligibility, while the core's
+data-memory arbiter is a hand-written single-outstanding ownership mux that both grants and routes.
+Composing them would replace the ownership model with the QoS window model and re-derive response routing
+and PTW priority — a second service model, which the card forbids. That is the same decision the fabric
+integration made about its own arbiter, recorded the same way, and it is the third time this project has
+chosen "compiled but deliberately not instantiated, here is why" over a decorative integration.
+
+**Also this stretch**: the masked mask-prefix forms are now proven (2870 checks; the RTL was *already*
+correct, so the deliverable is the coverage — including 45 cells where a masked-off set bit precedes an
+active one, the configuration where searching over active elements and searching over all elements
+disagree — plus three mutants). That package recorded a real gap rather than passing it by: **the core
+instantiates its vector ALU lane with ADDSUB and LOGIC capability bits only, so the mask-prefix operations
+are not advertised and the core refuses them** — the unit supports what the machine will not dispatch.
+
+**State**: 78 ledger entries delivered, 16 capabilities advertised, ACT4 127/127, `make check` and every
+gate green, lint 63/63 on both profiles, exclusion ledger 18 open / 36 covered. **I-084's full comparison
+is now the next measurable step** — with the locality structures in the path it can vary steering, locality
+and fusion one at a time on equal resources, which is the plan's actual success criterion. Remaining beyond
+it: vector register renaming and **real parallel lanes** (what would turn the lane broker's verified
+protocol into a measured aggregation benefit), multi-hart/cohort/pod (I-064..I-075), the measurement and
+release gates (I-076..I-086), the RVA23S64 mandatory matrix (I-092..I-098), the core-level `vstart` illegal
+routing test and the mask-prefix capability advertisement, and the `tb_vec.cpp` reset-traffic follow-up.
