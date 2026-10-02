@@ -2,7 +2,7 @@
   "schema_version": 1,
   "case": "rvv.lane_resize_boundary",
   "verdict": "PASS",
-  "detail": "checks=111 phases=7 seed=1 vec_cycles=203 scalar_cycles=103 lane8_quota=8 lane8_elems=32 lane4_quota=4 lane4_elems=32 lane4_high_elems=0 resize_quota=8 resizes=2 acks=2",
+  "detail": "checks=111 phases=7 seed=1 vec_cycles=226 scalar_cycles=103 lane8_quota=8 lane8_elems=32 lane4_quota=4 lane4_elems=32 lane4_high_elems=0 resize_quota=8 resizes=2 acks=2",
   "seed": 1,
   "max_cycles": 4000000,
   "checks": 112,
@@ -10,6 +10,6 @@
   "image": "",
   "expect": "",
   "tool": "Verilator 5.052 2026-09-05",
-  "timestamp": "2026-10-02T17:58:30Z",
+  "timestamp": "2026-10-02T18:18:07Z",
   "first_mismatch": ""
 }

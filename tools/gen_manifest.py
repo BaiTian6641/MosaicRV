@@ -246,6 +246,65 @@ def render_sv_package(bundle: config_check.Bundle, advertised) -> str:
         add("      mosaic_pa_cacheable = MOSAIC_%s_CACHEABLE;" % name)
     add("  endfunction")
     add("")
+    # A *device* region is one the map declares MMIO, names a backing device, or
+    # marks non-idempotent. The predicate below is the map's answer, not the
+    # RTL's: a request that is not normal, idempotent memory must never be
+    # coalesced, because a merged request cannot preserve a device's side effects
+    # or its per-access semantics. `mosaic_pa_normal` is the single predicate the
+    # vector coalescer asks; it is emitted here so the coalescer and the SoC
+    # device decode cannot disagree about where a device lives.
+    add("  // Device and idempotency, from each region's own kind/device/idempotent")
+    add("  // fields (config/memory/). A region is a device when it is MMIO, names a")
+    add("  // device, or the map marks it non-idempotent.")
+    for region in sorted(bundle.memory["regions"], key=lambda r: r["base"]):
+        name = region["name"].upper()
+        is_device = (region.get("kind") == "mmio" or "device" in region
+                     or not region.get("idempotent", True))
+        add("  localparam bit %-30s = 1'b%d;" % ("MOSAIC_%s_IS_DEVICE" % name,
+                                                 1 if is_device else 0))
+        add("  localparam bit %-30s = 1'b%d;" % ("MOSAIC_%s_IDEMPOTENT" % name,
+                                                 1 if region.get("idempotent", True) else 0))
+    add("")
+    add("  // The device predicate: the platform map, asked directly. An address no")
+    add("  // region covers is not a device -- it is a fault -- so this answers 0 for")
+    add("  // it; `mosaic_pa_normal` is the predicate that refuses it (idempotency).")
+    add("  function automatic logic mosaic_pa_device(input logic [63:0] pa);")
+    add("    mosaic_pa_device = 1'b0;")
+    for region in sorted(bundle.memory["regions"], key=lambda r: r["base"]):
+        name = region["name"].upper()
+        end = region["base"] + region["size"]
+        if region["base"] == 0:
+            add("    if (pa < %s)" % _hex64(end))
+        else:
+            add("    if ((pa >= %s) && (pa < %s))" % (_hex64(region["base"]), _hex64(end)))
+        add("      mosaic_pa_device = MOSAIC_%s_IS_DEVICE;" % name)
+    add("  endfunction")
+    add("")
+    add("  // Idempotency: an address no region covers answers 0 (not idempotent),")
+    add("  // because an uncovered access is a fault and nothing about it may be")
+    add("  // merged.")
+    add("  function automatic logic mosaic_pa_idempotent(input logic [63:0] pa);")
+    add("    mosaic_pa_idempotent = 1'b0;")
+    for region in sorted(bundle.memory["regions"], key=lambda r: r["base"]):
+        name = region["name"].upper()
+        end = region["base"] + region["size"]
+        if region["base"] == 0:
+            add("    if (pa < %s)" % _hex64(end))
+        else:
+            add("    if ((pa >= %s) && (pa < %s))" % (_hex64(region["base"]), _hex64(end)))
+        add("      mosaic_pa_idempotent = MOSAIC_%s_IDEMPOTENT;" % name)
+    add("  endfunction")
+    add("")
+    add("  // Normal memory: idempotent and not a device. This is the coalescer's")
+    add("  // predicate. Cacheability is deliberately *not* part of it: the baseline")
+    add("  // profile advertises its RAM as uncacheable (there is no cache in p0),")
+    add("  // yet that RAM is exactly the normal, idempotent memory a coalesced")
+    add("  // line request is legal for. Gating on cacheability would refuse the")
+    add("  // normal memory the card requires and coalesce nothing in p0.")
+    add("  function automatic logic mosaic_pa_normal(input logic [63:0] pa);")
+    add("    mosaic_pa_normal = mosaic_pa_idempotent(pa) && !mosaic_pa_device(pa);")
+    add("  endfunction")
+    add("")
     add("  /* verilator lint_on UNUSEDPARAM */")
     add("")
     add("endpackage : mosaic_cfg_pkg")

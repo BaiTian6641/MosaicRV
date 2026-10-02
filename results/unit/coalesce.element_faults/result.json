@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "case": "coalesce.element_faults",
+  "verdict": "FAIL",
+  "detail": "checks=612 cycles=1882901",
+  "seed": 1,
+  "max_cycles": 200000,
+  "checks": 612,
+  "failures": 96,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-02T18:22:56Z",
+  "first_mismatch": "",
+  "failed_checks": ["coalesce-fault unit e8 load at 0: a macro never completed", "coalesce-fault unit e8 load at 0: the fault was not reported", "coalesce-fault unit e8 load at 1: a macro never completed", "coalesce-fault unit e8 load at 1: the fault was not reported", "coalesce-fault unit e8 load at 1: vstart 0 expected 1 (a whole-group fault destroys element granularity)", "coalesce-fault unit e8 load at 1: load element 0 is 0x000000000000001d expected 0x00000000000000f5", "coalesce-fault unit e8 load at 3: a macro never completed", "coalesce-fault unit e8 load at 3: the fault was not reported", "coalesce-fault unit e8 load at 3: vstart 0 expected 3 (a whole-group fault destroys element granularity)", "coalesce-fault unit e8 load at 3: load element 0 is 0x000000000000001d expected 0x00000000000000f5", "coalesce-fault unit e8 load at 3: load element 1 is 0x0000000000000025 expected 0x0000000000000019", "coalesce-fault unit e8 load at 3: load element 2 is 0x00000000000000d5 expected 0x000000000000009e", "coalesce-fault unit e8 load at 7: a macro never completed", "coalesce-fault unit e8 load at 7: the fault was not reported", "coalesce-fault unit e8 load at 7: vstart 0 expected 7 (a whole-group fault destroys element granularity)", "coalesce-fault unit e8 load at 7: load element 0 is 0x000000000000001d expected 0x00000000000000f5", "coalesce-fault unit e8 load at 7: load element 1 is 0x0000000000000025 expected 0x0000000000000019", "coalesce-fault unit e8 load at 7: load element 2 is 0x00000000000000d5 expected 0x000000000000009e", "coalesce-fault unit e8 load at 7: load element 3 is 0x00000000000000d6 expected 0x0000000000000090", "coalesce-fault unit e8 load at 7: load element 4 is 0x00000000000000d2 expected 0x00000000000000c9", "coalesce-fault unit e8 load at 7: load element 5 is 0x0000000000000010 expected 0x00000000000000e6", "coalesce-fault unit e8 load at 7: load element 6 is 0x00000000000000f2 expected 0x0000000000000073", "coalesce-fault unit e8 store at 0: a macro never completed", "coalesce-fault unit e8 store at 0: the fault was not reported", "coalesce-fault unit e8 store at 1: a macro never completed", "coalesce-fault unit e8 store at 1: the fault was not reported", "coalesce-fault unit e8 store at 1: vstart 0 expected 1 (a whole-group fault destroys element granularity)", "coalesce-fault unit e8 store at 3: a macro never completed", "coalesce-fault unit e8 store at 3: the fault was not reported", "coalesce-fault unit e8 store at 3: vstart 0 expected 3 (a whole-group fault destroys element granularity)", "coalesce-fault unit e8 store at 3: store element 1 is 0x19 expected 0xc9", "coalesce-fault unit e8 store at 3: store element 2 is 0x9e expected 0xfe"]
+}

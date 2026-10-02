@@ -2347,8 +2347,7 @@
     "sim/unit/tb_vec.cpp"
    ],
    "max_cycles": 200000,
-   "seed": 1,
-   "pending": true
+   "seed": 1
   },
   "coalesce.element_faults": {
    "task": "I-061",

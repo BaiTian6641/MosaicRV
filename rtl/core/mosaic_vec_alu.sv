@@ -107,6 +107,14 @@
 //   MASKPFX_NO_TRAP     vmsbf/vmsif/vmsof never raise on a non-zero vstart
 //   MASKPFX_TRAP_VSTART0 the rule fires even at vstart == 0
 //   MASKPFX_WRONG_OP    vmsof is exempted, so only two of the three raise
+//
+// Three more inject a defect in the mask-prefix *semantics* proper
+// (CASE=rvv.mask_prefix_semantics); each is proven to fail it in
+// results/reports/rvv-mask-prefix-semantics.md:
+//
+//   MASKPFX_SAME_EXPR    vmsbf and vmsif share set-including-first again
+//   MASKPFX_ALLZERO      an all-zero active source is cleared, not all-ones
+//   MASKPFX_POS0         vmsbf sets a bit before a first set bit at position 0
 // ============================================================================
 
 `default_nettype none
@@ -775,11 +783,47 @@ module mosaic_vec_alu #(
         rd2 = 64'(idx / 8);
       end
       F_MASKPFX: begin
+        // ---------------------------------------------------- the three rules
+        // For a source mask whose first set bit over the *active* elements is
+        // at position k (the running prefix `ef_pfx` is the OR of the source
+        // bits strictly before the current element):
+        //
+        //   vmsbf: bits 0..k-1 set.  With no set bit, every active bit set.
+        //   vmsif: bits 0..k   set.  With no set bit, every active bit set.
+        //   vmsof: only bit k  set.  With no set bit, no active bit set.
+        //
+        // The all-zero row is where the three are *not* symmetric: vmsbf and
+        // vmsif are all-ones, vmsof is all-zeros (v-spec.adoc: vmsbf "if there
+        // is no set bit in the active elements of the source vector, then all
+        // active elements in the destination are written with a 1"; vmsif is
+        // "similar ... except it also includes the element with a set bit", so
+        // with no such element it is the same all-ones; vmsof "only sets the
+        // first element with a bit set, if any").
         case (ef_op)
-          4'd0:    sel_mres = ~ef_pfx;              // vmsbf
-          4'd1:    sel_mres = ~ef_pfx;              // vmsif
-          default: sel_mres = bbit & (~ef_pfx);     // vmsof
+          4'd0:    sel_mres = ~(ef_pfx | bbit);     // vmsbf: before the first
+          4'd1:    sel_mres = ~ef_pfx;              // vmsif: through the first
+          default: sel_mres = bbit & (~ef_pfx);     // vmsof: only the first
         endcase
+`ifdef MOSAIC_VEC_ALU_MUTANT_MASKPFX_SAME_EXPR
+        // NEGATIVE CONTROL: vmsbf and vmsif share the set-including-first
+        // expression again -- exactly the defect this case exists to catch.
+        if (ef_op == 4'd0) sel_mres = ~ef_pfx;
+`endif
+`ifdef MOSAIC_VEC_ALU_MUTANT_MASKPFX_ALLZERO
+        // NEGATIVE CONTROL: an all-zero active source is treated as "no first
+        // set bit, so nothing is set" instead of the specification's all-ones
+        // for vmsbf/vmsif. The whole active-slice OR is known only at the final
+        // active element, where the running prefix and this element's source
+        // bit together cover every active source bit.
+        if ((ef_op != 4'd2) && (cfg_vl_i != 8'd0) &&
+            (int'(ef_index) == (int'(cfg_vl_i) - 1)) && !(ef_pfx | bbit))
+          sel_mres = 1'b0;
+`endif
+`ifdef MOSAIC_VEC_ALU_MUTANT_MASKPFX_POS0
+        // NEGATIVE CONTROL: vmsbf reports a set bit before the first element
+        // even when element 0 is itself the first set bit (k = 0).
+        if ((ef_op == 4'd0) && (ef_index == 8'd0)) sel_mres = 1'b1;
+`endif
         sel_pfx = ef_pfx | bbit;
         rd2     = 64'(idx / 8);
       end
@@ -1107,8 +1151,13 @@ module mosaic_vec_alu #(
           wr_data_c = dwdata_q;
         end else begin
           // a mask destination is addressed by its SEW=8 byte, so the write
-          // element is i/8, not i
-          wr_elem_c = (dst_kind == DST_MASK) ? {cur_q[6:3], 3'b000} : cur_q[6:0];
+          // element is i/8, not i.  The read path (E_DSTRD) already uses
+          // `cur_q >> 3`; this expression previously multiplied that quotient
+          // back by 8, so every element from 8 up wrote byte 8 (or a multiple)
+          // and the bytes in between kept the stale destination byte.  Found by
+          // CASE=rvv.mask_prefix_semantics, which is the first case to drive a
+          // mask destination past element 8.
+          wr_elem_c = (dst_kind == DST_MASK) ? 7'(cur_q >> 3) : cur_q[6:0];
           wr_data_c = dwdata_q;
         end
       end

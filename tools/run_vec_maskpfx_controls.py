@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
-"""Negative controls for CASE=rvv.mask_prefix_vstart (work package I-057).
+"""Negative controls for the mask-prefix cases.
 
-The case claims that the mask-prefix operations (`vmsbf.m`, `vmsif.m`,
+Two cases share this tool: ``CASE=rvv.mask_prefix_vstart`` (work package I-057,
+the illegal-instruction rule at a non-zero ``vstart``) and the semantics proper,
+``CASE=rvv.mask_prefix_semantics`` (the three rules at the first set bit, plus
+the all-zero and position-0 boundaries).  ``--case`` selects which; the default
+is the vstart case.
+
+The vstart case claims that the mask-prefix operations (`vmsbf.m`, `vmsif.m`,
 `vmsof.m`) raise an illegal-instruction exception when `vstart` is non-zero --
 they cannot be restarted part-way -- while `vstart == 0` still executes
 normally, and that the refused instruction neither reads nor writes the register
@@ -37,10 +43,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import run_unit  # noqa: E402
 
 REPO_ROOT = run_unit.REPO_ROOT
-CASE_ID = "rvv.mask_prefix_vstart"
+DEFAULT_CASE = "rvv.mask_prefix_vstart"
 
 # Each mutant: the define, the source file that must read it, the defect it
-# injects, and the text the failing check must contain.
+# injects, and the text the failing check must contain.  Two cases share this
+# tool: the `vstart` rule (I-057) and the semantics proper (the registered
+# CASE=rvv.mask_prefix_semantics).
 MUTANTS = [
     (
         "MOSAIC_VEC_ALU_MUTANT_MASKPFX_NO_TRAP",
@@ -65,8 +73,40 @@ MUTANTS = [
     ),
 ]
 
+# CASE=rvv.mask_prefix_semantics: the defect the previous package missed
+# (`vmsbf` sharing `vmsif`'s expression) and the two boundaries where a wrong
+# all-zero or position-0 rule hides.
+MUTANTS_SEMANTICS = [
+    (
+        "MOSAIC_VEC_ALU_MUTANT_MASKPFX_SAME_EXPR",
+        "rtl/core/mosaic_vec_alu.sv",
+        "vmsbf and vmsif share the set-including-first expression again, so "
+        "vmsbf is wrong at the first set bit of every source that has one",
+        "spec-anchor vmsbf src=148 k-bit2: 1 expected 0",
+    ),
+    (
+        "MOSAIC_VEC_ALU_MUTANT_MASKPFX_ALLZERO",
+        "rtl/core/mosaic_vec_alu.sv",
+        "an all-zero active source is cleared for vmsbf/vmsif instead of the "
+        "specification's all-ones",
+        "all-zero vmsbf bit15: 0 expected 1",
+    ),
+    (
+        "MOSAIC_VEC_ALU_MUTANT_MASKPFX_POS0",
+        "rtl/core/mosaic_vec_alu.sv",
+        "vmsbf reports a bit set before the first element when element 0 is "
+        "itself the first set bit (k = 0)",
+        "spec-anchor vmsbf src=149 k-bit0: 1 expected 0",
+    ),
+]
 
-def build(entry: dict, profile: str, defines: list, build_dir: str) -> str:
+CASES = {
+    "rvv.mask_prefix_vstart": MUTANTS,
+    "rvv.mask_prefix_semantics": MUTANTS_SEMANTICS,
+}
+
+
+def build(entry: dict, profile: str, defines: list, build_dir: str, case_id: str) -> str:
     """Build one configuration from an empty directory; returns the log."""
     shutil.rmtree(build_dir, ignore_errors=True)
     os.makedirs(build_dir, exist_ok=True)
@@ -91,7 +131,7 @@ def build(entry: dict, profile: str, defines: list, build_dir: str) -> str:
         # The mutation is in the RTL, so the define goes to Verilator, not to the
         # generated C++.
         cmd += ["-D%s" % define]
-    cmd += ["-o", os.path.join(build_dir, CASE_ID)]
+    cmd += ["-o", os.path.join(build_dir, case_id)]
     cmd += sources
 
     with open(os.path.join(build_dir, "build_command.txt"), "w") as handle:
@@ -104,10 +144,10 @@ def build(entry: dict, profile: str, defines: list, build_dir: str) -> str:
     return log
 
 
-def run_case(binary: str, out_dir: str, max_cycles: int):
+def run_case(binary: str, out_dir: str, max_cycles: int, case_id: str):
     os.makedirs(out_dir, exist_ok=True)
     return subprocess.run(
-        [binary, "--case", CASE_ID, "--out", out_dir, "--seed", "1",
+        [binary, "--case", case_id, "--out", out_dir, "--seed", "1",
          "--max-cycles", str(max_cycles)],
         cwd=REPO_ROOT,
         stdout=subprocess.PIPE,
@@ -141,19 +181,22 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--only", default=None)
     parser.add_argument("--profile", default="p0")
+    parser.add_argument("--case", default=DEFAULT_CASE, choices=sorted(CASES))
     args = parser.parse_args()
 
+    case_id = args.case
+    mutants = CASES[case_id]
     registry = run_unit.load_registry()["cases"]
-    if CASE_ID not in registry:
-        print("no such case: %s" % CASE_ID)
+    if case_id not in registry:
+        print("no such case: %s" % case_id)
         return 2
-    entry = registry[CASE_ID]
+    entry = registry[case_id]
     max_cycles = entry.get("max_cycles", 200000)
 
     # The mutation must exist in the source before it is claimed to have been
     # built: a `-D` that no `ifdef` reads would build a shipping binary under a
     # mutant's name.
-    for define, source_rel, _defect, _expected in MUTANTS:
+    for define, source_rel, _defect, _expected in mutants:
         source = os.path.join(REPO_ROOT, source_rel)
         if source_rel not in entry.get("rtl", []):
             print("FAIL: %s is not in the case's RTL list" % source_rel)
@@ -166,9 +209,9 @@ def main() -> int:
     root = os.path.join(REPO_ROOT, "build", args.profile, "vec_maskpfx_controls")
     shipping_dir = os.path.join(root, "shipping")
     print("building the shipping case from an empty directory (profile %s)..." % args.profile)
-    build(entry, args.profile, [], shipping_dir)
-    shipping = os.path.join(shipping_dir, CASE_ID)
-    result = run_case(shipping, os.path.join(root, "out-shipping"), max_cycles)
+    build(entry, args.profile, [], shipping_dir, case_id)
+    shipping = os.path.join(shipping_dir, case_id)
+    result = run_case(shipping, os.path.join(root, "out-shipping"), max_cycles, case_id)
     baseline_ok = result.returncode == 0 and b"RESULT PASS" in result.stdout
     print("  baseline exit=%d %s" % (
         result.returncode, first_result_line(result.stdout.decode("utf-8", "replace"))))
@@ -182,21 +225,21 @@ def main() -> int:
     print()
     print("%-46s %-5s %s" % ("mutant", "exit", "result"))
     print("-" * 118)
-    for define, _source_rel, defect, expected in MUTANTS:
+    for define, _source_rel, defect, expected in mutants:
         if args.only is not None and args.only not in define:
             continue
         mutant_dir = os.path.join(root, define)
         try:
-            build(entry, args.profile, [define], mutant_dir)
+            build(entry, args.profile, [define], mutant_dir, case_id)
         except RuntimeError as error:
             print("%-46s BUILD FAILED" % define)
             print(error)
             failures += 1
             continue
-        mutant = os.path.join(mutant_dir, CASE_ID)
+        mutant = os.path.join(mutant_dir, case_id)
         differs = subprocess.run(["cmp", "-s", shipping, mutant]).returncode != 0
         mutant_hash = sha256_of(mutant)
-        result = run_case(mutant, os.path.join(root, "out-" + define), max_cycles)
+        result = run_case(mutant, os.path.join(root, "out-" + define), max_cycles, case_id)
         log = result.stdout.decode("utf-8", "replace")
         caught = result.returncode == 1 and expected in log
         status = "OK" if (differs and caught) else "MISS"
@@ -222,7 +265,7 @@ def main() -> int:
         print("%d mutant(s) were not caught as required" % failures)
         return 1
     print("all %d mutants mutate the binary, exit 1 and name the check they break"
-          % (len(MUTANTS) if args.only is None else 1))
+          % (len(mutants) if args.only is None else 1))
     return 0
 
 

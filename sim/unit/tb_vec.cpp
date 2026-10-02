@@ -41,6 +41,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <set>
 #include <string>
 #include <utility>
@@ -1793,10 +1794,17 @@ ElemVal OracleElem(int fam, int op, int sew, int form, uint64_t vs2, uint64_t vs
       break;
     }
     case VF_MASKPFX: {
+      // The specification's three rules, stated once (v-spec.adoc 6.x).  With
+      // `pfx_in` the OR of the source bits strictly before element `index`:
+      //   vmsbf[i] = 1 iff no set bit at or before i  (all-ones if none)
+      //   vmsif[i] = 1 iff no set bit strictly before i (all-ones if none)
+      //   vmsof[i] = 1 iff source bit i is the first set bit
+      // An all-zero active source is therefore all-ones for vmsbf and vmsif,
+      // and all-zeros for vmsof -- the asymmetry this case encodes.
       bool bb = ((vs2 >> (index & 7)) & 1u) != 0;
-      if (op == 0) o.mres = !pfx_in;                 // vmsbf
-      else if (op == 1) o.mres = !pfx_in;            // vmsif
-      else o.mres = bb && !pfx_in;                   // vmsof
+      if (op == 0) o.mres = !(pfx_in || bb);         // vmsbf: before the first
+      else if (op == 1) o.mres = !pfx_in;            // vmsif: through the first
+      else o.mres = bb && !pfx_in;                   // vmsof: only the first
       o.pfx = pfx_in || bb;
       break;
     }
@@ -3075,6 +3083,12 @@ struct LsuMem {
   bool fault_all = false;
   int fault_elem = -1;
   int fault_field = 0;
+  // I-061: a byte-granular fault map. A merge makes a request cover several
+  // elements, so the fault decision must be a property of the *bytes* the
+  // request enables (an address permission), not of one element index. When
+  // this map is non-empty it decides the fault; otherwise the element/field
+  // match does, which is what the I-056 and I-057 phases use.
+  std::vector<bool> fault_bytes;
   int req_count = 0;
   int device_reqs = 0;
   int ram_reqs = 0;
@@ -3120,6 +3134,41 @@ struct LsuMem {
     return r >= 0 && regions[static_cast<size_t>(r)].device;
   }
 
+  // Clear the byte-granular fault map and any element-keyed fault.
+  void ClearFaults() {
+    fault_enable = false;
+    fault_all = false;
+    fault_elem = -1;
+    fault_field = 0;
+    fault_bytes.assign(static_cast<size_t>(kSize), false);
+  }
+
+  // Fault an element's bytes, addressed as `addr`..`addr+be-1`.
+  void FaultByteRange(uint64_t addr, int be) {
+    fault_bytes.assign(static_cast<size_t>(kSize), false);
+    for (int k = 0; k < be; ++k) {
+      fault_bytes[static_cast<size_t>((addr + static_cast<uint64_t>(k)) & 0xFFFFull)] = true;
+    }
+    fault_enable = true;
+    fault_all = false;
+    fault_elem = -1;
+  }
+
+  // Does a request with `addr`/`mask` fault? Byte-granular when the map is set,
+  // element-keyed otherwise.
+  bool Faults(uint64_t addr, uint8_t mask, int elem, int field) const {
+    if (fault_all) return true;
+    if (!fault_bytes.empty()) {
+      uint64_t beat = addr & ~7ull;
+      for (int k = 0; k < 8; ++k) {
+        if (((mask >> k) & 1u) == 0) continue;
+        if (fault_bytes[static_cast<size_t>((beat + static_cast<uint64_t>(k)) & 0xFFFFull)]) return true;
+      }
+      return false;
+    }
+    return (elem == fault_elem) && (field == fault_field);
+  }
+
   uint64_t Beat(uint64_t addr) const {
     uint64_t beat = addr & ~7ull;
     uint64_t v = 0;
@@ -3162,6 +3211,9 @@ struct LsuStim {
   bool mask_en = false;
   uint8_t caps = 0xFF;
   bool mem_ready = true;
+  // ---- I-061 coalescing --------------------------------------------------
+  bool coalesce = false;        // enable same-hart, same-beat line coalescing
+  bool atomic = false;          // the macro is an atomic class access
   // ---- I-057 restart controller -----------------------------------------
   bool fof = false;             // fault-only-first unit-stride load
   bool intr = false;            // precise interrupt request at a boundary
@@ -3179,6 +3231,7 @@ struct LsuObs {
   bool busy = false, done = false, illegal = false, trap = false;
   int trap_elem = 0, elems = 0;
   uint32_t req_ctr = 0;
+  uint32_t merge_ctr = 0;      // I-061: elements a merge removed
   bool req_valid = false;
   int req_elem = 0, req_field = 0;
   uint64_t req_addr = 0;
@@ -3250,8 +3303,7 @@ class Lsu {
       re = p.elem;
       rf = p.field;
       rdata = mem_->Beat(p.addr);
-      rfault = mem_->fault_enable &&
-               (mem_->fault_all || ((re == mem_->fault_elem) && (rf == mem_->fault_field)));
+      rfault = mem_->fault_enable && mem_->Faults(p.addr, p.mask, re, rf);
       if (!rfault && p.we) mem_->Apply(p.addr, p.mask, p.wdata);
     }
 
@@ -3282,6 +3334,8 @@ class Lsu {
     d_->lsu_base_i = s.base;
     d_->lsu_stride_i = s.stride;
     d_->lsu_mask_en_i = s.mask_en ? 1 : 0;
+    d_->lsu_coalesce_i = s.coalesce ? 1 : 0;
+    d_->lsu_atomic_i = s.atomic ? 1 : 0;
     d_->lsu_mem_req_ready_i = s.mem_ready ? 1 : 0;
     d_->lsu_mem_rsp_valid_i = rsp ? 1 : 0;
     d_->lsu_mem_rsp_elem_i = static_cast<uint8_t>(re & 0x7F);
@@ -3342,6 +3396,7 @@ class Lsu {
     o.trap_elem = static_cast<int>(d_->lsu_trap_elem_o);
     o.elems = static_cast<int>(d_->lsu_elems_o);
     o.req_ctr = static_cast<uint32_t>(d_->lsu_req_ctr_o);
+    o.merge_ctr = static_cast<uint32_t>(d_->lsu_merge_ctr_o);
     o.req_valid = pre_req;
     o.req_elem = pre_elem;
     o.req_field = pre_field;
@@ -3414,7 +3469,8 @@ class Lsu {
   // launch one macro and run it to completion; returns the final observation
   LsuObs Run(int mode, bool we, bool ordered, int nf, int vd, int data, int index,
              int idx_sew, uint64_t base, uint64_t stride, bool mask_en,
-             int guard_cycles = 40000, uint8_t caps = 0xFF) {
+             int guard_cycles = 40000, uint8_t caps = 0xFF,
+             bool coalesce = false, bool atomic = false) {
     reqs_.clear();
     pending_.clear();
     overlapped_ = false;
@@ -3436,11 +3492,15 @@ class Lsu {
     s.mask_en = mask_en;
     s.caps = caps;
     s.mem_ready = true;
+    s.coalesce = coalesce;
+    s.atomic = atomic;
     LsuObs o = Step(s);
 
     LsuStim idle;
     idle.caps = caps;
     idle.mem_ready = true;
+    idle.coalesce = coalesce;
+    idle.atomic = atomic;
     int guard = 0;
     while (!o.done && ++guard < guard_cycles) o = Step(idle);
     if (!o.done) o.busy = false;
@@ -6980,6 +7040,731 @@ void RunMaskPrefixVstartCase(Vmosaic_vec_tb* dut, ClockDriver* clk, Reporter* re
              "coverage: " + Dec(illegal_cells) + " illegal-vstart cells ran, expected 6");
 }
 
+// ---------------------------------------------------------------------------
+// CASE=rvv.mask_prefix_semantics.
+//
+// The three mask-prefix instructions differ at the first set bit of the source
+// mask, and at the all-zero boundary they are not symmetric. Written as rules
+// over the active elements [0, vl) of the source, with k the position of the
+// first source bit set ("no k" meaning the active slice is all-zero):
+//
+//   vmsbf.m  vd[i] = 1  iff i <  k;   with no k, vd[i] = 1 for every active i
+//   vmsif.m  vd[i] = 1  iff i <= k;   with no k, vd[i] = 1 for every active i
+//   vmsof.m  vd[i] = 1  iff i == k;   with no k, vd[i] = 0 for every active i
+//
+// This is the specification's own statement (v-spec.adoc, "vmsbf.m
+// set-before-first mask bit" and its two neighbours), and it is the *source* of
+// every expectation here; the RTL is what is under test. The case drives all
+// three operations over a source whose first set bit is at every position the
+// packet engine can address, plus the three boundaries -- all-zero, first set
+// bit at position 0, and a set bit above vl -- and compares the destination
+// mask read back from the VRF.
+//
+// The all-zero row is the surprise the specification states and a naive reading
+// misses: vmsbf and vmsif both produce all-ones while vmsof produces all-zeros,
+// so an all-zero source mask is *not* symmetric among the three instructions.
+void RunMaskPrefixSemanticsCase(Vmosaic_vec_tb* dut, ClockDriver* clk, Reporter* rep) {
+  Cfg cfg(dut, clk);
+  Vec vec(dut, clk);
+
+  const char* kName[3] = {"vmsbf", "vmsif", "vmsof"};
+  const int kSewL = 3;      // a mask register is SEW=8, LMUL=1
+  const int kVlmax = 16;    // VLEN=128 / SEW=8, LMUL=1 -> 16 addressable bits
+  Layout L;
+  L.vd = 8; L.vs1 = 24; L.vs2 = 16; L.mask = false;
+
+  // Prime a mask register from a 16-bit pattern, through both the VRF and the
+  // host model so the oracle sees the same source.
+  auto prime = [&](HostVrf* vf, int base, uint64_t bits) {
+    for (int b = 0; b < kVlmax / 8; ++b) {
+      vec.Prime(*vf, base, b, 3, 0, (bits >> (8 * b)) & 0xFFull);
+    }
+  };
+  auto dst_bit = [&](int i) {
+    return ((vec.MemRead(L.vd, i / 8, 3, 0) >> (i % 8)) & 1u) != 0;
+  };
+
+  int position_cells = 0;   // (op, first-set-bit position 0..15)
+  int allzero_cells = 0;
+  int above_vl_cells = 0;
+  int tail_cells = 0;
+  int pos0_cells = 0;
+  int anchor_cells = 0;
+
+  // ------------------------------------------------------------------------
+  // Anchor checks against the specification's own worked examples. These do
+  // not go through `ComputeExpected`: they are the spec's printed input/output
+  // pairs, so the oracle itself is under test and a shared misreading of the
+  // rules cannot make both sides agree.
+  {
+    struct Anchor { uint64_t src; uint64_t want[3]; };
+    const Anchor kAnchors[3] = {
+        // v3 = 1 0 0 1 0 1 0 0 (first set bit at 2): vmsbf 0000011,
+        // vmsif 0000111, vmsof 0000100.
+        {0x94ull, {0x03ull, 0x07ull, 0x04ull}},
+        // v3 = 1 0 0 1 0 1 0 1 (first set bit at 0): vmsbf 0000000,
+        // vmsif 0000001, vmsof 0000001.
+        {0x95ull, {0x00ull, 0x01ull, 0x01ull}},
+        // first set bit at the top of the byte: 0111111 / 1111111 / 1000000.
+        {0x80ull, {0x7Full, 0xFFull, 0x80ull}},
+    };
+    for (int ai = 0; ai < 3; ++ai) {
+      for (int op = 0; op < 3; ++op) {
+        ConfigureVec(&cfg, kSewL, 0, 0, 0, 8);
+        HostVrf vf;
+        prime(&vf, L.vs2, kAnchors[ai].src);
+        prime(&vf, L.vd, 0);
+        VecObs o = vec.RunPacket(VF_MASKPFX, op, kFormVv, L.vd, L.vs1, L.vs2, 0, false,
+                                 kAllCaps);
+        rep->Check(!o.alu_illegal && !o.alu_trap,
+                   std::string("spec-anchor ") + kName[op] + ": refused (illegal=" +
+                       Dec(o.alu_illegal) + " trap=" + Dec(o.alu_trap) + ")");
+        for (int i = 0; i < 8; ++i) {
+          bool got = dst_bit(i);
+          bool exp = ((kAnchors[ai].want[op] >> i) & 1u) != 0;
+          rep->Check(got == exp,
+                     std::string("spec-anchor ") + kName[op] + " src=" +
+                         Dec(static_cast<int>(kAnchors[ai].src)) + " k-bit" + Dec(i) +
+                         ": " + Dec(got) + " expected " + Dec(exp));
+        }
+        ++anchor_cells;
+      }
+    }
+  }
+
+  // ------------------------------------------------------------------------
+  // First set bit at every addressable position, vl = kVlmax, against the host
+  // model (which is the rule set stated at the top of this function).
+  for (int op = 0; op < 3; ++op) {
+    for (int k = 0; k < kVlmax; ++k) {
+      ConfigureVec(&cfg, kSewL, 0, 0, 0, kVlmax);
+      HostVrf vf;
+      prime(&vf, L.vs2, 1ull << k);
+      prime(&vf, L.vd, 0xFFFFull);
+      VecObs o = vec.RunPacket(VF_MASKPFX, op, kFormVv, L.vd, L.vs1, L.vs2, 0, false, kAllCaps);
+      std::vector<uint64_t> ev;
+      std::vector<bool> mv;
+      ComputeExpected(VF_MASKPFX, op, kFormVv, kSewL, 0, 0, kVlmax, 0, 0, false, vf, L, 0, 0,
+                      kVlmax, &ev, &mv);
+      rep->Check(!o.alu_illegal && !o.alu_trap,
+                 std::string("first-bit ") + kName[op] + " k=" + Dec(k) +
+                     ": refused (illegal=" + Dec(o.alu_illegal) + " trap=" + Dec(o.alu_trap) +
+                     ")");
+      for (int i = 0; i < kVlmax; ++i) {
+        bool got = dst_bit(i);
+        rep->Check(got == mv[static_cast<size_t>(i)],
+                   std::string("first-bit ") + kName[op] + " k=" + Dec(k) + " bit" + Dec(i) +
+                       ": " + Dec(got) + " expected " + Dec(mv[static_cast<size_t>(i)]));
+      }
+      ++position_cells;
+      if (k == 0) ++pos0_cells;
+    }
+  }
+
+  // ------------------------------------------------------------------------
+  // The all-zero boundary, where the three are not symmetric. The rule is
+  // stated directly (vmsbf/vmsif all-ones, vmsof all-zeros) rather than through
+  // the shared oracle, so this row cannot be satisfied by a shared mistake.
+  for (int op = 0; op < 3; ++op) {
+    ConfigureVec(&cfg, kSewL, 0, 0, 0, kVlmax);
+    HostVrf vf;
+    prime(&vf, L.vs2, 0);
+    prime(&vf, L.vd, 0xFFFFull);
+    VecObs o = vec.RunPacket(VF_MASKPFX, op, kFormVv, L.vd, L.vs1, L.vs2, 0, false, kAllCaps);
+    rep->Check(!o.alu_illegal && !o.alu_trap,
+               std::string("all-zero ") + kName[op] + ": refused");
+    const bool want = (op < 2);   // vmsbf/vmsif all-ones, vmsof all-zeros
+    for (int i = 0; i < kVlmax; ++i) {
+      bool got = dst_bit(i);
+      rep->Check(got == want,
+                 std::string("all-zero ") + kName[op] + " bit" + Dec(i) + ": " + Dec(got) +
+                     " expected " + Dec(want) + " (all-zero is not symmetric among the three)");
+    }
+    ++allzero_cells;
+  }
+
+  // ------------------------------------------------------------------------
+  // A source bit above vl is not an active element: with vl = 8 and a source
+  // whose only set bit is at position 12, the active slice is all-zero, so the
+  // rule applies over [0, 8) and the tail [8, 16) stays undisturbed (vta = 0).
+  for (int op = 0; op < 3; ++op) {
+    ConfigureVec(&cfg, kSewL, 0, 0, 0, 8);
+    HostVrf vf;
+    prime(&vf, L.vs2, 1ull << 12);
+    prime(&vf, L.vd, 0x55AAull);
+    VecObs o = vec.RunPacket(VF_MASKPFX, op, kFormVv, L.vd, L.vs1, L.vs2, 0, false, kAllCaps);
+    rep->Check(!o.alu_illegal && !o.alu_trap,
+               std::string("above-vl ") + kName[op] + ": refused");
+    for (int i = 0; i < 8; ++i) {
+      bool got = dst_bit(i);
+      bool exp = (op < 2);      // active slice is all-zero
+      rep->Check(got == exp,
+                 std::string("above-vl ") + kName[op] + " active bit" + Dec(i) + ": " + Dec(got) +
+                     " expected " + Dec(exp) + " (a bit above vl is not a first set bit)");
+    }
+    for (int i = 8; i < kVlmax; ++i) {
+      bool got = dst_bit(i);
+      bool exp = ((0x55AAull >> i) & 1u) != 0;
+      rep->Check(got == exp,
+                 std::string("above-vl ") + kName[op] + " tail bit" + Dec(i) + ": " + Dec(got) +
+                     " expected " + Dec(exp) + " (vta=0 leaves the tail undisturbed)");
+    }
+    ++above_vl_cells;
+  }
+  // ... and a set bit below vl wins over one above it: the search is bounded by
+  // the active region, so k = 5, not 12.
+  for (int op = 0; op < 3; ++op) {
+    ConfigureVec(&cfg, kSewL, 0, 0, 0, 8);
+    HostVrf vf;
+    prime(&vf, L.vs2, (1ull << 5) | (1ull << 12));
+    prime(&vf, L.vd, 0x55AAull);
+    VecObs o = vec.RunPacket(VF_MASKPFX, op, kFormVv, L.vd, L.vs1, L.vs2, 0, false, kAllCaps);
+    rep->Check(!o.alu_illegal && !o.alu_trap,
+               std::string("above-vl2 ") + kName[op] + ": refused");
+    const uint64_t want_active[3] = {0x1Full, 0x3Full, 0x20ull};
+    for (int i = 0; i < 8; ++i) {
+      bool got = dst_bit(i);
+      bool exp = ((want_active[op] >> i) & 1u) != 0;
+      rep->Check(got == exp,
+                 std::string("above-vl2 ") + kName[op] + " active bit" + Dec(i) + ": " + Dec(got) +
+                     " expected " + Dec(exp) + " (k = 5, the bit above vl is ignored)");
+    }
+    for (int i = 8; i < kVlmax; ++i) {
+      bool got = dst_bit(i);
+      bool exp = ((0x55AAull >> i) & 1u) != 0;
+      rep->Check(got == exp,
+                 std::string("above-vl2 ") + kName[op] + " tail bit" + Dec(i) + ": " + Dec(got) +
+                     " expected " + Dec(exp) + " (vta=0 leaves the tail undisturbed)");
+    }
+    ++above_vl_cells;
+  }
+
+  // ------------------------------------------------------------------------
+  // The tail policy the mask family implies: mask destinations are tail-
+  // agnostic, so with vta = 1 the elements at and above vl are written with
+  // all-ones (the agnostic value this unit chooses) while the active elements
+  // still follow the rule. With vta = 0 they are left undisturbed, which the
+  // above-vl cells just checked.
+  for (int op = 0; op < 3; ++op) {
+    ConfigureVec(&cfg, kSewL, 0, /*vta=*/1, 0, 8);
+    HostVrf vf;
+    prime(&vf, L.vs2, 0);          // active slice all-zero
+    prime(&vf, L.vd, 0);           // destination clear, so a write of 1 shows
+    VecObs o = vec.RunPacket(VF_MASKPFX, op, kFormVv, L.vd, L.vs1, L.vs2, 0, false, kAllCaps);
+    rep->Check(!o.alu_illegal && !o.alu_trap,
+               std::string("tail-agnostic ") + kName[op] + ": refused");
+    for (int i = 0; i < 8; ++i) {
+      bool got = dst_bit(i);
+      bool exp = (op < 2);     // active all-zero rule
+      rep->Check(got == exp,
+                 std::string("tail-agnostic ") + kName[op] + " active bit" + Dec(i) + ": " +
+                     Dec(got) + " expected " + Dec(exp));
+    }
+    for (int i = 8; i < kVlmax; ++i) {
+      bool got = dst_bit(i);
+      rep->Check(got,
+                 std::string("tail-agnostic ") + kName[op] + " tail bit" + Dec(i) +
+                     ": " + Dec(got) + " expected 1 (mask tails are agnostic)");
+    }
+    ++tail_cells;
+  }
+
+  // ------------------------------------------------------------------------ coverage
+  rep->Check(position_cells == 3 * kVlmax,
+             "coverage: " + Dec(position_cells) + " first-set-bit cells ran, expected " +
+                 Dec(3 * kVlmax));
+  rep->Check(pos0_cells == 3,
+             "coverage: " + Dec(pos0_cells) + " first-set-bit-at-0 cells ran, expected 3");
+  rep->Check(allzero_cells == 3,
+             "coverage: " + Dec(allzero_cells) + " all-zero cells ran, expected 3");
+  rep->Check(above_vl_cells == 6,
+             "coverage: " + Dec(above_vl_cells) + " above-vl cells ran, expected 6");
+  rep->Check(tail_cells == 3,
+             "coverage: " + Dec(tail_cells) + " tail-agnostic cells ran, expected 3");
+  rep->Check(anchor_cells == 9,
+             "coverage: " + Dec(anchor_cells) + " spec-anchor cells ran, expected 9");
+}
+
+// ============================================================================
+// I-061 -- the same-hart line coalescer (CASE=coalesce.element_faults).
+//
+// The coalescer merges the items of one vector memory macro that share one
+// 8-byte memory beat whenever the merge cannot change the defined result. The
+// case runs the *same* macros with coalescing on and off and requires every
+// defined value and fault to be identical; on top of that identity it asserts
+// the merge actually happened (the request count fell and the reduction counter
+// moved -- a coalescer that never merges is the silent failure), that a fault
+// inside a merged group still names the element that caused it and leaves the
+// elements before it in effect, that a device or atomic access is never merged
+// even when its elements share a beat, and that two same-address stores apply
+// in element order.
+//
+// The two addresses the case uses are read off the profiles' memory maps
+// (config/memory/*.json): RAM is normal, idempotent memory in every profile and
+// the UART is a device in every profile.
+// ============================================================================
+
+const uint64_t kCoalRamBase = 0x80000000ull;   // normal memory, every profile
+const uint64_t kCoalDevBase = 0x100000ull;     // uart, a device, every profile
+
+int CoalBe(int sew_l) { return (1 << sew_l) / 8; }
+
+uint64_t CoalAddr(int mode, uint64_t base, int64_t stride, int e, int be) {
+  if (mode == LS_UNIT) {
+    return base + static_cast<uint64_t>(e) * static_cast<uint64_t>(be);
+  }
+  return base + static_cast<uint64_t>(e) * static_cast<uint64_t>(stride);
+}
+
+uint64_t CoalVal(bool we, int i, int sew_l) {
+  return Pat(313 * (we ? 1 : 0) + 17 * i + 5) & MaskW(1 << sew_l);
+}
+
+struct CoalCoverage {
+  bool mode_seen[LS_MODE_COUNT] = {};
+  bool dir_seen[2] = {};
+  int cells = 0;
+  int merged_cells = 0;
+};
+
+struct CoalRes {
+  std::vector<uint64_t> dest;
+  std::vector<uint8_t> mem;
+  int requests = 0;
+  uint32_t merge_ctr = 0;
+  bool done = false;
+  bool trap = false;
+  int trap_elem = 0;
+  std::vector<LsuRec> reqrec;
+};
+
+bool CoalSameBytes(const std::vector<uint8_t>& got, const std::vector<uint8_t>& exp,
+                   std::string* why) {
+  if (got.size() != exp.size()) {
+    *why = "size";
+    return false;
+  }
+  for (size_t i = 0; i < got.size(); ++i) {
+    if (got[i] != exp[i]) {
+      *why = "byte " + mosaic::Hex(static_cast<uint64_t>(i), 4) + " is " +
+             mosaic::Hex(got[i], 2) + " expected " + mosaic::Hex(exp[i], 2);
+      return false;
+    }
+  }
+  return true;
+}
+
+// Configure the macro and prime both the source (store data) and destination
+// (load destination) groups, so an undisturbed destination element is known.
+void CoalSetup(Cfg* cfg, Vec* vec, int sew_l, int lmul, int vl, HostVrf* vf, int vd,
+               int data, std::vector<uint64_t>* old) {
+  LsuConfig(cfg, sew_l, VlmulOfExp(lmul), static_cast<uint64_t>(vl), 0, 0, 0);
+  const int vlmax = LsuVlmaxOf(sew_l, lmul);
+  old->assign(static_cast<size_t>(vlmax), 0);
+  for (int i = 0; i < vlmax; ++i) {
+    vec->Prime(*vf, data, i, sew_l, lmul, CoalVal(true, i, sew_l));
+    const uint64_t o = CoalVal(false, i, sew_l);
+    vec->Prime(*vf, vd, i, sew_l, lmul, o);
+    (*old)[static_cast<size_t>(i)] = o;
+  }
+}
+
+CoalRes CoalExec(Vec* vec, Lsu* lsu, LsuMem* mem, int mode, int sew_l, int lmul, int vl,
+                 uint64_t base, int64_t stride, bool we, int vd, int data, bool coalesce,
+                 bool atomic) {
+  CoalRes r;
+  LsuObs o = lsu->Run(mode, we, false, 1, vd, data, 0, sew_l, base, stride, false,
+                      40000, 0xFF, coalesce, atomic);
+  r.done = o.done;
+  r.trap = o.trap;
+  r.trap_elem = o.trap_elem;
+  r.requests = static_cast<int>(lsu->reqs().size());
+  r.merge_ctr = o.merge_ctr;
+  r.reqrec = lsu->reqs();
+  const int vlmax = LsuVlmaxOf(sew_l, lmul);
+  r.dest.assign(static_cast<size_t>(vlmax), 0);
+  for (int i = 0; i < vlmax; ++i) {
+    r.dest[static_cast<size_t>(i)] = vec->MemRead(vd, i, sew_l, lmul);
+  }
+  r.mem = mem->mem;
+  return r;
+}
+
+// The memory a store macro defines: every element applied in ascending element
+// order. That order is the rule the coalescer declares for repeated-address
+// stores, so this function is that rule's oracle.
+std::vector<uint8_t> CoalExpStoreMem(const std::vector<uint8_t>& pristine, int mode,
+                                     uint64_t base, int64_t stride, int vl_eff, int be,
+                                     int sew_l) {
+  std::vector<uint8_t> m = pristine;
+  for (int e = 0; e < vl_eff; ++e) {
+    const uint64_t addr = CoalAddr(mode, base, stride, e, be);
+    const uint64_t val = CoalVal(true, e, sew_l);
+    for (int k = 0; k < be; ++k) {
+      m[static_cast<size_t>((addr + static_cast<uint64_t>(k)) & 0xFFFFull)] =
+          static_cast<uint8_t>((val >> (8 * k)) & 0xFFull);
+    }
+  }
+  return m;
+}
+
+// The byte-enabled beats of a request stream: one entry per beat, the union of
+// the byte masks of the requests that named it.
+std::map<uint64_t, uint8_t> CoalBeats(const std::vector<LsuRec>& reqs) {
+  std::map<uint64_t, uint8_t> m;
+  for (size_t i = 0; i < reqs.size(); ++i) {
+    m[reqs[i].addr & ~7ull] |= reqs[i].mask;
+  }
+  return m;
+}
+
+// The coalesced and uncoalesced runs must define the same destination values.
+void CoalCheckDest(Reporter* rep, const std::string& name, const CoalRes& off,
+                   const CoalRes& on, const std::vector<uint64_t>& old, int vl_eff) {
+  for (size_t i = 0; i < off.dest.size() && i < on.dest.size(); ++i) {
+    const uint64_t want = (static_cast<int>(i) < vl_eff) ? off.dest[i] : old[i];
+    rep->Check(on.dest[i] == want,
+               name + " dest e" + Dec(static_cast<int>(i)) + ": coalesced " +
+                   mosaic::Hex(on.dest[i], 16) + " uncoalesced " + mosaic::Hex(off.dest[i], 16));
+  }
+}
+
+// ------------------------------------------------------------------ phases
+
+// The coalesced run must define the same values as the uncoalesced one, merge
+// where a merge is legal, and not merge where it is not.
+void PhaseCoalEquivalence(Cfg* cfg, Vec* vec, Lsu* lsu, LsuMem* mem, Reporter* rep,
+                          CoalCoverage* cov) {
+  struct Row {
+    int mode; int sew_l; int lmul; int vl; uint64_t off; int64_t stride; bool we;
+    bool merge; const char* tag;
+  };
+  const Row rows[] = {
+      {LS_UNIT, 3, 0, 8, 0, 0, false, true, "e8"},
+      {LS_UNIT, 3, 0, 8, 0, 0, true, true, "e8"},
+      {LS_UNIT, 3, 0, 16, 3, 0, false, true, "e8-midbeat"},
+      {LS_UNIT, 3, 0, 16, 3, 0, true, true, "e8-midbeat"},
+      {LS_UNIT, 4, 0, 8, 0, 0, false, true, "e16"},
+      {LS_UNIT, 4, 0, 8, 0, 0, true, true, "e16"},
+      {LS_UNIT, 5, 0, 4, 0, 0, false, true, "e32"},
+      {LS_UNIT, 5, 0, 4, 0, 0, true, true, "e32"},
+      {LS_UNIT, 6, 0, 2, 0, 0, false, false, "e64"},
+      {LS_STRIDED, 4, 0, 4, 0, 4, false, true, "stride4"},
+      {LS_STRIDED, 3, 0, 4, 0, 2, false, true, "stride2"},
+      {LS_STRIDED, 3, 0, 4, 0, 8, false, false, "stride8"},
+      {LS_STRIDED, 5, 0, 4, 0, 4, true, true, "stride4"},
+      {LS_STRIDED, 5, 0, 4, 0, 0, false, true, "same-address"},
+  };
+  const int vd = 8, data = 16;
+  for (size_t ri = 0; ri < sizeof(rows) / sizeof(rows[0]); ++ri) {
+    const Row& R = rows[ri];
+    const std::string name = std::string("coalesce ") + LsuModeName(R.mode) + " " + R.tag +
+                             (R.we ? " store" : " load");
+    const int be = CoalBe(R.sew_l);
+    const int vlmax = LsuVlmaxOf(R.sew_l, R.lmul);
+    const int vl_eff = R.vl > vlmax ? vlmax : R.vl;
+    const uint64_t base = kCoalRamBase + R.off;
+
+    HostVrf vf;
+    std::vector<uint64_t> old;
+    mem->OneRam();
+    mem->ClearFaults();
+    CoalSetup(cfg, vec, R.sew_l, R.lmul, R.vl, &vf, vd, data, &old);
+    const std::vector<uint8_t> pristine = mem->mem;
+
+    mem->mem = pristine;
+    CoalRes off = CoalExec(vec, lsu, mem, R.mode, R.sew_l, R.lmul, R.vl, base, R.stride,
+                           R.we, vd, data, false, false);
+    mem->mem = pristine;
+    CoalRes on = CoalExec(vec, lsu, mem, R.mode, R.sew_l, R.lmul, R.vl, base, R.stride,
+                          R.we, vd, data, true, false);
+
+    rep->Check(off.done && on.done, name + ": a macro never completed");
+    rep->Check(!off.trap && !on.trap, name + ": a macro trapped");
+    rep->Check(off.requests == vl_eff,
+               name + " (uncoalesced): " + Dec(off.requests) + " requests for " + Dec(vl_eff) +
+                   " elements (one per item)");
+
+    if (R.we) {
+      const std::vector<uint8_t> exp =
+          CoalExpStoreMem(pristine, R.mode, base, R.stride, vl_eff, be, R.sew_l);
+      std::string why;
+      rep->Check(CoalSameBytes(off.mem, exp, &why), name + " (uncoalesced): " + why);
+      rep->Check(CoalSameBytes(on.mem, exp, &why), name + " (coalesced): " + why);
+      rep->Check(CoalSameBytes(on.mem, off.mem, &why),
+                 name + ": coalesced memory differs from uncoalesced: " + why);
+    } else {
+      for (int i = 0; i < vlmax; ++i) {
+        const uint64_t exp = (i < vl_eff)
+            ? (mem->Elem(CoalAddr(R.mode, base, R.stride, i, be), be) & MaskW(1 << R.sew_l))
+            : old[static_cast<size_t>(i)];
+        rep->Check(off.dest[static_cast<size_t>(i)] == exp,
+                   name + " (uncoalesced) dest e" + Dec(i) + ": " +
+                       mosaic::Hex(off.dest[static_cast<size_t>(i)], 16) + " expected " +
+                       mosaic::Hex(exp, 16));
+        rep->Check(on.dest[static_cast<size_t>(i)] == exp,
+                   name + " (coalesced) dest e" + Dec(i) + ": " +
+                       mosaic::Hex(on.dest[static_cast<size_t>(i)], 16) + " expected " +
+                       mosaic::Hex(exp, 16));
+      }
+    }
+
+    // the merged byte mask must be the union of the elements' masks
+    rep->Check(CoalBeats(on.reqrec) == CoalBeats(off.reqrec),
+               name + ": the coalesced byte mask is not the union of the elements' masks");
+
+    if (R.merge) {
+      rep->Check(on.requests < off.requests,
+                 name + ": no merge happened (" + Dec(on.requests) + " of " +
+                     Dec(off.requests) + " requests)");
+      rep->Check(static_cast<int>(on.merge_ctr) == off.requests - on.requests,
+                 name + ": the reduction counter says " + Dec(on.merge_ctr) +
+                     ", requests fell by " + Dec(off.requests - on.requests));
+      cov->merged_cells += 1;
+    } else {
+      rep->Check(on.requests == off.requests,
+                 name + ": a macro with no mergeable items was merged (" + Dec(on.requests) +
+                     " of " + Dec(off.requests) + ")");
+      rep->Check(on.merge_ctr == 0, name + ": the reduction counter moved with no merge");
+    }
+
+    cov->mode_seen[R.mode] = true;
+    cov->dir_seen[R.we ? 1 : 0] = true;
+    cov->cells += 1;
+  }
+}
+
+// A fault inside a merged group must still name the element that caused it; the
+// elements before it must take effect and the ones at or after it must not.
+void PhaseCoalFault(Cfg* cfg, Vec* vec, Lsu* lsu, LsuMem* mem, Reporter* rep,
+                    CoalCoverage* cov) {
+  struct Row { int mode; int sew_l; int lmul; int vl; int64_t stride; const char* tag; };
+  const Row rows[] = {
+      {LS_UNIT, 3, 0, 8, 0, "e8"},
+      {LS_UNIT, 4, 0, 4, 0, "e16"},
+      {LS_STRIDED, 5, 0, 4, 4, "stride4"},
+  };
+  const int positions[] = {0, 1, 3, 7};
+  const int vd = 8, data = 16;
+  for (size_t ri = 0; ri < sizeof(rows) / sizeof(rows[0]); ++ri) {
+    const Row& R = rows[ri];
+    for (int we = 0; we < 2; ++we) {
+      for (int pi = 0; pi < 4; ++pi) {
+        const int pos = positions[pi];
+        if (pos >= R.vl) continue;
+        const int be = CoalBe(R.sew_l);
+        const int vl_eff = LsuVlmaxOf(R.sew_l, R.lmul) < R.vl ? LsuVlmaxOf(R.sew_l, R.lmul) : R.vl;
+        const uint64_t base = kCoalRamBase;
+        const std::string name = std::string("coalesce-fault ") + LsuModeName(R.mode) + " " +
+                                 R.tag + (we ? " store " : " load ") + "at " + Dec(pos);
+
+        HostVrf vf;
+        std::vector<uint64_t> old;
+        mem->OneRam();
+        mem->ClearFaults();
+        CoalSetup(cfg, vec, R.sew_l, R.lmul, R.vl, &vf, vd, data, &old);
+        const std::vector<uint8_t> pristine = mem->mem;
+        const uint64_t faddr = CoalAddr(R.mode, base, R.stride, pos, be);
+        mem->FaultByteRange(faddr, be);
+
+        mem->mem = pristine;
+        CoalRes off = CoalExec(vec, lsu, mem, R.mode, R.sew_l, R.lmul, R.vl, base, R.stride,
+                               we != 0, vd, data, false, false);
+        mem->mem = pristine;
+        CoalRes on = CoalExec(vec, lsu, mem, R.mode, R.sew_l, R.lmul, R.vl, base, R.stride,
+                              we != 0, vd, data, true, false);
+
+        rep->Check(off.done && on.done, name + ": a macro never completed");
+        rep->Check(off.trap && on.trap, name + ": the fault was not reported");
+        rep->Check(on.trap_elem == pos,
+                   name + ": vstart " + Dec(on.trap_elem) + " expected " + Dec(pos) +
+                       " (a whole-group fault destroys element granularity)");
+        rep->Check(on.trap_elem == off.trap_elem,
+                   name + ": the coalesced fault names element " + Dec(on.trap_elem) +
+                       ", the uncoalesced run names " + Dec(off.trap_elem));
+
+        // the elements before the fault took effect; at or after did not
+        if (we != 0) {
+          std::string why;
+          rep->Check(CoalSameBytes(on.mem, off.mem, &why),
+                     name + ": coalesced memory differs from uncoalesced: " + why);
+          for (int e = 0; e < vl_eff; ++e) {
+            const uint64_t addr = CoalAddr(R.mode, base, R.stride, e, be);
+            const uint8_t got = mem->mem[static_cast<size_t>(addr & 0xFFFFull)];
+            const uint8_t exp = (e < pos)
+                ? static_cast<uint8_t>(CoalVal(true, e, R.sew_l) & 0xFFull)
+                : pristine[static_cast<size_t>(addr & 0xFFFFull)];
+            rep->Check(got == exp, name + ": store element " + Dec(e) + " is " +
+                                       mosaic::Hex(got, 2) + " expected " + mosaic::Hex(exp, 2));
+          }
+        } else {
+          CoalCheckDest(rep, name, off, on, old, vl_eff);
+          for (int e = 0; e < vl_eff; ++e) {
+            const uint64_t want = (e < pos)
+                ? (mem->Elem(CoalAddr(R.mode, base, R.stride, e, be), be) & MaskW(1 << R.sew_l))
+                : old[static_cast<size_t>(e)];
+            rep->Check(on.dest[static_cast<size_t>(e)] == want,
+                       name + ": load element " + Dec(e) + " is " +
+                           mosaic::Hex(on.dest[static_cast<size_t>(e)], 16) + " expected " +
+                           mosaic::Hex(want, 16));
+          }
+        }
+        cov->cells += 1;
+      }
+    }
+  }
+}
+
+// An MMIO/device or atomic access must never be merged, even when its elements
+// share one beat; the same shape in RAM does merge, so the predicate is what
+// makes the difference.
+void PhaseCoalDevice(Cfg* cfg, Vec* vec, Lsu* lsu, LsuMem* mem, Reporter* rep,
+                     CoalCoverage* cov) {
+  const int vd = 8, data = 16;
+  const int sew_l = 3, lmul = 0, vl = 8;
+
+  // the whole macro sits in the device and shares one beat
+  HostVrf vf;
+  std::vector<uint64_t> old;
+  mem->ClearFaults();
+  CoalSetup(cfg, vec, sew_l, lmul, vl, &vf, vd, data, &old);
+  CoalRes dev = CoalExec(vec, lsu, mem, LS_UNIT, sew_l, lmul, vl, kCoalDevBase, 0, false,
+                         vd, data, true, false);
+  rep->Check(dev.done && !dev.trap, "device: the macro did not complete cleanly");
+  rep->Check(dev.requests == vl,
+             "device: " + Dec(dev.requests) + " requests for " + Dec(vl) +
+                 " device elements sharing one beat (a device access was coalesced)");
+  rep->Check(dev.merge_ctr == 0, "device: the reduction counter moved for a device access");
+  bool at_dev = true;
+  for (size_t i = 0; i < dev.reqrec.size(); ++i) {
+    if ((dev.reqrec[i].addr & ~7ull) != (kCoalDevBase & ~7ull)) at_dev = false;
+  }
+  rep->Check(at_dev, "device: a request left the device region");
+
+  // the same shape in RAM does merge, so the check above is not vacuous
+  mem->OneRam();
+  CoalSetup(cfg, vec, sew_l, lmul, vl, &vf, vd, data, &old);
+  CoalRes ram = CoalExec(vec, lsu, mem, LS_UNIT, sew_l, lmul, vl, kCoalRamBase, 0, false,
+                         vd, data, true, false);
+  rep->Check(ram.requests == 1 && ram.merge_ctr == vl - 1,
+             "device: the RAM contrast did not merge (" + Dec(ram.requests) + " requests)");
+
+  // an atomic class access is never merged, and the same macro without the
+  // atomic class does merge
+  mem->OneRam();
+  CoalSetup(cfg, vec, sew_l, lmul, vl, &vf, vd, data, &old);
+  CoalRes at = CoalExec(vec, lsu, mem, LS_UNIT, sew_l, lmul, vl, kCoalRamBase, 0, false,
+                        vd, data, true, true);
+  rep->Check(at.requests == vl && at.merge_ctr == 0,
+             "atomic: an atomic class access was coalesced (" + Dec(at.requests) +
+                 " requests, merge_ctr " + Dec(at.merge_ctr) + ")");
+  mem->OneRam();
+  CoalSetup(cfg, vec, sew_l, lmul, vl, &vf, vd, data, &old);
+  CoalRes nat = CoalExec(vec, lsu, mem, LS_UNIT, sew_l, lmul, vl, kCoalRamBase, 0, false,
+                         vd, data, true, false);
+  rep->Check(nat.requests == 1, "atomic: the non-atomic contrast did not merge");
+
+  // a device element among normal elements is not merged with them
+  mem->OneRam();
+  CoalSetup(cfg, vec, sew_l, lmul, 2, &vf, vd, data, &old);
+  CoalRes mixed = CoalExec(vec, lsu, mem, LS_STRIDED, 5, lmul, 2, kCoalDevBase, 0x7FF00000LL,
+                           false, vd, data, true, false);
+  rep->Check(mixed.done && !mixed.trap, "device: the mixed macro did not complete cleanly");
+  rep->Check(mixed.requests == 2,
+             "device: " + Dec(mixed.requests) + " requests for a device element among "
+             "normal ones (an MMIO access was merged)");
+  rep->Check(mixed.merge_ctr == 0, "device: the reduction counter moved for a mixed macro");
+
+  cov->cells += 4;
+  (void)cov;
+}
+
+// Two stores to the same address inside one macro apply in the order the
+// instruction type defines: element order. They are never merged, because their
+// bytes overlap.
+void PhaseCoalStoreOrder(Cfg* cfg, Vec* vec, Lsu* lsu, LsuMem* mem, Reporter* rep,
+                         CoalCoverage* cov) {
+  const int vd = 8, data = 16;
+  const int sew_l = 5, lmul = 0, vl = 4;
+  const int be = CoalBe(sew_l);
+  const uint64_t base = kCoalRamBase;
+
+  HostVrf vf;
+  std::vector<uint64_t> old;
+  mem->OneRam();
+  mem->ClearFaults();
+  CoalSetup(cfg, vec, sew_l, lmul, vl, &vf, vd, data, &old);
+  const std::vector<uint8_t> pristine = mem->mem;
+
+  mem->mem = pristine;
+  CoalRes off = CoalExec(vec, lsu, mem, LS_STRIDED, sew_l, lmul, vl, base, 0, true, vd, data,
+                         false, false);
+  mem->mem = pristine;
+  CoalRes on = CoalExec(vec, lsu, mem, LS_STRIDED, sew_l, lmul, vl, base, 0, true, vd, data,
+                        true, false);
+
+  const std::string name = "store-order same-address";
+  rep->Check(off.done && on.done && !off.trap && !on.trap, name + ": a macro did not complete");
+  rep->Check(off.requests == vl,
+             name + " (uncoalesced): " + Dec(off.requests) + " requests expected " + Dec(vl));
+  rep->Check(on.requests == vl,
+             name + ": " + Dec(on.requests) + " requests for " + Dec(vl) +
+                 " overlapping stores (an overlapping pair was merged)");
+  rep->Check(on.merge_ctr == 0, name + ": the reduction counter moved for overlapping stores");
+
+  const uint64_t want = CoalVal(true, vl - 1, sew_l) & MaskW(1 << sew_l);
+  const uint64_t got = mem->Elem(base, be);
+  rep->Check(got == want,
+             name + ": memory holds " + mosaic::Hex(got, 16) + " expected the last element's " +
+                 mosaic::Hex(want, 16) + " (the declared order is element order)");
+
+  std::string why;
+  rep->Check(CoalSameBytes(on.mem, off.mem, &why),
+             name + ": coalesced memory differs from uncoalesced: " + why);
+
+  bool ascending = on.reqrec.size() == static_cast<size_t>(vl);
+  for (size_t i = 0; ascending && i + 1 < on.reqrec.size(); ++i) {
+    if (on.reqrec[i].elem > on.reqrec[i + 1].elem) ascending = false;
+  }
+  rep->Check(ascending, name + ": the coalesced request order is not ascending element order");
+
+  // a disjoint store pair in the same beat *does* merge, so the rule is about
+  // the bytes overlapping, not about the beat
+  mem->OneRam();
+  CoalSetup(cfg, vec, sew_l, lmul, vl, &vf, vd, data, &old);
+  CoalRes dis = CoalExec(vec, lsu, mem, LS_STRIDED, sew_l, lmul, vl, base, 4, true, vd, data,
+                         true, false);
+  rep->Check(dis.requests == 2 && dis.merge_ctr == vl,
+             name + ": a disjoint pair in one beat did not merge (" + Dec(dis.requests) +
+                 " requests, merge_ctr " + Dec(dis.merge_ctr) + ")");
+
+  cov->cells += 2;
+}
+
+void RunCoalCase(Vmosaic_vec_tb* dut, ClockDriver* clk, Reporter* rep, CoalCoverage* cov) {
+  Cfg cfg(dut, clk);
+  Vec vec(dut, clk);
+  LsuMem mem;
+  Lsu lsu(dut, clk);
+  lsu.BindMem(&mem);
+  PhaseCoalEquivalence(&cfg, &vec, &lsu, &mem, rep, cov);
+  PhaseCoalFault(&cfg, &vec, &lsu, &mem, rep, cov);
+  PhaseCoalDevice(&cfg, &vec, &lsu, &mem, rep, cov);
+  PhaseCoalStoreOrder(&cfg, &vec, &lsu, &mem, rep, cov);
+
+  for (int m = 0; m < LS_MODE_COUNT; ++m) {
+    if (m == LS_UNIT || m == LS_STRIDED) {
+      rep->Check(cov->mode_seen[m], std::string("coverage: mode ") + LsuModeName(m) +
+                                        " did not run under coalescing");
+    }
+  }
+  rep->Check(cov->dir_seen[0] && cov->dir_seen[1],
+             "coverage: both load and store directions did not run under coalescing");
+  rep->Check(cov->merged_cells >= 5,
+             "coverage: only " + Dec(cov->merged_cells) + " cells actually merged");
+  rep->Check(cov->cells >= 30, "coverage: only " + Dec(cov->cells) + " cells ran");
+}
+
 int main(int argc, char** argv) {
   mosaic::Options options;
   std::string error;
@@ -7003,6 +7788,7 @@ int main(int argc, char** argv) {
   FpCov fp_cov;
   RstCoverage rst_cov;
   ChainCov chain_cov;
+  CoalCoverage coal_cov;
 
   std::string detail;
   bool aborted = false;
@@ -7038,6 +7824,10 @@ int main(int argc, char** argv) {
       RunVtypeLayoutCase(&dut, &unit, &clk, &reporter, &layout_counts);
     } else if (options.case_id == "rvv.mask_prefix_vstart") {
       RunMaskPrefixVstartCase(&dut, &clk, &reporter);
+    } else if (options.case_id == "rvv.mask_prefix_semantics") {
+      RunMaskPrefixSemanticsCase(&dut, &clk, &reporter);
+    } else if (options.case_id == "coalesce.element_faults") {
+      RunCoalCase(&dut, &clk, &reporter, &coal_cov);
     } else {
       int reason_hist[RSN_COUNT] = {0};
       bool class_seen[VOP_COUNT] = {false};
@@ -7115,6 +7905,16 @@ int main(int argc, char** argv) {
   if (options.case_id == "rvv.mask_prefix_vstart") {
     return reporter.Finish("PASS", "checks=" + Dec(reporter.checks()) + " ops=3 vstart_cells=6"
                                        " cycles=" + Dec(cycles));
+  }
+  if (options.case_id == "coalesce.element_faults") {
+    return reporter.Finish("PASS", "checks=" + Dec(reporter.checks()) + " cells=" +
+                                       Dec(coal_cov.cells) + " merged=" +
+                                       Dec(coal_cov.merged_cells) + " cycles=" + Dec(cycles));
+  }
+  if (options.case_id == "rvv.mask_prefix_semantics") {
+    return reporter.Finish("PASS", "checks=" + Dec(reporter.checks()) + " ops=3"
+                                       " positions=16 allzero=3 anchors=9 cycles=" +
+                                       Dec(cycles));
   }
   return reporter.Finish("PASS", "checks=" + Dec(reporter.checks()) + " combos=" +
                                      Dec(VOP_COUNT * 64 * 4 * 2 + 64 + 4) +

@@ -256,6 +256,8 @@ module mosaic_vec_tb (
     input  logic [63:0]                lsu_base_i,
     input  logic [63:0]                lsu_stride_i,
     input  logic                       lsu_mask_en_i,
+    input  logic                       lsu_coalesce_i,
+    input  logic                       lsu_atomic_i,
     /* verilator lint_on UNUSEDSIGNAL */
     output logic                       lsu_busy_o,
     output logic                       lsu_done_o,
@@ -267,6 +269,7 @@ module mosaic_vec_tb (
     output logic                       lsu_stopped_o,
     output logic [6:0]                 lsu_stop_elem_o,
     output logic [31:0]                lsu_req_ctr_o,
+    output logic [31:0]                lsu_merge_ctr_o,
     output logic                       lsu_mem_req_valid_o,
     input  logic                       lsu_mem_req_ready_i,
     output logic [6:0]                 lsu_mem_req_elem_o,
@@ -961,6 +964,8 @@ module mosaic_vec_tb (
       .exec_base_i        (lsu_base_i),
       .exec_stride_i      (lsu_stride_i),
       .exec_mask_en_i     (lsu_mask_en_i),
+      .exec_coalesce_i    (lsu_coalesce_i),
+      .exec_atomic_i      (lsu_atomic_i),
 
       .busy_o             (lsu_busy_o),
       .done_o             (lsu_done_o),
@@ -973,6 +978,7 @@ module mosaic_vec_tb (
       .stop_elem_o        (lsu_stop_elem_w),
       .elems_o            (lsu_elems_o),
       .req_ctr_o          (lsu_req_ctr_o),
+      .merge_ctr_o        (lsu_merge_ctr_o),
 
       .vrf_rd_valid_o     (lsu_rd_valid),
       .vrf_rd_base_o      (lsu_rd_base),

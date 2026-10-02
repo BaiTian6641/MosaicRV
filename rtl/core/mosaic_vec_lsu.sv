@@ -152,6 +152,13 @@
 `default_nettype none
 `resetall
 
+// The platform map: the coalescer's device/cacheability predicates are the
+// generated map's (mosaic_pa_normal), never a hand-written list, so this module
+// and the SoC device decode cannot disagree about where a device lives.
+/* verilator lint_off UNUSEDPARAM */
+`include "mosaic_cfg_pkg.svh"
+/* verilator lint_on UNUSEDPARAM */
+
 module mosaic_vec_lsu #(
     parameter int unsigned VLEN = 128,
     parameter int unsigned ELEN = 64,
@@ -185,6 +192,14 @@ module mosaic_vec_lsu #(
     input  logic [63:0]             exec_base_i,
     input  logic [63:0]             exec_stride_i,
     input  logic                    exec_mask_en_i,
+    // ------------------------------------------------- coalescing (I-061)
+    // `exec_coalesce_i` enables same-hart, same-beat line coalescing for a
+    // macro; `exec_atomic_i` marks the macro as an atomic class access, which is
+    // never coalesced. Both are per-macro. With `exec_coalesce_i` low the unit
+    // issues exactly one request per item, which is the behaviour every I-056
+    // case observes.
+    input  logic                    exec_coalesce_i,
+    input  logic                    exec_atomic_i,
 
     output logic                    busy_o,
     output logic                    done_o,
@@ -203,6 +218,12 @@ module mosaic_vec_lsu #(
     output logic [6:0]              stop_elem_o,
     output logic [7:0]              elems_o,
     output logic [31:0]             req_ctr_o,
+    // --------------------------------------------------- coalescer counters
+    // `req_ctr_o` counts requests offered on the memory port (a replay request
+    // counts too); `merge_ctr_o` counts the *elements* a merge removed from the
+    // request stream, so `merge_ctr_o` is the transaction reduction. Both are
+    // zero when `exec_coalesce_i` is low.
+    output logic [31:0]             merge_ctr_o,
 
     // -------------------------------------------------- VRF read slot
     output logic                    vrf_rd_valid_o,
@@ -262,6 +283,23 @@ module mosaic_vec_lsu #(
 
   localparam int unsigned OUT_MAX = 2;   // outstanding unordered loads
   localparam int unsigned WFIFO_D = 4;   // load write-back queue depth
+
+  // --------------------------------------------------------- coalescing (I-061)
+  // A coalesced group is a contiguous run of active items that share one 8-byte
+  // beat. At most eight 1-byte elements fit a beat, so a group is at most eight
+  // members; the group descriptors are kept in an in-order FIFO beside the
+  // responses (a response is returned in issue order).
+  localparam int unsigned COAL_MAX = 8;  // members in one coalesced group
+  localparam int unsigned GF_D     = 4;  // in-flight group descriptors
+
+  localparam logic [3:0] ST_CUR   = 4'd12;   // a ready item waits to join/flush
+  localparam logic [3:0] ST_DIST  = 4'd13;   // distribute a coalesced load
+
+  // where ST_REQ returns after the request is accepted
+  localparam logic [1:0] RET_SCAN  = 2'd0;   // advance the item, then ST_SCAN
+  localparam logic [1:0] RET_CUR   = 2'd1;   // re-evaluate the waiting item
+  localparam logic [1:0] RET_DRAIN = 2'd2;   // the macro's items are exhausted
+  localparam logic [1:0] RET_STOP  = 2'd3;   // issue the pending group, then stop
 
   localparam logic [3:0] ST_IDLE  = 4'd0;
   localparam logic [3:0] ST_SCAN  = 4'd1;
@@ -370,6 +408,21 @@ module mosaic_vec_lsu #(
     cfg_vlmax    = nm_vlmax(int'(cfg_vsew), cfg_lmul_exp);
   end
 
+  // ------------------------------------------------- per-element normal check
+  // An element may be coalesced only if every byte it enables is normal memory,
+  // as the generated platform map defines normal: idempotent and not a device.
+  // A byte in a device/MMIO region, or one no region covers, answers no.
+  function automatic logic nm_bytes_normal(input logic [63:0] beat, input logic [7:0] mask);
+    logic ok;
+    begin
+      ok = 1'b1;
+      for (int unsigned k = 0; k < 8; ++k) begin
+        if (mask[k]) ok = ok && mosaic_cfg_pkg::mosaic_pa_normal(beat + 64'(k));
+      end
+      nm_bytes_normal = ok;
+    end
+  endfunction
+
   // ================================================================ state
   logic [3:0]  state_q;
   logic [3:0]  mode_q;
@@ -417,6 +470,51 @@ module mosaic_vec_lsu #(
   logic        abort_q;
   logic [2:0]  outstanding_q;
   logic [2:0]  vr_kind_q;
+
+  // --------------------------------------------------------- coalescing (I-061)
+  logic        coalesce_q;         // coalescing enabled for this macro
+  logic        atomic_q;           // atomic class: never coalesced
+  logic [1:0]  ret_q;              // where ST_REQ returns on acceptance
+  logic [31:0] merge_r;            // elements removed from the request stream
+
+  // the pending coalesced group: one (beat, mask, data) with up to COAL_MAX
+  // members. `acc_beat_q` is the shared 8-byte beat; the members are stored
+  // packed, `acc_n_q` of them valid.
+  logic        acc_valid_q;
+  logic [63:0] acc_beat_q;
+  logic [7:0]  acc_mask_q;
+  logic [63:0] acc_wdata_q;
+  logic [6:0]  acc_lead_elem_q;
+  logic [3:0]  acc_lead_field_q;
+  logic [3:0]  acc_n_q;
+  logic [COAL_MAX*7-1:0] acc_me_q;
+  logic [COAL_MAX*4-1:0] acc_mf_q;
+  logic [COAL_MAX*3-1:0] acc_ml_q;
+
+  // in-order group descriptors, one per outstanding request
+  logic        gf_coal_q  [0:GF_D-1];
+  logic [3:0]  gf_n_q     [0:GF_D-1];
+  logic [COAL_MAX*7-1:0] gf_me_q [0:GF_D-1];
+  logic [COAL_MAX*4-1:0] gf_mf_q [0:GF_D-1];
+  logic [COAL_MAX*3-1:0] gf_ml_q [0:GF_D-1];
+  logic [2:0]  gf_count_q;
+
+  // return distributor: a coalesced load response is handed to its members one
+  // per cycle through the existing write-back queue
+  logic        dist_valid_q;
+  logic [3:0]  dist_idx_q;
+  logic [3:0]  dist_n_q;
+  logic [63:0] dist_rdata_q;
+  logic [COAL_MAX*7-1:0] dist_me_q;
+  logic [COAL_MAX*4-1:0] dist_mf_q;
+  logic [COAL_MAX*3-1:0] dist_ml_q;
+
+  // de-coalesce on fault: replay the group's items individually so the fault
+  // names the element that caused it and only the elements before it take effect
+  logic        replay_q;
+  logic [6:0]  replay_first_q;
+  logic [6:0]  replay_last_q;
+  logic [3:0]  replay_code_q;
 
   logic                  wf_valid_q [0:WFIFO_D-1];
   logic [6:0]            wf_elem_q  [0:WFIFO_D-1];
@@ -508,6 +606,10 @@ module mosaic_vec_lsu #(
                   (mask_byte_idx_q != 5'(elem_q[6:3])));
 
     limit_c = (we_q || ordered_q) ? 3'd1 : 3'(OUT_MAX);
+    // A coalesced group is one request covering many items; its return is
+    // distributed one member per cycle, so the unit keeps a single request in
+    // flight while coalescing (the response then needs no concurrent push).
+    if (coalesce_q) limit_c = 3'd1;
 `ifdef MOSAIC_VEC_LSU_MUTANT_ORDERED_REORDER
     // NEGATIVE CONTROL: an ordered access takes the unordered gate, so the next
     // item is offered before the previous response has arrived.
@@ -542,6 +644,57 @@ module mosaic_vec_lsu #(
     end
   end
 
+  // ======================================================= coalescing rules
+  // The mergeability rule, stated once, in the module header:
+  //
+  //   A group is a contiguous run of active items of one macro that share one
+  //   8-byte beat. An item joins only if the macro is coalescing, is not an
+  //   atomic class access, is not one of the ordered forms, is a unit-stride or
+  //   constant-stride item, and every byte it enables is normal memory as the
+  //   generated platform map defines normal (idempotent, not a device). A store
+  //   joins only if its bytes are disjoint from the group's, so two overlapping
+  //   stores are never merged and element order is what the memory side sees.
+  logic        coal_eff_c;
+  logic        merge_ok_c;
+  logic        store_overlap_c;
+  logic        can_join_c;
+  logic [7:0]  acc_mask_n_c;
+  int          scan_end_c;
+  logic [6:0]  gf0_first_elem_c;
+  logic [6:0]  gf0_last_elem_c;
+
+  always_comb begin
+    coal_eff_c    = coalesce_q && !replay_q;
+    merge_ok_c    = coal_eff_c && !atomic_q && !ordered_q &&
+                    !is_seg && !is_indexed && !is_whole && !is_mask &&
+                    active_c && nm_bytes_normal(beat_c, wmask_c);
+`ifdef MOSAIC_VEC_LSU_MUTANT_COALESCE_DEVICE
+    // NEGATIVE CONTROL: the platform map is not consulted, so a device or MMIO
+    // element is merged with normal memory.
+    merge_ok_c = coal_eff_c && !atomic_q && !ordered_q &&
+                 !is_seg && !is_indexed && !is_whole && !is_mask && active_c;
+`endif
+    store_overlap_c = we_q && ((acc_mask_q & wmask_c) != 8'd0);
+`ifdef MOSAIC_VEC_LSU_MUTANT_COALESCE_STORE_ORDER
+    // NEGATIVE CONTROL: overlapping-byte stores are merged too, so the winning
+    // value is the group's accumulated data (the earlier store) rather than the
+    // later element's.
+    store_overlap_c = 1'b0;
+`endif
+    can_join_c = merge_ok_c && acc_valid_q && (acc_beat_q == beat_c) &&
+                 !store_overlap_c && (acc_n_q < 4'(COAL_MAX));
+    acc_mask_n_c = acc_mask_q | wmask_c;
+`ifdef MOSAIC_VEC_LSU_MUTANT_COALESCE_MASK_LOSS
+    // NEGATIVE CONTROL: a joining member's byte mask is dropped from the group.
+    acc_mask_n_c = acc_mask_q;
+`endif
+    scan_end_c = replay_q ? (int'(replay_last_q) + 1) : elem_end;
+
+    gf0_first_elem_c  = gf_me_q[0][0 +: 7];
+    gf0_last_elem_c   = (gf_n_q[0] > 4'd1) ?
+        gf_me_q[0][(gf_n_q[0] - 4'd1) * 7 +: 7] : gf_me_q[0][0 +: 7];
+  end
+
   // ============================================================== outputs
   assign busy_o      = busy_r;
   assign done_o      = done_r;
@@ -553,6 +706,7 @@ module mosaic_vec_lsu #(
   assign stop_elem_o = stop_elem_r;
   assign elems_o     = elems_r;
   assign req_ctr_o   = reqctr_r;
+  assign merge_ctr_o = merge_r;
 
   // ======================================================== VRF read drive
   logic        rd_valid_c;
@@ -699,6 +853,14 @@ module mosaic_vec_lsu #(
       mreq_mask_c  = 8'h01 << {1'b0, lane_c};
       mreq_wdata_c = data_val_q << (8 * {61'b0, lane_c});
     end
+    if (coalesce_q) begin
+      // the issued request is the coalesced group, not the item being scanned
+      mreq_addr_c  = acc_beat_q;
+      mreq_mask_c  = acc_mask_q;
+      mreq_wdata_c = acc_wdata_q;
+      mreq_elem_c  = acc_lead_elem_q;
+      mreq_field_c = acc_lead_field_q;
+    end
 `ifdef MOSAIC_VEC_LSU_MUTANT_MERGE_CROSS_REGION
     // NEGATIVE CONTROL: a request's byte mask absorbs the bytes of the earlier
     // items that fell in the same beat, so it can name bytes on both sides of a
@@ -709,14 +871,17 @@ module mosaic_vec_lsu #(
 `endif
   end
 
-  assign mem_req_valid_o  = (state_q == ST_REQ) && !abort_q && active_c;
+  assign mem_req_valid_o  = (state_q == ST_REQ) && !abort_q &&
+                            (coalesce_q ? acc_valid_q : active_c);
   assign mem_req_elem_o   = mreq_elem_c;
   assign mem_req_field_o  = mreq_field_c;
   assign mem_req_addr_o   = mreq_addr_c;
   assign mem_req_wmask_o  = mreq_mask_c;
   assign mem_req_wdata_o  = mreq_wdata_c;
   assign mem_req_we_o     = we_q;
-  assign mem_req_size_o   = 4'(eew_log2_q - 3'd3);   // log2 bytes
+  // a real merge spans the 8-byte beat; a size-1 group keeps the element's size
+  assign mem_req_size_o   = (coalesce_q && (acc_n_q > 4'd1)) ? 4'd3
+                                                            : 4'(eew_log2_q - 3'd3);
   assign mem_req_ordered_o = ordered_q;
 
   // ---------------------------------------------------- item stepping
@@ -764,6 +929,10 @@ module mosaic_vec_lsu #(
   logic wf_push_c;
   logic [1:0] wf_tail_c;
   logic [1:0] lane_tail_c;
+  logic wf_room_c;
+  logic rsp_push_c;
+  logic dist_push_c;
+  logic [1:0] gf_tail_c;
 
   always_comb begin
     accept_c = (state_q == ST_REQ) && !abort_q && mem_req_ready_i;
@@ -773,9 +942,31 @@ module mosaic_vec_lsu #(
     // any pop this cycle, expressed in two bits because the push is refused at
     // the full count
     wf_tail_c = 2'(wf_count_q) - (wf_pop_c ? 2'd1 : 2'd0);
+    gf_tail_c = 2'(gf_count_q) - (rsp_c ? 2'd1 : 2'd0);
     lane_tail_c = 2'(lane_count_q) - (rsp_c ? 2'd1 : 2'd0);
-    wf_push_c = mem_rsp_valid_i && !we_q && !mem_rsp_fault_i && !abort_q &&
-                ((wf_count_q != 3'(WFIFO_D)) || wf_pop_c);
+    wf_room_c = (wf_count_q != 3'(WFIFO_D)) || wf_pop_c;
+    // one write-back per response for a size-1 group; a coalesced group is
+    // distributed one member per cycle by ST_DIST
+    rsp_push_c = rsp_c && !we_q && !mem_rsp_fault_i && !abort_q &&
+                 !(gf_coal_q[0] && (gf_n_q[0] > 4'd1)) && wf_room_c;
+    dist_push_c = (state_q == ST_DIST) && dist_valid_q && (dist_idx_q < dist_n_q) &&
+                  wf_room_c;
+    wf_push_c = rsp_push_c || dist_push_c;
+  end
+
+  // a coalesced response either de-coalesces on a fault (replay) or is handed
+  // to its members (distribution success)
+  logic rsp_replay_c;
+  logic rsp_dist_c;
+
+  always_comb begin
+    rsp_replay_c = rsp_c && mem_rsp_fault_i && !abort_q && !replay_q &&
+                   gf_coal_q[0] && (gf_n_q[0] > 4'd1);
+    rsp_dist_c   = rsp_c && !mem_rsp_fault_i && !we_q && !replay_q &&
+                   gf_coal_q[0] && (gf_n_q[0] > 4'd1);
+`ifdef MOSAIC_VEC_LSU_MUTANT_COALESCE_GROUP_FAULT
+    rsp_replay_c = 1'b0;   // NEGATIVE CONTROL: report the whole group instead
+`endif
   end
 
   // ================================================================= FSM
@@ -825,6 +1016,39 @@ module mosaic_vec_lsu #(
       outstanding_q  <= 3'd0;
       wf_count_q     <= 3'd0;
       vr_kind_q      <= 3'd0;
+      coalesce_q     <= 1'b0;
+      atomic_q       <= 1'b0;
+      ret_q          <= RET_SCAN;
+      merge_r        <= 32'd0;
+      acc_valid_q    <= 1'b0;
+      acc_beat_q     <= 64'd0;
+      acc_mask_q     <= 8'd0;
+      acc_wdata_q    <= 64'd0;
+      acc_lead_elem_q  <= 7'd0;
+      acc_lead_field_q <= 4'd0;
+      acc_n_q        <= 4'd0;
+      acc_me_q       <= {COAL_MAX*7{1'b0}};
+      acc_mf_q       <= {COAL_MAX*4{1'b0}};
+      acc_ml_q       <= {COAL_MAX*3{1'b0}};
+      gf_count_q     <= 3'd0;
+      dist_valid_q   <= 1'b0;
+      dist_idx_q     <= 4'd0;
+      dist_n_q       <= 4'd0;
+      dist_rdata_q   <= 64'd0;
+      dist_me_q      <= {COAL_MAX*7{1'b0}};
+      dist_mf_q      <= {COAL_MAX*4{1'b0}};
+      dist_ml_q      <= {COAL_MAX*3{1'b0}};
+      replay_q       <= 1'b0;
+      replay_first_q <= 7'd0;
+      replay_last_q  <= 7'd0;
+      replay_code_q  <= 4'd0;
+      for (int unsigned k = 0; k < GF_D; ++k) begin
+        gf_coal_q[k] <= 1'b0;
+        gf_n_q[k]    <= 4'd0;
+        gf_me_q[k]   <= {COAL_MAX*7{1'b0}};
+        gf_mf_q[k]   <= {COAL_MAX*4{1'b0}};
+        gf_ml_q[k]   <= {COAL_MAX*3{1'b0}};
+      end
       lane_count_q   <= 3'd0;
       for (int unsigned k = 0; k < 3; ++k) lane_fifo_q[k] <= 3'd0;
       for (int unsigned k = 0; k < WFIFO_D; ++k) begin
@@ -865,17 +1089,45 @@ module mosaic_vec_lsu #(
                        (rsp_c ? 3'd1 : 3'd0);
 
       // ---- memory response ---------------------------------------------
-      if (mem_rsp_valid_i) begin
+      if (mem_rsp_valid_i && (outstanding_q != 3'd0)) begin
         if (mem_rsp_fault_i && !abort_q) begin
-          abort_q <= 1'b1;
-          trap_r  <= 1'b1;
-          trap_code_r <= mem_rsp_fault_code_i;
+          if (rsp_replay_c) begin
+            // A coalesced request faulted as a unit. A merged request cannot
+            // say which element faulted, so the group is de-coalesced: its
+            // items are replayed one at a time, in element order, which
+            // performs the elements before the faulting one and lets the
+            // faulting one report its own index. Hiding a per-element access
+            // check is exactly what a group-level fault would do.
+            replay_q        <= 1'b1;
+            replay_first_q  <= gf0_first_elem_c;
+            replay_last_q   <= gf0_last_elem_c;
+            replay_code_q   <= mem_rsp_fault_code_i;
+            elem_q   <= {1'b0, gf0_first_elem_c};
+            field_q  <= 4'd0;
+          end else begin
+            abort_q <= 1'b1;
+            trap_r  <= 1'b1;
+            trap_code_r <= mem_rsp_fault_code_i;
 `ifdef MOSAIC_VEC_LSU_MUTANT_WHOLE_FAULT
-          // NEGATIVE CONTROL: the fault is reported with vstart reset to zero.
-          trap_elem_r <= 7'd0;
+            // NEGATIVE CONTROL: the fault is reported with vstart reset to zero.
+            trap_elem_r <= 7'd0;
+`elsif MOSAIC_VEC_LSU_MUTANT_COALESCE_GROUP_FAULT
+            // NEGATIVE CONTROL: a coalesced fault is reported for the group --
+            // at its first element -- instead of the element that caused it.
+            trap_elem_r <= gf_coal_q[0] ? gf_me_q[0][0 +: 7] : mem_rsp_elem_i;
 `else
-          trap_elem_r <= mem_rsp_elem_i;
+            trap_elem_r <= mem_rsp_elem_i;
 `endif
+          end
+        end else if (rsp_dist_c) begin
+          // a coalesced load succeeded: hand the beat to each member in turn
+          dist_valid_q <= 1'b1;
+          dist_idx_q   <= 4'd0;
+          dist_n_q     <= gf_n_q[0];
+          dist_rdata_q <= mem_rsp_rdata_i;
+          dist_me_q    <= gf_me_q[0];
+          dist_mf_q    <= gf_mf_q[0];
+          dist_ml_q    <= gf_ml_q[0];
         end
       end
 
@@ -901,14 +1153,50 @@ module mosaic_vec_lsu #(
       end
       if (wf_push_c) begin
         wf_valid_q[wf_tail_c] <= 1'b1;
-        wf_elem_q[wf_tail_c]  <= mem_rsp_elem_i;
-        wf_field_q[wf_tail_c] <= mem_rsp_field_i;
-        wf_data_q[wf_tail_c]  <=
-            (mem_rsp_rdata_i >> (8 * {61'b0, lane_fifo_q[0]})) &
-            nm_width_mask(1 << eew_log2_q);
+        if (dist_push_c) begin
+          wf_elem_q[wf_tail_c]  <= dist_me_q[dist_idx_q * 7 +: 7];
+          wf_field_q[wf_tail_c] <= dist_mf_q[dist_idx_q * 4 +: 4];
+          wf_data_q[wf_tail_c]  <=
+              (dist_rdata_q >> (8 * {61'b0, dist_ml_q[dist_idx_q * 3 +: 3]})) &
+              nm_width_mask(1 << eew_log2_q);
+        end else begin
+          wf_elem_q[wf_tail_c]  <= mem_rsp_elem_i;
+          wf_field_q[wf_tail_c] <= mem_rsp_field_i;
+          wf_data_q[wf_tail_c]  <=
+              (mem_rsp_rdata_i >> (8 * {61'b0, lane_fifo_q[0]})) &
+              nm_width_mask(1 << eew_log2_q);
+        end
       end
       wf_count_q <= wf_count_q + (wf_push_c ? 3'd1 : 3'd0) -
                     (wf_pop_c ? 3'd1 : 3'd0);
+
+      // ---- group descriptors, in issue order (a response is in order) ---
+      if (rsp_c) begin
+        for (int unsigned k = 0; k < GF_D - 1; ++k) begin
+          gf_coal_q[k] <= gf_coal_q[k+1];
+          gf_n_q[k]    <= gf_n_q[k+1];
+          gf_me_q[k]   <= gf_me_q[k+1];
+          gf_mf_q[k]   <= gf_mf_q[k+1];
+          gf_ml_q[k]   <= gf_ml_q[k+1];
+        end
+        gf_coal_q[GF_D-1] <= 1'b0;
+        gf_n_q[GF_D-1]    <= 4'd0;
+      end
+      if (accept_c && (gf_count_q < 3'(GF_D))) begin
+        gf_coal_q[gf_tail_c] <= coalesce_q && (acc_n_q > 4'd1);
+        gf_n_q[gf_tail_c]    <= coalesce_q ? acc_n_q : 4'd1;
+        gf_me_q[gf_tail_c]   <= coalesce_q ? acc_me_q : {COAL_MAX*7{1'b0}};
+        gf_mf_q[gf_tail_c]   <= coalesce_q ? acc_mf_q : {COAL_MAX*4{1'b0}};
+        gf_ml_q[gf_tail_c]   <= coalesce_q ? acc_ml_q : {COAL_MAX*3{1'b0}};
+      end
+      gf_count_q <= gf_count_q + (accept_c ? 3'd1 : 3'd0) - (rsp_c ? 3'd1 : 3'd0);
+
+      // ---- the transaction reduction: an element is "merged" once the group
+      // it joined has completed without a fault. A group that faults is
+      // replayed member by member, so it removed nothing.
+      if (rsp_c && !mem_rsp_fault_i && gf_coal_q[0] && (gf_n_q[0] > 4'd1)) begin
+        merge_r <= merge_r + {28'd0, gf_n_q[0]} - 32'd1;
+      end
 
 `ifdef MOSAIC_VEC_LSU_MUTANT_MERGE_CROSS_REGION
       // ---- merge bookkeeping -------------------------------------------
@@ -939,6 +1227,7 @@ module mosaic_vec_lsu #(
             elems_r     <= 8'd0;
             reqctr_r    <= 32'd0;
             vrdctr_r    <= 32'd0;
+            merge_r     <= 32'd0;
             abort_q     <= 1'b0;
             outstanding_q <= 3'd0;
             wf_count_q  <= 3'd0;
@@ -946,6 +1235,14 @@ module mosaic_vec_lsu #(
             mask_valid_q <= 1'b0;
             index_val_q <= 64'd0;
             data_val_q  <= 64'd0;
+            coalesce_q  <= exec_coalesce_i;
+            atomic_q    <= exec_atomic_i;
+            ret_q       <= RET_SCAN;
+            acc_valid_q <= 1'b0;
+            acc_n_q     <= 4'd0;
+            gf_count_q  <= 3'd0;
+            dist_valid_q <= 1'b0;
+            replay_q    <= 1'b0;
 
             mode_q     <= exec_mode_i;
             we_q       <= exec_we_i;
@@ -1010,15 +1307,36 @@ module mosaic_vec_lsu #(
 
         // ------------------------------------------------- scan next item
         ST_SCAN: begin
-          if (int'(elem_q) >= elem_end) begin
-            state_q <= ST_DRAIN;
-          end else if (stop_pending_q && !abort_q) begin
-            // the boundary stop: nothing at or after elem_q has been offered,
-            // so elem_q is the first element not performed
+          if (int'(elem_q) >= scan_end_c) begin
+            if (replay_q) begin
+              // The replay range is exhausted and no member faulted: the
+              // group's fault did not reproduce element by element, so it is
+              // reported for the group's first element rather than dropped.
+              replay_q    <= 1'b0;
+              abort_q     <= 1'b1;
+              trap_r      <= 1'b1;
+              trap_elem_r <= replay_first_q;
+              trap_code_r <= replay_code_q;
+              state_q     <= ST_WAIT;
+            end else if (coalesce_q && acc_valid_q) begin
+              ret_q   <= RET_DRAIN;
+              state_q <= ST_REQ;
+            end else begin
+              state_q <= ST_DRAIN;
+            end
+          end else if (stop_pending_q && !abort_q && !replay_q) begin
+            // the boundary stop: nothing at or after elem_q may be offered, so
+            // elem_q is the first element not performed. A pending group's
+            // items lie before that boundary and must be performed first.
             stopped_r   <= 1'b1;
             stop_elem_r <= elem_q[6:0];
-            abort_q     <= 1'b1;
-            state_q     <= ST_WAIT;
+            if (coalesce_q && acc_valid_q) begin
+              ret_q   <= RET_STOP;
+              state_q <= ST_REQ;
+            end else begin
+              abort_q <= 1'b1;
+              state_q <= ST_WAIT;
+            end
           end else if (need_mask_c) begin
             vr_kind_q <= 3'd1;
             state_q   <= ST_MASK;
@@ -1031,7 +1349,10 @@ module mosaic_vec_lsu #(
           end else if (we_q) begin
             vr_kind_q <= 3'd3;
             state_q   <= ST_DATA;
+          end else if (coal_eff_c) begin
+            state_q <= ST_CUR;
           end else begin
+            ret_q   <= RET_SCAN;
             state_q <= ST_REQ;
           end
         end
@@ -1049,7 +1370,52 @@ module mosaic_vec_lsu #(
             else if ((vr_kind_q == 3'd2) && we_q) begin
               vr_kind_q <= 3'd3;
               state_q   <= ST_DATA;   // an indexed store reads its data too
+            end else if (coal_eff_c) begin
+              state_q <= ST_CUR;
             end else begin
+              ret_q   <= RET_SCAN;
+              state_q <= ST_REQ;
+            end
+          end
+        end
+
+        // ------------------------------------------ a ready item (I-061)
+        // The item's address, mask and data are in hand. It joins the pending
+        // group when the mergeability rule admits it; otherwise the pending
+        // group is issued first (the item waits) or this item is issued alone.
+        ST_CUR: begin
+          if (abort_q) begin
+            state_q <= ST_WAIT;
+          end else if (can_join_c) begin
+            acc_mask_q  <= acc_mask_n_c;
+            acc_wdata_q <= acc_wdata_q | wdata_c;
+            acc_me_q[acc_n_q * 7 +: 7] <= elem_q[6:0];
+            acc_mf_q[acc_n_q * 4 +: 4] <= field_q;
+            acc_ml_q[acc_n_q * 3 +: 3] <= lane_c;
+            acc_n_q     <= acc_n_q + 4'd1;
+            elem_q      <= main_nelem_c;
+            field_q     <= main_nfield_c;
+            state_q     <= ST_SCAN;
+          end else if (acc_valid_q) begin
+            ret_q   <= RET_CUR;
+            state_q <= ST_REQ;
+          end else begin
+            acc_valid_q      <= 1'b1;
+            acc_beat_q       <= beat_c;
+            acc_mask_q       <= wmask_c;
+            acc_wdata_q      <= wdata_c;
+            acc_lead_elem_q  <= elem_q[6:0];
+            acc_lead_field_q <= field_q;
+            acc_me_q[0 +: 7] <= elem_q[6:0];
+            acc_mf_q[0 +: 4] <= field_q;
+            acc_ml_q[0 +: 3] <= lane_c;
+            acc_n_q          <= 4'd1;
+            if (merge_ok_c) begin
+              elem_q  <= main_nelem_c;
+              field_q <= main_nfield_c;
+              state_q <= ST_SCAN;
+            end else begin
+              ret_q   <= RET_SCAN;
               state_q <= ST_REQ;
             end
           end
@@ -1060,15 +1426,33 @@ module mosaic_vec_lsu #(
           if (abort_q) begin
             state_q <= ST_WAIT;
           end else if (mem_req_ready_i) begin
-            reqctr_r      <= reqctr_r + 32'd1;
-            elems_r       <= elems_r + 8'd1;
-            if (elem_q <= 8'd127) loaded_bm_q[elem_q[6:0]] <= 1'b1;
+            reqctr_r <= reqctr_r + 32'd1;
+            if (coalesce_q) begin
+              elems_r <= elems_r + {4'd0, acc_n_q};
+              for (int unsigned k = 0; k < COAL_MAX; ++k) begin
+                if (4'(k) < acc_n_q) loaded_bm_q[acc_me_q[k * 7 +: 7]] <= 1'b1;
+              end
+              acc_valid_q <= 1'b0;
+            end else begin
+              elems_r <= elems_r + 8'd1;
+              if (elem_q <= 8'd127) loaded_bm_q[elem_q[6:0]] <= 1'b1;
+            end
             if (limit_hit_c) begin
               state_q <= ST_WAIT;
             end else begin
-              elem_q  <= main_nelem_c;
-              field_q <= main_nfield_c;
-              state_q <= ST_SCAN;
+              case (ret_q)
+                RET_CUR:   state_q <= ST_CUR;
+                RET_DRAIN: state_q <= ST_DRAIN;
+                RET_STOP: begin
+                  abort_q <= 1'b1;
+                  state_q <= ST_WAIT;
+                end
+                default: begin
+                  elem_q  <= main_nelem_c;
+                  field_q <= main_nfield_c;
+                  state_q <= ST_SCAN;
+                end
+              endcase
             end
           end else if (stop_pending_q) begin
             // the memory cannot take this item and a boundary stop is pending:
@@ -1080,14 +1464,36 @@ module mosaic_vec_lsu #(
           end
         end
 
+        // ------------------------------------- return distribution (I-061)
+        // A coalesced load's beat is handed to its members one per cycle
+        // through the write-back queue, which drains in parallel.
+        ST_DIST: begin
+          if (dist_idx_q >= dist_n_q) begin
+            dist_valid_q <= 1'b0;
+            state_q      <= ST_WAIT;
+          end else if (wf_room_c) begin
+            dist_idx_q <= dist_idx_q + 4'd1;
+          end
+        end
+
         // ----------------------------------------------------------- wait
         ST_WAIT: begin
           if (abort_q) begin
             if ((outstanding_q == 3'd0) && (wf_count_q == 3'd0)) state_q <= ST_DONE;
           end else if (outstanding_q < limit_c) begin
-            elem_q  <= main_nelem_c;
-            field_q <= main_nfield_c;
-            state_q <= ST_SCAN;
+            case (ret_q)
+              RET_CUR:   state_q <= ST_CUR;
+              RET_DRAIN: state_q <= ST_DRAIN;
+              RET_STOP: begin
+                abort_q <= 1'b1;
+                state_q <= ST_WAIT;
+              end
+              default: begin
+                elem_q  <= main_nelem_c;
+                field_q <= main_nfield_c;
+                state_q <= ST_SCAN;
+              end
+            endcase
           end
         end
 
@@ -1133,6 +1539,12 @@ module mosaic_vec_lsu #(
 
         default: state_q <= ST_IDLE;
       endcase
+
+      // A coalesced response borrows the FSM's next state: a fault starts the
+      // de-coalesce replay, a success starts the return distribution. A size-1
+      // response leaves the FSM alone, so the I-056 path is untouched.
+      if (rsp_replay_c) state_q <= ST_SCAN;
+      if (rsp_dist_c)   state_q <= ST_DIST;
     end
   end
 

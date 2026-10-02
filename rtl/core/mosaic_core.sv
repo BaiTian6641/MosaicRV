@@ -3904,6 +3904,11 @@ module mosaic_core (
       .exec_base_i        (vec_lsu_base),
       .exec_stride_i      (vec_lsu_stride),
       .exec_mask_en_i     (vec_lsu_mask_en),
+      // I-061: same-hart, same-beat line coalescing is enabled for the core's
+      // vector memory path. A vector macro has no atomic class, so `atomic` is
+      // clear; the coalescer still takes the device predicate from the map.
+      .exec_coalesce_i    (1'b1),
+      .exec_atomic_i      (1'b0),
       .busy_o             (vec_lsu_busy),
       .done_o             (vec_lsu_done),
       .illegal_o          (vec_lsu_illegal),
@@ -3915,6 +3920,7 @@ module mosaic_core (
       .stop_elem_o        (vec_lsu_stop_elem),
       .elems_o            (vec_lsu_elems),
       .req_ctr_o          (vec_lsu_req_ctr),
+      .merge_ctr_o        (),
       .vrf_rd_valid_o     (vec_lsu_rd_valid),
       .vrf_rd_base_o      (vec_lsu_rd_base),
       .vrf_rd_elem_o      (vec_lsu_rd_elem),
