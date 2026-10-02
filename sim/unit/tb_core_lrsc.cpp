@@ -237,7 +237,14 @@ class Asm {
     emit(EncR(OP_ALU, 0, 28, 5, 28, 0));    // add  x28, x5, x28
     EmitI(0, 29, 0, static_cast<int32_t>(code));
     EmitStoreD(28, 29, 0);                  // sd x29, 0(x28): TOHOST = code
-    emit(EncJ(OP_JAL, 0, 0));               // jal x0, .  (spin)
+    // The end of the program is a WFI, not a self-jump. A self-jump is a
+    // *redirect*, and the redirect is issued when the jump executes -- which,
+    // out of order, can be before the store that precedes it has retired, and a
+    // redirect flushes the whole store queue. WFI is a system macro the core
+    // stages and takes only at the ROB head, so the exit store has retired and
+    // drained before the machine halts, and the halt is what the harness waits
+    // for.
+    emit(0x10500073u);                      // wfi
   }
 
  private:
@@ -269,7 +276,6 @@ struct Program {
   ProgImage img;
   std::map<uint64_t, Expect> retires;   // PC -> (rd, value), from the ISA
   std::vector<uint64_t> watch;          // addresses to read back after the run
-  uint64_t spin_pc = 0;                 // the exit protocol's spin
   uint64_t lr_count = 0;
   uint64_t sc_count = 0;
   uint64_t sc_success = 0;
@@ -327,7 +333,6 @@ Program BuildSemantics() {
   a.EmitScD(2, 3, 10, 1);            // sc.d x2, x3, (x10) -> x2 = 1, no write
 
   a.EmitExit(1);
-  p.spin_pc = a.pc() - 4;
 
   // Derived from the program above, by hand, from the ISA: the LRs are blocks
   // 2, 4, 5, 6 and 7; the SCs are blocks 1, 2, 3, 4, 5, 6 and 7, of which 2 and 5
@@ -379,8 +384,6 @@ Program BuildProgress(uint64_t injections) {
   const uint64_t retry_branch_pc = a.pc() - 4;
   a.EmitStoreD(20, 4, 0);                            // sd x4, 0(x20): attempts
   a.EmitExit(1);                                     // success
-  const uint64_t success_spin_pc = a.pc() - 4;
-
   const uint64_t fail_pc = a.pc();
   a.EmitExit(2);                                     // attempts exceeded the bound
 
@@ -388,8 +391,6 @@ Program BuildProgress(uint64_t injections) {
                                  static_cast<int32_t>(fail_pc - fail_branch_pc)));
   p.img.Put(retry_branch_pc, EncB(OP_BRANCH, 0b001, 2, 0,
                                   static_cast<int32_t>(loop_pc - retry_branch_pc)));
-  p.spin_pc = success_spin_pc;
-
   // The ISA's accounting for this run, in terms of the stimulus: every injected
   // conflicting write breaks exactly one reservation, so the loop needs one
   // attempt per injection plus the attempt that succeeds.
@@ -506,7 +507,6 @@ class Harness {
   uint64_t injected() const { return injected_; }
   bool saw_stop() const { return saw_stop_; }
 
-  void SetStopPc(uint64_t pc) { stop_pc_ = pc; }
 
   // Arm the second agent: up to `budget` ordinary 8-byte writes to `addr`,
   // performed only while the hart holds a reservation and the port is free.
@@ -526,7 +526,8 @@ class Harness {
   // it reads the final image. (The spin's redirect spares an authorised store,
   // so the wait terminates.)
   void DrainStores(int max_cycles) {
-    for (int i = 0; i < max_cycles && dut_->o_mem_sq_occupied_o != 0; i++) {
+    for (int i = 0; i < max_cycles && dut_->o_mem_sq_occupied_o != 0 &&
+                    !dmem_.model()->finished(); i++) {
       Cycle(false);
     }
   }
@@ -583,6 +584,7 @@ class Harness {
     dut_->eval();
 
     if (!rst) Observe();
+    if (!rst && (dut_->o_wfi_halt_o != 0)) saw_stop_ = true;
 
     if (!rst) {
       if ((dut_->imem_req_valid_o != 0) && (dut_->imem_req_ready_i != 0)) {
@@ -727,7 +729,6 @@ class Harness {
       r.reg_we = PackedLane(dut_->ev_reg_we_o, lane, 1) != 0;
       r.trap = PackedLane(dut_->ev_trap_o, lane, 1) != 0;
       retires_.push_back(r);
-      if (r.pc == stop_pc_) saw_stop_ = true;
     }
     // The declared granule is checked as state: whenever a reservation stands,
     // the granule the DUT reports must be the 64-byte block containing the
@@ -755,7 +756,6 @@ class Harness {
   uint64_t agent_budget_ = 0;
   uint64_t agent_value_ = 0;
   uint64_t injected_ = 0;
-  uint64_t stop_pc_ = 0;
   bool saw_stop_ = false;
 };
 
@@ -859,12 +859,11 @@ RunResult RunOnce(Vmosaic_core_tb* dut, mosaic::Reporter* reporter,
 
   Harness harness(dut, reporter, &prog.img, &dut_mem, kMaxRunCycles);
   harness.Configure(geometry);
-  harness.SetStopPc(prog.spin_pc);
   harness.Reset(kResetCycles);
   if (agent_budget > 0) harness.EnableSecondAgent(kA, agent_budget);
 
-  // The frozen exit protocol: the program writes its code to TOHOST and spins;
-  // the spin's retirement is the end of the run.
+  // The frozen exit protocol: the program writes its code to TOHOST and then
+  // halts with WFI; the halt is the end of the run.
   uint64_t last_retires = 0;
   uint64_t last_progress = 0;
   while (!harness.saw_stop()) {
@@ -905,6 +904,47 @@ RunResult RunOnce(Vmosaic_core_tb* dut, mosaic::Reporter* reporter,
     reporter->Check(found, label + ": the instruction at " + U64(pc) + " retires");
   }
 
+  // ------------------------------------------------- 2. the port's own numbers
+  // The order here is deliberate. The *stimulus* check comes first, because in
+  // the progress run an external write that did not invalidate makes everything
+  // after it meaningless; then the two facts the card's Pass criterion turns on,
+  // which are statements about the memory traffic itself -- one write beat per
+  // successful SC and one read beat per LR; then the endpoint's class counters,
+  // which are an independent account of the same two facts; and last the
+  // retirement stream's own count of the store-conditionals.
+  const uint64_t dut_lr = dut->o_mem_lr_ctr_o;
+  const uint64_t dut_sc_ok = dut->o_mem_sc_ok_ctr_o;
+  const uint64_t dut_sc_fail = dut->o_mem_sc_fail_ctr_o;
+  const uint64_t dut_ext_inval = dut->o_mem_res_ext_inval_ctr_o;
+
+  reporter->Check(dut_ext_inval == prog.ext_inval_expected,
+                  label + ": " + Dec(prog.ext_inval_expected) + " external writes must "
+                  "clear the reservation, the endpoint counted " + Dec(dut_ext_inval));
+
+  Shadow shadow;
+  ReplayResult replay = Replay(harness.txns(), &shadow, reporter, label);
+
+  // The heart of the card: an SC that succeeds performs exactly one write, and an
+  // SC that fails performs none. The architectural statuses and the port's write
+  // count are two independent accounts of the same fact.
+  reporter->Check(replay.sc_writes == static_cast<int>(prog.sc_success),
+                  label + ": exactly one write beat per successful SC -- the ISA says " +
+                      Dec(prog.sc_success) + " succeed, the port saw " +
+                      Dec(replay.sc_writes) + " SC write beats");
+  reporter->Check(replay.lr_reads == static_cast<int>(prog.lr_count),
+                  label + ": exactly one read beat per LR -- the ISA says " +
+                      Dec(prog.lr_count) + ", the port saw " + Dec(replay.lr_reads));
+
+  reporter->Check(dut_lr == prog.lr_count,
+                  label + ": the hart executed " + Dec(prog.lr_count) + " LRs, the "
+                  "endpoint counted " + Dec(dut_lr));
+  reporter->Check(dut_sc_ok == prog.sc_success,
+                  label + ": " + Dec(prog.sc_success) + " SCs must succeed, the endpoint "
+                  "counted " + Dec(dut_sc_ok));
+  reporter->Check(dut_sc_fail == prog.sc_fail,
+                  label + ": " + Dec(prog.sc_fail) + " SCs must fail, the endpoint counted " +
+                  Dec(dut_sc_fail));
+
   // x2 is written only by an SC in both programs, so the retirements of x2 are
   // the store-conditionals, and their values are the statuses the ISA defines.
   uint64_t sc_retires = 0, sc_zero = 0, sc_bad = 0;
@@ -924,39 +964,6 @@ RunResult RunOnce(Vmosaic_core_tb* dut, mosaic::Reporter* reporter,
                   label + ": " + Dec(prog.sc_success) + " store-conditionals must report "
                   "success, the retire stream shows " + Dec(sc_zero));
 
-  // ------------------------------------------------ 2. the port's own numbers
-  Shadow shadow;
-  ReplayResult replay = Replay(harness.txns(), &shadow, reporter, label);
-
-  const uint64_t dut_lr = dut->o_mem_lr_ctr_o;
-  const uint64_t dut_sc_ok = dut->o_mem_sc_ok_ctr_o;
-  const uint64_t dut_sc_fail = dut->o_mem_sc_fail_ctr_o;
-  const uint64_t dut_ext_inval = dut->o_mem_res_ext_inval_ctr_o;
-
-  reporter->Check(dut_lr == prog.lr_count,
-                  label + ": the hart executed " + Dec(prog.lr_count) + " LRs, the "
-                  "endpoint counted " + Dec(dut_lr));
-  reporter->Check(dut_sc_ok == prog.sc_success,
-                  label + ": " + Dec(prog.sc_success) + " SCs must succeed, the endpoint "
-                  "counted " + Dec(dut_sc_ok));
-  reporter->Check(dut_sc_fail == prog.sc_fail,
-                  label + ": " + Dec(prog.sc_fail) + " SCs must fail, the endpoint counted " +
-                  Dec(dut_sc_fail));
-  reporter->Check(dut_ext_inval == prog.ext_inval_expected,
-                  label + ": " + Dec(prog.ext_inval_expected) + " external writes must "
-                  "clear the reservation, the endpoint counted " + Dec(dut_ext_inval));
-
-  // The heart of the card: an SC that succeeds performs exactly one write, and an
-  // SC that fails performs none. The architectural statuses and the port's write
-  // count are two independent accounts of the same fact.
-  reporter->Check(replay.sc_writes == static_cast<int>(prog.sc_success),
-                  label + ": exactly one write beat per successful SC -- the ISA says " +
-                      Dec(prog.sc_success) + " succeed, the port saw " +
-                      Dec(replay.sc_writes) + " SC write beats");
-  reporter->Check(replay.lr_reads == static_cast<int>(prog.lr_count),
-                  label + ": exactly one read beat per LR -- the ISA says " +
-                      Dec(prog.lr_count) + ", the port saw " + Dec(replay.lr_reads));
-
   // ------------------------------------------------------- 3. the granule rule
   reporter->Check(harness.granule_samples() > 0,
                   label + ": the reservation was observed standing at least once");
@@ -966,13 +973,13 @@ RunResult RunOnce(Vmosaic_core_tb* dut, mosaic::Reporter* reporter,
                       Dec(harness.granule_samples()) + " samples)");
 
   // ------------------------------------------------------- 4. the memory image
-  uint64_t tohost = 0;
-  if (dut_mem.Read(kTohost, 8, &tohost) != mosaic::AccessStatus::kOk) {
-    Fail(label, "the exit protocol's TOHOST word is not readable RAM");
-  }
-  reporter->Check(tohost == 1,
+  // The exit protocol is read through the memory model's own state, not by
+  // reading TOHOST: a TOHOST *read* answers "still running" by construction.
+  reporter->Check(dut_mem.finished() && dut_mem.passed() && dut_mem.exit_code() == 1,
                   label + ": the program reported success through the exit protocol "
-                  "(TOHOST = " + Dec(tohost) + ")");
+                  "(finished=" + Dec(dut_mem.finished() ? 1 : 0) + " passed=" +
+                      Dec(dut_mem.passed() ? 1 : 0) + " code=" + Dec(dut_mem.exit_code()) +
+                      ")");
 
   RunResult out;
   out.retires = retires.size();

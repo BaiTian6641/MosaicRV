@@ -47,7 +47,8 @@
     "I-030",
     "I-039",
     "I-041",
-    "I-031"
+    "I-031",
+    "I-040"
   ],
   "evidence": {
     "I-001": {
@@ -577,6 +578,17 @@
       "verdict": "PASS",
       "notes": "The resource-ownership change FSM: IDLE -> STOP_ADMIT -> DRAIN -> ACK -> PUBLISH, with owner generations and idempotent control messages. Case PASS from a clean build: 4354 per-cycle shadow-exact comparisons over 4406 cycles (the RESULT line's 'checks' counter is the phase count; the substantive evidence is the per-cycle comparison against an independently represented shadow -- stacks rather than counters -- written from the contract). The card's rule is what is enforced rather than asserted: a new owner is published only after every outstanding uop, result and credit of the old owner has settled, and a repeated control message is idempotent. Six mutants each exit 1 with a named first failure: PUBLISH_EARLY (a new owner published before the drain completes -- the card's first fail mode), NO_ACK (the drain treated as complete without the participant's acknowledgement), LOST_CREDIT, DOUBLE_CREDIT, REPEAT_CTRL (a non-idempotent control message) and DROP_ADMIT_AFTER_STOP. Ten other cases re-run green, including the corpus sweep, the memory cases and the arbiter. SCOPE, stated by the lane and recorded here: the FSM is standalone and is not yet instantiated by the fabric or the core -- that wiring is I-090/V-034's, and like the bypass (I-027), the steering policy (I-029) and the arbiter (I-030) it is verified in isolation until the fabric integration runs. NOT covered: p0 is single-hart so there is no second agent (the participants are modelled by the test's acknowledgement and the two event classes); the abort is a watchdog rather than a hang detector, so a credit settling after the abort leaves the next drain stalled as well; the 2^7 generation aliasing bound and the 8-bit message-sequence reuse bound are documented limits that no stimulus drives; the counters saturate at the architectural bound and no stimulus reaches saturation; there are no formal/SVA properties, only directed phases plus random shadow comparison; and the C++ shadow is the sole oracle, written by the same author though from the contract with an independent representation.",
       "report": "results/reports/I-031-ownership.md"
+    },
+    "I-040": {
+      "cases": [
+        "lrsc.reservation_progress"
+      ],
+      "commands": [
+        "python3 tools/run_unit.py --profile p0 --case lrsc.reservation_progress"
+      ],
+      "verdict": "PASS",
+      "notes": "LR/SC reservations, completing the A extension's implementation. Case PASS from a clean build: 73 checks. The reservation contract is DECLARED and checked rather than implied: the granule is the naturally aligned 64-byte block containing the LR address (GRANULE_BITS=6), verified as state against the address mask in every cycle a reservation stands (42 samples, 0 violations) and through its consequences (an in-granule store from the other agent breaks the reservation, an out-of-granule store does not). The card's forward-progress requirement is met the way it demands -- a declared bound, measured: N=16 attempts is compiled into the program as a hard ceiling with its own exit code, and the interfering run shows attempts == injected conflicts + 1, attempts <= N, with the case failing loudly if the stimulus injects >= N conflicting writes before any measurement. Four mutants each exit 1 with a precise first failure naming the ISA rule: SC_WRITES_ON_FAIL (the failing SC retires rd=0 where the ISA requires 1), SC_DOUBLE_WRITE (four write beats where two SCs succeeded -- 'exactly once' violated), NO_EXT_INVAL (three external writes clear nothing), and GRANULE_OVERINVALIDATE (an out-of-granule store breaks a reservation that must survive). Seventeen other cases were re-run green, including every memory and atomic case, the corpus sweep, the trap and retire verifications and the bring-up reference. NOT covered, stated by the lane: p0 is single-hart, so the second agent is the harness writing the shared memory model and raising an external-write notification, which is one event by construction -- the case therefore cannot distinguish invalidation-on-notification from invalidation-on-write, and there is no arbitration; a real multi-master test needs I-042/I-043/V-086. With no cache, any granule containing the LR address behaves identically, so the 64-byte size is not made *necessary* by anything this machine can do -- it is observable as declared state and through SC status, and that is the honest extent of it. aq/rl ordering effects are not demonstrated (the path is conservatively ordered; the bits are carried); speculative LR/SC is made unreachable by ROB-head serialization rather than tested; the misaligned LR/SC traps (cause 4 for LR, 6 for SC) are not exercised; atomic MMIO is neither claimed nor driven; a legitimate long retry cannot be exhibited because this implementation never fails spuriously; and no corpus program uses LR/SC.",
+      "report": "results/reports/I-040-lrsc.md"
     }
   }
 }

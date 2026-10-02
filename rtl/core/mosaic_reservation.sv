@@ -133,12 +133,17 @@ module mosaic_reservation (
 
   // The granule an address belongs to. One function, so the address compared at
   // establishment and the addresses compared at invalidation are always the same
-  // slice of the same width.
+  // slice of the same width. The low `GRANULE_BITS` bits are *inside* the granule
+  // and are deliberately not read -- a granule tag names the block, not the byte
+  // -- so the linter's "unused bits of the input" is the statement of the rule
+  // rather than an omission.
+  /* verilator lint_off UNUSEDSIGNAL */
   function automatic logic [GRANULE_W-1:0] granule_of(input logic [63:0] addr);
     begin
       granule_of = addr[63:GRANULE_BITS];
     end
   endfunction
+  /* verilator lint_on UNUSEDSIGNAL */
 
   // Does the byte range `[addr, addr + bytes - 1]` intersect the reserved
   // granule? An access of at most eight bytes spans at most two granules, so

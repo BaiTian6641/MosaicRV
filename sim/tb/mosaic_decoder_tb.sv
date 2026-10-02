@@ -8,8 +8,8 @@
 // sim/unit/tb_decoder.cpp counts.
 //
 // The struct is broken out into one named port per field rather than passed to
-// C++ as a 131-bit opaque vector, so the driver can compare field by field and
-// name the field that mismatched. The break-out is a straight member-by-member
+// C++ as an opaque vector, so the driver can compare field by field and name the
+// field that mismatched. The break-out is a straight member-by-member
 // copy and is checked against the DUT's own struct by `RebuildStruct()` in the
 // driver, so a typo here cannot hide a decoder bug.
 //
@@ -79,10 +79,11 @@ module mosaic_decoder_tb (
     // ports above carry exactly the bits of decode_ctl_t and that none of the
     // break-out assignments was fat-fingered. Field order is the declaration
     // order of mosaic_pkg::decode_ctl_t, with `valid` at the MSB. The width is
-    // taken from the package's declaration order, field by field: 141 bits
-    // (135 before the A extension's amo_op/amo_aq/amo_rl were added). tb_decoder.cpp
-    // derives the same layout from the same order and fails if the two disagree.
-    output logic [140:0] o_ctl_bits
+    // taken from the package's declaration order, field by field: 143 bits
+    // (135 before the A extension's amo_op/amo_aq/amo_rl, 141 before I-040's
+    // is_lr/is_sc). tb_decoder.cpp derives the same layout from the same order
+    // and fails if the two disagree.
+    output logic [142:0] o_ctl_bits
 );
   mosaic_pkg::decode_ctl_t ctl;
 
