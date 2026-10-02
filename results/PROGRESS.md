@@ -2247,3 +2247,44 @@ gate green, lint 57/57 on both profiles. Remaining for the goal: the rest of the
 core** (no decoded vector instruction reaches any of these seven units yet), the LLB and locality
 work, multi-hart/cohort/pod (I-064..I-075), the measurement and release gates (I-076..I-086) and the
 RVA23S64 mandatory matrix (I-092..I-098).
+
+---
+
+## 2026-10-01 — chaining measured, and a harness hazard closed class-wide (72 delivered)
+
+**I-058 (vector chaining)** passes with the benefit *measured* rather than asserted: 10 cycles with chaining
+against 18 without, 8 forwarded elements against 0, 1 stall against 9, and the architectural state identical
+on and off. Both of the card's named hazards are controlled by mutants — a macro-level ready bit letting a
+consumer read an unwritten element, and a cancelled instruction's packet being accepted by a new descriptor
+— and the scoreboard design is the sharpest distinction the vector work has produced: the descriptor's
+element bitmap is **architectural progress bound to the restart point** and must never record a speculative
+packet, while chaining readiness is a **microarchitectural forwarding fact** that carries element data and
+the producing generation. They cannot disagree, because when the binding input is set the descriptor's
+element-done pulse *is* the network's accepted-packet pulse.
+
+**The reset-traffic hazard is closed class-wide.** The rule — while reset is asserted, no bus model accepts,
+queues or delivers a request, and a request the DUT presents is ignored, because holding the reset-vector
+request is a legal state and not a DUT error — now lives in **one shared mechanism** (`mosaic::BusResetGate`),
+which **27 core drivers** route through. The survey is the valuable part: six non-core drivers already carried
+their own ad-hoc guard, and several core drivers guarded the *instruction* path but **not the data** path, so
+the hazard was half-closed rather than absent. The case's RESULT line states the condition that mattered
+(`first=nonredirect` — a program starting with a `JAL` would pass even with the bug present), and its control
+run accepts 4 reset-time requests and *makes the case fail*, which is what proves the case catches the class.
+It also demonstrates the stale-response mechanism deterministically.
+
+**Three process rules were earned this stretch and are worth more than either package.** (1) A lane that
+suspects its change is being blamed for a red gate should **exonerate itself by experiment** — rebuilding the
+same case from `git show HEAD:` — which is exactly how the red `core.act_dut` was traced to another lane's
+in-flight edits rather than to chaining. (2) **A `git stash` must always carry a pathspec**: a bare one takes
+every modified tracked file in the repository, and this time it swept a sibling's tracked edits into a stash
+that had to be restored hash-verified. (3) **A gate that is red because another lane is mid-edit is still a
+gate**: I told the offending lane to land the change in one piece and re-verify the 127-ELF suite rather than
+treat "someone else's edit" as an excuse to look away.
+
+**State**: 72 packages delivered, 16 capabilities advertised, ACT4 127/127, `make check` and every gate green,
+lint 58/58 on both profiles. Remaining for the goal: I-059..I-063 (lane quotas and the arithmetic restart),
+**wiring the vector unit into the core** — seven delivered vector units still have zero references from
+`mosaic_core.sv`, which is the single largest gap between what is verified and what the machine does — the
+LLB and locality work, multi-hart/cohort/pod (I-064..I-075), the measurement and release gates
+(I-076..I-086), the RVA23S64 mandatory matrix (I-092..I-098), and the mask-prefix `vstart` rule that two
+lanes have now reported.
