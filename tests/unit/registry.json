@@ -2405,6 +2405,24 @@
    ],
    "max_cycles": 200000,
    "seed": 1
+  },
+  "prefetch.fault_and_pollution": {
+   "task": "I-063",
+   "top": "mosaic_prefetch_tb",
+   "rtl": [
+    "rtl/core/mosaic_pkg.sv",
+    "rtl/core/mosaic_llb.sv",
+    "rtl/core/mosaic_prefetch.sv"
+   ],
+   "sv": [
+    "sim/tb/mosaic_prefetch_tb.sv"
+   ],
+   "cpp": [
+    "sim/unit/tb_prefetch.cpp"
+   ],
+   "max_cycles": 200000,
+   "seed": 1,
+   "pending": true
   }
  }
 }
