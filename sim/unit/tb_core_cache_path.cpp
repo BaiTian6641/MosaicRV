@@ -930,8 +930,7 @@ std::string Hexu(uint64_t v) {
   return buf;
 }
 
-std::vector<std::string> Split(const std::string& text, char sep) {
-  std::vector<std::string> out;
+std::vector<std::string> Split(const std::string& text, char sep) {  std::vector<std::string> out;
   std::string cur;
   for (char c : text) {
     if (c == sep) {
