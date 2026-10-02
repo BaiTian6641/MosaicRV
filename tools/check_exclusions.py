@@ -234,6 +234,14 @@ def check(root: str) -> Tuple[List[Problem], Dict[str, int]]:
 
     unregistered = []
     for name in sorted(cases):
+        # A case may be registered before its driver exists -- this project's
+        # deliberate order, so that a case is fixed before the thing it tests is
+        # built. The registry marks it `"pending": true`, and `check_records.py`
+        # already treats that as "not yet evidence". A case that has not run yet
+        # is not an unregistered exclusion; a case that *has* run and failed, or
+        # that has a result nobody accounted for, still is.
+        if cases[name].get("pending"):
+            continue
         if recorded_verdict(root, name) != "PASS" and name not in named:
             unregistered.append(name)
     for name in unregistered:
