@@ -2805,3 +2805,47 @@ to the inventory, printed on every run, with the added document held to every re
 links, git tracking, whitespace). `check_docs` passes. The alternative, editing the embedded checker
 inside `docs/verification.md`, was rejected: the wrapper's whole design is that the deviation is
 visible where it is applied.
+
+---
+
+## 2026-10-02 — V-013 isolated to one mechanism, and the insert is held rather than shipped
+
+**The isolation, in three builds, each from a deleted directory with the `-D` in that build:**
+
+| build | verdict |
+|---|---|
+| `-DMOSAIC_DISPATCH_MUTANT_NO_INSERT` — two-wide **allocation kept**, same-cycle second insert removed | **PASS** (`checks=1195 events=119 retires=118 dual=28 single=63 cycles=573`) |
+| `-DMOSAIC_DISPATCH_MUTANT_NO_PAIR` extended — allocation **and** insert removed | **PASS** |
+| allocation removed, **insert kept** (`wide_pair=0`) | **FAIL**, identical signature |
+
+So the depth-8 decoded queue and two-wide **allocation** are proven not to break `retire.width_and_order`
+(V-013), and the **same-cycle second insert (`head1_fire`) is the trigger**. Two further negatives inside
+the insert (`H1_NO_CTRL`, `H1_ALWAYS_NOTREADY`) and the memory lane's own `MOSAIC_MEM_SMALL_CACHE`
+switch do not change it, and both other lanes had already excluded themselves with revert builds of
+their own files.
+
+**The decision, and why it is the conservative one.** The failure is `lane 1` retiring a **much older**
+PC than the model expects — a retirement-*order* disagreement, i.e. the machine retires the wrong
+instruction. That is a **correctness** defect and it cannot ship, whatever its performance value: the
+case it fails is `V-013`, whose declared subject is commit width and order, which is precisely the
+property the insert changes. The insert is therefore **held by deleting it** — `head1_fire`, the
+`c0_from_h1`/`c1_from_h1` operand muxing and the lane-1 PRF/operand blocks — while the depth-8 queue and
+two-wide allocation stay, because those are the parts the evidence says are safe and they are what the
+depth half of the package is for. **A held feature with a named failing case is honest; a shipped
+feature with a failing case is a broken machine with a green dashboard.**
+
+**What the held state costs, stated plainly**: two-wide allocation still never engages on any measured
+workload (every workload is fetch-bound — `frsp%` 22–25, `alloc/cyc == frsp%`), so holding the insert
+gives up a mechanism that fires **3 times** in the one purpose-built backlog workload and zero times
+everywhere else. The width half of the package therefore ships as *allocation-only*, and the honest
+claim is the one already on the record: the binding resource is the instruction fetch path, not
+allocation width.
+
+**The open question the next experiment must answer**, because it decides whether the held code is
+salvageable: with the insert kept, does removing the retire-side two-wide lane make V-013 pass? If it
+does, the defect lives in the retire/ROB lane-1 path that the insert merely exposes — a **latent defect
+in already-delivered work** that a machine which never allocates two macros in a cycle could not
+surface — and the insert's own identity (it carries the ROB's `alloc2_index`/`alloc2_gen`) is likely
+sound. If it does not, the insert's identity is wrong. That experiment is running now, and its answer is
+worth more than the hold itself: one outcome means the project has a hidden defect in I-017's territory,
+the other means the insert needs redesigning.
