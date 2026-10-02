@@ -405,7 +405,7 @@ module mosaic_vec_lsu #(
   logic [6:0]  rdw_elem_c;
   logic [2:0]  rdw_sew_c;
   logic [3:0]  rdw_lmul_c;
-  logic [3:0]  rdw_grp_base;
+  logic [4:0]  rdw_grp_base;
 
   always_comb begin
     is_seg     = (mode_q == LM_SEG_UNIT) || (mode_q == LM_SEG_STRIDED) ||
@@ -463,10 +463,10 @@ module mosaic_vec_lsu #(
     limit_hit_c = (outstanding_q + 3'd1) >= limit_c;
 
     // the store-data / load-destination register demand, one rule per mode
-    rdw_grp_base = 4'd0;
+    rdw_grp_base = 5'd0;
     if (is_seg) begin
       rdw_grp_base = lmul_exp_q[3] ? data_q
-                   : 4'(data_q & ~(5'(emul_regs) - 5'd1));
+                   : (data_q & ~(5'(emul_regs) - 5'd1));
       rdw_base_c = rdw_grp_base + 5'(field_q) * 5'(emul_regs);
       rdw_elem_c = elem_q[6:0];
       rdw_sew_c  = eew_log2_q;
@@ -664,27 +664,29 @@ module mosaic_vec_lsu #(
   assign mem_req_ordered_o = ordered_q;
 
   // ---------------------------------------------------- item stepping
-  task automatic main_step();
-    begin
-      if (field_q + 4'd1 >= nf_eff) begin
-        field_q <= 4'd0;
-        elem_q  <= elem_q + 8'd1;
-      end else begin
-        field_q <= field_q + 4'd1;
-      end
-    end
-  endtask
+  // The next (element, field) of the main scan and of the post-pass, computed
+  // combinationally so the FSM has no separate task process writing its state.
+  logic [7:0] main_nelem_c;
+  logic [3:0] main_nfield_c;
+  logic [7:0] tail_nelem_c;
+  logic [3:0] tail_nfield_c;
 
-  task automatic tail_step();
-    begin
-      if (t_field_q + 4'd1 >= nf_eff) begin
-        t_field_q <= 4'd0;
-        t_elem_q  <= t_elem_q + 8'd1;
-      end else begin
-        t_field_q <= t_field_q + 4'd1;
-      end
+  always_comb begin
+    if (field_q + 4'd1 >= nf_eff) begin
+      main_nfield_c = 4'd0;
+      main_nelem_c  = elem_q + 8'd1;
+    end else begin
+      main_nfield_c = field_q + 4'd1;
+      main_nelem_c  = elem_q;
     end
-  endtask
+    if (t_field_q + 4'd1 >= nf_eff) begin
+      tail_nfield_c = 4'd0;
+      tail_nelem_c  = t_elem_q + 8'd1;
+    end else begin
+      tail_nfield_c = t_field_q + 4'd1;
+      tail_nelem_c  = t_elem_q;
+    end
+  end
 
   // the tail/mask policy for the current post-pass item
   function automatic logic tail_write_needed();
@@ -757,7 +759,7 @@ module mosaic_vec_lsu #(
         case (vrf_rd_rsp_tag_i)
           TAG_MASK: begin
             mask_byte_q     <= vrf_rd_rsp_data_i[7:0];
-            mask_byte_idx_q <= elem_q[6:3];
+            mask_byte_idx_q <= 5'(elem_q[6:3]);
             mask_valid_q    <= 1'b1;
           end
           TAG_IDX: index_val_q <= vrf_rd_rsp_data_i;
@@ -850,6 +852,7 @@ module mosaic_vec_lsu #(
             stride_q   <= exec_stride_i;
             vma_q      <= cfg_vma;
             vta_q      <= cfg_vta;
+            vl_q       <= cfg_vl_i;
             vstart_q   <= {1'b0, cfg_vstart_i};
             mask_en_q  <= exec_mask_en_i && (exec_mode_i != LM_WHOLE) &&
                           (exec_mode_i != LM_MASK);
@@ -861,10 +864,11 @@ module mosaic_vec_lsu #(
             if (exec_mode_i > LM_MASK) begin
               illegal_r <= 1'b1;
               state_q   <= ST_DONE;
-            end else if (!caps_i[exec_mode_i]) begin
+            end else if (!caps_i[exec_mode_i[2:0]]) begin
               illegal_r <= 1'b1;
               state_q   <= ST_DONE;
-            end else if ((int'(cfg_vsew) < 3) || (int'(cfg_vsew) > 6)) begin
+            end else if ((int'(cfg_vsew) < 3) || (int'(cfg_vsew) > 6) ||
+                         ((1 << int'(cfg_vsew)) > int'(ELEN))) begin
               illegal_r <= 1'b1;
               state_q   <= ST_DONE;
             end else if ((exec_mode_i == LM_WHOLE) &&
@@ -902,7 +906,8 @@ module mosaic_vec_lsu #(
             vr_kind_q <= 3'd1;
             state_q   <= ST_MASK;
           end else if (!active_c) begin
-            main_step();
+            elem_q  <= main_nelem_c;
+            field_q <= main_nfield_c;
           end else if (is_indexed) begin
             vr_kind_q <= 3'd2;
             state_q   <= ST_INDEX;
@@ -939,7 +944,8 @@ module mosaic_vec_lsu #(
             if (limit_hit_c) begin
               state_q <= ST_WAIT;
             end else begin
-              main_step();
+              elem_q  <= main_nelem_c;
+              field_q <= main_nfield_c;
               state_q <= ST_SCAN;
             end
           end
@@ -950,7 +956,8 @@ module mosaic_vec_lsu #(
           if (abort_q) begin
             if ((outstanding_q == 3'd0) && (wf_count_q == 3'd0)) state_q <= ST_DONE;
           end else if (outstanding_q < limit_c) begin
-            main_step();
+            elem_q  <= main_nelem_c;
+            field_q <= main_nfield_c;
             state_q <= ST_SCAN;
           end
         end
@@ -975,13 +982,15 @@ module mosaic_vec_lsu #(
           end else if (tail_write_needed()) begin
             state_q <= ST_TWR;
           end else begin
-            tail_step();
+            t_elem_q  <= tail_nelem_c;
+            t_field_q <= tail_nfield_c;
           end
         end
 
         ST_TWR: begin
           if (vrf_wr_gnt_i) begin
-            tail_step();
+            t_elem_q  <= tail_nelem_c;
+            t_field_q <= tail_nfield_c;
           end
         end
 
@@ -999,7 +1008,7 @@ module mosaic_vec_lsu #(
 
   // unused tie-off
   logic unused_ok;
-  assign unused_ok = (rdw_grp_base == 4'd0) & (rdw_base_c[4] == rd_base_c[4]);
+  assign unused_ok = (rdw_grp_base[4:0] == 5'd0) | (rd_base_c[4]);
 
 endmodule
 

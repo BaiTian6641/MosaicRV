@@ -108,16 +108,43 @@ def read_text(path: str) -> str:
 
 
 def recorded_verdict(root: str, case: str) -> Optional[str]:
-    """The verdict in results/unit/<case>/result.json, or None if unrecorded."""
-    path = os.path.join(root, RESULTS_REL, case, "result.json")
-    if not os.path.exists(path):
+    """The best recorded verdict for a case, or None if it has never run.
+
+    Results are per profile: p0 writes `results/unit/<case>/result.json` (the
+    historical path every citation uses) and every other profile writes
+    `results/unit/<case>/<profile>/result.json`. A case that is registered for p1
+    only therefore has no p0 result, and a checker that looked only at the
+    historical path would call it unrecorded -- which is exactly what happened when
+    `cache.integrated_path` was recorded as passing at p1 and the exclusion ledger
+    was told it had no recorded PASS.
+
+    The rule: prefer the case's own directory, then any profile subdirectory. A
+    PASS anywhere counts as recorded, because the ledger's question is whether a
+    named alternative verification exists and passes, not which profile proved it.
+    """
+    candidates = [os.path.join(root, RESULTS_REL, case, "result.json")]
+    profile_dir = os.path.join(root, RESULTS_REL, case)
+    if os.path.isdir(profile_dir):
+        for name in sorted(os.listdir(profile_dir)):
+            sub = os.path.join(profile_dir, name, "result.json")
+            if os.path.exists(sub):
+                candidates.append(sub)
+    verdicts = []
+    for path in candidates:
+        if not os.path.exists(path):
+            continue
+        try:
+            document = load(path)
+        except (ValueError, OSError):
+            verdicts.append("UNREADABLE")
+            continue
+        verdict = document.get("verdict")
+        verdicts.append(verdict if isinstance(verdict, str) else "MALFORMED")
+    if not verdicts:
         return None
-    try:
-        document = load(path)
-    except (ValueError, OSError):
-        return "UNREADABLE"
-    verdict = document.get("verdict")
-    return verdict if isinstance(verdict, str) else "MALFORMED"
+    if "PASS" in verdicts:
+        return "PASS"
+    return verdicts[0]
 
 
 def check(root: str) -> Tuple[List[Problem], Dict[str, int]]:

@@ -239,7 +239,47 @@ module mosaic_vec_tb (
     output logic [31:0]                vrf_wr_gnt_ctr_o,
     output logic [31:0]                vrf_rd_latency_o,
     output logic [31:0]                vrf_rows_o,
-    output logic [31:0]                vrf_banks_o
+    output logic [31:0]                vrf_banks_o,
+
+    // ------------- vector memory packetizer (I-056) ------------------------
+    /* verilator lint_off UNUSEDSIGNAL */
+    input  logic [7:0]                 lsu_caps_i,
+    input  logic                       lsu_exec_valid_i,
+    input  logic [3:0]                 lsu_mode_i,
+    input  logic                       lsu_we_i,
+    input  logic                       lsu_ordered_i,
+    input  logic [3:0]                 lsu_nf_i,
+    input  logic [4:0]                 lsu_vd_i,
+    input  logic [4:0]                 lsu_data_i,
+    input  logic [4:0]                 lsu_index_i,
+    input  logic [2:0]                 lsu_idx_sew_i,
+    input  logic [63:0]                lsu_base_i,
+    input  logic [63:0]                lsu_stride_i,
+    input  logic                       lsu_mask_en_i,
+    /* verilator lint_on UNUSEDSIGNAL */
+    output logic                       lsu_busy_o,
+    output logic                       lsu_done_o,
+    output logic                       lsu_illegal_o,
+    output logic                       lsu_trap_o,
+    output logic [6:0]                 lsu_trap_elem_o,
+    output logic [7:0]                 lsu_elems_o,
+    output logic [31:0]                lsu_req_ctr_o,
+    output logic [31:0]                lsu_vrd_ctr_o,
+    output logic                       lsu_mem_req_valid_o,
+    input  logic                       lsu_mem_req_ready_i,
+    output logic [6:0]                 lsu_mem_req_elem_o,
+    output logic [3:0]                 lsu_mem_req_field_o,
+    output logic [63:0]                lsu_mem_req_addr_o,
+    output logic [7:0]                 lsu_mem_req_wmask_o,
+    output logic [63:0]                lsu_mem_req_wdata_o,
+    output logic                       lsu_mem_req_we_o,
+    output logic [3:0]                 lsu_mem_req_size_o,
+    output logic                       lsu_mem_req_ordered_o,
+    input  logic                       lsu_mem_rsp_valid_i,
+    input  logic [6:0]                 lsu_mem_rsp_elem_i,
+    input  logic [3:0]                 lsu_mem_rsp_field_i,
+    input  logic                       lsu_mem_rsp_fault_i,
+    input  logic [63:0]                lsu_mem_rsp_rdata_i
 );
 
   logic [127:0] elem_bitmap;
@@ -451,6 +491,24 @@ module mosaic_vec_tb (
   logic [63:0] alu_wr_data;
   logic        alu_wr_gnt;
 
+  logic        lsu_rd_valid;
+  logic [4:0]  lsu_rd_base;
+  logic [6:0]  lsu_rd_elem;
+  logic [2:0]  lsu_rd_sew;
+  logic [3:0]  lsu_rd_lmul;
+  logic [15:0] lsu_rd_tag;
+  logic        lsu_rd_gnt;
+  logic        lsu_rd_rsp_valid;
+  logic [15:0] lsu_rd_rsp_tag;
+  logic [63:0] lsu_rd_rsp_data;
+  logic        lsu_wr_valid;
+  logic [4:0]  lsu_wr_base;
+  logic [6:0]  lsu_wr_elem;
+  logic [2:0]  lsu_wr_sew;
+  logic [3:0]  lsu_wr_lmul;
+  logic [63:0] lsu_wr_data;
+  logic        lsu_wr_gnt;
+
   always_comb begin
     vrf_rd_valid_f          = '0;
     vrf_rd_base_f           = '0;
@@ -465,19 +523,31 @@ module mosaic_vec_tb (
     vrf_wr_lmul_f           = '0;
     vrf_wr_data_f           = '0;
 
-    vrf_rd_valid_f[0]       = mem_owner_i ? mem_rd_valid_i : alu_rd_valid;
-    vrf_rd_base_f[4:0]      = mem_owner_i ? mem_rd_base_i  : alu_rd_base;
-    vrf_rd_elem_f[6:0]      = mem_owner_i ? mem_rd_elem_i  : alu_rd_elem;
-    vrf_rd_sew_f[2:0]       = mem_owner_i ? mem_rd_sew_i   : alu_rd_sew;
-    vrf_rd_lmul_f[3:0]      = mem_owner_i ? mem_rd_lmul_i  : alu_rd_lmul;
-    vrf_rd_tag_f[15:0]      = mem_owner_i ? mem_rd_tag_i   : alu_rd_tag;
+    vrf_rd_valid_f[0]       = mem_owner_i ? mem_rd_valid_i
+                            : (lsu_busy_o ? lsu_rd_valid : alu_rd_valid);
+    vrf_rd_base_f[4:0]      = mem_owner_i ? mem_rd_base_i
+                            : (lsu_busy_o ? lsu_rd_base : alu_rd_base);
+    vrf_rd_elem_f[6:0]      = mem_owner_i ? mem_rd_elem_i
+                            : (lsu_busy_o ? lsu_rd_elem : alu_rd_elem);
+    vrf_rd_sew_f[2:0]       = mem_owner_i ? mem_rd_sew_i
+                            : (lsu_busy_o ? lsu_rd_sew : alu_rd_sew);
+    vrf_rd_lmul_f[3:0]      = mem_owner_i ? mem_rd_lmul_i
+                            : (lsu_busy_o ? lsu_rd_lmul : alu_rd_lmul);
+    vrf_rd_tag_f[15:0]      = mem_owner_i ? mem_rd_tag_i
+                            : (lsu_busy_o ? lsu_rd_tag : alu_rd_tag);
 
-    vrf_wr_valid_f[0]       = mem_owner_i ? mem_wr_valid_i : alu_wr_valid;
-    vrf_wr_base_f[4:0]      = mem_owner_i ? mem_wr_base_i  : alu_wr_base;
-    vrf_wr_elem_f[6:0]      = mem_owner_i ? mem_wr_elem_i  : alu_wr_elem;
-    vrf_wr_sew_f[2:0]       = mem_owner_i ? mem_wr_sew_i   : alu_wr_sew;
-    vrf_wr_lmul_f[3:0]      = mem_owner_i ? mem_wr_lmul_i  : alu_wr_lmul;
-    vrf_wr_data_f[63:0]     = mem_owner_i ? mem_wr_data_i  : alu_wr_data;
+    vrf_wr_valid_f[0]       = mem_owner_i ? mem_wr_valid_i
+                            : (lsu_busy_o ? lsu_wr_valid : alu_wr_valid);
+    vrf_wr_base_f[4:0]      = mem_owner_i ? mem_wr_base_i
+                            : (lsu_busy_o ? lsu_wr_base : alu_wr_base);
+    vrf_wr_elem_f[6:0]      = mem_owner_i ? mem_wr_elem_i
+                            : (lsu_busy_o ? lsu_wr_elem : alu_wr_elem);
+    vrf_wr_sew_f[2:0]       = mem_owner_i ? mem_wr_sew_i
+                            : (lsu_busy_o ? lsu_wr_sew : alu_wr_sew);
+    vrf_wr_lmul_f[3:0]      = mem_owner_i ? mem_wr_lmul_i
+                            : (lsu_busy_o ? lsu_wr_lmul : alu_wr_lmul);
+    vrf_wr_data_f[63:0]     = mem_owner_i ? mem_wr_data_i
+                            : (lsu_busy_o ? lsu_wr_data : alu_wr_data);
   end
 
   assign alu_rd_gnt       = vrf_rd_gnt_f[0];
@@ -485,6 +555,12 @@ module mosaic_vec_tb (
   assign alu_rd_rsp_tag   = vrf_rd_rsp_tag_f[15:0];
   assign alu_rd_rsp_data  = vrf_rd_rsp_data_f[63:0];
   assign alu_wr_gnt       = vrf_wr_gnt_f[0];
+
+  assign lsu_rd_gnt       = vrf_rd_gnt_f[0];
+  assign lsu_rd_rsp_valid = vrf_rd_rsp_valid_f[0];
+  assign lsu_rd_rsp_tag   = vrf_rd_rsp_tag_f[15:0];
+  assign lsu_rd_rsp_data  = vrf_rd_rsp_data_f[63:0];
+  assign lsu_wr_gnt       = vrf_wr_gnt_f[0];
 
   assign mem_rd_gnt_o       = vrf_rd_gnt_f[0];
   assign mem_rd_rsp_valid_o = vrf_rd_rsp_valid_f[0];
