@@ -1,9 +1,11 @@
-// Simulation wrapper for CASE=rvv.descriptor_legality (work package I-051).
+// Simulation wrapper for CASE=rvv.descriptor_legality (work package I-051) and
+// CASE=rvv.vset_boundaries (work package I-052).
 //
 // `mosaic_vec_desc` is a combinational legality query plus one descriptor
-// register, so this wrapper adds no timing of its own: the clock and the reset
-// schedule belong to the C++ driver (sim/common/sim_common.h). It exists for
-// three reasons, all of them about keeping one copy of a fact:
+// register and `mosaic_vec_cfg` is the vset/CSR state, so this wrapper adds no
+// timing of its own: the clock and the reset schedule belong to the C++ driver
+// (sim/common/sim_common.h). It exists for three reasons, all of them about
+// keeping one copy of a fact:
 //
 //   * The macro-identity widths are taken from the generated identity package
 //     (mosaic_id_pkg) and read back as outputs, the way mosaic_fpu_tb does, so a
@@ -106,6 +108,56 @@ module mosaic_vec_tb (
     output logic [15:0]                o_alloc_ctr,
     output logic [15:0]                o_release_ctr,
 
+    // ---- vector configuration unit (I-052) --------------------------------
+    input  logic                       cfg_vset_valid,
+    input  logic [1:0]                 cfg_vset_kind,
+    input  logic [4:0]                 cfg_vset_rd,
+    input  logic [4:0]                 cfg_vset_rs1,
+    input  logic [63:0]                cfg_vset_rs1_val,
+    input  logic [63:0]                cfg_vset_rs2_val,
+    input  logic [4:0]                 cfg_vset_uimm,
+    input  logic [10:0]                cfg_vset_vtypei,
+    input  logic                       cfg_vset_vs_off,
+    output logic                       cfg_vset_illegal,
+    output logic                       cfg_vset_commit,
+    output logic                       cfg_vset_rd_we,
+    output logic [63:0]                cfg_vset_rd_val,
+    output logic [63:0]                cfg_vtype,
+    output logic [63:0]                cfg_vl,
+    output logic [63:0]                cfg_vstart,
+    output logic [63:0]                cfg_vxrm,
+    output logic [63:0]                cfg_vxsat,
+    output logic [63:0]                cfg_vcsr,
+    output logic [63:0]                cfg_vlenb,
+    output logic [63:0]                cfg_vlmax,
+    output logic                       cfg_vill,
+    output logic [15:0]                cfg_gen,
+    input  logic                       cfg_snap_capture,
+    output logic                       cfg_snap_valid,
+    output logic [63:0]                cfg_snap_vtype,
+    output logic [63:0]                cfg_snap_vl,
+    output logic [63:0]                cfg_snap_vstart,
+    output logic [15:0]                cfg_snap_gen,
+    input  logic                       cfg_replay_valid,
+    input  logic [15:0]                cfg_replay_gen,
+    output logic                       cfg_replay_ok,
+    output logic [63:0]                cfg_replay_vtype,
+    output logic [63:0]                cfg_replay_vl,
+    output logic [63:0]                cfg_replay_vstart,
+    input  logic                       cfg_exec_valid,
+    input  logic                       cfg_exec_vtype_dep,
+    output logic                       cfg_exec_illegal,
+    input  logic                       cfg_csr_valid,
+    input  logic [11:0]                cfg_csr_addr,
+    input  logic                       cfg_csr_write,
+    input  logic [63:0]                cfg_csr_wdata,
+    input  logic [1:0]                 cfg_csr_priv,
+    input  logic                       cfg_csr_vs_off,
+    output logic                       cfg_csr_ready,
+    output logic                       cfg_csr_illegal,
+    output logic [63:0]                cfg_csr_rdata,
+    output logic                       cfg_csr_commit,
+
     // read-back of the elaborated identity widths
     output logic [31:0]                o_rob_index_w,
     output logic [31:0]                o_rob_gen_w,
@@ -194,6 +246,71 @@ module mosaic_vec_tb (
   assign o_rob_index_w = 32'(TB_ROB_INDEX_W);
   assign o_rob_gen_w   = 32'(TB_ROB_GEN_W);
   assign o_uop_index_w = 32'(TB_UOP_INDEX_W);
+
+  // VLEN/ELEN are the frozen profile constants 128/64, for the same reason the
+  // descriptor uses them: this module must lint and build under every profile.
+  mosaic_vec_cfg #(
+      .VLEN (128),
+      .ELEN (64)
+  ) u_vec_cfg (
+      .clk_i             (clk),
+      .rst_i             (rst),
+
+      .vset_valid_i      (cfg_vset_valid),
+      .vset_kind_i       (cfg_vset_kind),
+      .vset_rd_i         (cfg_vset_rd),
+      .vset_rs1_i        (cfg_vset_rs1),
+      .vset_rs1_val_i    (cfg_vset_rs1_val),
+      .vset_rs2_val_i    (cfg_vset_rs2_val),
+      .vset_uimm_i       (cfg_vset_uimm),
+      .vset_vtypei_i     (cfg_vset_vtypei),
+      .vset_vs_off_i     (cfg_vset_vs_off),
+
+      .vset_illegal_o    (cfg_vset_illegal),
+      .vset_commit_o     (cfg_vset_commit),
+      .vset_rd_we_o      (cfg_vset_rd_we),
+      .vset_rd_val_o     (cfg_vset_rd_val),
+
+      .o_vtype_o         (cfg_vtype),
+      .o_vl_o            (cfg_vl),
+      .o_vstart_o        (cfg_vstart),
+      .o_vxrm_o          (cfg_vxrm),
+      .o_vxsat_o         (cfg_vxsat),
+      .o_vcsr_o          (cfg_vcsr),
+      .o_vlenb_o         (cfg_vlenb),
+      .o_vlmax_o         (cfg_vlmax),
+      .o_vill_o          (cfg_vill),
+      .o_cfg_gen_o       (cfg_gen),
+
+      .snap_capture_i    (cfg_snap_capture),
+      .snap_valid_o      (cfg_snap_valid),
+      .snap_vtype_o      (cfg_snap_vtype),
+      .snap_vl_o         (cfg_snap_vl),
+      .snap_vstart_o     (cfg_snap_vstart),
+      .snap_gen_o        (cfg_snap_gen),
+
+      .replay_valid_i    (cfg_replay_valid),
+      .replay_gen_i      (cfg_replay_gen),
+      .replay_ok_o       (cfg_replay_ok),
+      .replay_vtype_o    (cfg_replay_vtype),
+      .replay_vl_o       (cfg_replay_vl),
+      .replay_vstart_o   (cfg_replay_vstart),
+
+      .exec_valid_i      (cfg_exec_valid),
+      .exec_vtype_dep_i  (cfg_exec_vtype_dep),
+      .exec_illegal_o    (cfg_exec_illegal),
+
+      .csr_valid_i       (cfg_csr_valid),
+      .csr_addr_i        (cfg_csr_addr),
+      .csr_write_i       (cfg_csr_write),
+      .csr_wdata_i       (cfg_csr_wdata),
+      .csr_priv_i        (cfg_csr_priv),
+      .csr_vs_off_i      (cfg_csr_vs_off),
+      .csr_ready_o       (cfg_csr_ready),
+      .csr_illegal_o     (cfg_csr_illegal),
+      .csr_rdata_o       (cfg_csr_rdata),
+      .csr_commit_o      (cfg_csr_commit)
+  );
 
 endmodule : mosaic_vec_tb
 

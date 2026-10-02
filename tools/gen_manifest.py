@@ -535,15 +535,71 @@ def _ialign_writable_mask(csr, ialign: int) -> int:
     return ((align >> 1) << 1) if ialign == 16 else 0
 
 
-def effective_csr_wmask(csr, less_privileged: bool, ialign: int) -> int:
+# Capability-derived delegation and interrupt bits. Like the IALIGN rule, these
+# follow the profile's claimed capabilities rather than being frozen in the
+# shared CSR tables (which every profile reads), and the tables' own
+# writable_fields keep their p0-shaped declaration.
+#
+#   * medeleg[12], [13] and [15] -- the instruction/load/store page faults. A
+#     profile may delegate them only if it implements address translation, and
+#     the signal for translation is the `satp` CSR in the profile's own CSR
+#     table (I-045). medeleg[11] (ECALL from M-mode) is never writable: the
+#     specification says so outright ("In particular, medeleg[11] is read-only
+#     zero"), because an exception taken in M-mode is never delegated.
+#   * mideleg[5] (STI) and mie[5]/mip[5] (STIE/STIP) -- the supervisor timer.
+#     They exist in a profile with S-mode, where the platform timer raises STIP;
+#     a profile without a less-privileged mode keeps them read-only zero.
+PAGE_FAULT_DELEGATION_BITS = (12, 13, 15)
+SUPERVISOR_TIMER_BIT = 5
+
+
+def _bits_mask(bits) -> int:
+    mask = 0
+    for bit in bits:
+        mask |= 1 << bit
+    return mask
+
+
+def has_translation(csrs) -> bool:
+    """Whether this profile implements address translation.
+
+    The signal is the profile's own CSR table owning `satp`; a profile without
+    it cannot raise a page fault, so its page-fault delegation bits stay
+    read-only zero. This is the same kind of derivation as the IALIGN rule: the
+    fact comes from the profile's claimed capabilities, not from a hand-edited
+    mask that someone has to remember to change back.
+    """
+    return any(csr["name"] == "satp" for csr in csrs)
+
+
+def derived_writable_bits(csr, less_privileged: bool, translation: bool) -> int:
+    """Writable bits a profile's own capabilities add to a CSR's table mask.
+
+    The tables are shared by every profile, so a bit whose legality depends on
+    the profile cannot live in the table alone. These are additions (the IALIGN
+    rule's mirror): a capability the table does not freeze because p0 does not
+    have it, restored from the profile's privilege list and its CSR set.
+    """
+    name = csr["name"]
+    extra = 0
+    if name == "medeleg" and translation:
+        extra |= _bits_mask(PAGE_FAULT_DELEGATION_BITS)
+    if name in ("mideleg", "mie", "mip") and less_privileged:
+        extra |= 1 << SUPERVISOR_TIMER_BIT
+    return extra
+
+
+def effective_csr_wmask(csr, less_privileged: bool, ialign: int,
+                        translation: bool = False) -> int:
     """The write mask a profile actually gets for one CSR.
 
     Two rules narrow the table, both keyed on the profile and not on a
     hand-edited mask: a delegation register whose target mode does not exist has
     no legal value but zero, and a field whose whole meaning is a less-privileged
-    mode is read-only when there is no such mode. A third *widens* the table: the
-    alignment bits of a PC-valued register, whose writability follows the
-    profile's IALIGN.
+    mode is read-only when there is no such mode. Two rules *widen* it, and both
+    follow the profile's claimed capabilities: the alignment bits of a PC-valued
+    register (the profile's IALIGN) and the delegation/interrupt bits a
+    translation unit or an S-mode raises (``derived_writable_bits``).
     """
     if csr["access"] == "ro":
         return 0
@@ -551,6 +607,7 @@ def effective_csr_wmask(csr, less_privileged: bool, ialign: int) -> int:
     wmask = _bit_mask(csr.get("writable_fields", []), width,
                       "csr %s writable_fields" % csr["name"])
     wmask |= _ialign_writable_mask(csr, ialign)
+    wmask |= derived_writable_bits(csr, less_privileged, translation)
     if less_privileged:
         return wmask
     if csr["name"] in NO_TARGET_WITHOUT_LESS_PRIVILEGE:
@@ -597,6 +654,7 @@ def render_sv_csr_package(bundle: config_check.Bundle) -> str:
     less_privileged = bool([mode for mode in profile["privilege_modes"] if mode in ("S", "U")])
     ialign = config_check.ialign(bundle)
     csrs = collect_csrs(bundle)
+    translation = has_translation(csrs)
     modes_list = list(profile["privilege_modes"])
 
     # The HPM counter shadows (Zihpm). A profile that implements no HPM counter
@@ -686,13 +744,14 @@ def render_sv_csr_package(bundle: config_check.Bundle) -> str:
         width = csr["width"]
         access = csr["access"]
         write_legal = access != "ro"
-        wmask = effective_csr_wmask(csr, less_privileged, ialign)
+        wmask = effective_csr_wmask(csr, less_privileged, ialign, translation)
         note = ""
         table_wmask = 0
         if write_legal:
             table_wmask = _bit_mask(csr.get("writable_fields", []), width,
                                     "csr %s writable_fields" % csr["name"]) \
-                          | _ialign_writable_mask(csr, ialign)
+                          | _ialign_writable_mask(csr, ialign) \
+                          | derived_writable_bits(csr, less_privileged, translation)
         if table_wmask != wmask:
             note = ("  // %s: the table declares bits 0x%X writable, but profile %s has no\n"
                     "  // less-privileged mode for them to name, so every bit is WARL whose\n"
@@ -748,6 +807,7 @@ def render_csr_header(bundle: config_check.Bundle) -> str:
     less_privileged = bool([mode for mode in profile["privilege_modes"] if mode in ("S", "U")])
     ialign = config_check.ialign(bundle)
     csrs = collect_csrs(bundle)
+    translation = has_translation(csrs)
 
     lines = []
     add = lines.append
@@ -780,7 +840,7 @@ def render_csr_header(bundle: config_check.Bundle) -> str:
     for csr in csrs:
         access = csr["access"]
         write_legal = access != "ro"
-        wmask = effective_csr_wmask(csr, less_privileged, ialign)
+        wmask = effective_csr_wmask(csr, less_privileged, ialign, translation)
         add('  { "%s", "%s", 0x%03x, UINT64_C(0x%016x), UINT64_C(0x%016x), %d, %d, %d },'
             % (csr["name"], csr["role"], csr["address"], csr["reset"], wmask,
                1 if write_legal else 0, csr["min_priv_r"], csr["min_priv_w"]))

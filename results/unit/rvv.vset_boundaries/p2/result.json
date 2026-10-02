@@ -1,15 +1,15 @@
 {
   "schema_version": 1,
-  "case": "rvv.descriptor_legality",
+  "case": "rvv.vset_boundaries",
   "verdict": "PASS",
-  "detail": "checks=336 combos=9284 cycles=28",
+  "detail": "checks=571 vtypes=64 avl_bands=36 cycles=276",
   "seed": 1,
   "max_cycles": 200000,
-  "checks": 336,
+  "checks": 571,
   "failures": 0,
   "image": "",
   "expect": "",
   "tool": "Verilator 5.052 2026-09-05",
-  "timestamp": "2026-10-02T11:12:30Z",
+  "timestamp": "2026-10-02T11:14:59Z",
   "first_mismatch": ""
 }

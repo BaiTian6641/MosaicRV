@@ -1,5 +1,9 @@
 // ============================================================================
-// tb_vec.cpp -- CASE=rvv.descriptor_legality, work package I-051.
+// tb_vec.cpp -- CASE=rvv.descriptor_legality (work package I-051) and
+//               CASE=rvv.vset_boundaries (work package I-052).
+//
+// The single binary serves both cases; `--case` selects which phase set runs and
+// the RESULT line names it (`mosaic::Reporter::Finish` prints `options.case_id`).
 //
 // This case freezes two things and proves both.
 //
@@ -770,6 +774,565 @@ void PhaseReasonCoverage(Dut* d, Reporter* rep, int* reason_hist, bool* class_se
              "reason-coverage: the vtype-free families were visited");
 }
 
+// ============================================================================
+// I-052: vset{i}vl{i} and the vector CSRs (CASE=rvv.vset_boundaries).
+//
+// The oracle for the AVL rules is written from the V spec, not from the DUT:
+// the constraints are the three bands ("Constraints on Setting vl"), the
+// mandatory properties (vl = 0 iff AVL = 0, vl <= AVL, vl <= VLMAX) and
+// determinism. The driver deliberately does *not* require one particular legal
+// vl for AVL > VLMAX -- the spec permits several, and the package's declared
+// fail mode is enforcing the reference's choice on every implementation.
+// ============================================================================
+
+enum : int { VSETVLI = 0, VSETIVLI = 1, VSETVL = 2 };
+
+constexpr uint64_t kCsrVstart = 0x008;
+constexpr uint64_t kCsrVxsat  = 0x009;
+constexpr uint64_t kCsrVxrm   = 0x00A;
+constexpr uint64_t kCsrVcsr   = 0x00F;
+constexpr uint64_t kCsrVl     = 0xC20;
+constexpr uint64_t kCsrVtype  = 0xC21;
+constexpr uint64_t kCsrVlenb  = 0xC22;
+constexpr uint64_t kAvlMax    = ~0ull;
+constexpr uint64_t kVill      = 0x8000000000000000ull;
+
+// The vtype/vtypei word in the layout the descriptor decodes and
+// config/csr/vector.json records: vlmul[2:0], vma bit 3, vta bit 4,
+// vsew[2:0] = bits 7:5.
+uint64_t Vtypei(int vsew, int vlmul, int ta = 0, int ma = 0) {
+  return (static_cast<uint64_t>(ma & 1) << 3) |
+         (static_cast<uint64_t>(ta & 1) << 4) |
+         (static_cast<uint64_t>(vsew & 7) << 5) |
+         static_cast<uint64_t>(vlmul & 7);
+}
+
+int VlmaxOf(int vsew, int vlmul) {
+  if (!VsewValid(vsew) || !VlmulValid(vlmul)) return 0;
+  const int e = 7 + LmulExp(vlmul) - vsew;
+  if (e < 0 || e > 7) return 0;
+  return 1 << e;
+}
+
+bool WordSupported(uint64_t v) {
+  if (((v >> 63) & 1ull) != 0) return false;
+  if (((v >> 8) & ((1ull << 55) - 1ull)) != 0ull) return false;
+  const int vsew = static_cast<int>((v >> 5) & 7ull);
+  const int vlmul = static_cast<int>(v & 7ull);
+  return VsewValid(vsew) && VlmulValid(vlmul) && (LmulExp(vlmul) + 6 >= vsew);
+}
+
+// The spec's AVL bands as bounds, not one blessed value.
+bool VlLegal(uint64_t avl, uint64_t vlmax, uint64_t vl) {
+  if (vlmax == 0) return false;
+  if (avl == 0) return vl == 0;
+  if (vl == 0) return false;                    // AVL > 0 requires vl > 0
+  if (vl > vlmax) return false;                 // vl <= VLMAX
+  if (vl > avl) return false;                   // vl <= AVL
+  if (avl <= vlmax) return vl == avl;           // band 1
+  if (avl < 2ull * vlmax) return vl >= (avl + 1ull) / 2ull;  // band 2
+  return vl == vlmax;                           // band 3
+}
+
+struct CfgStim {
+  bool rst = false;
+  bool vset_valid = false;
+  int kind = VSETVLI;
+  int rd = 0, rs1 = 0;
+  uint64_t rs1_val = 0;
+  uint64_t rs2_val = 0;
+  int uimm = 0;
+  uint64_t vtypei = 0;
+  bool vs_off = false;
+  bool snap_capture = false;
+  bool replay_valid = false;
+  int replay_gen = 0;
+  bool exec_valid = false;
+  bool exec_vtype_dep = false;
+  bool csr_valid = false;
+  uint64_t csr_addr = 0;
+  bool csr_write = false;
+  uint64_t csr_wdata = 0;
+  int csr_priv = 3;
+  bool csr_vs_off = false;
+};
+
+struct CfgObs {
+  bool vset_illegal = false;
+  bool vset_commit = false;
+  bool vset_rd_we = false;
+  uint64_t vset_rd_val = 0;
+  uint64_t vtype = 0;
+  uint64_t vl = 0;
+  uint64_t vstart = 0;
+  uint64_t vxrm = 0;
+  uint64_t vxsat = 0;
+  uint64_t vcsr = 0;
+  uint64_t vlenb = 0;
+  uint64_t vlmax = 0;
+  bool vill = false;
+  int gen = 0;
+  bool snap_valid = false;
+  uint64_t snap_vtype = 0;
+  uint64_t snap_vl = 0;
+  uint64_t snap_vstart = 0;
+  int snap_gen = 0;
+  bool replay_ok = false;
+  uint64_t replay_vtype = 0;
+  uint64_t replay_vl = 0;
+  uint64_t replay_vstart = 0;
+  bool exec_illegal = false;
+  bool csr_ready = false;
+  bool csr_illegal = false;
+  bool csr_commit = false;
+  uint64_t csr_rdata = 0;
+};
+
+class Cfg {
+ public:
+  Cfg(Vmosaic_vec_tb* d, ClockDriver* clk) : d_(d), clk_(clk) {}
+
+  CfgObs Cycle(const CfgStim& s) {
+    d_->clk = 0;
+    d_->rst = s.rst ? 1 : 0;
+    d_->cfg_vset_valid = s.vset_valid ? 1 : 0;
+    d_->cfg_vset_kind = static_cast<uint8_t>(s.kind & 3);
+    d_->cfg_vset_rd = static_cast<uint8_t>(s.rd & 0x1F);
+    d_->cfg_vset_rs1 = static_cast<uint8_t>(s.rs1 & 0x1F);
+    d_->cfg_vset_rs1_val = s.rs1_val;
+    d_->cfg_vset_rs2_val = s.rs2_val;
+    d_->cfg_vset_uimm = static_cast<uint8_t>(s.uimm & 0x1F);
+    d_->cfg_vset_vtypei = static_cast<uint16_t>(s.vtypei & 0x7FF);
+    d_->cfg_vset_vs_off = s.vs_off ? 1 : 0;
+    d_->cfg_snap_capture = s.snap_capture ? 1 : 0;
+    d_->cfg_replay_valid = s.replay_valid ? 1 : 0;
+    d_->cfg_replay_gen = static_cast<uint16_t>(s.replay_gen & 0xFFFF);
+    d_->cfg_exec_valid = s.exec_valid ? 1 : 0;
+    d_->cfg_exec_vtype_dep = s.exec_vtype_dep ? 1 : 0;
+    d_->cfg_csr_valid = s.csr_valid ? 1 : 0;
+    d_->cfg_csr_addr = static_cast<uint16_t>(s.csr_addr & 0xFFF);
+    d_->cfg_csr_write = s.csr_write ? 1 : 0;
+    d_->cfg_csr_wdata = s.csr_wdata;
+    d_->cfg_csr_priv = static_cast<uint8_t>(s.csr_priv & 3);
+    d_->cfg_csr_vs_off = s.csr_vs_off ? 1 : 0;
+    d_->eval();
+    d_->clk = 1;
+    d_->eval();
+    d_->clk = 0;
+    d_->eval();
+
+    CfgObs o;
+    o.vset_illegal = d_->cfg_vset_illegal != 0;
+    o.vset_commit = d_->cfg_vset_commit != 0;
+    o.vset_rd_we = d_->cfg_vset_rd_we != 0;
+    o.vset_rd_val = d_->cfg_vset_rd_val;
+    o.vtype = d_->cfg_vtype;
+    o.vl = d_->cfg_vl;
+    o.vstart = d_->cfg_vstart;
+    o.vxrm = d_->cfg_vxrm;
+    o.vxsat = d_->cfg_vxsat;
+    o.vcsr = d_->cfg_vcsr;
+    o.vlenb = d_->cfg_vlenb;
+    o.vlmax = d_->cfg_vlmax;
+    o.vill = d_->cfg_vill != 0;
+    o.gen = static_cast<int>(d_->cfg_gen);
+    o.snap_valid = d_->cfg_snap_valid != 0;
+    o.snap_vtype = d_->cfg_snap_vtype;
+    o.snap_vl = d_->cfg_snap_vl;
+    o.snap_vstart = d_->cfg_snap_vstart;
+    o.snap_gen = static_cast<int>(d_->cfg_snap_gen);
+    o.replay_ok = d_->cfg_replay_ok != 0;
+    o.replay_vtype = d_->cfg_replay_vtype;
+    o.replay_vl = d_->cfg_replay_vl;
+    o.replay_vstart = d_->cfg_replay_vstart;
+    o.exec_illegal = d_->cfg_exec_illegal != 0;
+    o.csr_ready = d_->cfg_csr_ready != 0;
+    o.csr_illegal = d_->cfg_csr_illegal != 0;
+    o.csr_commit = d_->cfg_csr_commit != 0;
+    o.csr_rdata = d_->cfg_csr_rdata;
+    clk_->Tick();
+    return o;
+  }
+
+ private:
+  Vmosaic_vec_tb* d_;
+  ClockDriver* clk_;
+};
+
+CfgObs RunVset(Cfg* cfg, int kind, int rd, int rs1, uint64_t avl,
+               uint64_t vtype_word, int uimm = 0, bool vs_off = false) {
+  CfgStim s;
+  s.vset_valid = true;
+  s.kind = kind;
+  s.rd = rd;
+  s.rs1 = rs1;
+  s.rs1_val = avl;
+  s.rs2_val = vtype_word;
+  s.vtypei = vtype_word & 0x7FFull;
+  s.uimm = uimm;
+  s.vs_off = vs_off;
+  return cfg->Cycle(s);
+}
+
+CfgObs CsrRead(Cfg* cfg, uint64_t addr, bool vs_off = false) {
+  CfgStim s;
+  s.csr_valid = true;
+  s.csr_addr = addr;
+  s.csr_write = false;
+  s.csr_vs_off = vs_off;
+  return cfg->Cycle(s);
+}
+
+CfgObs CsrWrite(Cfg* cfg, uint64_t addr, uint64_t data, bool vs_off = false) {
+  CfgStim s;
+  s.csr_valid = true;
+  s.csr_addr = addr;
+  s.csr_write = true;
+  s.csr_wdata = data;
+  s.csr_vs_off = vs_off;
+  return cfg->Cycle(s);
+}
+
+struct VsetCounts {
+  int avl_bands = 0;
+  int vtypes = 0;
+};
+
+// Every SEW/LMUL encoding is visited: a supported pair must take the argument
+// (rest of vtype zero), an unsupported one must set vill, zero the rest of
+// vtype and set vl = 0. Also covers vtypei reserved bits and the read-back of
+// vta/vma.
+void PhaseVtypeSupport(Cfg* cfg, Reporter* rep, VsetCounts* counts) {
+  int legal = 0, illegal = 0;
+  for (int vsew = 0; vsew < 8; ++vsew) {
+    for (int vlmul = 0; vlmul < 8; ++vlmul) {
+      const uint64_t word = Vtypei(vsew, vlmul, 0, 0);
+      const CfgObs o = RunVset(cfg, VSETVLI, 5, 6, kAvlMax, word);
+      const bool expect = WordSupported(word);
+      const std::string name = "vtype-support vsew=" + Dec(vsew) + " vlmul=" + Dec(vlmul);
+      rep->Check(o.vset_commit && !o.vset_illegal, name + ": vset did not commit");
+      if (expect) {
+        rep->Check(!o.vill, name + ": a supported vtype set vill");
+        rep->Check(o.vtype == word, name + ": vtype read back as " + mosaic::Hex(o.vtype) +
+                                        ", expected " + mosaic::Hex(word));
+        rep->Check(o.vl == static_cast<uint64_t>(VlmaxOf(vsew, vlmul)),
+                   name + ": vl " + Dec(o.vl) + ", expected VLMAX " +
+                       Dec(VlmaxOf(vsew, vlmul)));
+        rep->Check(o.vlmax == static_cast<uint64_t>(VlmaxOf(vsew, vlmul)),
+                   name + ": VLMAX read back wrong");
+        rep->Check(o.vlenb == 16, name + ": vlenb changed");
+      } else {
+        rep->Check(o.vill, name + ": an unsupported vtype did not set vill");
+        rep->Check(o.vtype == kVill, name + ": vill did not zero vtype[62:0]");
+        rep->Check(o.vl == 0, name + ": an unsupported vtype left vl != 0");
+      }
+      expect ? ++legal : ++illegal;
+      ++counts->vtypes;
+    }
+  }
+  rep->Check(legal == 22, "vtype-support: " + Dec(legal) + " legal vtypes, expected 22");
+  rep->Check(illegal == 42, "vtype-support: " + Dec(illegal) + " illegal vtypes, expected 42");
+
+  // vta/vma are preserved on a legal write and never affect legality.
+  const uint64_t ta_word = Vtypei(3, 0, 1, 1);
+  const CfgObs ta = RunVset(cfg, VSETVLI, 5, 6, kAvlMax, ta_word);
+  rep->Check(!ta.vill && ta.vtype == ta_word, "vtype-support: vta/vma bits preserved");
+
+  // Reserved immediate bits set vill.
+  for (int bit : {8, 9, 10}) {
+    const CfgObs r = RunVset(cfg, VSETVLI, 5, 6, kAvlMax,
+                             Vtypei(3, 0) | (1ull << bit));
+    rep->Check(r.vill && r.vtype == kVill,
+               "vtype-support: reserved vtypei bit " + Dec(bit) + " did not set vill");
+  }
+
+  // A full vtype word from vsetvl with a reserved bit set is unsupported too.
+  const CfgObs r = RunVset(cfg, VSETVL, 5, 6, kAvlMax, Vtypei(3, 0) | (1ull << 40));
+  rep->Check(r.vill && r.vtype == kVill, "vtype-support: reserved vtype bit 40 did not set vill");
+}
+
+// The AVL bands, on several distinct configurations so the check cannot pass by
+// hard-coding one VLMAX. The shipped policy is vl = min(AVL, VLMAX); the driver
+// asserts the spec bounds and determinism, not that exact value.
+void PhaseAvlBands(Cfg* cfg, Reporter* rep, VsetCounts* counts) {
+  const int configs[4][2] = {{3, 0}, {3, 3}, {6, 3}, {5, 1}};
+  for (const auto& c : configs) {
+    const int vsew = c[0], vlmul = c[1];
+    const uint64_t vlmax = static_cast<uint64_t>(VlmaxOf(vsew, vlmul));
+    const uint64_t word = Vtypei(vsew, vlmul);
+    const uint64_t avls[] = {0, 1, vlmax - 1, vlmax, vlmax + 1, 2 * vlmax - 1,
+                             2 * vlmax, 2 * vlmax + 1, kAvlMax};
+    for (uint64_t avl : avls) {
+      const CfgObs o = RunVset(cfg, VSETVLI, 5, 6, avl, word);
+      const CfgObs o2 = RunVset(cfg, VSETVLI, 5, 6, avl, word);
+      const std::string name = "avl-band vsew=" + Dec(vsew) + " vlmul=" + Dec(vlmul) +
+                               " avl=" + mosaic::Hex(avl, 4) + " vlmax=" + Dec(vlmax);
+      rep->Check(!o.vill && o.vlmax == vlmax, name + ": configuration not established");
+      rep->Check(VlLegal(avl, vlmax, o.vl),
+                 name + ": vl " + Dec(o.vl) + " is not a legal choice");
+      rep->Check(o2.vl == o.vl, name + ": vl is not deterministic (" + Dec(o.vl) +
+                                    " then " + Dec(o2.vl) + ")");
+      // A vl read back and used as the AVL gives the same vl.
+      const CfgObs o3 = RunVset(cfg, VSETVLI, 5, 6, o.vl, word);
+      rep->Check(o3.vl == o.vl, name + ": vl is not idempotent under re-entry");
+      ++counts->avl_bands;
+    }
+  }
+}
+
+// The rd/rs1 table: rs1 != x0 uses x[rs1]; rs1 = x0 with rd != x0 uses ~0
+// (VLMAX); rs1 = x0 with rd = x0 keeps the current vl (and is reserved -- our
+// deterministic answer is vill -- when the new ratio changes VLMAX).
+void PhaseRdRs1(Cfg* cfg, Reporter* rep) {
+  const uint64_t word = Vtypei(3, 0);  // e8, m1 -> VLMAX 16
+  const uint64_t vlmax = 16;
+
+  CfgObs o = RunVset(cfg, VSETVLI, 5, 6, 7, word);
+  rep->Check(o.vl == 7 && o.vset_rd_we && o.vset_rd_val == 7,
+             "rd-rs1: AVL from x[rs1]");
+
+  o = RunVset(cfg, VSETVLI, 0, 6, 7, word);
+  rep->Check(o.vl == 7 && !o.vset_rd_we, "rd-rs1: rd=x0 writes nothing");
+
+  o = RunVset(cfg, VSETVLI, 5, 0, 0, word);
+  rep->Check(o.vl == vlmax && o.vset_rd_we && o.vset_rd_val == vlmax,
+             "rd-rs1: rs1=x0, rd!=x0 selects VLMAX");
+
+  // Keep the current vl: configure vl = 7, then rs1 = x0 / rd = x0.
+  o = RunVset(cfg, VSETVLI, 5, 6, 7, word);
+  o = RunVset(cfg, VSETVLI, 0, 0, 0, word);
+  rep->Check(!o.vill && o.vl == 7 && !o.vset_rd_we,
+             "rd-rs1: rs1=x0, rd=x0 keeps the current vl");
+
+  // Same form with a VLMAX-changing ratio is reserved: the unit sets vill.
+  o = RunVset(cfg, VSETVLI, 0, 0, 0, Vtypei(5, 0));  // e32,m1 -> VLMAX 4
+  rep->Check(o.vill && o.vl == 0, "rd-rs1: the reserved x0/x0 form sets vill");
+
+  // vsetivli: the AVL is the zero-extended 5-bit immediate.
+  o = RunVset(cfg, VSETIVLI, 3, 0, 0, word, /*uimm*/ 5);
+  rep->Check(o.vl == 5 && o.vset_rd_we && o.vset_rd_val == 5, "rd-rs1: vsetivli uimm=5");
+  o = RunVset(cfg, VSETIVLI, 3, 0, 0, word, /*uimm*/ 31);
+  rep->Check(o.vl == vlmax, "rd-rs1: vsetivli uimm=31 clamps to VLMAX");
+
+  // vsetvl takes the vtype from rs2.
+  o = RunVset(cfg, VSETVL, 4, 7, 9, Vtypei(4, 1));
+  rep->Check(!o.vill && o.vtype == Vtypei(4, 1) && o.vl == 9 && o.vset_rd_val == 9,
+             "rd-rs1: vsetvl uses rs2 as vtype and x[rs1] as AVL");
+}
+
+// vstart is reset to zero by every committed vector instruction, is writable
+// through its CSR, and is *not* modified by the illegal-instruction path.
+void PhaseVstart(Cfg* cfg, Reporter* rep) {
+  CfgObs o = RunVset(cfg, VSETVLI, 5, 6, 4, Vtypei(3, 0));
+  rep->Check(o.vstart == 0, "vstart: a committed vset resets vstart");
+
+  o = CsrWrite(cfg, kCsrVstart, 5);
+  rep->Check(!o.csr_illegal && o.csr_commit, "vstart: a software write commits");
+  o = CsrRead(cfg, kCsrVstart);
+  rep->Check(o.csr_rdata == 5, "vstart: value read back as " + Dec(o.csr_rdata));
+
+  o = CsrWrite(cfg, kCsrVstart, kAvlMax);
+  o = CsrRead(cfg, kCsrVstart);
+  rep->Check(o.csr_rdata == 0x7F, "vstart: upper bits are not writable (" + mosaic::Hex(o.csr_rdata) + ")");
+
+  o = CsrWrite(cfg, kCsrVstart, 5);
+  o = RunVset(cfg, VSETVLI, 5, 6, 4, Vtypei(3, 0), 0, /*vs_off*/ true);
+  rep->Check(o.vset_illegal && !o.vset_commit, "vstart: VS=Off raises illegal instruction");
+  o = CsrRead(cfg, kCsrVstart);
+  rep->Check(o.csr_rdata == 5, "vstart: an illegal instruction does not modify vstart");
+
+  o = RunVset(cfg, VSETVLI, 5, 6, 4, Vtypei(3, 0));
+  rep->Check(o.vstart == 0, "vstart: a following committed vset resets vstart");
+
+  o = CsrWrite(cfg, kCsrVstart, 9);
+  o = RunVset(cfg, VSETVLI, 5, 6, 4, Vtypei(0, 0));  // unsupported -> vill
+  rep->Check(o.vill && o.vstart == 0, "vstart: an unsupported vtype still resets vstart");
+}
+
+// The permissions and the field layout of the seven unprivileged vector CSRs.
+void PhaseCsrPermissions(Cfg* cfg, Reporter* rep) {
+  // Configure a known state: e32,m1 with vl = 3.
+  RunVset(cfg, VSETVLI, 5, 6, 3, Vtypei(5, 0));
+
+  struct Entry {
+    uint64_t addr;
+    const char* name;
+    bool read_only;
+  };
+  const Entry entries[] = {
+      {kCsrVstart, "vstart", false}, {kCsrVxsat, "vxsat", false},
+      {kCsrVxrm, "vxrm", false},     {kCsrVcsr, "vcsr", false},
+      {kCsrVl, "vl", true},          {kCsrVtype, "vtype", true},
+      {kCsrVlenb, "vlenb", true}};
+  for (const Entry& e : entries) {
+    const CfgObs r = CsrRead(cfg, e.addr);
+    rep->Check(r.csr_ready && !r.csr_illegal, std::string("csr: read ") + e.name + " is legal");
+    const CfgObs w = CsrWrite(cfg, e.addr, ~0ull);
+    if (e.read_only) {
+      rep->Check(w.csr_illegal && !w.csr_commit,
+                 std::string("csr: a write to read-only ") + e.name + " is illegal");
+    } else {
+      rep->Check(!w.csr_illegal && w.csr_commit,
+                 std::string("csr: a write to ") + e.name + " is legal");
+    }
+  }
+
+  // WARL fields.
+  CfgObs o = CsrRead(cfg, kCsrVlenb);
+  rep->Check(o.csr_rdata == 16, "csr: vlenb reads 16");
+  o = CsrRead(cfg, kCsrVl);
+  rep->Check(o.csr_rdata == 3, "csr: vl reads the configured length");
+  o = CsrRead(cfg, kCsrVtype);
+  rep->Check(o.csr_rdata == Vtypei(5, 0), "csr: vtype reads the configured type");
+
+  CsrWrite(cfg, kCsrVxsat, 0);
+  CsrWrite(cfg, kCsrVxrm, 0xFF);
+  o = CsrRead(cfg, kCsrVxrm);
+  rep->Check(o.csr_rdata == 3, "csr: vxrm holds two WARL bits (" + mosaic::Hex(o.csr_rdata) + ")");
+  o = CsrRead(cfg, kCsrVcsr);
+  rep->Check(o.csr_rdata == 6, "csr: vcsr mirrors vxrm in bits 2:1 (" + mosaic::Hex(o.csr_rdata) + ")");
+
+  CsrWrite(cfg, kCsrVxsat, 1);
+  o = CsrRead(cfg, kCsrVxsat);
+  rep->Check(o.csr_rdata == 1, "csr: vxsat holds one bit");
+  o = CsrRead(cfg, kCsrVcsr);
+  rep->Check(o.csr_rdata == 7, "csr: vcsr mirrors vxsat in bit 0 (" + mosaic::Hex(o.csr_rdata) + ")");
+
+  CsrWrite(cfg, kCsrVcsr, 4);
+  o = CsrRead(cfg, kCsrVxrm);
+  rep->Check(o.csr_rdata == 2, "csr: a vcsr write updates vxrm");
+  o = CsrRead(cfg, kCsrVxsat);
+  rep->Check(o.csr_rdata == 0, "csr: a vcsr write updates vxsat");
+
+  // VS = Off makes every vector CSR access illegal.
+  for (const Entry& e : entries) {
+    const CfgObs r = CsrRead(cfg, e.addr, /*vs_off*/ true);
+    rep->Check(r.csr_illegal, std::string("csr: ") + e.name + " access with VS=Off is illegal");
+  }
+  // An address that is none of the seven is illegal.
+  const CfgObs unknown = CsrRead(cfg, 0xC23);
+  rep->Check(unknown.csr_illegal, "csr: an unknown vector-CSR address is illegal");
+}
+
+// The descriptor must be fed the configuration the unit holds, and a replay must
+// use the captured snapshot even after the live configuration has moved on.
+void PhaseSnapshotReplay(Cfg* cfg, Dut* desc, Reporter* rep) {
+  CfgStim idle;
+  cfg->Cycle(idle);
+
+  CfgObs o = RunVset(cfg, VSETVLI, 5, 6, 7, Vtypei(3, 0));
+  const uint64_t v1 = o.vtype;
+  const uint64_t vl1 = o.vl;
+  const int g1 = o.gen;
+  rep->Check(!o.vill && v1 == Vtypei(3, 0) && vl1 == 7, "snapshot: V1 configured");
+
+  CfgStim cap;
+  cap.snap_capture = true;
+  const CfgObs c1 = cfg->Cycle(cap);
+  rep->Check(c1.snap_valid && c1.snap_vtype == v1 && c1.snap_vl == vl1 &&
+                 c1.snap_vstart == 0 && c1.snap_gen == g1,
+             "snapshot: the snapshot is not the configuration in force [v=" +
+                 mosaic::Hex(c1.snap_vtype) + " vl=" + Dec(c1.snap_vl) + " vs=" +
+                 Dec(c1.snap_vstart) + " gen=" + Dec(c1.snap_gen) + "]");
+
+  o = RunVset(cfg, VSETVLI, 5, 6, 3, Vtypei(5, 0));
+  rep->Check(!o.vill && o.vtype == Vtypei(5, 0) && o.vl == 3, "snapshot: V2 configured");
+  rep->Check(o.gen == g1 + 1, "snapshot: the generation did not advance");
+
+  CfgStim r;
+  r.replay_valid = true;
+  r.replay_gen = g1;
+  const CfgObs r1 = cfg->Cycle(r);
+  rep->Check(r1.replay_ok, "replay: the captured generation was refused");
+  rep->Check(r1.replay_vtype == v1,
+             "replay: a replay used the newer vtype " + mosaic::Hex(r1.replay_vtype) +
+                 ", expected the captured " + mosaic::Hex(v1));
+  rep->Check(r1.replay_vl == vl1 && r1.replay_vstart == 0,
+             "replay: the replay did not serve the captured vl/vstart");
+
+  CfgStim r2;
+  r2.replay_valid = true;
+  r2.replay_gen = g1 + 50;
+  const CfgObs r3 = cfg->Cycle(r2);
+  rep->Check(!r3.replay_ok, "replay: an unknown generation was accepted");
+
+  // Feed the descriptor the configuration snapshot the unit hands out.
+  Stim a;
+  a.alloc_valid = true;
+  a.alloc_vtype = o.vtype;
+  a.alloc_vl = static_cast<int>(o.vl & 0xFF);
+  a.alloc_vstart = 0;
+  a.alloc_vd = 4;
+  a.alloc_mask_ver = 1;
+  a.rob_index = 3;
+  a.rob_gen = 2;
+  a.uop_index = 1;
+  const DescObs dsc = desc->Cycle(a);
+  rep->Check(dsc.valid && dsc.vtype == o.vtype && dsc.vl == static_cast<int>(o.vl) &&
+                 dsc.vstart == 0,
+             "snapshot: the descriptor did not capture the configuration unit's snapshot");
+  Stim rel;
+  rel.release = true;
+  desc->Cycle(rel);
+}
+
+// While vill is set a vtype-dependent instruction is illegal; a vtype-free one
+// is not. Reset leaves vill set.
+void PhaseVillBlocks(Cfg* cfg, Reporter* rep) {
+  CfgObs o = RunVset(cfg, VSETVLI, 5, 6, 4, Vtypei(3, 0));
+  rep->Check(!o.vill, "vill-blocks: a supported vtype clears vill");
+  CfgStim e;
+  e.exec_valid = true;
+  e.exec_vtype_dep = true;
+  CfgObs x = cfg->Cycle(e);
+  rep->Check(!x.exec_illegal, "vill-blocks: a vtype-dependent instruction blocked while vill is clear");
+
+  o = RunVset(cfg, VSETVLI, 5, 6, 4, Vtypei(0, 0));  // SEW=1, unsupported
+  rep->Check(o.vill && o.vl == 0, "vill-blocks: an unsupported vtype sets vill and vl=0");
+  x = cfg->Cycle(e);
+  rep->Check(x.exec_illegal, "vill-blocks: a vtype-dependent instruction is not blocked by vill");
+  CfgStim e2;
+  e2.exec_valid = true;
+  e2.exec_vtype_dep = false;
+  x = cfg->Cycle(e2);
+  rep->Check(!x.exec_illegal, "vill-blocks: a vtype-free instruction was blocked by vill");
+
+  CfgStim r;
+  r.rst = true;
+  cfg->Cycle(r);
+  cfg->Cycle(r);
+  o = cfg->Cycle(CfgStim{});
+  rep->Check(o.vill, "vill-blocks: reset did not leave vill set");
+  x = cfg->Cycle(e);
+  rep->Check(x.exec_illegal, "vill-blocks: the reset vill state does not block execution");
+}
+
+// No configuration action may change VLEN / vlenb.
+void PhaseVlenInvariance(Cfg* cfg, Reporter* rep) {
+  for (int vsew = 3; vsew <= 6; ++vsew) {
+    for (int vlmul = 0; vlmul < 8; ++vlmul) {
+      const uint64_t word = Vtypei(vsew, vlmul);
+      if (!WordSupported(word)) continue;
+      const CfgObs o = RunVset(cfg, VSETVLI, 5, 6, kAvlMax, word);
+      rep->Check(o.vlenb == 16, "vlen-invariance: vlenb changed to " + Dec(o.vlenb));
+      rep->Check(o.vlmax <= 128, "vlen-invariance: VLMAX " + Dec(o.vlmax) + " exceeds VLEN");
+    }
+  }
+}
+
+void RunVsetCase(Vmosaic_vec_tb* dut, Dut* desc, ClockDriver* clk, Reporter* rep,
+                 VsetCounts* counts) {
+  Cfg cfg(dut, clk);
+  PhaseAvlBands(&cfg, rep, counts);
+  PhaseVtypeSupport(&cfg, rep, counts);
+  PhaseRdRs1(&cfg, rep);
+  PhaseVstart(&cfg, rep);
+  PhaseCsrPermissions(&cfg, rep);
+  PhaseSnapshotReplay(&cfg, desc, rep);
+  PhaseVillBlocks(&cfg, rep);
+  PhaseVlenInvariance(&cfg, rep);
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -788,6 +1351,7 @@ int main(int argc, char** argv) {
   ClockDriver clk;
   Vmosaic_vec_tb dut;
   Dut unit(&dut, &clk, &reporter);
+  VsetCounts vset_counts;
 
   std::string detail;
   bool aborted = false;
@@ -807,17 +1371,21 @@ int main(int argc, char** argv) {
     }
     unit.Masks((1ull << rob_w) - 1ull, (1ull << gen_w) - 1ull, (1ull << uop_w) - 1ull);
 
-    int reason_hist[RSN_COUNT] = {0};
-    bool class_seen[VOP_COUNT] = {false};
+    if (options.case_id == "rvv.vset_boundaries") {
+      RunVsetCase(&dut, &unit, &clk, &reporter, &vset_counts);
+    } else {
+      int reason_hist[RSN_COUNT] = {0};
+      bool class_seen[VOP_COUNT] = {false};
 
-    PhaseGeometry(&unit, &reporter);
-    PhaseVtypeMatrix(&unit, &reporter, reason_hist);
-    PhaseOpMatrix(&unit, &reporter, reason_hist, class_seen);
-    PhaseLaneInvariance(&unit, &reporter);
-    PhaseReasonCoverage(&unit, &reporter, reason_hist, class_seen);
-    PhaseDescriptorProgress(&unit, &reporter);
-    PhaseFaultProgress(&unit, &reporter);
-    PhaseResetInFlight(&unit, &reporter);
+      PhaseGeometry(&unit, &reporter);
+      PhaseVtypeMatrix(&unit, &reporter, reason_hist);
+      PhaseOpMatrix(&unit, &reporter, reason_hist, class_seen);
+      PhaseLaneInvariance(&unit, &reporter);
+      PhaseReasonCoverage(&unit, &reporter, reason_hist, class_seen);
+      PhaseDescriptorProgress(&unit, &reporter);
+      PhaseFaultProgress(&unit, &reporter);
+      PhaseResetInFlight(&unit, &reporter);
+    }
   } catch (const std::exception& e) {
     aborted = true;
     detail = e.what();
@@ -830,6 +1398,12 @@ int main(int argc, char** argv) {
   if (reporter.failures() != 0) {
     return reporter.Finish("FAIL", "checks=" + Dec(reporter.checks()) + " cycles=" +
                                          Dec(cycles));
+  }
+  if (options.case_id == "rvv.vset_boundaries") {
+    return reporter.Finish("PASS", "checks=" + Dec(reporter.checks()) + " vtypes=" +
+                                       Dec(vset_counts.vtypes) + " avl_bands=" +
+                                       Dec(vset_counts.avl_bands) + " cycles=" +
+                                       Dec(cycles));
   }
   return reporter.Finish("PASS", "checks=" + Dec(reporter.checks()) + " combos=" +
                                      Dec(VOP_COUNT * 64 * 4 * 2 + 64 + 4) +

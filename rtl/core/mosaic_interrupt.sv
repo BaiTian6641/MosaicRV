@@ -225,21 +225,27 @@ module mosaic_interrupt (
   // is mcause's Interrupt bit; the code sits in bits 62:0.
   localparam logic [5:0]  IRQ_CODE_SSI = 6'd1;   // supervisor software interrupt
   localparam logic [5:0]  IRQ_CODE_MSI = 6'd3;   // machine software interrupt
+  localparam logic [5:0]  IRQ_CODE_STI = 6'd5;   // supervisor timer interrupt
   localparam logic [5:0]  IRQ_CODE_MTI = 6'd7;   // machine timer interrupt
+  localparam logic [5:0]  IRQ_CODE_SEI = 6'd9;   // supervisor external interrupt
   localparam logic [5:0]  IRQ_CODE_MEI = 6'd11;  // machine external interrupt
 
   // Built by concatenation from the codes above, so the code is written down
   // once: bit 63 set, bits 62:6 zero, the code in bits 5:0.
   localparam logic [63:0] CAUSE_SSI = {1'b1, 57'd0, IRQ_CODE_SSI};
   localparam logic [63:0] CAUSE_MSI = {1'b1, 57'd0, IRQ_CODE_MSI};
+  localparam logic [63:0] CAUSE_STI = {1'b1, 57'd0, IRQ_CODE_STI};
   localparam logic [63:0] CAUSE_MTI = {1'b1, 57'd0, IRQ_CODE_MTI};
+  localparam logic [63:0] CAUSE_SEI = {1'b1, 57'd0, IRQ_CODE_SEI};
   localparam logic [63:0] CAUSE_MEI = {1'b1, 57'd0, IRQ_CODE_MEI};
 
   // mip/mie bit positions, from the mcause table (cause number i is bit i in
   // both registers).
   localparam int unsigned BIT_SSIP = 1;
   localparam int unsigned BIT_MSIP = 3;
+  localparam int unsigned BIT_STIP = 5;
   localparam int unsigned BIT_MTIP = 7;
+  localparam int unsigned BIT_SEIP = 9;
   localparam int unsigned BIT_MEIP = 11;
 
   // The software-writable mip bits. This used to be a literal with a comment
@@ -306,36 +312,42 @@ module mosaic_interrupt (
   // --------------------------------------------------------------------------
   logic sw_ssip_q;
   logic sw_msip_q;
+  logic sw_stip_q;
   logic sw_mtip_q;
   logic sw_ssip_d;
   logic sw_msip_d;
+  logic sw_stip_d;
   logic sw_mtip_d;
   logic [63:0] mip_write_data;
 
   // A write to a read-only bit is not a write: the mask is the one place the
-  // writable set is written down, and the two latch bits below are its two
-  // members. MEIP, for example, cannot be moved by software.
+  // writable set is written down, and the latch bits below are its members.
+  // MEIP, for example, cannot be moved by software.
   assign mip_write_data = mip_wdata_i & MIP_WRITABLE_MASK;
 
   always_comb begin
     sw_ssip_d = sw_ssip_q;
     sw_msip_d = sw_msip_q;
+    sw_stip_d = sw_stip_q;
     sw_mtip_d = sw_mtip_q;
     if (mip_we_i) begin
       case (mip_op_i)
         mosaic_pkg::CSR_RW: begin
           sw_ssip_d = mip_write_data[BIT_SSIP];
           sw_msip_d = mip_write_data[BIT_MSIP];
+          sw_stip_d = mip_write_data[BIT_STIP];
           sw_mtip_d = mip_write_data[BIT_MTIP];
         end
         mosaic_pkg::CSR_RS: begin
           sw_ssip_d = sw_ssip_q | mip_write_data[BIT_SSIP];
           sw_msip_d = sw_msip_q | mip_write_data[BIT_MSIP];
+          sw_stip_d = sw_stip_q | mip_write_data[BIT_STIP];
           sw_mtip_d = sw_mtip_q | mip_write_data[BIT_MTIP];
         end
         mosaic_pkg::CSR_RC: begin
           sw_ssip_d = sw_ssip_q & ~mip_write_data[BIT_SSIP];
           sw_msip_d = sw_msip_q & ~mip_write_data[BIT_MSIP];
+          sw_stip_d = sw_stip_q & ~mip_write_data[BIT_STIP];
           sw_mtip_d = sw_mtip_q & ~mip_write_data[BIT_MTIP];
         end
         default: begin
@@ -349,6 +361,7 @@ module mosaic_interrupt (
     if (rst_i) begin
       sw_ssip_q <= 1'b0;
       sw_msip_q <= 1'b0;
+      sw_stip_q <= 1'b0;
       sw_mtip_q <= 1'b0;
     end else begin
 `ifdef MOSAIC_INTERRUPT_MUTANT_IGNORE_SW_WRITE
@@ -356,10 +369,12 @@ module mosaic_interrupt (
       // longer raise a pending interrupt.
       sw_ssip_q <= sw_ssip_q;
       sw_msip_q <= sw_msip_q;
+      sw_stip_q <= sw_stip_q;
       sw_mtip_q <= sw_mtip_q;
 `else
       sw_ssip_q <= sw_ssip_d;
       sw_msip_q <= sw_msip_d;
+      sw_stip_q <= sw_stip_d;
       sw_mtip_q <= sw_mtip_d;
 `endif
     end
@@ -371,6 +386,14 @@ module mosaic_interrupt (
   // other than 11 and bits 6:4, 2:0 are WPRI in config/csr/mode_m.json and are
   // therefore read-only zero here, which is also what an implementation that has
   // no such interrupt must return.
+  //
+  // STIP (bit 5) is a supervisor-level pending bit, so it exists only in a
+  // profile with S-mode. The platform timer raises it (the same source that
+  // raises MTIP: one timer, and the delegation registers decide which mode
+  // handles it, exactly as the specification's priority order assumes), and
+  // software may clear it by writing mip[5]=0 -- the software latch below -- so
+  // an M-mode firmware can also inject STIP on the S-mode's behalf after
+  // handling MTI itself, which is the standard non-Sstc supervisor timer path.
   // --------------------------------------------------------------------------
   logic [63:0] mip_comb;
 
@@ -380,6 +403,9 @@ module mosaic_interrupt (
     mip_comb[BIT_MSIP] = platform_msip | sw_msip_q;
     mip_comb[BIT_MTIP] = platform_mtip | sw_mtip_q;
     mip_comb[BIT_MEIP] = platform_meip;
+`ifdef MOSAIC_CSR_HAS_S
+    mip_comb[BIT_STIP] = platform_mtip | sw_stip_q;
+`endif
   end
 
   assign mip_o = mip_comb;
@@ -424,7 +450,9 @@ module mosaic_interrupt (
   logic        cand_mei;
   logic        cand_msi;
   logic        cand_mti;
+  logic        cand_sei;
   logic        cand_ssi;
+  logic        cand_sti;
   logic        any_take;
   logic        taken_in_m;
   logic        taken_in_s;
@@ -479,24 +507,34 @@ module mosaic_interrupt (
   assign cand_mei = cand_pending[BIT_MEIP];
   assign cand_msi = cand_pending[BIT_MSIP];
   assign cand_mti = cand_pending[BIT_MTIP];
+  assign cand_sei = cand_pending[BIT_SEIP];
   assign cand_ssi = cand_pending[BIT_SSIP];
+  assign cand_sti = cand_pending[BIT_STIP];
   assign any_take = take_pending[BIT_MEIP] | take_pending[BIT_MSIP] |
-                    take_pending[BIT_MTIP] | take_pending[BIT_SSIP];
+                    take_pending[BIT_MTIP] | take_pending[BIT_SEIP] |
+                    take_pending[BIT_SSIP] | take_pending[BIT_STIP];
 
-  // MEI > MSI > MTI > SSI, per the privileged spec's standard priority order
-  // (MEI, MSI, MTI, SEI, SSI, STI -- SEI and STI have no source in this
-  // platform, so the three that remain keep their relative order). The cause is
-  // the winning *candidate*: it deliberately does not depend on mstatus.MIE or
-  // on core_can_trap_i. Those are the gates that decide whether a trap may be
-  // taken now (`irq_valid_o`), while the cause stays stable across a blocked
-  // window, so a core that latches the cause when the boundary opens cannot
-  // latch a value that was invalidated by the wait.
+  // MEI > MSI > MTI > SEI > SSI > STI, the privileged spec's standard priority
+  // order. SEI has no source in this platform (there is no PLIC), so in
+  // practice the live set is MEI/MSI/MTI/SSI/STI; the chain still names SEI in
+  // its specification position rather than dropping it, because the position is
+  // what the ordering is. STI is a supervisor interrupt and is last: it is the
+  // lowest-priority standard interrupt. The cause is the winning *candidate*:
+  // it deliberately does not depend on mstatus.MIE or on core_can_trap_i.
+  // Those are the gates that decide whether a trap may be taken now
+  // (`irq_valid_o`), while the cause stays stable across a blocked window, so a
+  // core that latches the cause when the boundary opens cannot latch a value
+  // that was invalidated by the wait.
   always_comb begin
     irq_cause_o = 64'd0;
 `ifdef MOSAIC_INTERRUPT_MUTANT_PRIORITY_REVERSED
     // Mutant: the order is inverted.
-    if (cand_ssi) begin
+    if (cand_sti) begin
+      irq_cause_o = CAUSE_STI;
+    end else if (cand_ssi) begin
       irq_cause_o = CAUSE_SSI;
+    end else if (cand_sei) begin
+      irq_cause_o = CAUSE_SEI;
     end else if (cand_mti) begin
       irq_cause_o = CAUSE_MTI;
     end else if (cand_msi) begin
@@ -511,8 +549,12 @@ module mosaic_interrupt (
       irq_cause_o = CAUSE_MSI;
     end else if (cand_mti) begin
       irq_cause_o = CAUSE_MTI;
+    end else if (cand_sei) begin
+      irq_cause_o = CAUSE_SEI;
     end else if (cand_ssi) begin
       irq_cause_o = CAUSE_SSI;
+    end else if (cand_sti) begin
+      irq_cause_o = CAUSE_STI;
     end
 `endif
   end

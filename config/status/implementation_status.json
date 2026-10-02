@@ -64,7 +64,8 @@
     "I-043",
     "I-050",
     "I-051",
-    "I-047"
+    "I-047",
+    "I-052"
   ],
   "evidence": {
     "I-001": {
@@ -783,6 +784,17 @@
       "verdict": "PASS",
       "notes": "The SoC interconnect and error completion -- the first REAL device implementations, where the memory map, UART, timer and interrupt wiring had until now existed only inside testbench models. Case PASS from a clean build under p0 and p1: 48 checks, 187 cycles, with the RESULT line carrying the counts (accepted=15 normal=14 error=1 decerr=1 slverr=0, 4 device pops, 3 transmits, 1 exit). THE ACCEPTANCE RULE IS THE CONSERVATION IDENTITY and it is checked every cycle: every accepted request receives exactly one completion, normal or error -- which is precisely what the card's fail mode ('an AXI response error is dropped and the ROB waits for ever') looks like when it happens. THE ERROR MAPPING IS SPECIFIED rather than left to circumstance: an unmapped address produces DECERR (err=2) and involves no slave; a peripheral refusal -- a ROM write, a write into the read-only harness window, an unmodelled or misaligned device register, an AMO to a device -- produces SLVERR (err=1) with no side effect; both are delivered as the memory response's fault bit, which the LSU endpoint maps to a load access fault (5) or a store access fault (7) by the access's own write-enable. Four mutants each exit 1 with a named first failure: DROP_ERROR (the card's fail mode), ID_SWAP (a response delivered to the wrong requester), STROBE_DROP (a narrow write losing its byte enables) and DUP_COMPLETE (a duplicated completion). Nine cases were re-run green, including the whole corpus sweep, MMIO exactly-once, the memory cases, and ACT4 which stays 127/127. SCOPE, stated by the lane: this is an additive module-level package -- rtl/soc/mosaic_soc.sv is a single self-contained module instantiated only by its own testbench, and it is NOT wired into the LSU endpoint or the core (that integration is separate work). It is a local bus with the properties the card requires (ID, strobes, backpressure, error completions) rather than a full AXI implementation: one outstanding transaction per slave, MAX_OUTSTANDING=4, no bursts and no separate channels. There is no PLIC (raw device interrupt lines only). The peripheral register map is V-019's, newly implemented in RTL, and the three existing device models are recorded as disagreeing rather than silently reconciled. mtime is a free-running counter with no timebase, write path or cross-domain synchronisation; the UART is a byte pipe without baud, framing or overrun; partial non-contiguous strobes are honoured but no core path drives them; there is no ECC or RAM collision matrix; and the campaign is directed rather than randomised.",
       "report": "results/reports/I-047-soc.md"
+    },
+    "I-052": {
+      "cases": [
+        "rvv.vset_boundaries"
+      ],
+      "commands": [
+        "python3 tools/run_unit.py --profile p0 --case rvv.vset_boundaries"
+      ],
+      "verdict": "PASS",
+      "notes": "vsetvl/vsetvli/vsetivli and the vector CSRs. Case PASS from a clean build: 571 checks, 64 vtypes enumerated, 36 AVL bands, 276 cycles, and it passes under p0 and p2 with the same module. Four mutants each exit 1 with a named first failure: AVL_UNCLAMPED (an AVL band choosing a vl beyond what the configuration permits), VILL_NO_BLOCK (vill failing to block execution -- the card's second fail mode), REPLAY_NEW_VTYPE (a replayed instruction using a newer vtype than its configuration snapshot, the card's first) and SILENT_M1 (an unsupported configuration silently becoming LMUL=1 rather than setting vill). ACT4 was re-run and stays 127/127, and rvv.descriptor_legality still passes. FINDING, recorded rather than papered over: the I-051 descriptor and config/csr/vector.json place vtype.vsew at bits 7:5, while the ratified RVV v1.0 vtype format puts it at 5:3. This package followed the family's recorded layout so that its descriptor snapshot stays consistent with the descriptor it feeds -- which is the right call inside one lane and the wrong answer for the machine, because a program that reads vtype back would see a different field position than the specification defines. The correction must move four artifacts together (mosaic_vec_desc.sv, tb_vec.cpp, config/csr/vector.json and mosaic_vec_cfg.sv) and is dispatched as its own package rather than left as a note. Other gaps stated by the lane: config/csr/vector.json marks vtype access=rwr (vset-written storage) while this unit implements the specification's URO rule for software writes; there is no core integration (module-level package, mstatus.VS is an input); no vstart-out-of-bounds trap (reserved, and the specification only recommends one); fault-only-first vl writes (I-056) and multi-macro snapshots (I-058) are out of scope. Environment note: build/p2/rtl/mosaic_csr_pkg.svh was 0 bytes during this run because a concurrent CSR change was mid-flight, so p2 lint failures on core/csr/interrupt/pmp at that moment are that change's, not this package's -- the vector files lint clean under both profiles.",
+      "report": "results/reports/I-052-vset.md"
     }
   },
   "blocked_tasks": {},

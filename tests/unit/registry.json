@@ -1796,6 +1796,23 @@
     "sim/unit/tb_vec.cpp"
    ],
    "max_cycles": 200000,
+   "seed": 1
+  },
+  "rvv.vtype_layout": {
+   "task": "I-051",
+   "top": "mosaic_vec_tb",
+   "rtl": [
+    "rtl/core/mosaic_pkg.sv",
+    "rtl/core/mosaic_vec_desc.sv",
+    "rtl/core/mosaic_vec_cfg.sv"
+   ],
+   "sv": [
+    "sim/tb/mosaic_vec_tb.sv"
+   ],
+   "cpp": [
+    "sim/unit/tb_vec.cpp"
+   ],
+   "max_cycles": 200000,
    "seed": 1,
    "pending": true
   }
