@@ -2343,3 +2343,52 @@ as I-059a rather than being allowed to mark it delivered), I-061..I-063, wiring 
 caches' locality into the core, vector register renaming, multi-hart/cohort/pod (I-064..I-075), the
 measurement and release gates (I-076..I-086), the RVA23S64 mandatory matrix (I-092..I-098), the
 mask-prefix `vstart` rule, and the `tb_vec.cpp` reset-traffic follow-up.
+
+---
+
+## 2026-10-01 — the lane broker, and the difference between a protocol and a benefit (75 delivered)
+
+**I-059 (runtime lane-quota reallocation) passes**, and it is the package the project's name rests
+on: the machine can now change how many lanes work on a vector instruction's elements at run time.
+The rule as implemented is one sentence — **the quota changes how many lanes work on the elements,
+never which elements exist** — and it is enforced structurally in two places rather than by checks that
+could be forgotten: the element-to-lane plan is a **launch-time snapshot** (so a lane that goes away
+cannot alter a running macro's elements), and the broker has **no path to the configuration unit at
+all** (so `vl` and `vlenb` cannot move, which is the card's second fail mode made unreachable instead
+of merely untested). A change is latched and committed only through the ownership FSM's sequence:
+stop admitting new macros, drain the staged macro and the launched macro's element work and any
+uncollected completion to zero, take the engine's own acknowledgement, then publish with a generation
+increment.
+
+**What was reused is the best part of the design.** The ownership FSM (I-031) is *instantiated*, not
+copied; the runtime lane count comes from the VRF's input (I-053); per-lane attribution reads the
+chaining network's accepted element packets (I-058); and I-031's own `NO_ACK` mutant is reused as the
+no-acknowledgement control. Four packages' worth of work met in one integration without any of them
+being re-implemented, which is what the incremental discipline was for.
+
+**And the honest limit, which matters more than the green line.** The core has **one VRF read slot and
+one ALU lane**: "8 lanes" today is an element-to-lane *attribution* plus the lane-count input, not
+eight parallel datapaths. The case proves the **protocol and the invariance**, not a throughput gain,
+and the lane says so in its own report. I-084's comparison *can* now include a lane-quota dimension —
+this case supplies its identical-architecture precondition — but only as throughput and area **once
+parallel lanes exist**. "Two workloads" is one hart with two register regions and two interleaved
+descriptor chains, not two harts. That distinction is the whole point of the plan's "measured, not
+inherited" rule: a project that read only the RESULT line would conclude dynamic aggregation is
+demonstrated, and it is not — it is *provisioned*, with the protocol verified and the benefit still
+owed to real lanes.
+
+**Also delivered this stretch**: the mask-prefix conformance rule that **two lanes had reported
+independently** (`vmsbf`/`vmsif`/`vmsof` with a non-zero `vstart` must raise illegal-instruction; it
+is now one whole-instruction predicate driving both the element path and the packet engine's setup
+refusal, so the instruction takes the illegal path rather than an element fault). That package then
+flagged a **second** semantic question rather than guessing: the element lane gives `vmsbf` and
+`vmsif` the same result expression, where the specification distinguishes them at the first set bit.
+It is recorded as an open correctness question owned by the mask-permutation package.
+
+**State**: 75 ledger entries delivered, 16 capabilities advertised, ACT4 127/127, `make check` and
+every gate green, lint 60/60 on both profiles, exclusion ledger at 18 open / 36 covered. Remaining for
+the goal: the `vmsbf`/`vmsif` distinction, wiring the LLB and cache locality into the core plus the
+locality half of I-084, vector register renaming, real parallel lanes (which is what would turn the
+lane broker's protocol into a measured benefit), multi-hart/cohort/pod (I-064..I-075), the measurement
+and release gates (I-076..I-086), the RVA23S64 mandatory matrix (I-092..I-098), and the `tb_vec.cpp`
+reset-traffic follow-up.
