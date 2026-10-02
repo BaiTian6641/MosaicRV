@@ -1,15 +1,15 @@
 {
   "schema_version": 1,
-  "case": "rvv.descriptor_legality",
+  "case": "rvv.integer_mask_permute",
   "verdict": "PASS",
-  "detail": "checks=336 combos=9284 cycles=28",
+  "detail": "checks=99952 cells=346 families=17 cycles=106824",
   "seed": 1,
   "max_cycles": 200000,
-  "checks": 336,
+  "checks": 99952,
   "failures": 0,
   "image": "",
   "expect": "",
   "tool": "Verilator 5.052 2026-09-05",
-  "timestamp": "2026-10-02T14:26:12Z",
+  "timestamp": "2026-10-02T14:25:21Z",
   "first_mismatch": ""
 }

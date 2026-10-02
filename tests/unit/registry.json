@@ -2060,7 +2060,8 @@
     "rtl/core/mosaic_vrf.sv",
     "rtl/core/mosaic_vec_alu.sv",
     "rtl/core/mosaic_vec_lsu.sv",
-    "rtl/core/mosaic_fpu.sv"
+    "rtl/core/mosaic_fpu.sv",
+    "rtl/core/mosaic_vec_fp.sv"
    ],
    "sv": [
     "sim/tb/mosaic_vec_tb.sv"
@@ -2081,7 +2082,8 @@
     "rtl/core/mosaic_vec_cfg.sv",
     "rtl/core/mosaic_vrf.sv",
     "rtl/core/mosaic_vec_alu.sv",
-    "rtl/core/mosaic_vec_lsu.sv"
+    "rtl/core/mosaic_vec_lsu.sv",
+    "rtl/core/mosaic_vec_restart.sv"
    ],
    "sv": [
     "sim/tb/mosaic_vec_tb.sv"
