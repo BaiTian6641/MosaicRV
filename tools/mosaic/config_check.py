@@ -64,6 +64,16 @@ MISA_MXL_SHIFT = 62
 # Architectural integer register count for RV64; x0 is never renamed.
 ARCH_INT_REGS = 32
 
+# Registers that hold a program counter. Their low bits are the instruction-
+# address alignment (IALIGN) rule's, and IALIGN is a property of the profile:
+# Priv v1.12 says "The low bit of mepc (mepc[0]) is always zero. On
+# implementations that support only IALIGN=32, the two low bits (mepc[1:0]) are
+# always zero", and the same for sepc. The alignment bits of these registers are
+# therefore *derived* from the profile's claimed extensions (see `ialign`) and
+# declared as such in the table (`ialign_bits`), never frozen as writable or
+# unmodifiable -- freezing them is exactly the EX-034 defect.
+PC_VALUED_CSRS = ("mepc", "sepc")
+
 
 class Problem(object):
     __slots__ = ("where", "message")
@@ -499,10 +509,44 @@ def _check_csr(bundle: Bundle, profile_name: str) -> None:
                 fixed = _parse_bit_ranges(
                     csr.get("unmodifiable_bits", []), width, "unmodifiable_bits", where, bundle
                 )
+                ialign_bits = _parse_bit_ranges(
+                    csr.get("ialign_bits", []), width, "ialign_bits", where, bundle
+                )
                 if _ranges_overlap(writable, wpri):
                     bundle.fail(where, "writable_fields and wpri_fields overlap")
                 if _ranges_overlap(writable, fixed) or _ranges_overlap(wpri, fixed):
                     bundle.fail(where, "declared fields overlap unmodifiable_bits")
+                if _ranges_overlap(ialign_bits, writable) or _ranges_overlap(ialign_bits, wpri) \
+                        or _ranges_overlap(ialign_bits, fixed):
+                    bundle.fail(
+                        where,
+                        "ialign_bits overlaps a declared writable, WPRI or unmodifiable "
+                        "field; a bit's writability is either declared here or derived "
+                        "from the profile's IALIGN, never both",
+                    )
+
+                # The IALIGN rule. A program-counter register must say which of
+                # its low bits follow the profile's instruction-address alignment,
+                # and the generator widens or masks them from the profile's
+                # claimed extensions. Freezing bit 1 either way in the table is
+                # the inconsistency EX-034 recorded: a profile that claims C has
+                # IALIGN=16 and mepc[1]/sepc[1] writable, one that does not has
+                # IALIGN=32 and both low bits read-only zero.
+                if csr.get("name") in PC_VALUED_CSRS:
+                    if sorted(ialign_bits) != [(1, 0)]:
+                        bundle.fail(
+                            where,
+                            "a program-counter register must declare ialign_bits "
+                            '["1:0"] so its low bits follow the profile\'s IALIGN '
+                            "instead of being frozen in the table",
+                        )
+                    if (1, 1) in fixed or (1, 1) in writable:
+                        bundle.fail(
+                            where,
+                            "bit 1 of a program-counter register is IALIGN-derived "
+                            "(read-only zero exactly when the profile does not claim C) "
+                            "and must not be declared writable or unmodifiable",
+                        )
 
                 if behavior == "warl_wpri" and not (writable and wpri):
                     bundle.fail(
@@ -1062,3 +1106,21 @@ def advertised_capabilities(bundle: Bundle) -> Tuple[List[str], List[str]]:
         else:
             pending.append(name)
     return advertised, pending
+
+
+def ialign(bundle: Bundle) -> int:
+    """The instruction-address alignment the profile's claimed extensions imply.
+
+    IALIGN is a property of the profile, not of one CSR: an implementation that
+    supports the C extension executes 16-bit instructions and has IALIGN=16, and
+    one that does not has IALIGN=32 (RISC-V Unprivileged ISA, "Instruction
+    Length"; Priv v1.12 mepc/sepc: the two low bits are read-only zero "on
+    implementations that support only IALIGN=32"). This is the one place the
+    choice is made, and it is derived from the claimed extension list rather than
+    held in a second flag that can drift from the capability ladder -- a drift
+    that produced EX-034. tools/gen_manifest.py widens the generated write masks
+    of the PC-valued CSRs from it, and tools/check_profile.py's table check
+    rejects a profile that claims C while its table freezes the alignment bits.
+    """
+    extensions = bundle.profile["isa_target"]["extensions"] if bundle.profile else []
+    return 16 if "C" in extensions else 32

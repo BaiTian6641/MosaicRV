@@ -48,10 +48,13 @@
 //     written by the same rule rather than folded into the base (L1181-L1183:
 //     "The value in the BASE field must always be aligned on a 4-byte boundary").
 //
-//   * mepc (0x341). p0 has fixed IALIGN=32, so mepc[1:0] are read-only zero
-//     (L1935-L1937). The generated write mask already excludes them, and the
-//     trap path masks the trap PC with the same mask, so a trap cannot install a
-//     misaligned PC either.
+//   * mepc (0x341). The low bits follow the profile's IALIGN: a profile that
+//     claims C has IALIGN=16, so only mepc[0] is read-only zero, and one that
+//     does not has IALIGN=32 and both low bits are read-only zero (L1935-L1937).
+//     The generated write mask encodes that, and the trap path masks the trap PC
+//     with the same mask, so a trap cannot install a bit the profile's IALIGN
+//     forbids. The mask is derived from the profile's claimed extensions
+//     (tools/mosaic/config_check.py `ialign`), not frozen in the CSR table.
 //
 // ------------------------------------------------------- boundary priority
 //
@@ -845,7 +848,15 @@ module mosaic_csr (
         mstatus_d = (mstatus_q & ~(MSTATUS_MIE | MSTATUS_MPIE | MSTATUS_MPP))
                   | (mstatus_q[3] ? MSTATUS_MPIE : 64'd0)
                   | ({{62{1'b0}}, priv_q} << 11);
+`ifdef MOSAIC_CSR_MUTANT_MEPC_IALIGN32
+        // NEGATIVE CONTROL (EX-034): the trap epc is masked with the IALIGN=32
+        // rule even for a profile that claims C, so bit 1 of a trap taken on a
+        // 2-mod-4 PC is lost and mepc no longer names the faulting instruction.
+        // The shipping build uses the generated mask, which follows the profile.
+        mepc_d    = trap_epc_i & mosaic_csr_pkg::MOSAIC_CSR_WMASK_MEPC & ~64'h2;
+`else
         mepc_d    = trap_epc_i & mosaic_csr_pkg::MOSAIC_CSR_WMASK_MEPC;
+`endif
         mcause_d  = trap_cause_i;
         mtval_d   = trap_tval_i;
         priv_d    = mosaic_csr_pkg::MOSAIC_PRIV_M;

@@ -126,6 +126,17 @@ constexpr uint64_t kFrameStride = 0x80ull;
 constexpr uint64_t kRecLo    = 0x80024000ull;   // the M-mode x5 records
 constexpr uint64_t kScratch  = 0x80025000ull;   // the store scenarios' words
 
+// EX-034: the IALIGN probe. A compressed instruction at a 2-mod-4 PC, a second
+// 2-mod-4 address the handler resumes at, and the exit stubs the two possible
+// mret targets lead to. Every address here is looked up exactly by the case's
+// instruction memory, so a 16-bit instruction at an odd halfword is placed as
+// its own word and the two-mod-four addresses are real.
+constexpr uint64_t kIalignTrapPc   = 0x80019102ull;  // 2 mod 4: c.ebreak lives here
+constexpr uint64_t kIalignResume   = 0x80019112ull;  // 2 mod 4: the mret target
+constexpr uint64_t kIalignGoodStub = 0x80019114ull;  // kIalignResume + 2, aligned
+constexpr uint64_t kIalignMarker   = 0x80026000ull;  // the good-path marker word
+constexpr uint64_t kIalignMarkerVal = 0x600Dull;
+
 // Frame fields, written by the handler.
 constexpr int F_VALID = 0, F_CAUSE = 8, F_TVAL = 16, F_EPC = 24, F_MSTATUS = 32,
               F_RESUME = 40, F_X5 = 48;
@@ -134,6 +145,7 @@ constexpr int F_VALID = 0, F_CAUSE = 8, F_TVAL = 16, F_EPC = 24, F_MSTATUS = 32,
 // The ISA's exception codes (mosaic_pkg.sv).
 constexpr uint64_t kExcInsnAccess  = 1;
 constexpr uint64_t kExcIllegal     = 2;
+constexpr uint64_t kExcBreakpoint  = 3;
 constexpr uint64_t kExcLoadAccess  = 5;
 constexpr uint64_t kExcStoreAccess = 7;
 constexpr uint64_t kExcEcallU      = 8;
@@ -276,10 +288,12 @@ struct Scenario {
   const char* rule = "";
   bool skip_without_pmp = false;   // needs PMP entries to mean anything
   bool skip_without_su = false;    // needs S or U mode
+  bool skip_without_ialign16 = false;  // needs IALIGN=16 (the profile claims C)
   bool alt_without_pmp = false;    // use `alt` when no entry is implemented
   bool alt_without_su = false;     // use `alt` when the profile has no S/U
   bool alt_without_u = false;      // ... only when U is missing
   bool alt_when_u_present = false; // use `alt` when U *is* present
+  bool ialign_probe = false;       // a breakpoint at a 2-mod-4 PC, not a PMP row
   Expect exp;
   Expect alt;
 
@@ -303,6 +317,8 @@ struct Scenario {
   uint64_t pre = 0;       // the word already at `addr`
   uint64_t preset = 0;    // the value x5 holds before the access
   uint64_t data = 0;      // the value a store-like access writes
+  uint64_t resume_abs = 0;  // when nonzero, the handler resumes here, not at the
+                            // keep label (the IALIGN probe's 2-mod-4 target)
 };
 
 uint8_t Cfg(bool lock, unsigned a, bool r, bool w, bool x) {
@@ -469,6 +485,20 @@ class Asm {
   std::vector<Fixup> fixups_;
   std::map<std::string, uint64_t> labels_;
 };
+
+// The same shape as Asm::LiAbs32, hand-placed into the image: a 32-bit constant
+// zero-extended into the 64-bit register (RV64 `lui` sign-extends, so the shift
+// pair clears bits 63:32). Used for the IALIGN probe's exit stub, which lives
+// outside the assembled stream because its address is a two-mod-four boundary.
+void EmitAbs32(ProgImage* img, uint64_t addr, uint32_t rd, uint32_t v) {
+  const uint32_t lo = v & 0xFFFu;
+  const uint32_t hi = (v + 0x800u) >> 12;
+  img->Put(addr + 0, Asm::U(hi, rd, 0x37));
+  img->Put(addr + 4, Asm::I(static_cast<int32_t>(lo) - ((lo & 0x800u) ? 0x1000 : 0),
+                            rd, 0, rd, 0x13));
+  img->Put(addr + 8, Asm::I(32, rd, 1, rd, 0x13));    // slli rd, rd, 32
+  img->Put(addr + 12, Asm::I(32, rd, 5, rd, 0x13));   // srli rd, rd, 32
+}
 
 // ============================================================================
 // The scenario list
@@ -1254,6 +1284,32 @@ std::vector<Scenario> BuildScenarios() {
     add(s);
   }
 
+  // ------------------------------------------------------------------ group 11
+  // EX-034: the profile's IALIGN, observed where it is visible. A compressed
+  // instruction (c.ebreak) sits at a 2-mod-4 PC; the trap taken on it must record
+  // that exact PC in mepc when the profile claims C (IALIGN=16), and the handler
+  // then mret's to a second 2-mod-4 address (the frame's resume value), so the
+  // return path is exercised with bit 1 set as well. A profile that does not
+  // claim C has IALIGN=32, where a 2-mod-4 trap PC is rounded and a 2-mod-4
+  // resume address is not representable at all, so the row is inapplicable by
+  // construction and skipped rather than asserted against the wrong rule.
+  {
+    Scenario s;
+    s.name = "ialign-odd-pc-mepc";
+    s.mode = Mod::kM; s.cls = Cls::kFetch; s.cat = Cat::kNoEntry;
+    s.skip_without_ialign16 = true;
+    s.ialign_probe = true;
+    s.addr = kIalignTrapPc;
+    s.resume_abs = kIalignResume;
+    s.rule = "Priv v1.12 mepc: the low bit is always zero, and the two low bits "
+             "are always zero only on implementations that support only "
+             "IALIGN=32. A profile that claims C has IALIGN=16, so a trap taken "
+             "on a compressed instruction at a 2-mod-4 PC records that PC with "
+             "bit 1 preserved, and MRET resumes at the 2-mod-4 address mepc names";
+    s.exp = Expect{true, kExcBreakpoint};
+    add(s);
+  }
+
   return v;
 }
 
@@ -1448,6 +1504,7 @@ ProgImage BuildProgram(std::vector<Scenario>* scs, const Geometry& g) {
     const bool pmp_row = s.skip_without_pmp && !pmp;
     if (pmp_row) continue;
     if (s.skip_without_su && !(g.has_s && g.has_u)) continue;
+    if (s.skip_without_ialign16 && MOSAIC_IALIGN != 16) continue;
     s.index = emitted;
     emitted++;
     s.frame = kFrameLo + kFrameStride * s.index;
@@ -1489,7 +1546,8 @@ ProgImage BuildProgram(std::vector<Scenario>* scs, const Geometry& g) {
     // the handler will resume at.
     a.LiAbs(6, s.frame);
     a.Sd(0, 6, F_VALID);
-    a.La(7, KeepLabel(s.index));
+    if (s.resume_abs != 0) a.LiAbs(7, s.resume_abs);
+    else a.La(7, KeepLabel(s.index));
     a.Sd(7, 6, F_RESUME);
     a.Csrrw(0, CSR_MSCRATCH, 6);
 
@@ -1522,6 +1580,16 @@ ProgImage BuildProgram(std::vector<Scenario>* scs, const Geometry& g) {
       s.expect_epc_fault = (s.cls == Cls::kFetch) ? s.addr
                           : (s.cls == Cls::kCsr)  ? s.csr_fault_pc
                           : s.access_pc;
+      if (s.ialign_probe) {
+        // The probe's trap PC is 2 mod 4. A profile that claims C (IALIGN=16)
+        // records it exactly; one that does not has IALIGN=32 and rounds it. The
+        // probe is skipped for the latter, but the expectation is stated from the
+        // profile's IALIGN rather than assumed, so the check is about the profile
+        // and not about which driver branch ran.
+        s.expect_epc_fault = (MOSAIC_IALIGN == 16)
+                                 ? s.addr
+                                 : (s.addr & ~UINT64_C(3));
+      }
       // An allowed instruction access runs the `ecall` that lives at the
       // target, and that trap's mepc is the target too. Every other allowed
       // scenario traps nothing at all in M-mode.
@@ -1555,6 +1623,7 @@ ProgImage BuildProgram(std::vector<Scenario>* scs, const Geometry& g) {
     if (s.mode == Mod::kM) continue;
     if (s.skip_without_pmp && !pmp) continue;
     if (s.skip_without_su && !(g.has_s && g.has_u)) continue;
+    if (s.skip_without_ialign16 && MOSAIC_IALIGN != 16) continue;
     a.Mark(StubLabel(s.index));
     s.stub_pc = a.pc();
     s.access_pc = a.pc();
@@ -1591,6 +1660,29 @@ ProgImage BuildProgram(std::vector<Scenario>* scs, const Geometry& g) {
   for (uint64_t addr : {kFetch0, kFetch1, kFetch2, kFetch3}) {
     image.Put(addr, 0x00000073u);
   }
+
+  // ---- the IALIGN probe's pad (EX-034) ----
+  // Only a profile that claims C has IALIGN=16, so only then can a compressed
+  // instruction be fetched at a 2-mod-4 PC and an MRET target a 2-mod-4 address.
+  if (MOSAIC_IALIGN == 16) {
+    // The trapping compressed instruction, c.ebreak, at the 2-mod-4 PC.
+    image.Put(kIalignTrapPc, 0x00009002u);
+    // The MRET target: a 16-bit c.nop at the 2-mod-4 address, falling through to
+    // the good exit stub one halfword later. If MRET dropped bit 1 it would land
+    // on kIalignResume - 2, which the image leaves as an `ecall`, so the frame
+    // would be overwritten with a different cause and address.
+    image.Put(kIalignResume, 0x00000001u);
+    // The good stub: record the marker, then write the normal pass code to
+    // tohost (which ends the run), then park.
+    EmitAbs32(&image, kIalignGoodStub, 30, static_cast<uint32_t>(kIalignMarker));
+    EmitAbs32(&image, kIalignGoodStub + 16, 29, static_cast<uint32_t>(kIalignMarkerVal));
+    image.Put(kIalignGoodStub + 32, Asm::S(0, 29, 30, 3, 0x23));   // sd x29, 0(x30)
+    EmitAbs32(&image, kIalignGoodStub + 36, 28, static_cast<uint32_t>(MOSAIC_TOHOST));
+    image.Put(kIalignGoodStub + 52, Asm::I(1, 0, 0, 29, 0x13));    // addi x29, x0, 1
+    image.Put(kIalignGoodStub + 56, Asm::S(0, 29, 28, 3, 0x23));   // sd x29, 0(x28)
+    image.Put(kIalignGoodStub + 60, 0x0000006Fu);                 // jal x0, 0
+  }
+
   ProgImage out;
   for (const auto& kv : image.words()) out.Put(kv.first, kv.second);
   return out;
@@ -1868,6 +1960,7 @@ void RunCase(Vmosaic_core_tb* dut, mosaic::Reporter* reporter, const Geometry& g
   for (const Scenario& s : all) {
     if (s.skip_without_pmp && !pmp) continue;
     if (s.skip_without_su && !su) continue;
+    if (s.skip_without_ialign16 && MOSAIC_IALIGN != 16) continue;
     run.push_back(s);
   }
   if (run.empty()) Fail(phase, "no scenario is applicable to this profile");
@@ -1973,7 +2066,7 @@ void RunCase(Vmosaic_core_tb* dut, mosaic::Reporter* reporter, const Geometry& g
       }
     }
     if (s.cls != Cls::kCsr && s.cls != Cls::kNop && s.cls != Cls::kMret &&
-        s.cls != Cls::kSret) {
+        s.cls != Cls::kSret && !s.ialign_probe) {
       // The class the specification names: a load or load-reserved checks R, a
       // store, store-conditional or AMO checks W, an instruction access checks X
       // and *not* R -- an instruction access is not a read of the instruction
@@ -2232,6 +2325,46 @@ void RunCase(Vmosaic_core_tb* dut, mosaic::Reporter* reporter, const Geometry& g
                       "mcause=" + U64(f.cause) + " is not the illegal-instruction "
                       "exception a refused CSR access raises");
     }
+  }
+
+  // ------------------------------------------------------------- the IALIGN probe
+  // EX-034. The matrix above already checks the probe's mcause/mtval/mepc against
+  // the profile's IALIGN; these checks name the two halves of the requirement
+  // directly, so a regression's first failure is the claim and not a generic cell:
+  //   * the trap taken on the compressed instruction at the 2-mod-4 PC recorded
+  //     that exact address in mepc (bit 1 preserved) -- under IALIGN=32 the
+  //     recorded value is the word-rounded one; and
+  //   * the handler's mret, whose target is the frame's 2-mod-4 resume address,
+  //     reached the good stub, which wrote the marker. If mret -- or the mepc
+  //     write mask it uses -- dropped bit 1, the run would land two bytes earlier
+  //     on an `ecall` and the frame would carry a different cause and address.
+  bool probe_present = false;
+  for (Scenario& s : run) {
+    if (!s.ialign_probe) continue;
+    probe_present = true;
+    Frame f;
+    std::string detail;
+    if (!ReadFrame(&dut_mem, s.frame, &f, &detail)) Fail(phase, detail);
+    harness.Check(
+        "EX-034: mepc names the 2-mod-4 trap PC exactly when the profile claims C "
+        "(IALIGN=16)",
+        f.epc == s.expect_epc_fault,
+        "mepc=" + U64(f.epc) + " expected " + U64(s.expect_epc_fault) +
+            " (IALIGN=" + Dec(MOSAIC_IALIGN) + ")");
+    harness.Check("EX-034: the trap on the compressed instruction is a breakpoint",
+                  f.cause == kExcBreakpoint,
+                  "mcause=" + U64(f.cause) + " expected " + U64(kExcBreakpoint));
+    uint64_t marker = 0;
+    if (dut_mem.Read(kIalignMarker, 8, &marker) != mosaic::AccessStatus::kOk) {
+      Fail(phase, "EX-034: the IALIGN marker word is not readable");
+    }
+    harness.Check("EX-034: mret returned to the 2-mod-4 address mepc named",
+                  marker == kIalignMarkerVal,
+                  "marker=" + U64(marker) + " expected " + U64(kIalignMarkerVal));
+  }
+  if (MOSAIC_IALIGN == 16) {
+    harness.Check("EX-034: the IALIGN probe ran for a C-claiming profile",
+                  probe_present, "no ialign-odd-pc-mepc scenario was emitted");
   }
 
   // ------------------------------------------------------------- coverage

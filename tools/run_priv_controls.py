@@ -23,6 +23,13 @@ control for defect D5:
                                       access to have taken effect (driver-side;
                                       the refusal is structural in the RTL and no
                                       RTL switch can express "it wrote anyway")
+  MOSAIC_CSR_MUTANT_MEPC_IALIGN32     EX-034's defect, re-injected in the RTL:
+                                      the trap epc is masked with the IALIGN=32
+                                      rule (bit 1 forced to zero) even though the
+                                      profile claims C, so a trap taken on a
+                                      compressed instruction at a 2-mod-4 PC
+                                      records the word-rounded address and the
+                                      case's mepc check names it.
 
 Each control is built from a deleted build directory with its -D on the Verilator
 command line, so the binary hash differs from the shipping one, and the run is
@@ -57,6 +64,7 @@ CONTROLS = [
     ("M_MODE_ENFORCED", "MOSAIC_PMP_MUTANT_M_MODE_ENFORCED"),
     ("STORE_DENY_NOT_TAKEN", "MOSAIC_PMP_MUTANT_STORE_DENY_NOT_TAKEN"),
     ("FAULT_WRITES", "MOSAIC_PRIV_MUTANT_FAULT_WRITES"),
+    ("MEPC_IALIGN32", "MOSAIC_CSR_MUTANT_MEPC_IALIGN32"),
 ]
 
 

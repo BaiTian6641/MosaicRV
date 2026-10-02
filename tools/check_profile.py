@@ -224,6 +224,25 @@ class NegativeControls(object):
             "overlapping writable and WPRI fields",
             self.patch_first_csr(lambda t: t["modes"][0]["csrs"][0].update({"wpri_fields": ["5:4"]})),
         )
+
+        def freeze_pc_alignment(table):
+            """Re-freeze the IALIGN decision in the table: drop `ialign_bits` and
+            declare mepc's low two bits unmodifiable. That is exactly the EX-034
+            shape -- a table that decides IALIGN=32 for a profile whose capability
+            ladder may claim C -- and it must be rejected for every profile,
+            because the alignment bits are the profile's to decide, not the
+            table's."""
+            for block in table["modes"]:
+                for csr in block["csrs"]:
+                    if csr["name"] != "mepc":
+                        continue
+                    csr.pop("ialign_bits", None)
+                    csr["unmodifiable_bits"] = ["1:0"]
+                    return
+            raise AssertionError("no mepc row to freeze")
+
+        self.case("mepc alignment bits frozen in the table (EX-034)",
+                  self.patch_first_csr(freeze_pc_alignment))
         self.case(
             "privilege mode with no CSR table",
             self.patch_profile(lambda d: d["privilege_modes"].append("U")),

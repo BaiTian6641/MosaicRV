@@ -1,0 +1,7 @@
+name: mosaic-p1
+compiler_exe: riscv64-unknown-elf-gcc # frozen via ~/mosaic-ref/act4-bin
+objdump_exe: riscv64-unknown-elf-objdump
+ref_model_exe: sail_riscv_sim # Sail 0.14.1, the ACT4-pinned reference
+udb_config: mosaic-p1.yaml
+linker_script: link.ld
+dut_include_dir: . # holds this config's rvmodel_macros.h and sail.json

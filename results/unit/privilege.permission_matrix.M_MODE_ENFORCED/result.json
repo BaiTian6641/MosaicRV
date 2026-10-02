@@ -1,15 +1,16 @@
 {
   "schema_version": 1,
   "case": "privilege.permission_matrix",
-  "verdict": "PASS",
-  "detail": "checks=52 comparisons=9 cycles=1415 retires=513 traps=6 seed=1",
+  "verdict": "FAIL",
+  "detail": "contract violated: priv-matrix at cycle 4000000: max-cycles (4000000) exhausted: head_pc=0x0000000080007d48 occupied=5 retired=1115349 traps=44291 priv=3",
   "seed": 1,
   "max_cycles": 4000000,
-  "checks": 53,
-  "failures": 0,
+  "checks": 1,
+  "failures": 1,
   "image": "",
   "expect": "",
   "tool": "Verilator 5.052 2026-09-05",
-  "timestamp": "2026-10-02T06:02:40Z",
-  "first_mismatch": ""
+  "timestamp": "2026-10-02T07:46:16Z",
+  "first_mismatch": "priv-matrix at cycle 4000000: max-cycles (4000000) exhausted: head_pc=0x0000000080007d48 occupied=5 retired=1115349 traps=44291 priv=3: expected every privilege/access/PMP cell matches the ISA, got contract violated",
+  "failed_checks": ["no contract violation"]
 }

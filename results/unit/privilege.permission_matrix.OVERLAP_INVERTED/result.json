@@ -1,15 +1,16 @@
 {
   "schema_version": 1,
   "case": "privilege.permission_matrix",
-  "verdict": "PASS",
-  "detail": "checks=52 comparisons=9 cycles=1415 retires=513 traps=6 seed=1",
+  "verdict": "FAIL",
+  "detail": "contract violated: priv-matrix at cycle 22958: s-overlap-lower-allows (S/load/overlap): mcause is the ISA's: mcause=0x0000000000000005 expected 0x0000000000000009",
   "seed": 1,
   "max_cycles": 4000000,
-  "checks": 53,
-  "failures": 0,
+  "checks": 3224,
+  "failures": 2,
   "image": "",
   "expect": "",
   "tool": "Verilator 5.052 2026-09-05",
-  "timestamp": "2026-10-02T06:02:37Z",
-  "first_mismatch": ""
+  "timestamp": "2026-10-02T07:45:57Z",
+  "first_mismatch": "priv-matrix at cycle 22958: s-overlap-lower-allows (S/load/overlap): mcause is the ISA's: mcause=0x0000000000000005 expected 0x0000000000000009: expected every privilege/access/PMP cell matches the ISA, got contract violated",
+  "failed_checks": ["priv-matrix: s-overlap-lower-allows (S/load/overlap): mcause is the ISA's -- mcause=0x0000000000000005 expected 0x0000000000000009", "no contract violation"]
 }

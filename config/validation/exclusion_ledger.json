@@ -1054,13 +1054,17 @@
       "subjects": [
         "mepc[1:0] read-only zero for a profile that claims the C extension"
       ],
-      "reason": "config/csr/mode_m.json declares mepc's low two bits unmodifiable for the IALIGN=32 rule, and the generated MOSAIC_CSR_WMASK_MEPC masks both bits. The C extension requires IALIGN=16 (only mepc[0] read-only zero). p1 claims C, so the p1 mask is wrong for C; the case prints the rounded-down mepc as a note rather than asserting it.",
-      "spec_clause": "RISC-V Privileged Spec, mepc: the low bit is always zero; with IALIGN=16 only mepc[0] is read-only zero. config/csr/mode_m.json records the p0 IALIGN=32 reading of the same clause.",
+      "reason": "config/csr/mode_m.json used to declare mepc's low two bits unmodifiable for the IALIGN=32 rule, and the generated MOSAIC_CSR_WMASK_MEPC masked both bits, so a p1 profile that claims C (IALIGN=16) lost bit 1 of a trap PC. The mask was a hand-maintained second copy of a decision that belongs to the profile. It is now derived: the table declares mepc's and sepc's low bits with `ialign_bits`, and tools/gen_manifest.py widens the generated mask to preserve bit 1 exactly when the profile claims C (tools/mosaic/config_check.py `ialign`). config/csr/mode_m.json no longer freezes the alignment bits, rtl/core/mosaic_csr.sv's trap path uses the generated mask, and tools/check_profile.py rejects any table that freezes them.",
+      "spec_clause": "RISC-V Privileged Spec v1.12, src/machine.tex mepc L1935-L1937: 'The low bit of mepc (mepc[0]) is always zero. On implementations that support only IALIGN=32, the two low bits (mepc[1:0]) are always zero'; src/supervisor.tex sepc L623-L631 states the same rule and that sepc[1] is masked only when IALIGN=32. RISC-V Unprivileged ISA, 'Instruction Length': the C extension implies IALIGN=16.",
       "alternative_verification": {
-        "status": "open",
-        "cases": [],
-        "checks": [],
-        "note": "Nothing covers the p1 IALIGN=16 mask. core.event_payload pins the p0 rule (mepc's low two bits read-only zero) and compressed.cross_boundary records the p0 rounding as a note; the CSR config, the generated package and that expectation must move together."
+        "status": "covered",
+        "cases": [
+          "privilege.permission_matrix"
+        ],
+        "checks": [
+          "tools/run_priv_controls.py"
+        ],
+        "note": "privilege.permission_matrix's p1 run carries the EX-034 probe: a c.ebreak at the 2-mod-4 PC 0x80019102 is trapped, the handler's frame must read mepc back as that exact address (bit 1 preserved), and the handler's mret resumes at the 2-mod-4 address 0x80019112 it wrote into mepc, reaching the probe's exit stub (marker 0x600d). tools/run_priv_controls.py rebuilds the case from a deleted build directory with MOSAIC_CSR_MUTANT_MEPC_IALIGN32, which re-injects the defect (the trap epc masked with the IALIGN=32 rule); that control exits 1 with mepc=0x80019100 expected 0x80019102, and its binary hash differs from the shipping one. tools/check_profile.py --negative additionally rejects a table that freezes mepc[1]."
       },
       "affected_cases": [
         {
@@ -1076,8 +1080,8 @@
           ]
         }
       ],
-      "affected_scope": "config/csr/mode_m.json; config/profiles/p1.json; tools/gen_manifest.py",
-      "end_condition": "The CSR config, the generated mask and core.event_payload's expectation move to mepc[1] writable together when a C-claiming profile is exercised."
+      "affected_scope": "config/csr/mode_m.json; config/csr/mode_su.json; config/schema/csr.schema.json; tools/mosaic/config_check.py; tools/gen_manifest.py; tools/check_profile.py; rtl/core/mosaic_csr.sv; sim/unit/tb_core_priv.cpp; tools/run_priv_controls.py",
+      "end_condition": "Met. The CSR config, the generated mask and the trap path move together and the choice is derived from the profile's claimed extensions, not held in a second flag: a profile that claims C generates mepc/sepc masks with bit 1 writable, one that does not keeps both low bits read-only zero, privilege.permission_matrix's p1 IALIGN probe checks the exact mepc and the mret return, its MEPC_IALIGN32 control fails, and tools/check_profile.py rejects a table that freezes the alignment bits."
     },
     {
       "id": "EX-035",

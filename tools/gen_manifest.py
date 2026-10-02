@@ -125,6 +125,13 @@ def render_sv_package(bundle: config_check.Bundle, advertised) -> str:
     add("  localparam logic [63:0] MOSAIC_MISA_RESET = %s;" % _hex64(misa))
     add("  localparam logic [63:0] MOSAIC_RESET_VECTOR = %s;" % _hex64(profile["reset"]["reset_vector"]))
     add("")
+    # The instruction-address alignment is a property of the profile, derived from
+    # whether it claims C (see config_check.ialign). It is emitted here, next to
+    # misa, so the value the CSR masks are built from is visible in the same place
+    # as the capability that decides it.
+    add("  // IALIGN: 16 when the profile claims C, else 32 (config_check.ialign).")
+    add("  localparam int unsigned MOSAIC_IALIGN = %d;" % config_check.ialign(bundle))
+    add("")
     add("  // Frontend")
     add("  localparam int unsigned MOSAIC_FETCH_OUTSTANDING = %d;" % geometry["frontend"]["fetch_outstanding"])
     add("  localparam int unsigned MOSAIC_BTB_ENTRIES       = %d;" % geometry["frontend"]["btb_entries"])
@@ -469,7 +476,7 @@ def collect_csrs(bundle: config_check.Bundle) -> list:
                 else:
                     for field in ("address", "width", "access", "behavior", "reset",
                                   "writable_fields", "wpri_fields",
-                                  "unmodifiable_bits"):
+                                  "unmodifiable_bits", "ialign_bits"):
                         if record.get(field) != csr.get(field):
                             raise SystemExit(
                                 "csr %s: the %s block and an earlier block disagree "
@@ -511,19 +518,37 @@ def collect_csrs(bundle: config_check.Bundle) -> list:
     return csrs
 
 
-def effective_csr_wmask(csr, less_privileged: bool) -> int:
+def _ialign_writable_mask(csr, ialign: int) -> int:
+    """The bits a PC-valued register's IALIGN leaves writable.
+
+    A program-counter register declares its alignment bits with ``ialign_bits``
+    ("1:0" for mepc/sepc). Bit 0 is always read-only zero; bit 1 is read-only zero
+    exactly when IALIGN=32 (Priv v1.12: "the two low bits are always zero" only
+    "on implementations that support only IALIGN=32"). IALIGN is derived from
+    whether the profile claims C, so the table never freezes this decision --
+    freezing it is the inconsistency EX-034 recorded.
+    """
+    align = _bit_list_mask(csr.get("ialign_bits", ()))
+    # Drop bit 0 (always zero) and, when IALIGN=32, bit 1 as well.
+    return ((align >> 1) << 1) if ialign == 16 else 0
+
+
+def effective_csr_wmask(csr, less_privileged: bool, ialign: int) -> int:
     """The write mask a profile actually gets for one CSR.
 
     Two rules narrow the table, both keyed on the profile and not on a
     hand-edited mask: a delegation register whose target mode does not exist has
     no legal value but zero, and a field whose whole meaning is a less-privileged
-    mode is read-only when there is no such mode.
+    mode is read-only when there is no such mode. A third *widens* the table: the
+    alignment bits of a PC-valued register, whose writability follows the
+    profile's IALIGN.
     """
     if csr["access"] == "ro":
         return 0
     width = csr["width"]
     wmask = _bit_mask(csr.get("writable_fields", []), width,
                       "csr %s writable_fields" % csr["name"])
+    wmask |= _ialign_writable_mask(csr, ialign)
     if less_privileged:
         return wmask
     if csr["name"] in NO_TARGET_WITHOUT_LESS_PRIVILEGE:
@@ -568,6 +593,7 @@ def render_sv_csr_package(bundle: config_check.Bundle) -> str:
     """
     profile = bundle.profile
     less_privileged = bool([mode for mode in profile["privilege_modes"] if mode in ("S", "U")])
+    ialign = config_check.ialign(bundle)
     csrs = collect_csrs(bundle)
     modes_list = list(profile["privilege_modes"])
 
@@ -634,12 +660,13 @@ def render_sv_csr_package(bundle: config_check.Bundle) -> str:
         width = csr["width"]
         access = csr["access"]
         write_legal = access != "ro"
-        wmask = effective_csr_wmask(csr, less_privileged)
+        wmask = effective_csr_wmask(csr, less_privileged, ialign)
         note = ""
         table_wmask = 0
         if write_legal:
             table_wmask = _bit_mask(csr.get("writable_fields", []), width,
-                                    "csr %s writable_fields" % csr["name"])
+                                    "csr %s writable_fields" % csr["name"]) \
+                          | _ialign_writable_mask(csr, ialign)
         if table_wmask != wmask:
             note = ("  // %s: the table declares bits 0x%X writable, but profile %s has no\n"
                     "  // less-privileged mode for them to name, so every bit is WARL whose\n"
@@ -693,6 +720,7 @@ def render_csr_header(bundle: config_check.Bundle) -> str:
     """
     profile = bundle.profile
     less_privileged = bool([mode for mode in profile["privilege_modes"] if mode in ("S", "U")])
+    ialign = config_check.ialign(bundle)
     csrs = collect_csrs(bundle)
 
     lines = []
@@ -725,7 +753,7 @@ def render_csr_header(bundle: config_check.Bundle) -> str:
     for csr in csrs:
         access = csr["access"]
         write_legal = access != "ro"
-        wmask = effective_csr_wmask(csr, less_privileged)
+        wmask = effective_csr_wmask(csr, less_privileged, ialign)
         add('  { "%s", 0x%03x, UINT64_C(0x%016x), UINT64_C(0x%016x), %d, %d, %d },'
             % (csr["name"], csr["address"], csr["reset"], wmask,
                1 if write_legal else 0, csr["min_priv_r"], csr["min_priv_w"]))
@@ -876,6 +904,11 @@ def render_platform_header(bundle: config_check.Bundle) -> str:
     add("#define MOSAIC_PROFILE_NAME \"%s\"" % bundle.name)
     add("#define MOSAIC_RESET_VECTOR UINT64_C(0x%x)" % bundle.profile["reset"]["reset_vector"])
     add("")
+    add("// ---- instruction-address alignment (profile property) ----")
+    add("// Derived from whether the profile claims C; the CSR write masks of the")
+    add("// PC-valued registers follow it (config_check.ialign).")
+    add("#define MOSAIC_IALIGN %d" % config_check.ialign(bundle))
+    add("")
     add("// ---- physical memory map ----")
     for region in sorted(bundle.memory["regions"], key=lambda r: r["base"]):
         upper = "MOSAIC_%s_BASE" % region["name"].upper()
@@ -950,6 +983,7 @@ def main() -> int:
             bundle.profile["isa_target"]["extensions"], bundle.profile["xlen"]
         ),
         "misa_reset": config_check.misa_value(advertised, bundle.profile["xlen"]),
+        "ialign": config_check.ialign(bundle),
         "claimed_capabilities": bundle.profile["isa_target"]["extensions"],
         "advertised_capabilities": advertised,
         "not_yet_implemented": pending,

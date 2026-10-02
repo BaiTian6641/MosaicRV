@@ -107,6 +107,14 @@
                   },
                   "description": "msb:lsb inclusive bit ranges that software can never change"
                 },
+                "ialign_bits": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^[0-9]+(:[0-9]+)?$"
+                  },
+                  "description": "msb:lsb inclusive bit ranges whose writability follows the profile's instruction-address alignment (IALIGN), derived from whether the profile claims the C extension. For a PC-valued register (mepc, sepc) this is \"1:0\": bit 0 is always read-only zero and bit 1 is read-only zero exactly when the profile does not claim C. The generator, not the table, decides the bits, so a table cannot freeze them."
+                },
                 "writable_fields": {
                   "type": "array",
                   "items": {
