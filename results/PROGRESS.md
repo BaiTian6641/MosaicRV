@@ -2156,3 +2156,51 @@ vector datapath (I-054..I-063), locality and the LLB, multi-hart/cohort/pod (I-0
 measurement and release gates (I-076..I-086), the RVA23S64 mandatory matrix (I-092..I-098), F/D's
 advertisement (gated on V-060/V-061, which are vector and LLB verification), wiring the caches into
 the fetch and memory paths, and the integrated full comparison suite of I-084.
+
+---
+
+## 2026-10-01 — the caches are in the path, and the vector chain has six packages (69 delivered)
+
+**The caches are real parts of the machine now.** `cache.integrated_path` passes at p1: the instruction
+cache sits in the fetch path and the data cache in the memory path, cacheability comes from the
+generated platform map rather than a hand-written predicate, MMIO and atomics bypass, and an `FENCE.I`
+micro-FSM flushes the data side, invalidates the instruction side and holds the front end off. The
+evidence that the caches are *used* is a memory-port beat count falling from **4186 to 107** with the
+architectural results identical on and off — the number that rules out the silent failure of a cache
+that never hits. Four mutants fail by name, including stale instruction bytes executed after `FENCE.I`
+and a cached device access.
+
+**A harness defect was found and closed, and it is worth reading.** The first attempt reported that
+the retire payload (`ev_rd`/`ev_value`) appeared to *lag* `ev_pc` by one retirement for one program
+while the same decode was exact for the corpus. The verdict, proven by an order-swap experiment rather
+than by reading: the **driver's bus model queued fetch responses during the eight reset cycles** (the
+fetch unit re-offers the reset-vector request while reset is asserted), and because fetch matches a
+response to a slot by `{id, epoch}` — and only a redirect advances the epoch — the post-reset requests
+consumed those stale words. From outside that looks exactly like a payload lagging its program
+counter. Fixed in the driver, no RTL line changed, reduced to a two-instruction reproduction. The p0
+corpus is immune only by the luck of its stimulus (its entry is a `JAL`, which bumps the epoch), and
+**the same hazard is latent in the other core drivers** — recorded for a follow-up, because "it does
+not happen to fail today" is not the same as "it cannot".
+
+**The vector chain now has six delivered packages**, and two of them are large:
+
+| package | what it delivered |
+|---|---|
+| I-051 descriptor | 9284 EEW/EMUL/SEW/overlap combinations, 6588 illegal rejected; a later conformance fix moved `vtype.vsew` from the recorded bits 7:5 to the ratified 5:3 across five copies of the constant |
+| I-052 configuration | `vsetvl`/`vsetvli`/`vsetivli`, 36 AVL bands, `vill` blocking execution |
+| I-053 VRF | 2/4/8 lane counts read the same logical vector, with a lifetime rule that refuses a write overlapping an unread read |
+| I-054 integer datapath | 99 952 checks, **17 families implemented and 17 declared absent with names** — so the classic "implement `vadd`/`vmul` and advertise V" shortcut is structurally impossible, since an absent family has no capability bit |
+| I-056 memory packetizer | **every mode the card names**, with element-granular fault ownership (`o_trap_elem_o` is the value a `vstart` restart needs) and a rejected whole-macro trap |
+
+Two of those findings came from one lane reading another's work rather than from a test: the `vsew`
+field position (a specification conformance bug that only an outside reader would question) and the
+harness reset-queue hazard (which looked like a DUT defect until the order-swap experiment). Both are
+worth keeping as a habit: the reader who trusts the existing convention is the one who cannot find the
+convention's mistakes.
+
+**State**: 69 packages delivered, 16 capabilities advertised, ACT4 127/127, `make check` and every
+gate green, lint 55/55 on both profiles. Remaining for the goal: the rest of the vector chain
+(I-055 vector FP, I-057 partial-trap restart, I-058 chaining, and the rest through I-063), locality and
+the LLB, multi-hart/cohort/pod (I-064..I-075), the measurement and release gates (I-076..I-086), the
+RVA23S64 matrix (I-092..I-098), wiring the vector unit into the core, and the harness-wide
+reset-traffic rule.
