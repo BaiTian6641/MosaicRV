@@ -2392,3 +2392,53 @@ locality half of I-084, vector register renaming, real parallel lanes (which is 
 lane broker's protocol into a measured benefit), multi-hart/cohort/pod (I-064..I-075), the measurement
 and release gates (I-076..I-086), the RVA23S64 mandatory matrix (I-092..I-098), and the `tb_vec.cpp`
 reset-traffic follow-up.
+
+---
+
+## 2026-10-01 — the mask family's second reader, and a coalescer that keeps its promises (76 delivered)
+
+Two packages closed this stretch, and both are examples of the same habit: **a second reader finds what a
+first one normalised.**
+
+**The mask prefix operations were wrong, and one of them was wrong in the way a reader would not
+question.** `vmsbf` was implemented as `~pfx` — which is *`vmsif`'s* expression — so it set the first
+set bit's own position as well and was incorrect for any source mask with a bit in it. The rules, now
+established from the specification rather than from the RTL: `vmsbf[i] = ~(pfx | bit_i)` (strictly
+before the first set bit), `vmsif[i] = ~pfx` (up to and including it), `vmsof[i] = bit_i & ~pfx` (only
+that bit). The degenerate cases are where the three **stop** being symmetric, and the case states them
+because they are counterintuitive: for an **all-zero active slice**, `vmsbf` and `vmsif` are all-ones
+while `vmsof` is all-zeroes; for a first set bit at position 0, `vmsbf` is all-zeroes while the other
+two set bit 0. Nine of the case's cells are **spec-anchor** cells that use the specification's own
+printed examples rather than the host oracle — which is what makes the oracle's independence checkable
+in turn.
+
+**Being the second reader found a second defect that no test in the repository could have seen.** The
+packet engine's mask-*destination* write element was `(cur_q >> 3) << 3`, so every destination element
+at or above 8 wrote **byte 8** while the read path used `cur_q >> 3`, leaving destination bytes stale.
+It was invisible because no existing packet case drove `vl` above 8; the new case drove positions 8…15
+and exposed it immediately. Fixed to match the read path. That is the same lesson as the `vtype.vsew`
+field position one vector lane found in another's descriptor: **the reader who trusts the existing
+convention is the one who cannot find the convention's mistakes.**
+
+**I-061 (line coalescing) passes with a measured reduction from 94 to 28 memory requests**, and the
+rule is a conjunction of checked terms rather than a heuristic: enabled, not atomic, not ordered,
+unit- or constant-stride, every byte normal memory per the **generated** platform map, and disjoint
+bytes for a store. The sharpest requirement is met **by construction**: a fault on a coalesced group
+**de-coalesces** it — the group is replayed element by element in element order — so `vstart` still
+names the faulting element and only the elements before it take effect. The store-ordering rule comes
+from the instruction *type* (element order), and the coalescer never has to pick a winner because
+overlapping-byte stores are never merged at all. Four mutants fail by name, I-056's own mutants are
+still caught, and **ACT4 stays 127/127 with the coalescer enabled in the core**.
+
+That package also recorded rather than hid a **pre-existing defect outside its scope**: a probe found
+that an uncoalesced load still in flight when a stop is taken is *discarded* rather than written back,
+because the writeback push is gated by the abort signal. It belongs to I-057's territory and is now on
+the record with its mechanism named, which is how a finding survives the lane that made it.
+
+**State**: 76 ledger entries delivered, 16 capabilities advertised, ACT4 127/127, `make check` and
+every gate green, lint 60/60 on both profiles, exclusion ledger 18 open / 36 covered. Remaining for the
+goal: I-062 (memory QoS arbitration) and I-063 (reuse predictor and prefetch), wiring the LLB and cache
+locality into the core along with the locality half of I-084, vector register renaming and real
+parallel lanes, the `vmsbf`/`vmsif` class of follow-up in the packet engine's masked forms, multi-hart
+and cohort (I-064..I-075), the measurement and release gates (I-076..I-086), the RVA23S64 mandatory
+matrix (I-092..I-098), and the `tb_vec.cpp` reset-traffic follow-up.
