@@ -423,6 +423,7 @@ module mosaic_load_queue #(
   sq_view_t sq_c [0:SQ_ENTRIES-1];
   logic     sq_resident_c [0:SQ_ENTRIES-1];
   logic [XLEN-1:0] sq_addr_c [0:SQ_ENTRIES-1];
+  logic     sq_dev_c [0:SQ_ENTRIES-1];
 
   always_comb begin
     for (int unsigned j = 0; j < SQ_ENTRIES; j++) begin
@@ -435,6 +436,11 @@ module mosaic_load_queue #(
       sq_c[j].id         = sq_entry_pay_i[j*SQ_ENTRY_W + SQ_OFF_ID         +: ID_W];
       sq_resident_c[j]   = (SQ_CNT_W'(j) < sq_count_i);
       sq_addr_c[j]       = sq_c[j].base + sq_c[j].imm;
+      // I-038: the store queue's entries are classified by the same PMA
+      // predicate the device path uses. A device store must never be a source
+      // for a load -- not for the RAM path either, since merging a device access
+      // with an ordinary one is exactly the coalescing the profile forbids.
+      sq_dev_c[j]        = mosaic_uop_pkg::is_device_addr(sq_addr_c[j]);
     end
   end
 
@@ -443,12 +449,17 @@ module mosaic_load_queue #(
   lq_entry_t        head_c;
   logic [XLEN-1:0]  head_addr_c;
   logic [3:0]       head_bytes_c;
+  // I-038: whether the head load is a device (non-idempotent) access. A device
+  // load is never satisfied from the store queue and never replayed; see the
+  // request and completion blocks below.
+  logic             head_dev_c;
 
   assign head_present_c = (count_q != {CNT_W{1'b0}});
   always_comb begin
     head_c      = ent_q[0];
     head_addr_c = ent_q[0].base + ent_q[0].imm;
     head_bytes_c = 4'(mosaic_uop_pkg::size_bytes(ent_q[0].size));
+    head_dev_c  = mosaic_uop_pkg::is_device_addr(head_addr_c);
   end
 
   // ------------------------------------------------------- the youngest-older rule
@@ -513,7 +524,8 @@ module mosaic_load_queue #(
                           head_c.id.rob_gen, head_c.id.uop_index);
         covers = FwdCovers(sq_addr_c[j], sq_c[j].size, sel_x_c);
         sel_off_c = 3'(sel_x_c - sq_addr_c[j]);
-        if (sq_resident_c[j] && older && sq_c[j].addr_valid && covers) begin
+        if (sq_resident_c[j] && older && sq_c[j].addr_valid && covers &&
+            !sq_dev_c[j]) begin
           if (sq_c[j].data_valid) begin
             src_store_c[i]  = 1'b1;
             src_nodata_c[i] = 1'b0;
@@ -560,7 +572,10 @@ module mosaic_load_queue #(
     fwd_mask_c = {BYTES{1'b0}};
     for (int unsigned i = 0; i < BYTES; i++) begin
       if (i < head_bytes_c) begin
-        fwd_mask_c[i] = src_store_c[i] && FWD_USES_STORE;
+        // I-038: a device load's bytes come from the device and only from the
+        // device. `sq_dev_c` already excludes device stores from the search, so
+        // this is the same rule stated where the byte is chosen.
+        fwd_mask_c[i] = src_store_c[i] && FWD_USES_STORE && !head_dev_c;
         if (fwd_mask_c[i]) begin
           merged_c[i*8 +: 8] = src_byte_c[i][7:0];
         end else begin
@@ -682,8 +697,19 @@ module mosaic_load_queue #(
   // known -- the card's "waits for all relevant older store addresses" policy.
   logic complete_c;
   logic replay_c;
-  assign complete_c = inflight_q && rsp_accept_c && !blocked_c;
-  assign replay_c   = inflight_q && rsp_accept_c && blocked_c;
+  // I-038: a device load is completed by the one response it gets and is never
+  // replayed. A replay re-issues the request to the memory system, and for a
+  // device that is a repeated side effect (a FIFO popped twice, a command
+  // written twice) -- the failure this work package exists to prevent. The rule
+  // is safe rather than merely convenient: the serializer issues a device load
+  // only when it is the ROB head, at which point every older store has retired
+  // and left the queue, so no older store can cover its bytes and `blocked_c`
+  // cannot be raised for it. The store queue in this integration never holds an
+  // entry with an unknown address either, so the whole-queue block is likewise
+  // clear. Stating it here means a future replay path cannot silently re-enable
+  // it for a device access.
+  assign complete_c = inflight_q && rsp_accept_c && (!blocked_c || head_dev_c);
+  assign replay_c   = inflight_q && rsp_accept_c && blocked_c && !head_dev_c;
 
   // ------------------------------------------------------------- next state
   lq_entry_t         ent_next_c [0:ENTRIES-1];

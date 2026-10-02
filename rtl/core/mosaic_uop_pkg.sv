@@ -282,6 +282,40 @@ package mosaic_uop_pkg;
     end
   endfunction
 
+  // ------------------------------------------------------------ the device map
+  // `is_device_addr` is the PMA's *device* predicate (work package I-038): true
+  // when an access to this address must be serialized on the non-speculative
+  // path rather than executed like ordinary memory.
+  //
+  // The source of truth is `config/memory/p0.json`, which records for every
+  // region whether it is idempotent. The three regions it marks **not**
+  // idempotent -- uart, test_harness, clint -- are exactly the three named
+  // here, through the generated `mosaic_cfg_pkg` bases and sizes. boot_rom and
+  // ram are idempotent: a read of them has no side effect, so a repeated or
+  // speculative read is allowed and no serialization is needed.
+  //
+  // It is one function, called by the serializer that gates an access and by the
+  // two queues that decide whether a store may feed a load, so "which addresses
+  // are devices" cannot differ between the module that orders the access and the
+  // module that decides whether it may be merged with the RAM path.
+  function automatic logic is_device_addr(input logic [XLEN-1:0] addr);
+    logic in_uart;
+    logic in_harness;
+    logic in_clint;
+    begin
+      // The subtraction is the containment test: for an address below the base
+      // the wrapped difference is far larger than any region size, so an
+      // address outside a region can never be mistaken for one inside it.
+      in_uart    = (addr - mosaic_cfg_pkg::MOSAIC_UART_BASE) <
+                   mosaic_cfg_pkg::MOSAIC_UART_SIZE;
+      in_harness = (addr - mosaic_cfg_pkg::MOSAIC_TEST_HARNESS_BASE) <
+                   mosaic_cfg_pkg::MOSAIC_TEST_HARNESS_SIZE;
+      in_clint   = (addr - mosaic_cfg_pkg::MOSAIC_CLINT_BASE) <
+                   mosaic_cfg_pkg::MOSAIC_CLINT_SIZE;
+      is_device_addr = in_uart || in_harness || in_clint;
+    end
+  endfunction
+
   // A uop id matches only when every field matches, including the generation.
   // Comparing the wrapping rob_index alone is how a late completion from a
   // recycled slot is mistaken for a live one.

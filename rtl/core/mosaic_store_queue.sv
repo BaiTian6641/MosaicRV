@@ -834,6 +834,16 @@ module mosaic_store_queue #(
     fwd_idx_c     = {IDX_W{1'b0}};
     fwd_blocked_c = 1'b0;
     for (int unsigned i = 0; i < ENTRIES; i++) begin
+      // I-038: an entry whose address is a device (non-idempotent) region is
+      // invisible to this query. It is not a source -- a device access must
+      // never be merged into an ordinary load -- and it is not a blocker
+      // either, because its bytes are in a region no ordinary load can alias,
+      // so a load waiting for it would wait for nothing. `is_device_addr` is
+      // the same predicate the serializer uses, so the query and the gate
+      // cannot disagree about which addresses are devices.
+      if (resident_c[i] && mosaic_uop_pkg::is_device_addr(ent_q[i].base + ent_q[i].imm)) begin
+        continue;
+      end
       if (resident_c[i] && !ent_q[i].addr_valid) begin
         fwd_blocked_c = 1'b1;
       end

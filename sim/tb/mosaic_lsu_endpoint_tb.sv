@@ -59,6 +59,11 @@ module mosaic_lsu_endpoint_tb (
     input  logic [31:0] up_req_size,
     input  logic        up_req_signed,
     input  logic [63:0] up_req_store_data,
+    // The PMA device attribute (I-038). It is a flat port rather than a packet
+    // field, and the packet below is assembled without it, for the same reason
+    // the rest of this wrapper exists: the C++ driver must not know the packet
+    // layout, and `lsu_req_t` is a frozen interface.
+    input  logic        up_req_dev,
 
     // ------------------------------------------------ upstream: the response
     output logic        up_rsp_valid,
@@ -96,6 +101,11 @@ module mosaic_lsu_endpoint_tb (
     output logic [63:0] o_last_fault_tval,
     output logic [63:0] o_inflight_addr,
     output logic [31:0] o_inflight_size,
+    // The identity of the transaction being served and its device attribute
+    // (I-038), flattened for the driver. The expected id width is derivable from
+    // the `o_*_w` geometry below.
+    output logic [31:0] o_txn_id,
+    output logic        o_txn_dev,
 
     // ------------------------------------------------------------ geometry
     output logic [31:0] o_xlen_w,
@@ -121,6 +131,7 @@ module mosaic_lsu_endpoint_tb (
   mosaic_uop_pkg::mem_req_t dn_req_s;
   mosaic_uop_pkg::mem_rsp_t dn_rsp_s;
   logic [SIZE_W-1:0]        o_inflight_size_s;
+  mosaic_uop_pkg::uop_id_t  o_txn_id_s;
 
   // The request packet, assembled field by field.
   always_comb begin
@@ -175,6 +186,7 @@ module mosaic_lsu_endpoint_tb (
       .req_valid_i         (up_req_valid),
       .req_ready_o         (up_req_ready),
       .req_i               (up_req_s),
+      .req_dev_i           (up_req_dev),
 
       .rsp_valid_o         (up_rsp_valid),
       .rsp_ready_o         (up_rsp_ready),
@@ -198,8 +210,12 @@ module mosaic_lsu_endpoint_tb (
       .o_last_fault_cause  (o_last_fault_cause),
       .o_last_fault_tval   (o_last_fault_tval),
       .o_inflight_addr     (o_inflight_addr),
-      .o_inflight_size     (o_inflight_size_s)
+      .o_inflight_size     (o_inflight_size_s),
+      .o_txn_id            (o_txn_id_s),
+      .o_txn_dev           (o_txn_dev)
   );
+
+  assign o_txn_id = {{(32 - ID_W) {1'b0}}, o_txn_id_s};
 
 endmodule : mosaic_lsu_endpoint_tb
 

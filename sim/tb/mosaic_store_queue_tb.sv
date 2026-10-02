@@ -311,6 +311,8 @@ module mosaic_store_queue_tb (
       .req_valid_i        (drain_req_valid),
       .req_ready_o        (ep_req_ready),
       .req_i              (sq_drain_req_s),
+      // RAM addresses only (I-038); see mosaic_load_queue_tb.
+      .req_dev_i          (1'b0),
 
       .rsp_valid_o        (ep_rsp_valid),
       .rsp_ready_o        (sq_drain_rsp_ready),
@@ -334,7 +336,12 @@ module mosaic_store_queue_tb (
       .o_last_fault_cause (),
       .o_last_fault_tval  (),
       .o_inflight_addr    (),
-      .o_inflight_size    ()
+      .o_inflight_size    (),
+      // The transaction identity and device attribute (I-038) are observed by
+      // CASE=mmio.exactly_once on the integrated core; a store queue never
+      // classifies an access here (the attribute is constant zero in this case).
+      .o_txn_id           (),
+      .o_txn_dev          ()
   );
   /* verilator lint_on PINCONNECTEMPTY */
 

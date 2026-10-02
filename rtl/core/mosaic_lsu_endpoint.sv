@@ -98,6 +98,14 @@ module mosaic_lsu_endpoint (
     input  logic                          req_valid_i,
     output logic                          req_ready_o,
     input  mosaic_uop_pkg::lsu_req_t      req_i,
+    // The PMA device attribute of this request (I-038). It rides beside the
+    // packet rather than inside it because `lsu_req_t` is a frozen interface
+    // (mosaic_uop_pkg's header) and the attribute is produced by the serializer
+    // that owns the classification. It is latched with the transaction and
+    // exported so a testbench can require every access presented to the memory
+    // system to carry the attribute its address's region demands -- the signal a
+    // coalescer keys on when it refuses to merge an MMIO access with RAM.
+    input  logic                          req_dev_i,
 
     output logic                          rsp_valid_o,
     input  logic                          rsp_ready_o,
@@ -128,7 +136,16 @@ module mosaic_lsu_endpoint (
     output logic [63:0]                   o_last_fault_tval,
     // Address of the access being served, after the base+imm addition.
     output logic [63:0]                   o_inflight_addr,
-    output logic [2:0]                    o_inflight_size
+    output logic [2:0]                    o_inflight_size,
+    // The identity and the device attribute of the transaction being served, so
+    // a testbench can attribute every access the memory system sees to one
+    // instruction and require each identity to appear exactly once (I-038's
+    // "one side effect per transaction identity"). Valid while a transaction is
+    // in flight -- live from the cycle the request is accepted until its
+    // response leaves -- and aligned with the memory request port, because both
+    // are read from the same latched transaction.
+    output mosaic_uop_pkg::uop_id_t       o_txn_id,
+    output logic                          o_txn_dev
 );
 
   // --------------------------------------------------------------- localparams
@@ -165,6 +182,7 @@ module mosaic_lsu_endpoint (
     logic [2:0]              size;
     logic                    is_signed;
     logic [XLEN-1:0]         store_data;
+    logic                    dev;
   } txn_t;
 
   txn_t            req_q;
@@ -285,6 +303,8 @@ module mosaic_lsu_endpoint (
   assign o_busy          = (state_q != ST_IDLE) || rsp_valid_q;
   assign o_inflight_addr = addr_q;
   assign o_inflight_size = req_q.size;
+  assign o_txn_id        = req_q.id;
+  assign o_txn_dev       = req_q.dev;
 
   assign o_load_ctr         = load_ctr_q;
   assign o_store_ctr        = store_ctr_q;
@@ -333,6 +353,7 @@ module mosaic_lsu_endpoint (
             req_q.size       <= req_i.size;
             req_q.is_signed  <= req_i.signed_;
             req_q.store_data <= req_i.store_data;
+            req_q.dev        <= req_dev_i;
             addr_q           <= addr_c;
 
             if (req_i.we) store_ctr_q <= store_ctr_q + 32'd1;
@@ -369,12 +390,18 @@ module mosaic_lsu_endpoint (
         ST_WAIT: begin
           if (mem_rsp_valid_i) begin
             rsp_q.id    <= req_q.id;
-`ifndef MOSAIC_LSU_MUTANT_FAULT_AS_ZERO
-            rsp_q.fault <= mem_rsp_i.fault;
-`else
+`ifdef MOSAIC_LSU_MUTANT_DEV_ERR_OK
+            // NEGATIVE CONTROL: a device access the device rejected is reported
+            // as a successful read of zero, so the error response never traps.
+            // CASE=mmio.exactly_once's "the error device traps precisely" check
+            // names it: mepc/mcause/mtval never appear.
+            rsp_q.fault <= mem_rsp_i.fault && !req_q.dev;
+`elsif MOSAIC_LSU_MUTANT_FAULT_AS_ZERO
             // Mutant: a memory access fault is reported as a successful read of
             // zero -- the "out-of-range read defaults to zero" blocker.
             rsp_q.fault <= 1'b0;
+`else
+            rsp_q.fault <= mem_rsp_i.fault;
 `endif
             rsp_q.tval  <= addr_q;
             rsp_q.cause <= req_q.we ? EXC_STORE_ACCESS : EXC_LOAD_ACCESS;

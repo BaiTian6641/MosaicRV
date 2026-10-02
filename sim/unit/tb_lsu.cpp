@@ -566,6 +566,10 @@ class Bench {
     dut_->up_req_size = s.size;
     dut_->up_req_signed = s.is_signed ? 1 : 0;
     dut_->up_req_store_data = s.store_data;
+    // The PMA device attribute (I-038). This case drives ordinary memory
+    // addresses only, so the attribute is constant zero; the endpoint case that
+    // covers the attribute itself is CASE=mmio.exactly_once on the core.
+    dut_->up_req_dev = 0;
     dut_->up_rsp_ready = s.rsp_ready ? 1 : 0;
     dut_->dn_req_ready = s.mem_req_ready ? 1 : 0;
     dut_->dn_rsp_valid = mem_.RspValid() ? 1 : 0;

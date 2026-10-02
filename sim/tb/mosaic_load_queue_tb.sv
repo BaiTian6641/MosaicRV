@@ -457,6 +457,10 @@ module mosaic_load_queue_tb (
       .req_valid_i        (lq_req_valid_s),
       .req_ready_o        (ep_lq_req_ready),
       .req_i              (lq_req_s),
+      // This case uses ordinary RAM addresses only (I-038): the device
+      // attribute is constant zero here. The attribute itself is covered by
+      // CASE=mmio.exactly_once on the integrated core.
+      .req_dev_i          (1'b0),
 
       .rsp_valid_o        (ep_lq_rsp_valid),
       .rsp_ready_o        (lq_rsp_ready),
@@ -480,7 +484,10 @@ module mosaic_load_queue_tb (
       .o_last_fault_cause (),
       .o_last_fault_tval  (),
       .o_inflight_addr    (),
-      .o_inflight_size    ()
+      .o_inflight_size    (),
+      // Observed by CASE=mmio.exactly_once on the integrated core (I-038).
+      .o_txn_id           (),
+      .o_txn_dev          ()
   );
 
   mosaic_lsu_endpoint u_ep_sq (
@@ -490,6 +497,7 @@ module mosaic_load_queue_tb (
       .req_valid_i        (sq_drain_req_valid),
       .req_ready_o        (ep_sq_req_ready),
       .req_i              (sq_drain_req_s),
+      .req_dev_i          (1'b0),
 
       .rsp_valid_o        (ep_sq_rsp_valid),
       .rsp_ready_o        (sq_drain_rsp_ready),
@@ -513,7 +521,10 @@ module mosaic_load_queue_tb (
       .o_last_fault_cause (),
       .o_last_fault_tval  (),
       .o_inflight_addr    (),
-      .o_inflight_size    ()
+      .o_inflight_size    (),
+      // Observed by CASE=mmio.exactly_once on the integrated core (I-038).
+      .o_txn_id           (),
+      .o_txn_dev          ()
   );
   /* verilator lint_on PINCONNECTEMPTY */
 

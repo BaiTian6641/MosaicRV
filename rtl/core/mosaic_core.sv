@@ -218,6 +218,22 @@ module mosaic_core (
     output logic                        o_mem_lsu_busy,
     output logic [31:0]                 o_mem_ins_stall,
     output logic                        o_mem_squash_valid,
+    // ------------------------------------------------- the device path (I-038)
+    // What the serializer classified and how it behaved. `o_mem_dev_txn` counts
+    // the accesses it presented to the memory system as device accesses (the
+    // attribute below), `o_mem_ram_txn` the ordinary ones, and `o_mem_dev_wait`
+    // the cycles a device access was offered but refused because it was not yet
+    // irreversible-safe -- the evidence that the non-speculation gate was
+    // exercised rather than merely declared.
+    output logic [31:0]                 o_mem_dev_txn,
+    output logic [31:0]                 o_mem_ram_txn,
+    output logic [31:0]                 o_mem_dev_wait,
+    // The device attribute and the identity of the access the endpoint is
+    // serving, aligned with the data port: a testbench reads them in the cycle
+    // it accepts a transaction and can require the attribute to match the
+    // address's region and every device identity to appear exactly once.
+    output logic                        o_mem_dmem_dev,
+    output logic [CORE_MEM_ID_W-1:0]    o_mem_dmem_id,
 
     // -------------------------------------------------------------- evidence
     output logic [31:0]                 o_commit_ctr,
@@ -659,6 +675,27 @@ module mosaic_core (
   logic                       ep_owner_q;
   logic [31:0]                lsu_txn_ctr, lsu_misaligned_ctr, lsu_access_fault_ctr;
   logic                       ep_busy;
+  // The device serializer (I-038): the endpoint's upstream port is driven by the
+  // serializer, not by the queue mux, so these are the wires between them, plus
+  // the identity/attribute probe the endpoint exports alongside the transaction.
+  // The serializer's registers are declared here rather than next to its logic
+  // because the FENCE/FENCE.I drain rule (section 10b) reads its busy state.
+  logic                       ser_req_valid, ser_ep_req_ready;
+  mosaic_uop_pkg::lsu_req_t   ser_req;
+  logic [CORE_MEM_ID_W-1:0]   ep_txn_id;
+  logic                       ep_txn_dev;
+  logic                       ser_take_c;
+  logic                       ser_nonspec_c;
+  logic                       ser_is_device_c;
+  logic [CORE_XLEN-1:0]       ser_addr_c;
+  logic                       ser_hold_valid_q;
+  logic                       ser_dev_out_q;
+  mosaic_uop_pkg::lsu_req_t   ser_hold_q;
+  logic                       ser_out_dev_c;
+  logic                       ser_accept_c;
+  logic [CORE_MEM_ID_W-1:0]   rob_head_id;
+  logic                       rob_boundary_ok;
+  logic [31:0]                dev_txn_ctr_q, ram_txn_ctr_q, dev_wait_ctr_q;
 
   logic                       lsu_wb_valid, lsu_wb_ready;
   mosaic_uop_pkg::wb_event_t  lsu_wb_ev, store_wb_ev, lq_wb_ev;
@@ -1904,9 +1941,17 @@ module mosaic_core (
   assign fence_like_q = sys_valid_q && (sys_fence_q || sys_fence_i_q);
   assign fence_pending = fence_like_q;
 
+  // The device serializer is part of the memory path for this rule (I-038): a
+  // device transaction that has been classified and taken into the serializer's
+  // register is an access in flight even before the endpoint has accepted it, so
+  // a fence that ignored it could retire with an MMIO access still owed. The
+  // conjunction below therefore uses the serializer's busy too, and
+  // `o_mem_lsu_busy` reports the whole path.
+  logic dev_ser_busy;
+  assign dev_ser_busy = ser_hold_valid_q || ser_dev_out_q;
   assign mem_path_idle = (sq_count == {CORE_MEM_CNT_W{1'b0}}) &&
                          (lq_count == {CORE_MEM_CNT_W{1'b0}}) &&
-                         !ep_busy;
+                         !ep_busy && !dev_ser_busy;
 
 `ifdef MOSAIC_CORE_MUTANT_FENCE_EARLY
   // NEGATIVE CONTROL: the fence does not wait for the memory path. It is
@@ -2100,8 +2145,18 @@ module mosaic_core (
   // halt, and the head must exist. A synchronous exception at the head is
   // excluded too: the instruction's own fault is taken first, and the interrupt
   // is offered again at the handler's first boundary.
+  //
+  // I-038 adds one more conjunct: no device transaction may be in flight. A
+  // device load is issued from the head, so an interrupt taken at the head while
+  // its access is in the memory system would retire *nothing* for that access --
+  // the device's side effect would have happened for an instruction that never
+  // commits. Blocking the interrupt until the access completes makes the
+  // side effect and the commit the same instruction again. The window is the
+  // access latency, and the load's own fault path is unaffected: an error
+  // response arrives as the head's exception, which `head_exc_trap` takes.
   assign core_can_trap = rob_head_valid && !rob_head_exc && !sys_head &&
-                         !redirect_valid && !recovering && !core_stop && !wfi_halt;
+                         !redirect_valid && !recovering && !core_stop && !wfi_halt &&
+                         !dev_ser_busy;
 
   // Retirement is suppressed in the cycle a trap is decided, for the interrupt's
   // sake: a completed instruction at the head would otherwise retire in the same
@@ -2807,33 +2862,160 @@ module mosaic_core (
   // The endpoint owns the fault boundary and computes `base + imm` once, in one
   // adder, so the strobes, the misalignment test and the reported `tval` cannot
   // disagree about which bytes the access owns.
+  //
+  // The two queues' offers are muxed here -- the store drain has priority, as
+  // above -- and the mux feeds the device serializer below, which is the last
+  // point before the endpoint.
   assign ep_req_valid = sq_drain_valid | lq_req_valid;
   assign ep_req       = sq_drain_valid ? sq_drain_req : lq_req;
   assign sq_drain_ready = ep_req_ready;
   assign lq_req_ready   = ep_req_ready && !sq_drain_valid;
 
-  // Which queue the endpoint's response belongs to. The endpoint holds one
-  // transaction and refuses a second request until it has returned that
-  // transaction's response (`accept_c` requires ST_IDLE), so the owner recorded
-  // at acceptance is exact and a response can never be delivered to the wrong
-  // queue.
+  // --------------------------------------------------------------------------
+  // The device serializer (I-038): non-speculative MMIO
+  // --------------------------------------------------------------------------
+  // Everything the queues offer goes through this point before the endpoint.
+  // Its rule, in one paragraph:
+  //
+  //   **A device access is presented to the memory system exactly once, only
+  //   when it is irreversible-safe.** For a *load* that means the access is the
+  //   ROB head at a legal boundary: every older instruction has already
+  //   committed, so nothing can squash it and no older access can be reordered
+  //   after it. For a *store* it is the store queue's own contract -- a store is
+  //   offered for drain only after the instruction that owns it has retired (the
+  //   authorisation watermark), which is the same statement one step later.
+  //
+  //   An ordinary (idempotent) access is not serialized: it passes straight
+  //   through, so speculative RAM loads keep their existing timing and the fast
+  //   path this profile is built around is unchanged.
+  //
+  // Why a register rather than a combinational gate: the device transaction is
+  // *owned* here from the cycle its requester is told "accepted" until its
+  // response is consumed. That has two consequences the card asks for by name.
+  // First, the requester cannot re-offer the transaction (it has been accepted),
+  // so the access is presented once and a replay is impossible -- the store
+  // queue's and the load queue's own exactly-once rules are not weakened, they
+  // are extended. Second, the classification and the identity travel *with* the
+  // held transaction, so the attribute the memory system sees cannot change
+  // between the decision and the access, which is what makes "a device access is
+  // not coalesced with RAM" a property of the access rather than of a cycle.
+  //
+  // A device access is also a barrier for the ordinary path: while one is held,
+  // the endpoint port is not offered to anything else, so no younger RAM access
+  // can overtake it. It is never the other way round -- the queue mux gives the
+  // store drain priority, and every store older than the head has already
+  // drained -- so the order the memory system sees is program order.
+
+  assign ser_addr_c      = ep_req.base + ep_req.imm;
+  assign ser_is_device_c = mosaic_uop_pkg::is_device_addr(ser_addr_c);
+
+  // The identity of the ROB head, built exactly as every other identity in this
+  // file is (one uop per macro, one hart), so the comparison below is a whole
+  // identity and not a wrapping index.
+  assign rob_head_id = {1'b0, rob_head_index, rob_head_gen, {CORE_UOP_W{1'b0}}};
+
+  // A device is non-speculative when it cannot be squashed. `rob_boundary_ok` is
+  // the same legal-boundary conjunction the system unit uses: not a redirect in
+  // flight, not recovering, not stopped.
+  assign rob_boundary_ok = !redirect_valid && !recovering && !core_stop;
+
+`ifdef MOSAIC_CORE_MUTANT_DEV_SPECULATIVE
+  // NEGATIVE CONTROL: the non-speculation gate is removed, so a device load is
+  // issued as soon as the load queue offers it -- while it is still speculative.
+  // A load on a wrong path reaches the device and its side effect is performed
+  // for an instruction that never retires; CASE=mmio.exactly_once's
+  // "the device performed exactly the retired accesses" check names it.
+  assign ser_nonspec_c = 1'b1;
+`else
+  assign ser_nonspec_c = ep_req.we ? 1'b1
+                                   : (rob_head_valid && rob_boundary_ok &&
+                                      mosaic_uop_pkg::uop_id_eq(ep_req.id, rob_head_id));
+`endif
+
+  // The upstream acceptance. A device offer is taken into the hold regardless of
+  // whether the endpoint can take it now; anything else is passed through, and
+  // the upstream is told "accepted" only when the endpoint actually takes it, so
+  // the payload stays stable in between by the project-wide transport rule.
+  assign ep_req_ready  = ser_hold_valid_q ? 1'b0
+                       : (ser_is_device_c ? (ser_nonspec_c && !ser_dev_out_q)
+                                          : ser_ep_req_ready);
+  // A device offer never passes through combinationally: it is always taken into
+  // the hold first, so the access is presented to the endpoint in exactly one
+  // cycle-window owned by this register -- the property the RETRY control below
+  // removes.
+  assign ser_req_valid = ser_hold_valid_q ? 1'b1 : (ep_req_valid && !ser_is_device_c);
+  assign ser_req       = ser_hold_valid_q ? ser_hold_q : ep_req;
+
+`ifdef MOSAIC_CORE_MUTANT_DEV_AS_RAM
+  // NEGATIVE CONTROL: the classification the memory system is told is cleared.
+  // The access is still serialized correctly -- the gate below uses the real
+  // predicate -- but it is presented as an ordinary access, which is exactly the
+  // attribute a coalescer or a cache keys on when it refuses to merge MMIO with
+  // RAM. CASE=mmio.exactly_once's "every access carries the attribute its
+  // address's region demands" check names it, and the device/RAM transaction
+  // counters disagree with the memory system's address-based classification.
+  assign ser_out_dev_c = 1'b0;
+`else
+  assign ser_out_dev_c = ser_hold_valid_q;
+`endif
+
+  assign ser_take_c = ep_req_valid && ep_req_ready && ser_is_device_c;
+  assign ser_accept_c = ser_req_valid && ser_ep_req_ready;
+
+  // The response being consumed is what ends the device transaction's life.
+  logic ser_rsp_consumed;
+  assign ser_rsp_consumed = ep_rsp_valid && ep_rsp_ready;
+
   always_ff @(posedge clk) begin
     if (rst) begin
-      ep_owner_q <= 1'b0;
-    end else if (ep_req_valid && ep_req_ready) begin
-      ep_owner_q <= sq_drain_valid;
+      ser_hold_valid_q <= 1'b0;
+      ser_dev_out_q    <= 1'b0;
+      dev_txn_ctr_q    <= 32'd0;
+      ram_txn_ctr_q    <= 32'd0;
+      dev_wait_ctr_q   <= 32'd0;
+    end else begin
+      if (ser_take_c) begin
+        ser_hold_q       <= ep_req;
+        ser_hold_valid_q <= 1'b1;
+        ser_dev_out_q    <= 1'b1;
+      end
+      if (ser_hold_valid_q && ser_req_valid && ser_ep_req_ready) begin
+`ifdef MOSAIC_CORE_MUTANT_DEV_RETRY
+        // NEGATIVE CONTROL: the held device transaction is not released when the
+        // endpoint takes it, so the same access is offered again as soon as the
+        // endpoint is free -- a transport retry that repeats the side effect.
+        // The identity probe then shows one identity twice, which is the
+        // card's "a replayed transaction duplicates a side effect".
+        ser_hold_valid_q <= 1'b1;
+`else
+        ser_hold_valid_q <= 1'b0;
+`endif
+      end
+      if (ser_dev_out_q && ser_rsp_consumed) begin
+        ser_dev_out_q <= 1'b0;
+      end
+      if (ser_accept_c && ser_out_dev_c) dev_txn_ctr_q <= dev_txn_ctr_q + 32'd1;
+      if (ser_accept_c && !ser_out_dev_c) ram_txn_ctr_q <= ram_txn_ctr_q + 32'd1;
+      if (ep_req_valid && ser_is_device_c && !ser_nonspec_c && !ser_hold_valid_q &&
+          !ser_dev_out_q) begin
+        dev_wait_ctr_q <= dev_wait_ctr_q + 32'd1;
+      end
     end
   end
-  assign lq_rsp_valid = ep_rsp_valid && !ep_owner_q;
-  assign sq_rsp_valid = ep_rsp_valid &&  ep_owner_q;
-  assign ep_rsp_ready = ep_owner_q ? sq_rsp_ready : lq_rsp_ready;
+
+  assign o_mem_dev_txn  = dev_txn_ctr_q;
+  assign o_mem_ram_txn  = ram_txn_ctr_q;
+  assign o_mem_dev_wait = dev_wait_ctr_q;
+  assign o_mem_dmem_dev = ep_txn_dev;
+  assign o_mem_dmem_id  = ep_txn_id;
 
   mosaic_lsu_endpoint u_lsu (
       .clk                  (clk),
       .rst                  (rst),
-      .req_valid_i          (ep_req_valid),
-      .req_ready_o          (ep_req_ready),
-      .req_i                (ep_req),
+      .req_valid_i          (ser_req_valid),
+      .req_ready_o          (ser_ep_req_ready),
+      .req_i                (ser_req),
+      .req_dev_i            (ser_out_dev_c),
       .rsp_valid_o          (ep_rsp_valid),
       .rsp_ready_o          (ep_rsp_ready),
       .rsp_o                (ep_rsp),
@@ -2853,8 +3035,26 @@ module mosaic_core (
       .o_last_fault_cause   (),
       .o_last_fault_tval    (),
       .o_inflight_addr      (),
-      .o_inflight_size      ()
+      .o_inflight_size      (),
+      .o_txn_id             (ep_txn_id),
+      .o_txn_dev            (ep_txn_dev)
   );
+
+  // Which queue the endpoint's response belongs to. The endpoint holds one
+  // transaction and refuses a second request until it has returned that
+  // transaction's response (`accept_c` requires ST_IDLE), so the owner recorded
+  // at acceptance is exact and a response can never be delivered to the wrong
+  // queue.
+  always_ff @(posedge clk) begin
+    if (rst) begin
+      ep_owner_q <= 1'b0;
+    end else if (ep_req_valid && ep_req_ready) begin
+      ep_owner_q <= sq_drain_valid;
+    end
+  end
+  assign lq_rsp_valid = ep_rsp_valid && !ep_owner_q;
+  assign sq_rsp_valid = ep_rsp_valid &&  ep_owner_q;
+  assign ep_rsp_ready = ep_owner_q ? sq_rsp_ready : lq_rsp_ready;
 
   mosaic_load_queue u_lq (
       .clk                  (clk),
@@ -3274,7 +3474,11 @@ module mosaic_core (
   assign o_mem_lsu_txn        = lsu_txn_ctr;
   assign o_mem_lsu_misaligned = lsu_misaligned_ctr;
   assign o_mem_lsu_access_fault = lsu_access_fault_ctr;
-  assign o_mem_lsu_busy       = ep_busy;
+  // "A transaction is outstanding" now means the whole path, not only the
+  // endpoint (I-038): a device access taken into the serializer's register is
+  // outstanding before the endpoint accepts it, and the FENCE/FENCE.I rule above
+  // uses the same conjunction.
+  assign o_mem_lsu_busy       = ep_busy || dev_ser_busy;
   assign o_mem_ins_stall      = mem_ins_stall_ctr;
   assign o_mem_squash_valid   = sq_squash_valid;
 

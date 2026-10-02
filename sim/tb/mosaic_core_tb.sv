@@ -23,6 +23,11 @@ localparam int unsigned TB_IDX_W    = mosaic_id_pkg::MOSAIC_ID_W_ROB_INDEX;
 localparam int unsigned TB_RGEN_W   = mosaic_id_pkg::MOSAIC_ID_W_ROB_GEN;
 localparam int unsigned TB_UOP_W    = 3;
 localparam int unsigned TB_UOP_ID_W = TB_IDX_W + TB_RGEN_W + TB_UOP_W;
+// The endpoint's transaction identity is the whole uop id (hart included), so it
+// is wider than the wrapper's own `TB_UOP_ID_W`, which is the id without the
+// hart. Take the width from the package that defines it rather than re-deriving
+// it, so the two cannot drift.
+localparam int unsigned TB_MEM_ID_W = $bits(mosaic_uop_pkg::uop_id_t);
 localparam int unsigned TB_FETCH_N  = mosaic_cfg_pkg::MOSAIC_FETCH_OUTSTANDING;
 localparam int unsigned TB_REQ_ID_W = (TB_FETCH_N <= 1) ? 1 : $clog2(TB_FETCH_N);
 localparam int unsigned TB_EPOCH_W  = ((mosaic_cfg_pkg::MOSAIC_ROB_ENTRIES <= 1)
@@ -199,6 +204,19 @@ module mosaic_core_tb (
     output logic        o_mem_lsu_busy_o,
     output logic [31:0] o_mem_ins_stall_o,
     output logic        o_mem_squash_valid_o,
+    // ---------------------------------------------- the device path (I-038)
+    // What the serializer classified, and the device attribute and identity of
+    // the access the data port is carrying. CASE=mmio.exactly_once reads all of
+    // them: the counts are its cross-check against the memory system's own
+    // address-based classification, and the attribute/identity are read in the
+    // cycle a transaction is accepted, so every access can be required to carry
+    // the attribute its region demands and every identity can be required to
+    // appear exactly once.
+    output logic [31:0] o_mem_dev_txn_o,
+    output logic [31:0] o_mem_ram_txn_o,
+    output logic [31:0] o_mem_dev_wait_o,
+    output logic        o_mem_dmem_dev_o,
+    output logic [TB_MEM_ID_W-1:0] o_mem_dmem_id_o,
 
     // ------------------------------------------------- CSR / trap / interrupt
     input  logic        irq_soft_i,
@@ -458,6 +476,11 @@ module mosaic_core_tb (
       .o_mem_lsu_busy  (o_mem_lsu_busy_o),
       .o_mem_ins_stall (o_mem_ins_stall_o),
       .o_mem_squash_valid(o_mem_squash_valid_o),
+      .o_mem_dev_txn   (o_mem_dev_txn_o),
+      .o_mem_ram_txn   (o_mem_ram_txn_o),
+      .o_mem_dev_wait  (o_mem_dev_wait_o),
+      .o_mem_dmem_dev  (o_mem_dmem_dev_o),
+      .o_mem_dmem_id   (o_mem_dmem_id_o),
       .o_dbg_redir_bundle(o_dbg_redir_o),
       .o_dbg_fetch_state(o_dbg_fetch_o),
       .o_dbg_deliver_valid(o_dbg_deliver_valid_o),
