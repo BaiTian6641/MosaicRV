@@ -99,6 +99,14 @@
 //   PERMUTE_ORDER a permute orders elements by LMUL instead of by index
 //   MASKED_ACCESS a masked-off element still issues its source access
 //   REDUCE_ORDER  a reduction folds the source elements in descending order
+//
+// Three more inject a defect in the mask-prefix `vstart` rule (I-057); each is
+// proven to fail CASE=rvv.mask_prefix_vstart in
+// results/reports/rvv-mask-prefix-vstart.md:
+//
+//   MASKPFX_NO_TRAP     vmsbf/vmsif/vmsof never raise on a non-zero vstart
+//   MASKPFX_TRAP_VSTART0 the rule fires even at vstart == 0
+//   MASKPFX_WRONG_OP    vmsof is exempted, so only two of the three raise
 // ============================================================================
 
 `default_nettype none
@@ -447,6 +455,33 @@ module mosaic_vec_alu #(
     end
   end
 
+  // ------------------------------------------------- mask-prefix vstart rule
+  // `vmsbf`/`vmsif`/`vmsof` cannot be restarted from an element boundary: they
+  // are the three instructions the pinned specification makes an
+  // illegal-instruction exception when `vstart` is non-zero (v-spec.adoc,
+  // "Traps on `vmsbf.m`/`vmsif.m`/`vmsof.m` are always reported with a
+  // `vstart` of 0 ... will raise an illegal-instruction exception if `vstart`
+  // is non-zero"). The rule is a property of the whole instruction, so it is
+  // decided before any element is touched: the destination is left unchanged
+  // and no source element is read. `vstart == 0` executes normally.
+  logic maskpfx_vstart_illegal;
+  always_comb begin
+    maskpfx_vstart_illegal = (ef_family == F_MASKPFX) && (cfg_vstart_i != 7'd0);
+`ifdef MOSAIC_VEC_ALU_MUTANT_MASKPFX_NO_TRAP
+    // NEGATIVE CONTROL: the rule is not implemented at all.
+    maskpfx_vstart_illegal = 1'b0;
+`endif
+`ifdef MOSAIC_VEC_ALU_MUTANT_MASKPFX_TRAP_VSTART0
+    // NEGATIVE CONTROL: the rule fires even at vstart == 0.
+    maskpfx_vstart_illegal = (ef_family == F_MASKPFX);
+`endif
+`ifdef MOSAIC_VEC_ALU_MUTANT_MASKPFX_WRONG_OP
+    // NEGATIVE CONTROL: vmsof (op 2) is exempted, so only vmsbf/vmsif raise.
+    maskpfx_vstart_illegal =
+        (ef_family == F_MASKPFX) && (ef_op != 4'd2) && (cfg_vstart_i != 7'd0);
+`endif
+  end
+
   // ------------------------------------------------------------ element lane
   logic [63:0] sel_result;
   logic        sel_mres;
@@ -508,6 +543,10 @@ module mosaic_vec_alu #(
     if (int'(ef_family) >= NFAM) begin
       sel_illegal = 1'b1;
     end else if (!caps_i[ef_family]) begin
+      sel_illegal = 1'b1;
+    end else if (maskpfx_vstart_illegal) begin
+      // vmsbf/vmsif/vmsof with a non-zero vstart: an illegal instruction, not
+      // an element fault and not a partial execution.
       sel_illegal = 1'b1;
     end
 
@@ -1201,6 +1240,11 @@ module mosaic_vec_alu #(
               (((op_f_q == F_NARROW) || (op_f_q == F_WIDE) || (op_f_q == F_MULW) ||
                 (op_f_q == F_REDWIDE)) &&
                ((sew > int'(ELEN_HALF)) || ((int'(lmul) + 1) > 3)))) begin
+            illegal_r <= 1'b1;
+            state_q   <= S_DONE;
+          end else if (maskpfx_vstart_illegal) begin
+            // vmsbf/vmsif/vmsof with a non-zero vstart: refuse before any
+            // element is touched (no VRF transaction, no write).
             illegal_r <= 1'b1;
             state_q   <= S_DONE;
           end else if (is_red) begin

@@ -2169,6 +2169,20 @@ void ConfigureVec(Cfg* cfg, int vsew, int vlmul, int vta, int vma, uint64_t avl)
   cfg->Cycle(cap);
 }
 
+// The same, but with a non-zero `vstart` in the captured snapshot. `vstart` is
+// written through its CSR *after* the vset (which would have reset it) and
+// before the capture, so the ALU sees an instruction that names element
+// `vstart` as its first. This is exactly the state the mask-prefix rule is
+// defined against.
+void ConfigureVecVstart(Cfg* cfg, int vsew, int vlmul, int vta, int vma, uint64_t avl,
+                        uint64_t vstart) {
+  (void)RunVset(cfg, VSETVLI, 5, 6, avl, Vtypei(vsew, vlmul, vta, vma));
+  if (vstart != 0) (void)CsrWrite(cfg, kCsrVstart, vstart);
+  CfgStim cap;
+  cap.snap_capture = true;
+  cfg->Cycle(cap);
+}
+
 uint64_t Pat(int seed) {
   uint64_t x = static_cast<uint64_t>(seed) * 0x9E3779B97F4A7C15ull + 0x2545F4914F6CDD1Dull;
   x ^= x >> 33;
@@ -6857,6 +6871,115 @@ void RunVecChainCase(Vmosaic_vec_tb* dut, ClockDriver* clk, Reporter* rep,
              "coverage: " + Dec(cov->fault_cells) + " fault cells ran, expected 1");
 }
 
+// ---------------------------------------------------------------------------
+// CASE=rvv.mask_prefix_vstart (work package I-057).
+//
+// `vmsbf`/`vmsif`/`vmsof` are the three instructions the pinned V spec makes an
+// illegal-instruction exception when `vstart` is non-zero: they cannot be
+// restarted part-way. The rule is a property of the whole instruction, so it is
+// decided before any element is touched, and a non-zero `vstart` still executes
+// normally. This case observes, for each of the three operations, that
+//   * `vstart == 0` executes and writes the prefix mask the model expects;
+//   * a non-zero `vstart` is refused as an illegal instruction, with no VRF
+//     access and no destination update, and *not* reported as an element fault;
+//   * the rule also guards the boundary element lane, so a single operand
+//     cannot slip past it without a packet.
+void RunMaskPrefixVstartCase(Vmosaic_vec_tb* dut, ClockDriver* clk, Reporter* rep) {
+  Cfg cfg(dut, clk);
+  Vec vec(dut, clk);
+
+  const char* kName[3] = {"vmsbf", "vmsif", "vmsof"};
+  const int kSewL = 3;       // e8: a mask register is SEW=8, LMUL=1
+  const int kVl = 8;
+  Layout L;
+  L.vd = 8; L.vs1 = 24; L.vs2 = 16; L.mask = false;
+
+  int normal_cells = 0;
+  int illegal_cells = 0;
+
+  for (int op = 0; op < 3; ++op) {
+    const std::string tag = kName[op];
+
+    // ------------------------------------------------ vstart == 0: executes
+    ConfigureVecVstart(&cfg, kSewL, 0, 0, 0, kVl, 0);
+    HostVrf vf;
+    PrimeMaskReg(&vec, &vf, L.vs2, kVl, 40 + op);
+    PrimeMaskReg(&vec, &vf, L.vs1, kVl, 70 + op);
+    PrimeMaskReg(&vec, &vf, L.vd, kVl, 100 + op);
+    VecObs ok = vec.RunPacket(VF_MASKPFX, op, kFormVv, L.vd, L.vs1, L.vs2, 0, false, kAllCaps);
+    rep->Check(!ok.alu_illegal, tag + " vstart=0: the instruction was refused as illegal");
+    rep->Check(!ok.alu_trap, tag + " vstart=0: the instruction raised an element fault");
+    // `alu_elems` is the count of destination writes the engine performed; the
+    // readback below is what proves they landed.
+    rep->Check(ok.alu_elems == kVl,
+               tag + " vstart=0: " + Dec(ok.alu_elems) + " elements executed, expected " +
+                   Dec(kVl));
+    std::vector<uint64_t> ev;
+    std::vector<bool> mv;
+    ComputeExpected(VF_MASKPFX, op, kFormVv, kSewL, 0, 0, kVl, 0, 0, false, vf, L, 0, 0, kVl,
+                    &ev, &mv);
+    for (int i = 0; i < kVl; ++i) {
+      bool got = ((vec.MemRead(L.vd, i / 8, 3, 0) >> (i % 8)) & 1u) != 0;
+      rep->Check(got == mv[static_cast<size_t>(i)],
+                 tag + " vstart=0 bit" + Dec(i) + ": " + Dec(got) + " expected " +
+                     Dec(mv[static_cast<size_t>(i)]));
+    }
+    ++normal_cells;
+
+    // ------------------------------------------- vstart != 0: illegal, and
+    // nothing is read, written or discarded.
+    const int vstarts[2] = {1, 3};
+    for (int vi = 0; vi < 2; ++vi) {
+      const int vs = vstarts[vi];
+      ConfigureVecVstart(&cfg, kSewL, 0, 0, 0, kVl, static_cast<uint64_t>(vs));
+      HostVrf vf2;
+      PrimeMaskReg(&vec, &vf2, L.vs2, kVl, 40 + op);
+      PrimeMaskReg(&vec, &vf2, L.vd, kVl, 100 + op);
+      const uint64_t dst_before = HostGet(vf2, L.vd, 0, 3, 0);
+      const int rd0 = vec.RdGnt();
+      VecObs bad = vec.RunPacket(VF_MASKPFX, op, kFormVv, L.vd, L.vs1, L.vs2, 0, false, kAllCaps);
+      const std::string t = tag + " vstart=" + Dec(vs);
+      rep->Check(bad.alu_illegal, t + ": a non-zero vstart did not raise an illegal instruction");
+      rep->Check(!bad.alu_trap, t + ": the exception was reported as an element fault");
+      rep->Check(bad.src_rd_ctr == 0 && vec.RdGnt() == rd0,
+                 t + ": the refused instruction read the register file");
+      rep->Check(bad.alu_elems == 0,
+                 t + ": " + Dec(bad.alu_elems) + " elements executed, expected 0");
+      rep->Check(vec.MemRead(L.vd, 0, 3, 0) == dst_before,
+                 t + ": the refused instruction changed the destination");
+      ++illegal_cells;
+    }
+  }
+
+  // The boundary element lane carries the same rule: a single operand cannot
+  // be executed at a non-zero vstart without a packet.
+  for (int op = 0; op < 3; ++op) {
+    const std::string tag = kName[op];
+    VecStim s;
+    s.el_valid = true;
+    s.el_family = VF_MASKPFX;
+    s.el_op = op;
+    s.el_form = kFormVv;
+    s.el_vs2 = 0x01;
+    s.el_pfx = false;
+    s.el_index = 0;
+    s.el_mask = true;
+
+    ConfigureVecVstart(&cfg, kSewL, 0, 0, 0, kVl, 0);
+    VecObs a = vec.Cycle(s);
+    rep->Check(!a.el_illegal, tag + " lane vstart=0: the element was refused as illegal");
+
+    ConfigureVecVstart(&cfg, kSewL, 0, 0, 0, kVl, 2);
+    VecObs b = vec.Cycle(s);
+    rep->Check(b.el_illegal, tag + " lane vstart=2: the element was not refused as illegal");
+  }
+
+  rep->Check(normal_cells == 3,
+             "coverage: " + Dec(normal_cells) + " normal cells ran, expected 3");
+  rep->Check(illegal_cells == 6,
+             "coverage: " + Dec(illegal_cells) + " illegal-vstart cells ran, expected 6");
+}
+
 int main(int argc, char** argv) {
   mosaic::Options options;
   std::string error;
@@ -6913,6 +7036,8 @@ int main(int argc, char** argv) {
       RunVecChainCase(&dut, &clk, &reporter, &chain_cov);
     } else if (options.case_id == "rvv.vtype_layout") {
       RunVtypeLayoutCase(&dut, &unit, &clk, &reporter, &layout_counts);
+    } else if (options.case_id == "rvv.mask_prefix_vstart") {
+      RunMaskPrefixVstartCase(&dut, &clk, &reporter);
     } else {
       int reason_hist[RSN_COUNT] = {0};
       bool class_seen[VOP_COUNT] = {false};
@@ -6986,6 +7111,10 @@ int main(int argc, char** argv) {
                                        Dec(chain_cov.pkt_off) + " pre_on=" +
                                        Dec(chain_cov.pre_on) + " pre_off=" +
                                        Dec(chain_cov.pre_off) + " cycles=" + Dec(cycles));
+  }
+  if (options.case_id == "rvv.mask_prefix_vstart") {
+    return reporter.Finish("PASS", "checks=" + Dec(reporter.checks()) + " ops=3 vstart_cells=6"
+                                       " cycles=" + Dec(cycles));
   }
   return reporter.Finish("PASS", "checks=" + Dec(reporter.checks()) + " combos=" +
                                      Dec(VOP_COUNT * 64 * 4 * 2 + 64 + 4) +
