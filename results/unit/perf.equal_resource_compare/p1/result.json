@@ -2,7 +2,7 @@
   "schema_version": 1,
   "case": "perf.equal_resource_compare",
   "verdict": "PASS",
-  "detail": "workloads=3 configs=7 baseline_cycles=2394/3088/466 resources=rob=64 iq=8 prf=96 banks=4 clusters=2 l1=32B/8sets/1way lanes=8 reset=8 vlenb=16 arch_identical=yes",
+  "detail": "workloads=3 configs=7 baseline_cycles=2389/3088/466 resources=rob=64 iq=8 prf=96 banks=4 clusters=2 l1=32B/8sets/1way lanes=8 reset=8 vlenb=16 arch_identical=yes",
   "seed": 1,
   "max_cycles": 4000000,
   "checks": 132,
@@ -10,6 +10,6 @@
   "image": "",
   "expect": "",
   "tool": "Verilator 5.052 2026-09-05",
-  "timestamp": "2026-10-02T21:02:30Z",
+  "timestamp": "2026-10-02T21:15:23Z",
   "first_mismatch": ""
 }

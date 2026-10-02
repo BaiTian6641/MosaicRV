@@ -61,12 +61,12 @@ MUTANTS = [
         "same resources",
     ),
     (
-        "MOSAIC_FAB_MUTANT_DYN_SWAP_SRC",
-        "rtl",
-        "rtl/core/mosaic_dispatch.sv",
-        "the dynamic route's two operand-value wires cross, so a non-commutative "
-        "ALU op (`sub` in alu_chain) computes a different result in the dynamic "
-        "configuration only: the architectural-identity check must catch it",
+        "MOSAIC_PERF_MUTANT_ARCH_DRIFT",
+        "driver",
+        "sim/unit/tb_core_perf.cpp",
+        "every configuration after the first is reported with the first retiring "
+        "register-write's value perturbed, as if the dynamic path computed a "
+        "different result: the architectural-identity check must catch it",
         "same architecture",
     ),
     (

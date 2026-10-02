@@ -114,7 +114,6 @@ constexpr int kResetCycles = 8;
 constexpr int kDrainCycles = 64;
 constexpr int kStallCycles = 60000;
 constexpr uint64_t kRamBase = 0x80000000ull;
-constexpr uint64_t kRamSize = 0x200000ull;
 
 struct Failure {
   std::string what;
@@ -414,17 +413,14 @@ void Put64(std::vector<uint8_t>* image, uint64_t off, uint64_t value) {
 Workload BuildAluChain() {
   Workload w;
   w.name = "alu_chain";
-  const int x0 = 0, t0 = 5, t1 = 6, t2 = 7, t3 = 28, t4 = 29, s1 = 9, a1 = 11,
-            a2 = 12, a3 = 13;
+  const int x0 = 0, t0 = 5, t1 = 6, t2 = 7, t3 = 28, t4 = 29, s1 = 9, a2 = 12,
+            a3 = 13;
   Asm a(kRamBase);
   const uint64_t off_a = 0x800, off_b = 0x808;
-  const uint64_t data_off = 0x800;  // image offset of off_a
-  (void)data_off;
 
   a.LaAbs(s1, kRamBase + 0x800);       // data base
   a.Addi(a2, x0, 0);                    // accumulator
-  a.Addi(a1, x0, 48);                   // iterations
-  a.Addi(a3, x0, 0);                    // index
+  a.Addi(a3, x0, 48);                   // iterations, counted down
   const int loop = a.Label();
   a.Bind(loop);
   a.Ld(t0, s1, int(off_a - 0x800));
@@ -435,8 +431,12 @@ Workload BuildAluChain() {
   a.Xor(t2, t3, t4);
   a.Add(a2, a2, t2);
   a.Add(a2, a2, t3);
-  a.Addi(a3, a3, 1);
-  a.Blt(a3, a1, loop);
+  a.Addi(a3, a3, -1);
+  // `bne` to x0 is symmetric under the dynamic-route operand swap, so the swap
+  // control changes only the accumulator (the `sub`), not the loop trip count --
+  // otherwise the run would derail into unmapped memory and the *identity* check
+  // would never be reached.
+  a.Bne(a3, x0, loop);
   a.LaAbs(t0, MOSAIC_SIGNATURE_ADDR);
   a.Sd(a2, t0, 0);
   a.LaAbs(t0, MOSAIC_TOHOST);
@@ -463,7 +463,6 @@ Workload BuildStream() {
   const uint64_t kOffPfBase = 0x0C0;
   const uint64_t kPfBase = 0x1FF000;
   const int kPfLines = 16;
-  const uint64_t kUartScratch = 0x0010000Cull;
 
   Workload w;
   w.name = "stream";
@@ -559,7 +558,6 @@ Workload BuildStream() {
   put(kDataBase + kOffF, 17);
   put(kDataBase + kOffPfBase, 0x801FF000ull);
   for (int i = 0; i < kPfLines; i++) put(kPfBase + uint64_t(i) * 0x100, uint64_t((i + 1) * 3));
-  (void)kUartScratch;
   return w;
 }
 
@@ -867,6 +865,22 @@ class Runner {
     rec.invariant_violations = violations_;
     rec.invariant_first = invariant_first_;
     rec.retires = retires_;
+#ifdef MOSAIC_PERF_MUTANT_ARCH_DRIFT
+    // NEGATIVE CONTROL: every configuration after the first is reported with the
+    // first retiring register-write's value perturbed, as if the "dynamic" path
+    // computed a different result. The architectural-identity check must catch
+    // it. Like the resource-drift control, the mutation is injected at the
+    // comparison's input -- the observed retire stream -- which is the only place
+    // a wrong result could reach the check.
+    if (config_index > 0) {
+      for (RetireRec& r : rec.retires) {
+        if (r.reg_we) {
+          r.value ^= 1;
+          break;
+        }
+      }
+    }
+#endif
     {
       std::vector<uint64_t> words;
       if (mem.ReadSignature(&words) && words.size() == 4) {
