@@ -947,18 +947,11 @@ class Harness {
     Check("the retire counter equals the event stream published so far",
           dut_->o_commit_o == retires_.size(),
           "counter=" + Dec(dut_->o_commit_o) + " events=" + Dec(retires_.size()));
-    if (kCompareMemory) {
-      Check("the store queue's drains and its occupancy are within its allocations",
-            dut_->o_mem_sq_drain_o + dut_->o_mem_sq_occupied_o <= dut_->o_mem_sq_alloc_o,
-            "drain=" + Dec(dut_->o_mem_sq_drain_o) + " occupied=" +
-                Dec(dut_->o_mem_sq_occupied_o) + " alloc=" + Dec(dut_->o_mem_sq_alloc_o));
-      // The per-cycle form of the central rule: the number of write transactions
-      // memory has seen can never exceed the number of stores that have committed.
-      Check("no store is visible before a store has committed",
-            write_txns_ <= committed_.size(),
-            "write transactions=" + Dec(write_txns_) + " committed stores=" +
-                Dec(committed_.size()));
-    }
+    // The store queue's own conservation identity is CASE=core.mem_program's
+    // check. This case's authority is the per-drain attribution below: a coarse
+    // per-cycle count would fire first on a duplicate drain and name the wrong
+    // thing, so the attribution is deliberately the only place that decides
+    // whether a visible byte has a legal producer.
 
     const uint32_t mask =
         (g_.retire_width >= 32) ? 0xFFFFFFFFu : ((1u << g_.retire_width) - 1u);
@@ -1125,18 +1118,11 @@ class Harness {
     // round-trip both do) -- and ambiguity is exactly what a provenance rule must
     // not have. The payload match below is then a check on an identity already
     // established by position.
-    if (drain_next_ >= committed_.size()) {
-      cov_.unattributed_visibility++;
-      Fail(phase_ + " at cycle " + Dec(cycles_),
-           "every visible byte has a legal, committed producer: a write to " +
-               U64(req.addr) + " size=" + Dec(bytes) +
-               " reached memory with no committed store to attribute it to" +
-               DescribeOutstanding());
-    }
-    CommittedStore& s = committed_[drain_next_];
-    if (!TxMatches(req, s)) {
-      const size_t other = FindMatch(req);
-      if (other != kNoMatch && other < drain_next_) {
+    const size_t other = FindMatch(req);
+    const bool positional =
+        drain_next_ < committed_.size() && PayloadMatches(req, committed_[drain_next_]);
+    if (!positional) {
+      if (other != kNoMatch && other <= drain_next_) {
         cov_.duplicate_drains++;
         const CommittedStore& d = committed_[other];
         Fail(phase_ + " at cycle " + Dec(cycles_),
@@ -1150,19 +1136,22 @@ class Harness {
              "the visible store is the oldest committed store not yet drained: a store "
              "at " +
                  U64(req.addr) + " size=" + Dec(bytes) + " drained while the older " +
-                 "committed store " + StoreName(s) + " had not");
+                 "committed store " + StoreName(committed_[drain_next_]) + " had not");
       }
       cov_.unattributed_visibility++;
       Fail(phase_ + " at cycle " + Dec(cycles_),
            "every visible byte has a legal, committed producer: a write to " +
                U64(req.addr) + " size=" + Dec(bytes) +
-               " reached memory and does not match the committed store " + StoreName(s) +
+               " reached memory and does not match the committed store " +
+               (drain_next_ < committed_.size() ? StoreName(committed_[drain_next_])
+                                                : std::string("(none outstanding)")) +
                " that is next in commit order" + DescribeOutstanding());
     }
+    CommittedStore& s = committed_[drain_next_];
     // (3) the strobes are exactly the bytes the store's size owns.
     const unsigned low = static_cast<unsigned>(s.addr & 7u);
     const unsigned expected_strb = ((1u << s.size) - 1u) << low;
-    if (req.wstrb != (expected_strb & 0xFFu) || bytes != s.size) {
+    if (!SizeMatches(req, s)) {
       Fail(phase_ + " at cycle " + Dec(cycles_),
            "the drain's byte mask is the store's own size: store " + StoreName(s) +
                " size=" + Dec(s.size) +
@@ -1247,20 +1236,31 @@ class Harness {
 
   static constexpr size_t kNoMatch = static_cast<size_t>(-1);
 
-  // Does this transaction carry exactly this store's bytes?
-  static bool TxMatches(const DataMem::Request& req, const CommittedStore& s) {
-    if (s.addr != req.addr || s.size != SizeBytes(req.size)) return false;
+  // Does this transaction *carry* this store's bytes? The byte comparison only:
+  // the size and the strobes are checked separately, so a store whose payload is
+  // right but whose reported size is wrong fails on the size and not on "this is
+  // not the store".
+  static bool PayloadMatches(const DataMem::Request& req, const CommittedStore& s) {
+    if (s.addr != req.addr) return false;
     const unsigned low = static_cast<unsigned>(s.addr & 7u);
-    const unsigned strb = ((1u << s.size) - 1u) << low;
-    if (req.wstrb != (strb & 0xFFu)) return false;
     for (unsigned lane = 0; lane < 8; ++lane) {
       if (((req.wstrb >> lane) & 1u) == 0u) continue;
+      if (lane < low) return false;
       const unsigned offset = lane - low;
+      if (offset >= s.size) return false;
       const uint8_t payload = static_cast<uint8_t>((s.data >> (8 * offset)) & 0xFFu);
       const uint8_t from_port = static_cast<uint8_t>((req.wdata >> (8 * lane)) & 0xFFu);
       if (payload != from_port) return false;
     }
     return true;
+  }
+
+  // The strobes are exactly the bytes the store's size owns.
+  static bool SizeMatches(const DataMem::Request& req, const CommittedStore& s) {
+    if (SizeBytes(req.size) != s.size) return false;
+    const unsigned low = static_cast<unsigned>(s.addr & 7u);
+    const unsigned strb = ((1u << s.size) - 1u) << low;
+    return req.wstrb == (strb & 0xFFu);
   }
 
   // A diagnosis-only search: which committed store, if any, does this
@@ -1269,7 +1269,7 @@ class Harness {
   // already drained) or an out-of-order one.
   size_t FindMatch(const DataMem::Request& req) const {
     for (size_t i = 0; i < committed_.size(); ++i) {
-      if (TxMatches(req, committed_[i])) return i;
+      if (PayloadMatches(req, committed_[i]) && SizeMatches(req, committed_[i])) return i;
     }
     return kNoMatch;
   }
