@@ -1377,3 +1377,65 @@ are all as the ALU expects) was found. The legal-instruction count in this repor
 rises accordingly (the opcode sweep now finds ten legal OP-32 encodings), and the
 "116 reserved opcodes" figure elsewhere in the body was already superseded when
 I-012 made OP-32 a decoded opcode at all (it is 115 in the current case).
+
+## Addendum (I-017): `LWU`, and the wrapper width that had gone stale
+
+This section is an addendum to the report above, not a rewrite of it. Work
+package I-017 (`results/reports/I-017-event-payload.md`) fixed a defect V-013
+found in this decoder and, because this case owns "which encodings are
+reserved", extended it to cover the fix.
+
+**`LWU` was refused.** The `OP_LOAD` arm decoded funct3 `0,1,2,3,4,5` and
+treated everything else as illegal, with a comment claiming `110` and `111` are
+both reserved. That is wrong for `110`: RV64I defines **LWU**, the
+zero-extending word load, the project's own reference model implements it
+(`sim/unit/trap_ref.h`, `case 0x6u: size = 4; sign = false`), and a program
+containing `lwu` stopped the machine
+(`unsupported=1 illegal=1 stopped=1` — V-013's observation). funct3 `110` now
+decodes as `SZ_WORD` with `mem_signed = 0`; funct3 `111` remains the only
+reserved load, and the comment says which is which.
+
+**What this case now does about it.**
+
+* the independent C++ reference decoder decodes funct3 `110` as legal;
+* the named `LWU` check runs *first* in the directed phase, so a regression
+  fails with the instruction named rather than with the first field the sweep
+  happens to disagree about;
+* the memory-width table pins `LWU`'s size and signedness beside `lb`/`lh`/`lw`/
+  `ld`/`lbu`/`lhu`;
+* only funct3 `111` is left in the reserved class.
+
+**Verification after the change.**
+
+```
+python3 tools/run_unit.py --profile p0 --case decode.rv64im_reserved
+  RESULT PASS decode.rv64im_reserved  166734 instructions (82915 legal, 83819 illegal),
+  0 mismatches, 1442 named reserved checks            (exit 0)
+
+-DMOSAIC_DECODER_MUTANT_LWU_ILLEGAL
+  exit 1, 5 failures
+  first: LWU (LOAD funct3 110) is a legal encoding
+  field mismatch: insn=0x00816083.valid: expected 0x0000000000000001, got 0x0000000000000000
+```
+
+The legal population rises by 531 instructions and the named reserved checks
+fall by one: funct3 `110` moved from the reserved class to the legal one, and
+the reserved class for LOAD is now the single encoding `111`.
+
+**A pre-existing defect this addendum also records.** The case did not *build*
+on the tree I-017 started from:
+
+```
+%Warning-WIDTHTRUNC: sim/tb/mosaic_decoder_tb.sv:85:21: Operator ASSIGNW expects
+134 bits on the Assign RHS, but Assign RHS's VARREF 'ctl' generates 135 bits.
+%Error: Exiting due to 1 warning(s)
+```
+
+`mosaic_pkg::decode_ctl_t` grew `is_wfi` (the core integration recognises WFI in
+the front end and left the decoder's illegal set alone) and neither the
+wrapper's flattened `o_ctl_bits` nor this driver's bit accounting was updated.
+It reproduces with the unmodified decoder, so it is not a consequence of the
+`LWU` change. The accounting was completed — `is_wfi` is exported and pushed, the
+total is 135 bits and the top word's mask widened from `0x3F` to `0x7F` — because
+the case has to build to be extended at all. Whoever owns the decoder wrapper
+should confirm the fix; a case that cannot build is not a case that passes.

@@ -32,6 +32,7 @@ localparam int unsigned TB_RET_ID_W = 2 * TB_TAG_W;
 localparam int unsigned TB_SEQ_W    = $clog2(2 * mosaic_cfg_pkg::MOSAIC_ROB_ENTRIES + 1);
 localparam int unsigned TB_RD_W     = 5;
 localparam int unsigned TB_SIZE_W   = 3;
+localparam int unsigned TB_CSR_W    = 12;
 localparam int unsigned TB_OCC_W    = $clog2(mosaic_cfg_pkg::MOSAIC_ROB_ENTRIES + 1);
 // Readiness probes: the same generated geometry the core and rename derive, so
 // the wrapper never invents a width.
@@ -85,7 +86,14 @@ module mosaic_core_tb (
     output logic [TB_RET_N*TB_RD_W-1:0]      ev_rd_o,
     output logic [TB_RET_N*TB_XLEN-1:0]      ev_value_o,
     output logic [TB_RET_N-1:0]              ev_store_o,
+    output logic [TB_RET_N*TB_XLEN-1:0]      ev_store_addr_o,
+    output logic [TB_RET_N*TB_XLEN-1:0]      ev_store_data_o,
     output logic [TB_RET_N*TB_SIZE_W-1:0]    ev_store_size_o,
+    output logic [TB_RET_N-1:0]              ev_csr_we_o,
+    output logic [TB_RET_N*TB_CSR_W-1:0]     ev_csr_addr_o,
+    output logic [TB_RET_N*TB_XLEN-1:0]      ev_csr_value_o,
+    output logic [TB_RET_N*TB_XLEN-1:0]      ev_trap_cause_o,
+    output logic [TB_RET_N*TB_XLEN-1:0]      ev_trap_tval_o,
 
     // ---------------------------------------------------------------- evidence
     output logic [31:0] o_commit_o,
@@ -371,9 +379,14 @@ module mosaic_core_tb (
       .ev_rd           (ev_rd_o),
       .ev_value        (ev_value_o),
       .ev_store        (ev_store_o),
-      .ev_store_addr   (),
-      .ev_store_data   (),
+      .ev_store_addr   (ev_store_addr_o),
+      .ev_store_data   (ev_store_data_o),
       .ev_store_size   (ev_store_size_o),
+      .ev_csr_we       (ev_csr_we_o),
+      .ev_csr_addr     (ev_csr_addr_o),
+      .ev_csr_value    (ev_csr_value_o),
+      .ev_trap_cause   (ev_trap_cause_o),
+      .ev_trap_tval    (ev_trap_tval_o),
       .o_commit_ctr    (o_commit_o),
       .o_unsupported_ctr(o_unsupported_o),
       .o_illegal_ctr   (o_illegal_o),

@@ -178,6 +178,25 @@ module mosaic_retire (
     input  logic [RET_WIDTH*RET_XLEN-1:0]   pay_exc_cause,
     input  logic [RET_WIDTH*RET_XLEN-1:0]   pay_exc_tval,
 
+    // ------------------------------------------------- a system-unit trap
+    // The buffer's exception bit is the memory path's record: a fault is
+    // captured on the entry it belongs to. A trap the *system unit* resolves at
+    // the head -- ecall, ebreak, an illegal CSR access -- never appears there:
+    // the macro completes normally, the core latches the trap itself and the
+    // redirect arbiter takes it at the boundary. It is a trap of a real
+    // instruction all the same, and the event stream owes it the same lane-0
+    // TRAP record a buffer-recorded exception gets, carrying the cause and tval
+    // the trap entry publishes.
+    //
+    // This is a *statement*, not a second trap decision: the core asserts it in
+    // the cycle the trap is taken, and nothing here recomputes whether a trap
+    // should happen or what it should be. `head_trap` keeps priority if both
+    // are presented, which is the same order the core's own trap controller
+    // resolves.
+    input  logic                            sys_trap_valid,
+    input  logic [RET_XLEN-1:0]             sys_trap_cause,
+    input  logic [RET_XLEN-1:0]             sys_trap_tval,
+
     // Recovery owns a flush cycle outright: nothing retires in it.
     input  logic                            flush_valid,
 
@@ -257,15 +276,32 @@ module mosaic_retire (
   // exception that has reached the head is architecturally final, and a
   // recovery flush in the same cycle would otherwise drop the trapping
   // instruction and execute straight past the fault.
+  //
+  // Two sources present here: the buffer's own exception bit, and the core's
+  // statement that the system unit resolved a trap on the head this cycle. They
+  // are one event as far as every consumer is concerned, which is why they
+  // merge into one signal here rather than into two event paths downstream.
   logic head_trap;
+  logic trap_now;
+
+`ifdef MOSAIC_RETIRE_MUTANT_SYS_TRAP_NO_EVENT
+  // NEGATIVE CONTROL 8: a trap the system unit resolved publishes no event. The
+  // trap is still taken and still redirects -- only the record that explains the
+  // PC discontinuity is gone, which is exactly the defect V-013 reported.
+  assign trap_now = head_trap;
+`else
+  assign trap_now = head_trap || sys_trap_valid;
+`endif
 
   assign head_trap   = rob_valid[0] && rob_exc[0];
-  assign trap_flush  = head_trap;
+  assign trap_flush  = trap_now;
 
-  assign trap_valid  = head_trap;
-  assign trap_pc     = head_trap ? rob_pc[RET_XLEN-1:0] : {RET_XLEN{1'b0}};
-  assign trap_cause  = head_trap ? pay_exc_cause[RET_XLEN-1:0] : {RET_XLEN{1'b0}};
-  assign trap_tval   = head_trap ? pay_exc_tval[RET_XLEN-1:0]  : {RET_XLEN{1'b0}};
+  assign trap_valid  = trap_now;
+  assign trap_pc     = trap_now ? rob_pc[RET_XLEN-1:0] : {RET_XLEN{1'b0}};
+  assign trap_cause  = head_trap ? pay_exc_cause[RET_XLEN-1:0]
+                      : (sys_trap_valid ? sys_trap_cause : {RET_XLEN{1'b0}});
+  assign trap_tval   = head_trap ? pay_exc_tval[RET_XLEN-1:0]
+                      : (sys_trap_valid ? sys_trap_tval : {RET_XLEN{1'b0}});
 
   // --------------------------------------------------------------- requests
   // A lane is requested when its entry exists, the buffer says it is retirable,
@@ -394,8 +430,8 @@ module mosaic_retire (
   // trapping lane as though it were an ordinary retirement.
   logic [RET_WIDTH-1:0] lane_effect;
 
-  assign lane_effect = lane_retire | (head_trap ? {RET_WIDTH{trap_as_retire}}
-                                                 : {RET_WIDTH{1'b0}});
+  assign lane_effect = lane_retire | (trap_now ? {RET_WIDTH{trap_as_retire}}
+                                                : {RET_WIDTH{1'b0}});
 
   // ------------------------------------------------ NEGATIVE CONTROL 5 (above)
   // "Committed map updated on squash": the commit is taken from the payload bus
@@ -429,8 +465,9 @@ module mosaic_retire (
   always_comb begin
     // The trap is an event in its own right, and it occupies lane 0's slot:
     // the trap path drops everything younger, so there is nothing behind it.
+    // Both trap sources are one event here -- see `trap_now`.
     ev_valid_q      = lane_retire;
-    ev_valid_q[0]   = head_trap || lane_retire[0];
+    ev_valid_q[0]   = trap_now || lane_retire[0];
 
     ev_count = RET_CNT_W'(0);
     for (int unsigned i = 0; i < RET_WIDTH; i++) begin
@@ -455,7 +492,7 @@ module mosaic_retire (
 
   always_comb begin
     ev_trap       = '0;
-    ev_trap[0]    = head_trap && !trap_as_retire;
+    ev_trap[0]    = trap_now && !trap_as_retire;
 
     ev_seq        = '0;
     ev_pc         = '0;
@@ -502,10 +539,14 @@ module mosaic_retire (
 
       // A trap event carries the cause and the faulting value, and nothing
       // else: a trap is not a retire of an ordinary instruction, and the two
-      // must never be confused by a reference checker reading the stream.
+      // must never be confused by a reference checker reading the stream. The
+      // two sources carry the same two fields -- the memory path's recorded
+      // payload, or the trap entry's own, which the core supplies.
       if (ev_trap[i]) begin
-        ev_trap_cause[i*RET_XLEN +: RET_XLEN] = pay_exc_cause[i*RET_XLEN +: RET_XLEN];
-        ev_trap_tval[i*RET_XLEN  +: RET_XLEN]  = pay_exc_tval[i*RET_XLEN  +: RET_XLEN];
+        ev_trap_cause[i*RET_XLEN +: RET_XLEN] = head_trap
+            ? pay_exc_cause[i*RET_XLEN +: RET_XLEN] : sys_trap_cause;
+        ev_trap_tval[i*RET_XLEN  +: RET_XLEN]  = head_trap
+            ? pay_exc_tval[i*RET_XLEN  +: RET_XLEN]  : sys_trap_tval;
       end
     end
   end

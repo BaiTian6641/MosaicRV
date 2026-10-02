@@ -138,6 +138,12 @@ module mosaic_decoder (
 `else
   localparam bit MutReservedF3 = 1'b0;
 `endif
+`ifdef MOSAIC_DECODER_MUTANT_LWU_ILLEGAL
+  localparam bit MutLwuIllegal = 1'b1;   // LWU (LOAD funct3 110) refused as illegal,
+                                         // the defect V-013 reported
+`else
+  localparam bit MutLwuIllegal = 1'b0;
+`endif
 `ifdef MOSAIC_DECODER_MUTANT_SHIFT_UPPER_IGNORED
   localparam bit MutShiftUpper = 1'b1;   // slli ignores insn[31:26]
 `else
@@ -286,8 +292,19 @@ module mosaic_decoder (
           mosaic_pkg::F3_SLTU:    begin ctl.mem_size = mosaic_pkg::SZ_DBL;  ctl.mem_signed = 1'b1; end  // ld
           mosaic_pkg::F3_XOR:     begin ctl.mem_size = mosaic_pkg::SZ_BYTE; ctl.mem_signed = 1'b0; end  // lbu
           3'd5:       begin ctl.mem_size = mosaic_pkg::SZ_HALF; ctl.mem_signed = 1'b0; end  // lhu
-          // funct3 110 and 111 are reserved: RV64I has no load wider than ld
+          // funct3 110 is LWU, the zero-extending word load RV64I requires:
+          // the same 32-bit access as lw with no sign extension into the upper
+          // half. Only funct3 111 is reserved -- RV64I has no load wider than ld
           // and no store-by-width encoding beyond the six defined above.
+          mosaic_pkg::F3_OR: begin
+            // Mutation: go back to refusing LWU as a reserved encoding.
+            if (MutLwuIllegal) begin
+              legal = 1'b0;
+            end else begin
+              ctl.mem_size   = mosaic_pkg::SZ_WORD;
+              ctl.mem_signed = 1'b0;
+            end
+          end
           3'd7: begin
             // Mutation: accept a reserved funct3 as a signed doubleword load.
             if (MutReservedF3) begin

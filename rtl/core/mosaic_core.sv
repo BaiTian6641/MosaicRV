@@ -117,14 +117,18 @@ localparam int unsigned CORE_MEM_CNT_W = $clog2(CORE_LQ_N + 1);   // == clog2(SQ
 // (data_valid, data, size, imm, base, id at those offsets); the case asserts the
 // three-way agreement at startup rather than trusting three copies of a formula.
 localparam int unsigned CORE_MEM_ID_W  = $bits(mosaic_uop_pkg::uop_id_t);
-// Only the pre-commit negative control reads the exported entry view by hand,
-// so this offset exists only in that build: an always-present localparam would
-// be an unused parameter in the shipping build, which is a lint failure here.
-`ifdef MOSAIC_CORE_MUTANT_STORE_PRECOMMIT
-localparam int unsigned CORE_SQ_OFF_ID  = 2 + CORE_XLEN + 3 + CORE_XLEN + CORE_XLEN;
-`endif
-localparam int unsigned CORE_SQ_ENTRY_W =
-    2 + CORE_XLEN + 3 + CORE_XLEN + CORE_XLEN + CORE_MEM_ID_W;
+// The event payload needs the store's own address, data and size as well as its
+// identity, so every field of the view is named here and the two readers -- the
+// payload bus below and the pre-commit negative control -- share one definition
+// of the layout rather than two formulas that could drift.
+localparam int unsigned CORE_SQ_OFF_DATA_VALID = 0;
+localparam int unsigned CORE_SQ_OFF_ADDR_VALID = 1;
+localparam int unsigned CORE_SQ_OFF_DATA       = 2;
+localparam int unsigned CORE_SQ_OFF_SIZE       = CORE_SQ_OFF_DATA + CORE_XLEN;
+localparam int unsigned CORE_SQ_OFF_IMM        = CORE_SQ_OFF_SIZE + 3;
+localparam int unsigned CORE_SQ_OFF_BASE       = CORE_SQ_OFF_IMM + CORE_XLEN;
+localparam int unsigned CORE_SQ_OFF_ID         = CORE_SQ_OFF_BASE + CORE_XLEN;
+localparam int unsigned CORE_SQ_ENTRY_W        = CORE_SQ_OFF_ID + CORE_MEM_ID_W;
 
 module mosaic_core (
     input  logic                        clk,
@@ -164,6 +168,15 @@ module mosaic_core (
     output logic [CORE_RET_N*CORE_XLEN-1:0]   ev_store_addr,
     output logic [CORE_RET_N*CORE_XLEN-1:0]   ev_store_data,
     output logic [CORE_RET_N*CORE_SIZE_W-1:0] ev_store_size,
+    // The CSR and trap halves of the same frozen record. `ev_csr_*` are
+    // presented for a retiring CSR instruction that writes (`csr_write_valid`),
+    // and `ev_trap_cause`/`ev_trap_tval` for a lane that trapped -- from the
+    // buffer's exception bit or from a trap the system unit resolved.
+    output logic [CORE_RET_N-1:0]       ev_csr_we,
+    output logic [CORE_RET_N*CORE_CSR_W-1:0]  ev_csr_addr,
+    output logic [CORE_RET_N*CORE_XLEN-1:0]   ev_csr_value,
+    output logic [CORE_RET_N*CORE_XLEN-1:0]   ev_trap_cause,
+    output logic [CORE_RET_N*CORE_XLEN-1:0]   ev_trap_tval,
 
     /* verilator lint_on UNUSEDSIGNAL */
 
@@ -2463,6 +2476,177 @@ module mosaic_core (
   // ==========================================================================
   assign retire_pay_value = {stash_value1, stash_value0};
 
+  // ==========================================================================
+  // 13a. The retire event's payload bus
+  // ==========================================================================
+  // The frozen architectural event (config/contracts/event_v1.json) is one
+  // record per instruction, and two of its groups are owned by state the retire
+  // unit does not hold: a store's address, data and size (the store queue holds
+  // them until it authorises the store, which is exactly the cycle the
+  // instruction retires) and a CSR write's address and value (the CSR file
+  // holds them, and applies the write at the completion edge -- one cycle
+  // before the retirement that makes it architectural).
+  //
+  // Both are built here as *per-lane presentations*, and every field of a
+  // lane's group is zero unless that lane is the instruction that owns it. That
+  // is what makes the schema's validity rules hold by construction: a load
+  // retirement carries no store payload, an ordinary retirement carries no CSR
+  // payload, and a trap carries neither -- the retire unit gates every payload
+  // field on the lane having retired, and a trap is not a retirement
+  // (mosaic_retire.sv).
+  //
+  // Neither source is a second copy of a rule. The address is `base + imm`, the
+  // sum the memory endpoint's single adder forms, read from the same entry the
+  // store queue authorises, so the event cannot describe a different store from
+  // the one that reached memory. The CSR value is the CSR file's own read-back
+  // in the retirement cycle, so it is the value the register actually holds --
+  // WARL canonicalisation included -- and not a re-derivation of the write
+  // operation here.
+  logic                             sq_commit_ok;
+  logic [CORE_MEM_CNT_W-1:0]        sq_pay0_slot, sq_pay1_slot;
+  logic                             sq_pay0_valid, sq_pay1_valid;
+  logic                             sq_pay0_ready, sq_pay1_ready;
+  logic [CORE_XLEN-1:0]             sq_pay0_addr, sq_pay0_data;
+  logic [CORE_XLEN-1:0]             sq_pay1_addr, sq_pay1_data;
+  logic [CORE_SIZE_W-1:0]           sq_pay0_size, sq_pay1_size;
+  // The size the payload presents. NEGATIVE CONTROL: every store is reported as
+  // a word whatever the instruction asked for -- the valid bit, the address and
+  // the data are all right, so only a check that reads `mem_size` field by
+  // field can see it.
+  logic [CORE_SIZE_W-1:0]           sq_pay0_size_ev, sq_pay1_size_ev;
+  logic [CORE_RET_N-1:0]            pay_store_we_vec;
+  logic [CORE_RET_N*CORE_XLEN-1:0]  pay_store_addr_vec, pay_store_data_vec;
+  logic [CORE_RET_N*CORE_SIZE_W-1:0] pay_store_size_vec;
+
+  // The authorisation names the first unauthorised entry, and the queue is
+  // compacted, so that entry sits at the authorisation watermark; the second
+  // lane's is the one after it -- the same rule the queue's own commit path
+  // applies, expressed in the count domain so it cannot wrap onto entry 0.
+  assign sq_pay0_slot = sq_auth_cnt;
+  assign sq_pay1_slot = sq_auth_cnt + CORE_MEM_CNT_W'(sq_commit_ok);
+
+`ifdef MOSAIC_CORE_MUTANT_NO_STORE_PAYLOAD
+  // NEGATIVE CONTROL: the store payload is tied off again -- the wiring this
+  // package shipped with. A retiring store still retires and still reaches
+  // memory; what is lost is the event's ability to say *which* store it was,
+  // which is the record the frozen schema declares and CASE=core.event_payload
+  // checks field by field.
+  assign sq_pay0_valid = 1'b0;
+  assign sq_pay1_valid = 1'b0;
+`else
+  // The entry must actually hold the store's address and value: an entry the
+  // queue has not filled is not a store that can describe itself, and the two
+  // readiness bits are the queue's own statement of that.
+  assign sq_pay0_valid = sq_commit_valid && sq_commit_ok && sq_pay0_ready;
+  assign sq_pay1_valid = sq_commit2_valid && sq_commit2_ok && sq_pay1_ready;
+`endif
+
+  always_comb begin
+    sq_pay0_ready = 1'b0;
+    sq_pay1_ready = 1'b0;
+    sq_pay0_addr = {CORE_XLEN{1'b0}};
+    sq_pay0_data = {CORE_XLEN{1'b0}};
+    sq_pay0_size = {CORE_SIZE_W{1'b0}};
+    sq_pay1_addr = {CORE_XLEN{1'b0}};
+    sq_pay1_data = {CORE_XLEN{1'b0}};
+    sq_pay1_size = {CORE_SIZE_W{1'b0}};
+    for (int unsigned i = 0; i < CORE_SQ_N; i++) begin
+      if (CORE_MEM_CNT_W'(i) == sq_pay0_slot) begin
+        sq_pay0_ready = sq_entry_pay[i*CORE_SQ_ENTRY_W + CORE_SQ_OFF_ADDR_VALID]
+                     && sq_entry_pay[i*CORE_SQ_ENTRY_W + CORE_SQ_OFF_DATA_VALID];
+        sq_pay0_addr = sq_entry_pay[i*CORE_SQ_ENTRY_W + CORE_SQ_OFF_BASE +: CORE_XLEN]
+                     + sq_entry_pay[i*CORE_SQ_ENTRY_W + CORE_SQ_OFF_IMM  +: CORE_XLEN];
+        sq_pay0_data = sq_entry_pay[i*CORE_SQ_ENTRY_W + CORE_SQ_OFF_DATA +: CORE_XLEN];
+        sq_pay0_size = sq_entry_pay[i*CORE_SQ_ENTRY_W + CORE_SQ_OFF_SIZE +: CORE_SIZE_W];
+      end
+      if (CORE_MEM_CNT_W'(i) == sq_pay1_slot) begin
+        sq_pay1_ready = sq_entry_pay[i*CORE_SQ_ENTRY_W + CORE_SQ_OFF_ADDR_VALID]
+                     && sq_entry_pay[i*CORE_SQ_ENTRY_W + CORE_SQ_OFF_DATA_VALID];
+        sq_pay1_addr = sq_entry_pay[i*CORE_SQ_ENTRY_W + CORE_SQ_OFF_BASE +: CORE_XLEN]
+                     + sq_entry_pay[i*CORE_SQ_ENTRY_W + CORE_SQ_OFF_IMM  +: CORE_XLEN];
+        sq_pay1_data = sq_entry_pay[i*CORE_SQ_ENTRY_W + CORE_SQ_OFF_DATA +: CORE_XLEN];
+        sq_pay1_size = sq_entry_pay[i*CORE_SQ_ENTRY_W + CORE_SQ_OFF_SIZE +: CORE_SIZE_W];
+      end
+    end
+  end
+
+  always_comb begin
+    pay_store_we_vec   = '0;
+    pay_store_addr_vec = '0;
+    pay_store_data_vec = '0;
+    pay_store_size_vec = '0;
+    // Each lane presents its payload only when that lane really is a store the
+    // queue is authorising, so a non-store lane carries zero in every field of
+    // the group rather than a neighbour's bytes with the valid bit clear: the
+    // schema's validity rule ("zero for a load retirement, for a non-memory
+    // instruction") is then a property of the bus, not a rule a consumer has to
+    // remember to apply.
+    if (sq_pay0_valid) begin
+      pay_store_we_vec[0] = 1'b1;
+      pay_store_addr_vec[0*CORE_XLEN +: CORE_XLEN]  = sq_pay0_addr;
+      pay_store_data_vec[0*CORE_XLEN +: CORE_XLEN]  = sq_pay0_data;
+      pay_store_size_vec[0*CORE_SIZE_W +: CORE_SIZE_W] = sq_pay0_size_ev;
+    end
+    if (CORE_RET_N > 1 && sq_pay1_valid) begin
+      pay_store_we_vec[1] = 1'b1;
+      pay_store_addr_vec[1*CORE_XLEN +: CORE_XLEN]  = sq_pay1_addr;
+      pay_store_data_vec[1*CORE_XLEN +: CORE_XLEN]  = sq_pay1_data;
+      pay_store_size_vec[1*CORE_SIZE_W +: CORE_SIZE_W] = sq_pay1_size_ev;
+    end
+  end
+
+`ifdef MOSAIC_CORE_MUTANT_STORE_SIZE_WRONG
+  assign sq_pay0_size_ev = CORE_SIZE_W'(mosaic_pkg::SZ_WORD);
+  assign sq_pay1_size_ev = CORE_SIZE_W'(mosaic_pkg::SZ_WORD);
+`else
+  assign sq_pay0_size_ev = sq_pay0_size;
+  assign sq_pay1_size_ev = sq_pay1_size;
+`endif
+
+  // ------------------------------------------------------- the CSR payload
+  // A CSR macro is staged at the head and its staging entry is freed at the end
+  // of the very cycle it retires, so in that cycle the entry still names it and
+  // the CSR file still answers for its address. The value presented is the
+  // file's read-back one cycle after the write strobe: the write landed at the
+  // completion edge, so the register already holds what the instruction wrote.
+  logic                            retire_csr_write;
+  logic [CORE_RET_N-1:0]           pay_csr_we_vec;
+  logic [CORE_RET_N*CORE_CSR_W-1:0] pay_csr_addr_vec;
+  logic [CORE_RET_N*CORE_XLEN-1:0]  pay_csr_value_vec;
+
+  assign retire_csr_write = sys_valid_q && sys_head && rob_retire_ack &&
+                            sys_csr_writes_q;
+
+`ifdef MOSAIC_CORE_MUTANT_NO_CSR_PAYLOAD
+  // NEGATIVE CONTROL: the CSR payload is tied off again. The CSR write still
+  // happens and still shows in the architectural state; the event stream just
+  // stops naming the address and the value it wrote.
+  assign pay_csr_we_vec = {CORE_RET_N{1'b0}};
+`else
+  always_comb begin
+    pay_csr_we_vec    = '0;
+    pay_csr_addr_vec  = '0;
+    pay_csr_value_vec = '0;
+    if (retire_csr_write) begin
+      pay_csr_we_vec[0] = 1'b1;
+      pay_csr_addr_vec[CORE_CSR_W-1:0] = sys_csr_addr_q;
+      pay_csr_value_vec[CORE_XLEN-1:0] = csr_rdata;
+    end
+  end
+`endif
+
+  // --------------------------------------------------- the system-trap event
+  // The trap the *system unit* resolves at the head never appears on the
+  // buffer's exception bit: the macro completes normally, the core latches the
+  // trap, and the redirect arbiter takes it. It is a trap of a real instruction
+  // all the same, so the event stream is told about it, in the cycle it is
+  // taken, with the cause and tval the trap entry publishes. The PC the record
+  // carries is the head's own -- which is the trap's epc for a synchronous
+  // trap, exactly as the schema's trap_epc rule states.
+  logic                            retire_sys_trap;
+  assign retire_sys_trap = sys_trap_take && !head_exc_trap && !irq_valid;
+
+
   // The retire module carries one commit lane per retired instruction. rename
   // has one commit port per lane, applied in program order, which is what makes
   // two commits to one architectural register in one cycle install the younger
@@ -2534,15 +2718,18 @@ module mosaic_core (
       .pay_reg_we     ({desc_reg_we1, desc_reg_we0}),
       .pay_rd         ({desc_rd1, desc_rd0}),
       .pay_value      (retire_pay_value),
-      .pay_csr_we     ({CORE_RET_N{1'b0}}),
-      .pay_csr_addr   ({(CORE_RET_N*CORE_CSR_W){1'b0}}),
-      .pay_csr_value  ({(CORE_RET_N*CORE_XLEN){1'b0}}),
-      .pay_is_store   ({CORE_RET_N{1'b0}}),
-      .pay_store_addr ({(CORE_RET_N*CORE_XLEN){1'b0}}),
-      .pay_store_data ({(CORE_RET_N*CORE_XLEN){1'b0}}),
-      .pay_store_size ({(CORE_RET_N*CORE_SIZE_W){1'b0}}),
+      .pay_csr_we     (pay_csr_we_vec),
+      .pay_csr_addr   (pay_csr_addr_vec),
+      .pay_csr_value  (pay_csr_value_vec),
+      .pay_is_store   (pay_store_we_vec),
+      .pay_store_addr (pay_store_addr_vec),
+      .pay_store_data (pay_store_data_vec),
+      .pay_store_size (pay_store_size_vec),
       .pay_exc_cause  (pay_exc_cause_vec),
       .pay_exc_tval   (pay_exc_tval_vec),
+      .sys_trap_valid (retire_sys_trap),
+      .sys_trap_cause (trap_cause),
+      .sys_trap_tval  (trap_tval),
       .flush_valid    (rob_flush_pulse),
       .retire_req     (ret_req),
       .trap_flush     (),
@@ -2554,15 +2741,15 @@ module mosaic_core (
       .ev_reg_we      (ev_reg_we),
       .ev_rd          (ev_rd),
       .ev_value       (ev_value),
-      .ev_csr_we      (),
-      .ev_csr_addr    (),
-      .ev_csr_value   (),
+      .ev_csr_we      (ev_csr_we),
+      .ev_csr_addr    (ev_csr_addr),
+      .ev_csr_value   (ev_csr_value),
       .ev_store       (ev_store),
       .ev_store_addr  (ev_store_addr),
       .ev_store_data  (ev_store_data),
       .ev_store_size  (ev_store_size),
-      .ev_trap_cause  (),
-      .ev_trap_tval   (),
+      .ev_trap_cause  (ev_trap_cause),
+      .ev_trap_tval   (ev_trap_tval),
       .trap_valid     (),
       .trap_pc        (),
       .trap_cause     (),
@@ -2765,7 +2952,7 @@ module mosaic_core (
       .fill_stale_o         (),
       .commit_valid_i       (sq_commit_valid),
       .commit_id_i          (sq_commit_id),
-      .commit_ok_o          (),
+      .commit_ok_o          (sq_commit_ok),
       .commit_stale_o       (),
       .commit2_valid_i      (sq_commit2_valid),
       .commit2_id_i         (sq_commit2_id),

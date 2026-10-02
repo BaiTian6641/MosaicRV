@@ -95,6 +95,7 @@ struct Ref {
   uint8_t is_miscmem, is_fence_i;
   uint8_t is_muldiv, md_op, md_signed, md_w;
   uint8_t is_system, is_ecall, is_ebreak, is_mret;
+  uint8_t is_wfi;
   uint8_t csr_op;
   uint16_t csr_addr;
   uint8_t csr_writes, csr_reads, csr_imm_form;
@@ -187,7 +188,8 @@ Decoded DecodeFields(uint32_t insn) {
         case 3: r.mem_size = SZ_DBL;  r.mem_signed = 1; return {r, true};  // ld
         case 4: r.mem_size = SZ_BYTE; r.mem_signed = 0; return {r, true};  // lbu
         case 5: r.mem_size = SZ_HALF; r.mem_signed = 0; return {r, true};  // lhu
-        default: return {Illegal(), false};      // 110, 111 reserved
+        case 6: r.mem_size = SZ_WORD; r.mem_signed = 0; return {r, true};  // lwu
+        default: return {Illegal(), false};      // 111 reserved
       }
     }
     case OP_MISC_MEM: {
@@ -525,6 +527,15 @@ class Bench {
         Vmosaic_decoder_tb* top)
       : opt_(options), rep_(reporter), top_(top), rng_(options.seed) {}
 
+  // Drive one instruction word without comparing it. A named check that has to
+  // speak before the field-by-field comparison -- so a failure names the
+  // encoding the defect is about rather than the first field that differs --
+  // presents its word this way and then reads the DUT through Observe().
+  void Present(uint32_t insn) {
+    top_->insn = insn;
+    top_->eval();
+  }
+
   // Present one instruction word and compare every field. Returns false on the
   // first mismatch, which stops the run.
   bool Apply(uint32_t insn) {
@@ -600,6 +611,26 @@ class Bench {
   void Directed() {
     if (aborted_) return;
     Ref r = Illegal();
+
+    // --- LWU, by name, before anything else ---------------------------------
+    // `lwu` (LOAD funct3 110) is RV64I's zero-extending word load. It was
+    // refused as a reserved encoding in the shipping RTL -- the defect V-013
+    // reported (results/reports/V-013-retire.md section 6.1) -- and this check
+    // is deliberately the first thing the case does, so a decoder that refuses
+    // it again fails with the instruction named rather than with whichever
+    // field the sweep happens to disagree about first.
+    Present(EncI(OP_LOAD, 6, 1, 2, 8));
+    {
+      const Ref lwu = Observe();
+      rep_.Check(lwu.valid && !lwu.illegal,
+                 "LWU (LOAD funct3 110) is a legal encoding");
+      rep_.Check(lwu.mem_kind == MEM_LOAD && lwu.mem_size == SZ_WORD &&
+                     lwu.mem_signed == 0,
+                 "LWU is a zero-extending word load: mem_size SZ_WORD, signed 0");
+      rep_.Check(lwu.uses_alu && lwu.alu_op == ALU_ADD && lwu.uses_rs1 &&
+                     lwu.uses_imm && lwu.rd == 1 && lwu.rs1 == 2,
+                 "LWU decodes rd, rs1 and the address immediate");
+    }
 
     // --- immediate formats, each at a value that cannot be confused ---------
     // S-type with a negative offset: insn[11:7] supplies imm[4:0] here, so an
@@ -771,6 +802,7 @@ class Bench {
           {"ld",  EncI(OP_LOAD, 3, 1, 2, 8), SZ_DBL,  1},
           {"lbu", EncI(OP_LOAD, 4, 1, 2, 8), SZ_BYTE, 0},
           {"lhu", EncI(OP_LOAD, 5, 1, 2, 8), SZ_HALF, 0},
+          {"lwu", EncI(OP_LOAD, 6, 1, 2, 8), SZ_WORD, 0},
           {"sb",  EncS(OP_STORE, 0, 1, 2, 8), SZ_BYTE, 0},
           {"sh",  EncS(OP_STORE, 1, 1, 2, 8), SZ_HALF, 0},
           {"sw",  EncS(OP_STORE, 2, 1, 2, 8), SZ_WORD, 0},
@@ -982,11 +1014,22 @@ class Bench {
   void Reserved() {
     if (aborted_) return;
 
-    // LOAD funct3 110/111: RV64I defines no load wider than ld.
-    for (uint32_t f3 : {6u, 7u}) {
-      if (!Apply(Word(OP_LOAD, f3, 1, 2, 0, 0x00))) return;
-      ExpectIllegalState("reserved: LOAD funct3 " + std::to_string(f3));
-    }
+    // LOAD funct3 110 is LWU, the zero-extending word load RV64I requires: it
+    // is *legal*, decodes as a 32-bit access with no sign extension, and its
+    // absence is the defect V-013 reported (results/reports/V-013-retire.md
+    // section 6.1). Only funct3 111 is reserved -- RV64I has no load wider than
+    // ld -- and the positive check above pins LWU's fields.
+    if (!Apply(Word(OP_LOAD, 6, 1, 2, 0, 0x00))) return;
+    const Ref lwu = Observe();
+    rep_.Check(lwu.valid && !lwu.illegal,
+               "LWU (LOAD funct3 110) is a legal encoding");
+    rep_.Check(lwu.mem_kind == MEM_LOAD && lwu.mem_size == SZ_WORD &&
+                   lwu.mem_signed == 0,
+               "LWU is a zero-extending word load");
+    rep_.Check(lwu.uses_alu && lwu.alu_op == ALU_ADD && lwu.uses_rs1 && lwu.uses_imm,
+               "LWU computes rs1 + imm in the ALU");
+    if (!Apply(Word(OP_LOAD, 7, 1, 2, 0, 0x00))) return;
+    ExpectIllegalState("reserved: LOAD funct3 7");
     // MISC-MEM funct3 010..111: only fence (000) and fence.i (001) exist.
     for (uint32_t f3 = 2; f3 < 8; ++f3) {
       if (!Apply(Word(OP_MISC_MEM, f3, 1, 2, 3, 0x0F))) return;
@@ -1350,6 +1393,7 @@ class Bench {
     r.is_ecall = static_cast<uint8_t>(top_->o_is_ecall);
     r.is_ebreak = static_cast<uint8_t>(top_->o_is_ebreak);
     r.is_mret = static_cast<uint8_t>(top_->o_is_mret);
+    r.is_wfi = static_cast<uint8_t>(top_->o_is_wfi);
     r.csr_op = static_cast<uint8_t>(top_->o_csr_op);
     r.csr_addr = static_cast<uint16_t>(top_->o_csr_addr);
     r.csr_writes = static_cast<uint8_t>(top_->o_csr_writes);
@@ -1369,10 +1413,13 @@ class Bench {
   // Without this, a typo in one of the break-out assignments would either hide
   // a decoder bug or invent one.
   bool CheckBreakout(const Ref& r, const std::string& where) {
-    // 134 bits: 2 + 3 + 15 + 64 + 6 + 7 + 8 + 2 + 5 + 4 + 12 + 3. The first
+    // 135 bits: 2 + 3 + 15 + 64 + 6 + 7 + 8 + 2 + 5 + 5 + 12 + 3. The first
     // field pushed lands at the most significant end, because that is how a
-    // packed struct is laid out.
-    const int kTotalBits = 134;
+    // packed struct is laid out. `is_wfi` is one of the five system bits: the
+    // decoder leaves it 0 for every encoding (the core's front end recognises
+    // WFI), and it is carried here so the break-out accounting covers every
+    // field the package declares.
+    const int kTotalBits = 135;
     uint64_t chunk[3] = {0, 0, 0};
     int nbits = 0;
     // Fields are laid out MSB first, and inside a field the value's bit 0 sits
@@ -1398,23 +1445,23 @@ class Bench {
     push(r.is_muldiv, 1);   push(r.md_op, 3);      push(r.md_signed, 1);
     push(r.md_w, 1);
     push(r.is_system, 1);   push(r.is_ecall, 1);   push(r.is_ebreak, 1);
-    push(r.is_mret, 1);
+    push(r.is_mret, 1);     push(r.is_wfi, 1);
     push(r.csr_op, 2);      push(r.csr_addr, 12);
     push(r.csr_writes, 1);  push(r.csr_reads, 1); push(r.csr_imm_form, 1);
     rep_.Check(nbits == kTotalBits,
                "decode_ctl_t is " + std::to_string(kTotalBits) +
                    " bits wide and every one is accounted for");
 
-    // 134 bits is five 32-bit Verilator words, not three 64-bit ones.
+    // 135 bits is five 32-bit Verilator words, not three 64-bit ones.
     const uint64_t w0 = top_->o_ctl_bits[0], w1 = top_->o_ctl_bits[1];
     const uint64_t w2 = top_->o_ctl_bits[2], w3 = top_->o_ctl_bits[3];
     const uint64_t w4 = top_->o_ctl_bits[4];
     const uint64_t dut_lo = w0 | (w1 << 32);
     const uint64_t dut_mid = w2 | (w3 << 32);
-    const uint64_t dut_top = w4 & 0x3Full;
+    const uint64_t dut_top = w4 & 0x7Full;
     const uint64_t my_lo = chunk[0];
     const uint64_t my_mid = chunk[1];
-    const uint64_t my_top = chunk[2] & 0x3Full;
+    const uint64_t my_top = chunk[2] & 0x7Full;
     if (my_lo == dut_lo && my_mid == dut_mid && my_top == dut_top) return true;
     rep_.Mismatch(where + " (testbench break-out vs decode_ctl_t)",
                   mosaic::Hex(my_lo) + "|" + mosaic::Hex(my_mid) + "|" +

@@ -68,6 +68,7 @@ module mosaic_decoder_tb (
     output logic         o_is_ecall,
     output logic         o_is_ebreak,
     output logic         o_is_mret,
+    output logic         o_is_wfi,
     output logic [1:0]   o_csr_op,
     output logic [11:0]  o_csr_addr,
     output logic         o_csr_writes,
@@ -78,7 +79,7 @@ module mosaic_decoder_tb (
     // ports above carry exactly the bits of decode_ctl_t and that none of the
     // break-out assignments was fat-fingered. Field order is the declaration
     // order of mosaic_pkg::decode_ctl_t, with `valid` at the MSB.
-    output logic [133:0] o_ctl_bits
+    output logic [134:0] o_ctl_bits
 );
   mosaic_pkg::decode_ctl_t ctl;
 
@@ -120,6 +121,7 @@ module mosaic_decoder_tb (
   assign o_is_ecall     = ctl.is_ecall;
   assign o_is_ebreak    = ctl.is_ebreak;
   assign o_is_mret      = ctl.is_mret;
+  assign o_is_wfi       = ctl.is_wfi;
   assign o_csr_op       = ctl.csr_op;
   assign o_csr_addr     = ctl.csr_addr;
   assign o_csr_writes   = ctl.csr_writes;

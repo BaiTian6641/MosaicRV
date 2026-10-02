@@ -1,15 +1,15 @@
 {
   "schema_version": 1,
-  "case": "core.trap_csr_program",
+  "case": "core.event_payload",
   "verdict": "PASS",
-  "detail": "checks=208 comparisons=17144009 cycles=2696515 retires=428642 traps=26 seed=1",
+  "detail": "checks=27 comparisons=484 seed=1",
   "seed": 1,
   "max_cycles": 4000000,
-  "checks": 209,
+  "checks": 28,
   "failures": 0,
   "image": "",
   "expect": "",
   "tool": "Verilator 5.052 2026-09-05",
-  "timestamp": "2026-10-02T00:35:04Z",
+  "timestamp": "2026-10-02T00:37:27Z",
   "first_mismatch": ""
 }

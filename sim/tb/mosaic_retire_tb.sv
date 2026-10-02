@@ -150,6 +150,14 @@ module mosaic_retire_tb (
     input  logic [TB_RET_WIDTH*64-1:0] pay_exc_cause_i,
     input  logic [TB_RET_WIDTH*64-1:0] pay_exc_tval_i,
 
+    // The trap the *system unit* resolves at the head (ecall/ebreak/illegal
+    // CSR). The integrated core drives these; this wrapper exposes them so the
+    // unit case can leave them at zero (its own stimulus is the buffer's
+    // exception bit) and nothing here invents a second trap decision.
+    input  logic        sys_trap_valid_i,
+    input  logic [63:0] sys_trap_cause_i,
+    input  logic [63:0] sys_trap_tval_i,
+
     // recovery's one-word interface to this unit, plus the CSR read port
     input  logic        flush_valid_i,
     input  logic        csr_rd_valid_i,
@@ -536,6 +544,10 @@ module mosaic_retire_tb (
       .pay_store_size     (pay_store_size),
       .pay_exc_cause      (pay_exc_cause),
       .pay_exc_tval       (pay_exc_tval),
+
+      .sys_trap_valid     (sys_trap_valid_i),
+      .sys_trap_cause     (sys_trap_cause_i),
+      .sys_trap_tval      (sys_trap_tval_i),
 
       .flush_valid        (flush_valid_i),
 

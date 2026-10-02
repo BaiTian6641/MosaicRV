@@ -617,6 +617,14 @@
       "finding": "the de-facto host record has no microarchitectural identity, no cycle and no CSR effect, and no message for a memory visibility, so a differential runner built on it alone cannot attribute an effect to a reorder-buffer slot, cannot locate a failure in time, and cannot compare Zicsr.",
       "decided_by": "docs/validation-plan.md#3 CSR group (the CSR list is part of the canonical event) and the V-008 card's requirement that every architectural effect locate to one hart and one instruction.",
       "verdict": "the schema is right: the host record must be replaced by, or migrated to, the canonical record and the codec in sim/common/event_codec.*. The migration of sim/harness/tb_harness.cpp and sim/common/event_tap.* is a declared follow-up, not part of this freeze."
+    },
+    {
+      "id": "F-6",
+      "field": "mem_is_store, mem_addr, mem_data, mem_size, csr_write_valid, csr_addr, csr_value",
+      "source": "rtl/core/mosaic_core.sv, the retire instance's payload bus",
+      "finding": "the retire unit declares and drives every one of these per-lane fields, but the integrated core tied pay_is_store, pay_store_addr, pay_store_data, pay_store_size, pay_csr_we, pay_csr_addr and pay_csr_value to constant zero, so through the integrated path ev_store, ev_store_size and ev_csr_* were always zero even though the frozen schema declares them: the fields had a producer in the RTL and no producer in the machine. Found and reported by V-013 (results/reports/V-013-retire.md section 6.2), which measured 0 of 11 retiring stores carrying the flag while the store queue authorised exactly those 11.",
+      "decided_by": "docs/validation-plan.md#3 Memory operation and CSR groups: a committed store's address, data and size and a retiring CSR write's address and value are architectural effects of that instruction, so an event that cannot name them cannot be compared against a reference model that applies them.",
+      "verdict": "the schema is right and the integration was incomplete: the payload is now wired from the store queue (the entry the queue authorises, address = base + imm, the sum the endpoint's adder forms) and from the CSR file's own read-back in the retirement cycle, and CASE=core.event_payload compares the fields one by one against a second implementation of the ISA's addressing and Zicsr rules. F-4 is unaffected: a store's *retirement* (kind RETIRE, mem_is_store 1) is now produced, and the separate MEM_VISIBLE record still has no DUT-side producer."
     }
   ]
 }
