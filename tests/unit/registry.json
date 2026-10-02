@@ -1920,6 +1920,68 @@
    ],
    "max_cycles": 4000000,
    "seed": 1
+  },
+  "rvv.integer_mask_permute": {
+   "task": "I-054",
+   "top": "mosaic_vec_tb",
+   "rtl": [
+    "rtl/core/mosaic_pkg.sv",
+    "rtl/core/mosaic_vec_desc.sv",
+    "rtl/core/mosaic_vec_cfg.sv",
+    "rtl/core/mosaic_vrf.sv",
+    "rtl/core/mosaic_vec_alu.sv"
+   ],
+   "sv": [
+    "sim/tb/mosaic_vec_tb.sv"
+   ],
+   "cpp": [
+    "sim/unit/tb_vec.cpp"
+   ],
+   "max_cycles": 200000,
+   "seed": 1,
+   "pending": true
+  },
+  "perf.equal_resource_compare": {
+   "task": "I-084",
+   "top": "mosaic_core_tb",
+   "rtl": [
+    "rtl/core/mosaic_pkg.sv",
+    "rtl/core/mosaic_uop_pkg.sv",
+    "rtl/core/mosaic_alu.sv",
+    "rtl/core/mosaic_branch_cmp.sv",
+    "rtl/core/mosaic_branch_target.sv",
+    "rtl/core/mosaic_predictor.sv",
+    "rtl/core/mosaic_fetch.sv",
+    "rtl/core/mosaic_decoder.sv",
+    "rtl/core/mosaic_rename.sv",
+    "rtl/core/mosaic_rob.sv",
+    "rtl/core/mosaic_iq.sv",
+    "rtl/core/mosaic_prf.sv",
+    "rtl/core/mosaic_wb_arbiter.sv",
+    "rtl/core/mosaic_macro_desc.sv",
+    "rtl/core/mosaic_dispatch.sv",
+    "rtl/core/mosaic_steering.sv",
+    "rtl/core/mosaic_cluster.sv",
+    "rtl/core/mosaic_cluster_bypass.sv",
+    "rtl/core/mosaic_redirect_arb.sv",
+    "rtl/core/mosaic_muldiv.sv",
+    "rtl/core/mosaic_retire.sv",
+    "rtl/core/mosaic_core.sv",
+    "rtl/core/mosaic_fpu.sv",
+    "rtl/core/mosaic_fp_unit.sv"
+   ],
+   "sv": [
+    "sim/tb/mosaic_core_tb.sv"
+   ],
+   "cpp": [
+    "sim/unit/tb_core_perf.cpp",
+    "sim/common/elf_loader.cpp",
+    "sim/common/memory_model.cpp",
+    "sim/common/event_tap.cpp"
+   ],
+   "max_cycles": 4000000,
+   "seed": 1,
+   "pending": true
   }
  }
 }
