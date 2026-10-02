@@ -2494,3 +2494,42 @@ with I-084's locality comparison, vector register renaming and real parallel lan
 forms and the core-level `vstart` routing test, multi-hart/cohort (I-064..I-075), the measurement and
 release gates (I-076..I-086), the RVA23S64 mandatory matrix (I-092..I-098), and the `tb_vec.cpp`
 reset-traffic follow-up.
+
+---
+
+## 2026-10-01 — the memory path is complete, with an honest negative in it (78 delivered)
+
+**I-063 closes the memory-path block** (I-033..I-038 and I-060..I-063 are all delivered): an ordered
+endpoint, a store queue with commit authorisation, a load queue with byte forwarding, MMIO, L1 caches in
+the fetch and memory paths, an MSHR, the SoC with real devices and defined error mapping, the vector
+packetizer with element-granular faults, line coalescing (94 → 28 requests), a criticality-aware
+scheduler with a checked 212-cycle bound, a clean-copy locality buffer with eight enumerated
+invalidation sources, and now a bounded prefetcher whose harm is bounded by construction.
+
+**The prefetch package did the two things this project keeps insisting on.** First, it met the card's
+sequencing rule *literally*: the workload's PC/stride/reuse characteristics were recorded with
+prediction **disabled** — 18 accesses, 3 new PCs, 15 repeats, 8 stride matches, 6 reuse hits, 0 issued
+— before the predictor was enabled at all, so its expected benefit is a measurement rather than a guess
+with a state machine attached. Second, it reported an **honest negative**: on p0, whose RAM is not
+cacheable, 22 prefetches were issued, **0 were useful and 20 were pure pollution** — and the record says
+so. The histogram **conserves** on both profiles (13 = 5 useful + 2 useless + 1 late + 1 cancelled + 4
+in-flight on p1), which is what makes it a report rather than a decoration.
+
+Both halves of the card's harm bound are controlled: a wrong prediction can never fault or touch a
+device (the prefetch passes the *same* permission, alias and cacheability checks as a demand access),
+and prediction can never become the only source of correctness (the on/off architectural identity is
+checked, and one mutant changes a result while another lets a cancelled prefetch land anyway — the same
+rule the LLB proves for cancelled accesses). **No energy claim is made**, because the card forbids
+inferring one from a hit rate; only the traffic delta is measured. Rexpressed as the project's own
+habit: the package states what its numbers are a measurement *of*.
+
+**State**: 78 ledger entries delivered, 16 capabilities advertised, ACT4 127/127, `make check` and
+every gate green, lint 62/62 on both profiles, exclusion ledger 18 open / 36 covered. **Remaining for
+the goal is now dominated by two things**: (1) *integration* — the LLB, the prefetcher and the QoS
+scheduler are all module-level, the caches and the vector engine are in the core, and I-084's locality
+and fusion comparison needs the first group wired in before it can measure anything; and (2) *the
+big remaining blocks* — vector register renaming and real parallel lanes (which is what would turn the
+lane broker's protocol into a measured aggregation benefit), multi-hart/cohort/pod (I-064..I-075), the
+measurement and release gates (I-076..I-086), the RVA23S64 mandatory matrix (I-092..I-098), plus the
+smaller open items: the masked mask-prefix forms, the core-level `vstart` illegal routing test, and the
+`tb_vec.cpp` reset-traffic follow-up.
