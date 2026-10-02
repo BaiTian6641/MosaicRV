@@ -2442,3 +2442,55 @@ locality into the core along with the locality half of I-084, vector register re
 parallel lanes, the `vmsbf`/`vmsif` class of follow-up in the packet engine's masked forms, multi-hart
 and cohort (I-064..I-075), the measurement and release gates (I-076..I-086), the RVA23S64 mandatory
 matrix (I-092..I-098), and the `tb_vec.cpp` reset-traffic follow-up.
+
+---
+
+## 2026-10-01 — a scheduler with a bound it checks, and a probe promoted to a check (77 delivered)
+
+**I-062 (criticality-aware memory arbitration) passes with the fail mode provably reached.** Three classes
+derived from the request's own identity — SCALAR with a reservation floor of 4 grants in a window of 8,
+PREFETCH as a placeholder bounded to 2, BULK with a ceiling of 2 — and the three mechanisms the card names
+each separately controlled: a windowed reservation whose measured share equals the quota in every phase, a
+bulk ceiling that normal grants never exceed, and age-based escape as the **only** over-quota path. The
+service assumption meets the standard I-030 set in full: written into the header, exposed with a sticky
+violation flag, checked every cycle, asserted in *both* directions by a phase that holds the port not-ready
+for seven cycles, and a **212-cycle bound computed from the geometry and checked against every measured
+wait**. p50/p99 is measured, not asserted: a scalar dependent chain against 100% bulk gives 2/6 for scalar
+against 27/27 for bulk; under saturation 11/32 against 23/33.
+
+**The stimulus provably reaches the card's fail mode**, which is what makes the pass mean something: with
+the policy off the scalar chain advances **zero links over 800 cycles** while bulk is served 400 times, and
+an independent naive model leaves SCALAR and PREFETCH stuck while BULK takes everything. And priority never
+changes a result: a 200-request stream replayed off and on delivers all 200 payloads identical with the
+*service order* differing — the order changes, the data does not.
+
+The package also declined a decorative reuse in a way worth recording: `mosaic_arbiter.sv` (I-030) is in
+its compiled source list but **not instantiated**, because that arbiter's geometry and its
+immediate-exhaustion escape make the very starvation this card must demonstrate impossible. It reused
+I-030's *model* — the windowed quota, the exactness argument, the checked assumption, the bound shape — and
+said so in the report instead of instantiating a second service model for appearance.
+
+**And the defect the coalescing lane had recorded rather than patched is settled.** The verdict: an
+in-flight uncoalesced load must be written back or discarded **depending on the stop kind**, and the
+existing behaviour was right for three of the four kinds and wrong for one — the **precise-interrupt
+boundary stop**, where the abort signal gated the writeback push, so a load whose element had *already
+committed* was dropped and that element was lost for ever. Fixed, with the rule stated per kind and the
+already-correct kinds now *proven by construction* rather than left implicit. Three mutants guard it,
+including the **mirror** error (writing back an element that will be re-executed, leaving a stale value a
+later restart overwrites — the kind that surfaces much later as a wrong result).
+
+**The best structural outcome of the stretch**: the coalescing lane's temporary probe is now a **permanent
+check** — `coalesce.element_faults` with `STOP_DISCARD` exits 1 — so a finding made in one package became a
+regression test in another, which is what the project wants to happen to every finding rather than letting
+it live only in a transcript. One honest limitation is recorded in the RTL header rather than left as a
+trap: **no redirect/cancel input exists on this unit**, so a true pipeline squash is unreachable, and the
+abort-only path would write back — which would be *wrong* for a squash. Whoever wires a squash in will read
+that sentence before doing it.
+
+**State**: 77 ledger entries delivered, 16 capabilities advertised, ACT4 127/127, `make check` and every
+gate green, lint 61/61 on both profiles, exclusion ledger 18 open / 36 covered. Remaining for the goal:
+I-063 (reuse predictor and prefetch), wiring the LLB, the caches and the QoS scheduler into the core along
+with I-084's locality comparison, vector register renaming and real parallel lanes, the masked mask-prefix
+forms and the core-level `vstart` routing test, multi-hart/cohort (I-064..I-075), the measurement and
+release gates (I-076..I-086), the RVA23S64 mandatory matrix (I-092..I-098), and the `tb_vec.cpp`
+reset-traffic follow-up.
