@@ -2300,6 +2300,7 @@ module mosaic_core (
             // OPIVV (000), OPIVX (100), OPIVI (011). The OPFVV/OPMVV/OPFVF/
             // OPMVX forms are vector FP and mask-to-mask, which this
             // integration does not wire.
+            vec_kind_c   = 3'd1;
             vec_class_c  = 5'd0;   // VOP_IVV
             vec_mask_en_c = !fetch_out_bits[25];
             vec_form_c   = (vec_f3_c == 3'b000) ? 2'd0
@@ -4055,7 +4056,7 @@ module mosaic_core (
   assign vec_lsu_exec_valid = vec_launch_unit && vec_is_mem;
   assign vec_rst_exec_valid = vec_launch_unit && vec_is_mem;
   assign vec_desc_alloc_valid = vec_launch_unit;
-  assign vec_desc_release     = vec_macro_leave;
+  assign vec_desc_release     = vec_macro_leave && vec_desc_valid;
 
   // The scalar operand of an arithmetic macro: x[rs1] for the .vx form, the
   // immediate for .vi, unused for .vv.

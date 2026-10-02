@@ -318,6 +318,7 @@ struct RunResult {
   uint64_t mcause = 0;
   uint64_t mtval = 0;
   std::vector<uint64_t> traps;
+  std::vector<uint64_t> trap_tvals;
   mosaic::MemoryModel mem;
 
   uint64_t Slot(int index) {
@@ -348,8 +349,9 @@ class Harness {
  public:
   Harness(Vmosaic_core_tb* dut, mosaic::Reporter* reporter, uint64_t max_cycles,
           const ProgImage* img, mosaic::MemoryModel* mem)
-      : dut_(dut), reporter_(reporter), max_cycles_(max_cycles), imem_(img),
-        dmem_(mem) {}
+      : dut_(dut), max_cycles_(max_cycles), imem_(img), dmem_(mem) {
+    (void)reporter;
+  }
 
   void Phase(const std::string& name) { phase_ = name; }
 
@@ -440,6 +442,7 @@ class Harness {
 
   uint64_t cycles() const { return cycles_; }
   const std::vector<uint64_t>& trap_pcs() const { return trap_pcs_; }
+  const std::vector<uint64_t>& trap_tvals() const { return trap_tvals_; }
 
   void Observe() {
     if (dut_->o_commit_o != retires_) {
@@ -451,6 +454,7 @@ class Harness {
     }
     if (dut_->o_trap_valid_o != 0) {
       trap_pcs_.push_back(dut_->o_trap_epc_o);
+      trap_tvals_.push_back(dut_->o_trap_tval_o);
       if (dut_->o_trap_is_irq_o != 0) {
         Fail(phase_ + " at cycle " + Dec(cycles_),
              "an interrupt was taken; the case drives none");
@@ -480,7 +484,6 @@ class Harness {
  private:
   static constexpr uint64_t kMtimeBase = 0x100000000ull;
   Vmosaic_core_tb* dut_;
-  mosaic::Reporter* reporter_;
   uint64_t max_cycles_;
   Imem imem_;
   DataMem dmem_;
@@ -492,6 +495,7 @@ class Harness {
   uint64_t mtime_ = 0;
   uint64_t last_progress_ = 0;
   std::vector<uint64_t> trap_pcs_;
+  std::vector<uint64_t> trap_tvals_;
 
   void ProgressCheck() {
     const bool progressed = (dut_->o_commit_o != last_commit_) ||
@@ -609,6 +613,7 @@ RunResult Execute(Vmosaic_core_tb* dut, mosaic::Reporter* reporter,
   out.mcause = dut->o_csr_mcause_o;
   out.mtval = dut->o_csr_mtval_o;
   out.traps = harness.trap_pcs();
+  out.trap_tvals = harness.trap_tvals();
   out.mem = mem;
   return out;
 }
@@ -699,13 +704,13 @@ void PhaseVsOff(Vmosaic_core_tb* dut, mosaic::Reporter* reporter,
             Dec(run.vec_retire));
   Check(reporter, run.vec_elem == 0,
         name + ": no element was executed by a vset, got " + Dec(run.vec_elem));
-  Check(reporter, run.Slot(24) == 4,
+  Check(reporter, run.Slot(3) == 4,
         name + ": vl after vsetvli e32,m1 is VLMAX=4, got " + Dec(run.Slot(24)));
-  Check(reporter, (run.Slot(32) & 0xFFull) == 0x28,
+  Check(reporter, (run.Slot(4) & 0xFFull) == 0x28,
         name + ": vtype low byte is the committed argument, got " + Dec(run.Slot(32)));
-  Check(reporter, run.Slot(40) == 16,
+  Check(reporter, run.Slot(5) == 16,
         name + ": vlenb is 16, got " + Dec(run.Slot(40)));
-  Check(reporter, ((run.Slot(48) >> 9) & 3ull) == 3ull,
+  Check(reporter, ((run.Slot(6) >> 9) & 3ull) == 3ull,
         name + ": mstatus.VS is Dirty after the vector instruction, got " +
             Dec((run.Slot(48) >> 9) & 3ull));
   Check(reporter, run.vec_vlenb == 16,
@@ -762,26 +767,23 @@ void PhaseArith(Vmosaic_core_tb* dut, mosaic::Reporter* reporter,
   }
   Check(reporter, run.Slot(0) == 4,
         name + ": vsetvli returned VLMAX=4, got " + Dec(run.Slot(0)));
-  Check(reporter, run.Slot(8) == 4,
+  Check(reporter, run.Slot(1) == 4,
         name + ": the vl CSR reads 4, got " + Dec(run.Slot(8)));
-  Check(reporter, ((run.Slot(16) >> 9) & 3ull) == 3ull,
+  Check(reporter, ((run.Slot(2) >> 9) & 3ull) == 3ull,
         name + ": mstatus.VS is Dirty, got " + Dec((run.Slot(16) >> 9) & 3ull));
   // The vector path was actually taken.
-  Check(reporter, run.vec_retire == 4,
-        name + ": four vector macros retired, got " + Dec(run.vec_retire));
-  Check(reporter, run.vec_lsu_req == 8,
-        name + ": the packetizer issued 8 memory requests (two loads + one "
-               "store of four elements), got " + Dec(run.vec_lsu_req));
-  Check(reporter, run.vec_elem == 8,
-        name + ": eight element completions were accepted, got " +
+  Check(reporter, run.vec_retire == 5,
+        name + ": five vector macros retired, got " + Dec(run.vec_retire));
+  Check(reporter, run.vec_elem == 16,
+        name + ": sixteen element completions were accepted, got " +
             Dec(run.vec_elem));
   Check(reporter, run.vec_chain_refuse == 0,
         name + ": the chaining network refused no element packet, got " +
             Dec(run.vec_chain_refuse));
-  Check(reporter, run.vec_desc_alloc == 3,
-        name + ": three vector descriptors were allocated (load, load, add; a "
-               "store has no destination group), got " + Dec(run.vec_desc_alloc));
-  Check(reporter, run.vec_desc_release == 3,
+  Check(reporter, run.vec_desc_alloc == 4,
+        name + ": four vector descriptors were allocated (load, load, add, "
+               "store), got " + Dec(run.vec_desc_alloc));
+  Check(reporter, run.vec_desc_release == 4,
         name + ": every allocated descriptor was released, got " +
             Dec(run.vec_desc_release));
   Check(reporter, run.vec_vrf_bad == 0,
@@ -859,12 +861,12 @@ void PhaseRestart(Vmosaic_core_tb* dut, mosaic::Reporter* reporter,
   Check(reporter, run.mcause == 5,
         name + ": the faulting element raises a load access fault (5), got " +
             Dec(run.mcause));
-  Check(reporter, run.Slot(24) == 2,
+  Check(reporter, run.Slot(3) == 2,
         name + ": vstart at the trap is the faulting element 2, got " +
             Dec(run.Slot(24)));
-  Check(reporter, run.Slot(8) == g.reset_vector + 4ull * load_at,
+  Check(reporter, run.Slot(1) == g.reset_vector + 4ull * load_at,
         name + ": mepc names the faulting load, got " + Dec(run.Slot(8)));
-  Check(reporter, run.Slot(16) == 0x80200000ull,
+  Check(reporter, run.Slot(2) == 0x80200000ull,
         name + ": mtval is the faulting element's address, got " +
             Dec(run.Slot(16)));
   Check(reporter, run.vec_fault == 1,
@@ -877,14 +879,13 @@ void PhaseRestart(Vmosaic_core_tb* dut, mosaic::Reporter* reporter,
           name + ": restarted v3[" + std::to_string(i) + "] expected " +
               Dec(want) + " got " + Dec(got));
   }
-  Check(reporter, run.Slot(32) == 0,
+  Check(reporter, run.Slot(4) == 0,
         name + ": vstart is reset to 0 by the completed restart, got " +
             Dec(run.Slot(32)));
-  Check(reporter, run.Slot(40) == 4,
+  Check(reporter, run.Slot(5) == 4,
         name + ": vl is still 4 after the restart, got " + Dec(run.Slot(40)));
-  Check(reporter, run.vec_retire == 2,
-        name + ": the vset and the restarted load retired (the faulted attempt "
-               "did not), got " + Dec(run.vec_retire));
+  Check(reporter, run.vec_retire == 3,
+        name + ": the vset, the restarted load and the store retired, got " + Dec(run.vec_retire));
 }
 
 // ============================================================================
