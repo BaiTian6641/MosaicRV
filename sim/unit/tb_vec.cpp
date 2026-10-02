@@ -1547,7 +1547,7 @@ enum : int {
 };
 const uint64_t kAllCaps = (1ull << VF_COUNT) - 1ull;
 
-constexpr int kFormVv = 0, kFormVx = 1, kFormVi = 2;
+constexpr int kFormVv = 0, kFormVx = 1;
 
 const char* VecFamilyName(int f) {
   switch (f) {
@@ -1895,9 +1895,6 @@ struct VecObs {
   uint64_t alu_acc = 0;
   bool trace_valid = false;
   int trace_elem = 0;
-  int alu_state = 0, alu_step = 0;
-  bool alu_rd_valid = false, alu_wr_valid = false;
-  int alu_rd_base = 0, alu_rd_elem = 0, alu_rd_sew = 0, alu_rd_lmul = 0;
   int src_rd_ctr = 0;
 
   uint64_t el_result = 0;
@@ -1981,14 +1978,6 @@ class Vec {
     o.alu_elems = static_cast<int>(d_->alu_elems_o);
     o.alu_cur = static_cast<int>(d_->alu_cur_o);
     o.alu_acc = d_->alu_acc_o;
-    o.alu_rd_valid = d_->alu_rd_valid_o != 0;
-    o.alu_rd_base = static_cast<int>(d_->alu_rd_base_o);
-    o.alu_rd_elem = static_cast<int>(d_->alu_rd_elem_o);
-    o.alu_rd_sew = static_cast<int>(d_->alu_rd_sew_o);
-    o.alu_rd_lmul = Sgn4(static_cast<int>(d_->alu_rd_lmul_o));
-    o.alu_wr_valid = d_->alu_wr_valid_o != 0;
-    o.alu_state = static_cast<int>(d_->alu_state_o);
-    o.alu_step = static_cast<int>(d_->alu_step_o);
     o.trace_valid = d_->alu_trace_valid_o != 0;
     o.trace_elem = static_cast<int>(d_->alu_trace_elem_o);
     o.src_rd_ctr = static_cast<int>(d_->alu_src_rd_ctr_o);
@@ -2073,22 +2062,15 @@ class Vec {
 
     VecStim idle;
     idle.mem_owner = false;
+    // The capability mask is read while the packet is in flight, so the idle
+    // stimulus must carry the same one as the launch.
+    idle.alu_caps = caps;
     int guard = 0;
     while (!o.alu_done && ++guard < 40000) {
       if (trace != nullptr && o.trace_valid) trace->push_back(o.trace_elem);
       o = Cycle(idle);
     }
     if (trace != nullptr && o.trace_valid) trace->push_back(o.trace_elem);
-    if (guard >= 40000 && getenv("MOSAIC_VEC_DEBUG") != nullptr) {
-      static int shown = 0;
-      if (shown < 6) {
-        std::fprintf(stderr, "GUARD fam=%d cur=%d st=%d step=%d rv=%d rb=%d re=%d rsw=%d rlm=%d bad=%d rdg=%d\n",
-                     family, o.alu_cur, o.alu_state, o.alu_step, (int)o.alu_rd_valid,
-                     o.alu_rd_base, o.alu_rd_elem, o.alu_rd_sew, o.alu_rd_lmul,
-                     o.rd_bad_ctr, (int)o.mem_rd_gnt);
-        ++shown;
-      }
-    }
     return o;
   }
 
@@ -2126,7 +2108,6 @@ int VlmulOfExp(int e) {
   }
 }
 
-const int kSewLogs[4] = {3, 4, 5, 6};
 const int kLmulExps[7] = {-3, -2, -1, 0, 1, 2, 3};
 
 int VlmaxOf2(int sew_l, int lmul_e) {
@@ -2147,6 +2128,16 @@ void FamilyWidths(int fam, int sew_l, int lmul_e, int* s1w, int* s1l, int* s2w,
   if (fam == VF_COMPRESS) { *s1w = 3; *s1l = 0; }
   if (fam == VF_NARROW) { *s2w = sew_l + 1; *s2l = lmul_e + 1; }
   if (fam == VF_WIDE || fam == VF_MULW || fam == VF_REDWIDE) { *dw = sew_l + 1; *dl = lmul_e + 1; }
+}
+
+// A widening or narrowing form doubles the effective LMUL, so LMUL=8 would
+// leave the [1/8, 8] range the descriptor admits. Those cells are not in
+// scope, exactly as the legality matrix has them.
+bool FamilySupportsLmul(int fam, int lmul_e) {
+  if (fam == VF_WIDE || fam == VF_MULW || fam == VF_NARROW || fam == VF_REDWIDE) {
+    return lmul_e <= 2;
+  }
+  return true;
 }
 
 bool FamilySupportsSew(int fam, int sew) {
@@ -2365,7 +2356,7 @@ void PhasePermuteLane(Cfg* cfg, Vec* vec, Reporter* rep) {
           VecObs od = vec->Cycle(d);
           int exp_d = i + off;
           bool exp_da = exp_d < vlmax;
-          rep->Check((od.el_rd2 == 0 || exp_da) && ((od.el_access != 0) == exp_da),
+          rep->Check(((!exp_da) || (od.el_rd2 == exp_d)) && ((od.el_access != 0) == exp_da),
                      "permute-order slidedown off" + Dec(off) + " lmul" + Dec(lmul_e) +
                          " i" + Dec(i) + ": access " + Dec(od.el_access) + " expected " +
                          Dec(exp_da));
@@ -2612,12 +2603,18 @@ void ComputeExpected(int fam, int op, int form, int sew_l, int lmul_e, int vstar
   }
 
   if (fam == VF_REDUCE || fam == VF_REDWIDE) {
+    // only element 0 is written; the rest of the destination group is
+    // undisturbed
+    for (int i = 0; i < n; ++i) {
+      ev->at(static_cast<size_t>(i)) = HostGet(vf, L.vd, i, dw, dl);
+    }
     int acc_w = (fam == VF_REDWIDE) ? 2 * sew : sew;
     uint64_t acc = HostGet(vf, L.vs1, 0, sew_l, lmul_e);
     if (fam == VF_REDWIDE) {
       acc = (op == 0) ? (acc & MaskW(sew)) : static_cast<uint64_t>(SxW(acc, sew)) & MaskW(acc_w);
     }
     for (int i = vstart; i < vl; ++i) {
+      if (mask_en && !MaskBit(vf, i)) continue;   // masked-off elements are not read
       uint64_t src = HostGet(vf, L.vs2, i, s2w, s2l);
       ElemVal e = OracleElem(fam, op, sew, kFormVv, src, 0, 0, acc, vxrm, i, false);
       acc = e.result & MaskW(acc_w);
@@ -2642,8 +2639,12 @@ void ComputeExpected(int fam, int op, int form, int sew_l, int lmul_e, int vstar
     } else if (!mbit) {
       if (vma) { dval = ones; dbit = true; }
     } else {
-      uint64_t a = HostGet(vf, L.vs2, i, s2w, s2l);
-      uint64_t b = (form == kFormVv) ? HostGet(vf, L.vs1, i, s1w, s1l) : scalar;
+      uint64_t a = HostGet(vf, L.vs2,
+                           (fam == VF_MASKLOG || fam == VF_MASKPFX) ? (i / 8) : i,
+                           s2w, s2l);
+      uint64_t b = (form == kFormVv)
+                       ? HostGet(vf, L.vs1, (fam == VF_MASKLOG) ? (i / 8) : i, s1w, s1l)
+                       : scalar;
       if (fam == VF_CMP || fam == VF_MASKLOG) {
         ElemVal e = OracleElem(fam, op, sew, form, a, b, scalar, 0, vxrm, i, false);
         dbit = e.mres;
@@ -2695,12 +2696,14 @@ bool MaskDstFamily(int fam) {
 void PhaseCoverage(Cfg* cfg, Vec* vec, Reporter* rep, Coverage* cov) {
   int expected_cells = 0;
   for (int fam = 0; fam < VF_COUNT; ++fam) {
-    for (int sew_l = 0; sew_l < 4; ++sew_l) {
-      int sew = 8 << sew_l;
+    for (int si = 0; si < 4; ++si) {
+      int sew_l = 3 + si;
+      int sew = 1 << sew_l;
       if (!FamilySupportsSew(fam, sew)) continue;
       for (int li = 0; li < 7; ++li) {
         int lmul_e = kLmulExps[li];
         if (lmul_e + 6 < sew_l) continue;
+        if (!FamilySupportsLmul(fam, lmul_e)) continue;
         int vlmax = VlmaxOf2(sew_l, lmul_e);
         if (vlmax == 0) continue;
         ++expected_cells;
@@ -2716,12 +2719,27 @@ void PhaseCoverage(Cfg* cfg, Vec* vec, Reporter* rep, Coverage* cov) {
         ConfigureVec(cfg, sew_l, VlmulOfExp(lmul_e), 0, 0, static_cast<uint64_t>(vl));
         (void)CsrWrite(cfg, kCsrVxrm, 2);
         HostVrf vf;
-        int np = vlmax < (vl + 4) ? vlmax : (vl + 4);
-        if (mask_en) PrimeMaskReg(vec, &vf, 0, np, fam * 7 + li + 1);
-        PrimeGroup(vec, &vf, L.vs2, np, sew_l, lmul_e, fam * 31 + li + 3);
-        PrimeGroup(vec, &vf, L.vs1, np, sew_l, lmul_e, fam * 17 + li + 5);
+        // a permute may read a source element anywhere below VLMAX (and a
+        // slide a few beyond it), so the whole source group must be primed
+        // rather than only the active prefix.
+        int np;
+        if (fam == VF_GATHER || fam == VF_SLIDE) {
+          np = vlmax + 8;
+        } else {
+          np = vl + 4;
+        }
+        if (np > 128) np = 128;
         int nd = vlmax < 16 ? vlmax : 16;
-        PrimeGroup(vec, &vf, L.vd, nd, sew_l, lmul_e, fam * 11 + li + 7);
+        int f1w, f1l, f2w, f2l, fdw, fdl;
+        FamilyWidths(fam, sew_l, lmul_e, &f1w, &f1l, &f2w, &f2l, &fdw, &fdl);
+        if (mask_en) PrimeMaskReg(vec, &vf, 0, np, fam * 7 + li + 1);
+        PrimeGroup(vec, &vf, L.vs2, np, f2w, f2l, fam * 31 + li + 3);
+        PrimeGroup(vec, &vf, L.vs1, np, f1w, f1l, fam * 17 + li + 5);
+        if (MaskDstFamily(fam)) {
+          PrimeMaskReg(vec, &vf, L.vd, nd, fam * 11 + li + 7);
+        } else {
+          PrimeGroup(vec, &vf, L.vd, nd, fdw, fdl, fam * 11 + li + 7);
+        }
 
         std::vector<int> trace;
         VecObs o = vec->RunPacket(fam, 0, form, L.vd, L.vs1, L.vs2, scalar, mask_en, kAllCaps,
@@ -2752,7 +2770,7 @@ void PhaseCoverage(Cfg* cfg, Vec* vec, Reporter* rep, Coverage* cov) {
                            mosaic::Hex(ev[static_cast<size_t>(i)], 16));
           }
         }
-        cov->cell[fam][sew_l][li] = true;
+        cov->cell[fam][si][li] = true;
         ++cov->cells;
         if (mask_en) {
           rep->Check(o.src_rd_ctr <= np, name + ": the packet read beyond its sources");
@@ -2882,30 +2900,16 @@ void PhaseReductionOrder(Cfg* cfg, Vec* vec, Reporter* rep) {
 void RunVecIntCase(Vmosaic_vec_tb* dut, ClockDriver* clk, Reporter* rep, Coverage* cov) {
   Cfg cfg(dut, clk);
   Vec vec(dut, clk);
-  if (getenv("MOSAIC_VEC_TRACE") != nullptr) {
-    ConfigureVec(&cfg, 3, VlmulOfExp(-3), 0, 0, 2);
-    struct P { int b, e, sw, lm; };
-    const P probes[] = {{2,0,3,-3},{1,0,3,-3},{2,0,3,0},{8,0,3,-3},{2,1,3,-3},{2,0,4,-3}};
-    for (const P& p : probes) {
-      VecStim r;
-      r.mem_owner = true;
-      r.mem_rd_valid = true;
-      r.mem_rd_base = p.b; r.mem_rd_elem = p.e; r.mem_rd_sew = p.sw; r.mem_rd_lmul = p.lm;
-      VecObs o = vec.Cycle(r);
-      std::printf("probe b=%d e=%d sw=%d lm=%d gnt=%d rsp=%d data=%02llx bad=%d\n",
-                  p.b, p.e, p.sw, p.lm, (int)o.mem_rd_gnt, (int)o.mem_rd_rsp_valid,
-                  (unsigned long long)o.mem_rd_rsp_data, o.rd_bad_ctr);
-    }
-    return;
-  }
   PhaseElementLane(&cfg, &vec, rep);
   PhaseMaskLane(&cfg, &vec, rep);
   PhasePermuteLane(&cfg, &vec, rep);
   PhaseReduceLane(&cfg, &vec, rep);
   PhaseCapabilityGate(&cfg, &vec, rep);
-  PhaseCoverage(&cfg, &vec, rep, cov);
+  // the targeted policy checks come before the bulk coverage sweep, so the
+  // first failure a policy defect produces names the policy
   PhaseMaskedOff(&cfg, &vec, rep);
   PhaseReductionOrder(&cfg, &vec, rep);
+  PhaseCoverage(&cfg, &vec, rep, cov);
 }
 
 int main(int argc, char** argv) {

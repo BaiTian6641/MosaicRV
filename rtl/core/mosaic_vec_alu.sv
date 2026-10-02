@@ -166,8 +166,6 @@ module mosaic_vec_alu #(
     output logic                    exec_sat_o,
     output logic [7:0]              exec_elems_o,
     output logic [7:0]              exec_cur_o,
-    output logic [2:0]              exec_state_o,
-    output logic [3:0]              exec_step_o,
     output logic [63:0]             exec_acc_o,
     output logic                    exec_trace_valid_o,
     output logic [7:0]              exec_trace_elem_o,
@@ -377,6 +375,7 @@ module mosaic_vec_alu #(
   logic [7:0]  dbyte_q;
   logic [63:0] dwdata_q;
   logic        mbit_q;
+  logic        mres_q;    // the destination mask bit, latched at E_EXEC
   logic [63:0] acc_q;
   logic        pfx_q;
   logic [7:0]  cur_q;
@@ -479,7 +478,7 @@ module mosaic_vec_alu #(
     int           idx;
     int           off;
     int           sh;
-    int           rd2;
+    logic [63:0]  rd2;      // unsigned: a SEW=64 gather index need not fit an int
 
     m     = width_mask(sew);
     m2    = width_mask(2 * sew);
@@ -497,7 +496,7 @@ module mosaic_vec_alu #(
     sh    = 0;
     idx   = int'(ef_index);
     off   = 0;
-    rd2   = idx;
+    rd2   = 64'(idx);
     sel_sat     = 1'b0;
     sel_illegal = 1'b0;
     sel_trap    = 1'b0;
@@ -734,7 +733,7 @@ module mosaic_vec_alu #(
           4'd6:    sel_mres = bbit & (~abit);       // vmandn
           default: sel_mres = bbit | (~abit);       // vmorn
         endcase
-        rd2 = idx / 8;
+        rd2 = 64'(idx / 8);
       end
       F_MASKPFX: begin
         case (ef_op)
@@ -743,28 +742,34 @@ module mosaic_vec_alu #(
           default: sel_mres = bbit & (~ef_pfx);     // vmsof
         endcase
         sel_pfx = ef_pfx | bbit;
-        rd2     = idx / 8;
+        rd2     = 64'(idx / 8);
       end
       F_SLIDE: begin
         off = (ef_op == 4'd0 || ef_op == 4'd1) ? int'(ef_scalar[7:0]) : 1;
         v128 = uext(bb, sew);
         if (ef_op == 4'd0) begin          // vslideup
-          rd2 = idx - off;
           if (idx < off) begin
-            wr = 1'b0;
+            // destination elements below OFFSET are unchanged, not merely
+            // "not written by the mask": no source is read and no update is
+            // produced for them.
+            wr  = 1'b0;
+            acc = 1'b0;
+            rd2 = 64'd0;
+          end else begin
+            rd2 = 64'(idx - off);
           end
         end else if (ef_op == 4'd1) begin // vslidedown
-          rd2 = idx + off;
-          if (rd2 >= vlmax) begin
+          rd2 = 64'(idx + off);
+          if (rd2 >= 64'(vlmax)) begin
             v128 = 128'd0;
           end
         end else if (ef_op == 4'd2) begin // vslide1up
-          rd2 = idx - 1;
+          rd2 = (idx >= 1) ? 64'(idx - 1) : 64'd0;
           if (idx == int'(cfg_vstart_i)) begin
             v128 = uext(ef_scalar, sew);
           end
         end else begin                    // vslide1down
-          rd2 = idx + 1;
+          rd2 = 64'(idx + 1);
           if (idx == (int'(cfg_vl_i) - 1)) begin
             v128 = uext(ef_scalar, sew);
           end
@@ -772,24 +777,24 @@ module mosaic_vec_alu #(
       end
       F_GATHER: begin
         if (ef_form == FORM_VV) begin
-          rd2 = int'(ef_vs1 & m[63:0]);
+          rd2 = ef_vs1 & m[63:0];
         end else if ((ef_form == FORM_VX) || (ef_form == FORM_VI)) begin
-          rd2 = int'(ef_scalar & m[63:0]);
+          rd2 = ef_scalar & m[63:0];
         end
 `ifdef MOSAIC_VEC_ALU_MUTANT_PERMUTE_ORDER
         // NEGATIVE CONTROL: the permute orders by LMUL instead of by index.
         if (int'(lmul) > 0) begin
-          rd2 = rd2 * (1 << int'(lmul));
+          rd2 = rd2 << int'(lmul);
         end
 `endif
-        if (rd2 >= vlmax) begin
+        if (rd2 >= 64'(vlmax)) begin
           v128 = 128'd0;
         end else begin
           v128 = uext(bb, sew);
         end
       end
       F_COMPRESS: begin
-        rd2  = idx;
+        rd2  = 64'(idx);
         v128 = uext(bb, sew);
       end
       F_REDUCE: begin
@@ -843,19 +848,22 @@ module mosaic_vec_alu #(
         sel_access = 1'b0;
       end
     end else if (ef_family == F_GATHER) begin
-      if (rd2 >= vlmax) begin
+      if (rd2 >= 64'(vlmax)) begin
         sel_access = 1'b0;
       end
     end
 
 `ifdef MOSAIC_VEC_ALU_MUTANT_MASKED_ACCESS
-    // NEGATIVE CONTROL: an inactive element still issues its source access.
-    sel_access = 1'b1;
+    // NEGATIVE CONTROL: an element the mask disables still issues its source
+    // access, so an address it should never have formed can be presented.
+    if (!ef_mask) begin
+      sel_access = 1'b1;
+    end
 `endif
 
     // An access whose element index leaves the group is a fault the case can
     // observe; the shipping build never produces one.
-    sel_trap = sel_access && (rd2 >= vlmax);
+    sel_trap = sel_access && (rd2 >= 64'(vlmax));
 
     if (sel_illegal) begin
       sel_access = 1'b0;
@@ -1059,7 +1067,9 @@ module mosaic_vec_alu #(
           wr_elem_c = count_q[6:0];
           wr_data_c = dwdata_q;
         end else begin
-          wr_elem_c = cur_q[6:0];
+          // a mask destination is addressed by its SEW=8 byte, so the write
+          // element is i/8, not i
+          wr_elem_c = (dst_kind == DST_MASK) ? {cur_q[6:3], 3'b000} : cur_q[6:0];
           wr_data_c = dwdata_q;
         end
       end
@@ -1067,7 +1077,7 @@ module mosaic_vec_alu #(
 
     // byte_new is only meaningful for a mask destination
     byte_new = dbyte_q;
-    byte_new[cur_q[2:0]] = sel_mres;
+    byte_new[cur_q[2:0]] = mres_q;
   end
 
   // --------------------------------------------------------------- outputs
@@ -1092,8 +1102,6 @@ module mosaic_vec_alu #(
   assign exec_sat_o         = sat_r;
   assign exec_elems_o       = elems_r;
   assign exec_cur_o         = cur_q;
-  assign exec_state_o       = state_q;
-  assign exec_step_o        = step_q;
   assign exec_acc_o         = acc_q;
   assign exec_trace_valid_o = trace_c;
   assign exec_trace_elem_o  = trace_elem_c;
@@ -1118,6 +1126,7 @@ module mosaic_vec_alu #(
       dbyte_q     <= 8'd0;
       dwdata_q    <= 64'd0;
       mbit_q      <= 1'b0;
+      mres_q      <= 1'b0;
       acc_q       <= 64'd0;
       pfx_q       <= 1'b0;
       cur_q       <= 8'd0;
@@ -1189,8 +1198,9 @@ module mosaic_vec_alu #(
 
         S_SETUP: begin
           if ((int'(op_f_q) >= NFAM) || (!caps_i[op_f_q]) ||
-              (((op_f_q == F_NARROW) || (op_f_q == F_WIDE) ||
-                (op_f_q == F_MULW) || (op_f_q == F_REDWIDE)) && (sew > int'(ELEN_HALF)))) begin
+              (((op_f_q == F_NARROW) || (op_f_q == F_WIDE) || (op_f_q == F_MULW) ||
+                (op_f_q == F_REDWIDE)) &&
+               ((sew > int'(ELEN_HALF)) || ((int'(lmul) + 1) > 3)))) begin
             illegal_r <= 1'b1;
             state_q   <= S_DONE;
           end else if (is_red) begin
@@ -1311,15 +1321,17 @@ module mosaic_vec_alu #(
             E_VS1W: begin
               if (vrf_rd_rsp_valid_i) begin
                 if (redinit_q) begin
-                  // the reduction's initial accumulator is vs1[0]
+                  // the reduction's initial accumulator is vs1[0]; it comes
+                  // from the response directly, because a_q is captured on this
+                  // same edge and would still hold the previous value.
                   if (is_redwide) begin
                     if (op_op_q == 4'd0) begin
-                      acc_q <= a_q & width_mask(sew)[63:0];
+                      acc_q <= vrf_rd_rsp_data_i & width_mask(sew)[63:0];
                     end else begin
-                      acc_q <= sext64(a_q, sew);
+                      acc_q <= sext64(vrf_rd_rsp_data_i, sew);
                     end
                   end else begin
-                    acc_q <= a_q & width_mask(sew)[63:0];
+                    acc_q <= vrf_rd_rsp_data_i & width_mask(sew)[63:0];
                   end
                   redinit_q <= 1'b0;
                   rcount_q  <= 8'(cfg_vl_i) - 8'(cfg_vstart_i);
@@ -1355,6 +1367,7 @@ module mosaic_vec_alu #(
               if (sel_active) begin
                 pfx_q <= sel_pfx;
               end
+              mres_q <= sel_mres;
               sat_r <= sat_r | (sel_active ? sel_sat : 1'b0);
               if (is_red) begin
                 acc_q    <= sel_result;

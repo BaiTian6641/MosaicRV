@@ -318,7 +318,8 @@ module mosaic_l1_cache_path #(
                                 : cpu_req_id_i;
   assign mem_req_epoch_o = en_i ? (bypass_offer_c ? cpu_req_epoch_i : {EPOCH_W{1'b0}})
                                 : cpu_req_epoch_i;
-  assign mem_rsp_ready_o = en_i ? ((state == S_CWAIT) || (state == S_BWAIT))
+  assign mem_rsp_ready_o = en_i ? ((state == S_CWAIT) || (state == S_BWAIT) ||
+                                   (state == S_FLUSH))
                                 : cpu_rsp_ready_i;
 
   assign cpu_rsp_valid_o = en_i ? hold_valid : mem_rsp_valid_i;
@@ -333,7 +334,14 @@ module mosaic_l1_cache_path #(
     end
   end
 
-  assign bridge_mem_resp_valid = mem_rsp_valid_i && (state == S_CWAIT);
+  // The bridge waits for the memory service's acknowledgement of every beat it
+  // issues, writebacks included, so a flush's writeback beats must be answered
+  // while the wrapper is in S_FLUSH. Without this the flush's first writeback
+  // beat is never acknowledged, `o_busy` never falls, `flush_done` never rises,
+  // and the core's FENCE.I micro-FSM holds the front end off forever -- a
+  // deadlock, not a slow path. Gating this on S_CWAIT alone is exactly that bug.
+  assign bridge_mem_resp_valid = mem_rsp_valid_i && ((state == S_CWAIT) ||
+                                                     (state == S_FLUSH));
   assign flush_done = en_i ? (flush_ack_r && !bridge_mem_busy) : flush_i;
 
   assign o_cpu_txn    = cpu_txn_r;
@@ -419,9 +427,13 @@ module mosaic_l1_cache_path #(
         S_FLUSH: begin
           if (!flush_sent) begin
             if (cache_flush_ready) flush_sent <= 1'b1;
-          end else if (cache_flush_done) begin
-            flush_ack_r <= 1'b1;
-            state       <= S_IDLE;
+          end else if (flush_ack_r && !bridge_mem_busy) begin
+            // The cache's flush is done (latched in `flush_ack_r`), and the width
+            // adapter has drained the writebacks it issued through the memory
+            // service. Only then is the flush complete: leaving earlier would
+            // stop accepting memory responses while a writeback beat is still
+            // awaiting its acknowledgement, and the beat would hang.
+            state <= S_IDLE;
           end
           if (!flush_i) state <= S_IDLE;
         end

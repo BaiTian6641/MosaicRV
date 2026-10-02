@@ -1938,8 +1938,7 @@
     "sim/unit/tb_vec.cpp"
    ],
    "max_cycles": 200000,
-   "seed": 1,
-   "pending": true
+   "seed": 1
   },
   "perf.equal_resource_compare": {
    "task": "I-084",

@@ -81,9 +81,9 @@ constexpr uint64_t kToHost = 0x80001000ull;
 constexpr uint64_t kSigBase = 0x80000400ull;
 
 // The program's data addresses. The set index of a direct-mapped 32-byte line is
-// (addr >> 5) & 7; the loop's instruction line is index 1 (0x20..0x3f), so the
-// data addresses are chosen in indices 2..6 to avoid a conflict that would turn
-// every iteration into a miss.
+// (addr >> 5) & 7; the loop's instructions live in lines 0 and 1 (0x00..0x3f), so
+// the data addresses are chosen in indices 2..6 to avoid a conflict that would
+// turn every iteration into a miss.
 constexpr uint64_t kData0 = 0x80000840ull;   // index 2
 constexpr uint64_t kData1 = 0x80000860ull;   // index 3
 constexpr uint64_t kMagic = 0x80000880ull;   // index 4
@@ -91,6 +91,13 @@ constexpr uint64_t kIoRec = 0x800008C0ull;   // index 6
 constexpr uint64_t kSlot = 0x80000100ull;    // the self-modifying code slot
 
 constexpr uint64_t kUartScratch = 0x0010000Cull;
+
+// The pc of the program's park loop (`jal x0, .`), recorded while the program is
+// assembled. Both runs retire it once and then spin there; the retirement stream
+// is compared up to and including that instruction, because how many times a
+// parked machine is *observed* to go round is a property of when the harness
+// stopped sampling, not of the machine.
+uint64_t g_park_pc = 0;
 
 // The instruction encodings this program uses (all 32-bit; no compressed
 // instruction is emitted, so every PC is 4-aligned).
@@ -208,6 +215,7 @@ struct Rsp {
   bool fault = false;
   uint32_t id = 0;
   uint32_t epoch = 0;
+  uint64_t addr = 0;   // the request this response belongs to (trace only)
 };
 
 class Bus {
@@ -286,6 +294,7 @@ class Bus {
 
   Rsp Perform(const Req& r) {
     Rsp resp;
+    resp.addr = r.addr;
     if (fault_en_ && !r.we && (r.addr & ~fault_mask_) == fault_base_) {
       resp.fault = true;
       return resp;
@@ -349,12 +358,16 @@ std::vector<uint8_t> BuildProgram() {
   const int x0 = 0, ra = 1, t0 = 5, t1 = 6, t2 = 7, s0 = 8, s1 = 9, a0 = 10, a1 = 11,
             a2 = 12, a3 = 13, a4 = 14, a5 = 15, a6 = 16, s4 = 20, s5 = 21;
 
-  // Addresses are formed PC-relatively (`auipc`) or from a small positive
-  // offset: a bare `lui 0x80002` sign-extends bit 31 to 0xFFFFFFFF80002000,
-  // which is not the physical address the memory map covers.
+  // Addresses are formed PC-relatively (`auipc`) or from small positive
+  // offsets: a bare `lui 0x80002` sign-extends bit 31 to 0xFFFFFFFF80002000,
+  // which is not the physical address the memory map covers. The 0x800
+  // adjustment is split into 0x7ff + 1 because a 12-bit immediate of 0x800 has
+  // bit 11 set, and is therefore *negative* (-2048): `addi s0, s0, 0x800` is
+  // `s0 - 0x800`, not `s0 + 0x800`.
   // ---- phase 1: the cache-use loop -------------------------------------
   a.Auipc(s0, 0);              // s0 = 0x80000000
-  a.Addi(s0, s0, 0x800);       // s0 = 0x80000800 (data base)
+  a.Addi(s0, s0, 0x7ff);       // s0 = 0x800007ff
+  a.Addi(s0, s0, 1);           // s0 = 0x80000800 (data base)
   a.Addi(s1, x0, 0);           // s1 = 0 (iteration counter)
   a.Addi(a1, x0, 256);         // a1 = 256 (iterations)
   const int loop = a.Label();
@@ -373,7 +386,10 @@ std::vector<uint8_t> BuildProgram() {
   a.Jalr(ra, t1, 0);           // first call: caches the slot line (nop)
   a.Lui(t2, 0x05A00);          // t2 = 0x05A00000
   a.Addi(t2, t2, 0x513);       // t2 = 0x05A00513  (addi a0,x0,0x5a)
-  a.Sd(t2, t1, 0);             // patch the slot
+  // A *word* store: the patched instruction is four bytes and the `jalr` that
+  // follows it in the slot is the next word. An eight-byte store here would
+  // overwrite that `jalr` with zeros and the slot would return nowhere.
+  a.Sw(t2, t1, 0);             // patch the slot
   a.FenceI();                  // make the store visible to fetch
   a.Jalr(ra, t1, 0);           // second call: must execute the new bytes
   a.Sd(a0, s0, 0x80);          // MAGIC = a0 (0x5a iff the patch was seen)
@@ -401,8 +417,16 @@ std::vector<uint8_t> BuildProgram() {
   a.Addi(s4, s4, 1);           // s4 = 0x80001000 (tohost)
   a.Addi(s5, x0, 1);
   a.Sd(s5, s4, 0);             // tohost = PASS
+  // The exit word lives in cacheable RAM, so a write-back data cache holds it
+  // until something writes the cache back. This core's only data-cache writeback
+  // that a program can ask for is its FENCE.I (which flushes the data cache and
+  // then invalidates the instruction cache); with the caches disabled it is an
+  // ordinary retired fence. Without it the harness -- which observes memory --
+  // would never see the PASS word while the caches are on.
+  a.FenceI();
   const int hang = a.Label();
   a.Bind(hang);
+  g_park_pc = kRamBase + uint64_t(a.off());
   a.Jal(x0, hang);             // park
 
   // The self-modifying slot sits at a fixed address so the program can store to
@@ -411,6 +435,12 @@ std::vector<uint8_t> BuildProgram() {
   a.PadTo(int(kSlot - kRamBase));
   a.Addi(a0, x0, 0);           // placeholder: a0 = 0
   a.Jalr(x0, ra, 0);           // return to the caller
+  // The front end fetches ahead of the slot's `jalr` and delivers what it finds
+  // before that jump's redirect lands. The image must therefore hold *valid*
+  // encodings past the slot: unfilled memory reads as zero, and a zero word is a
+  // compressed illegal instruction, which stops the core (`disp_unsupported`)
+  // even though the flow never falls through to it.
+  a.PadTo(int(kSlot - kRamBase) + 0x40);
   std::vector<uint8_t> bytes = a.Bytes();
   if (std::getenv("CACHE_PATH_DUMP") != nullptr) {
     for (size_t i = 0; i < bytes.size() / 4 && i < 40; i++) {
@@ -462,7 +492,12 @@ constexpr int kRetN = 2;   // p1 retire width; taken from the DUT at runtime bel
 
 class CoreRun {
  public:
-  CoreRun(Vmosaic_core_tb* dut, Reporter* rep) : dut_(dut), rep_(rep) {}
+  CoreRun(Vmosaic_core_tb* dut, Reporter* rep) : dut_(dut), rep_(rep) {
+    const char* t = std::getenv("CACHE_PATH_TRACE");
+    if (t != nullptr) trace_ = std::atoi(t);
+    const char* tn = std::getenv("CACHE_PATH_TRACE_N");
+    if (tn != nullptr) trace_n_ = std::atoi(tn);
+  }
 
   RunRec Run(bool cache_en, uint32_t retire_n) {
     MemoryModel mem;
@@ -628,7 +663,16 @@ class CoreRun {
 
     if (!rst) Observe(retire_n);
 
-    if ((dut_->imem_req_valid_o != 0) && (dut_->imem_req_ready_i != 0)) {
+    // The memory bus is only driven outside reset. While `rst` is high the fetch
+    // unit still presents a request for the reset vector (its PC register is
+    // held there and its slot has not been recorded busy), and accepting those
+    // requests queues responses that the core discards at reset -- leaving them
+    // in front of the post-reset responses with the *same* request id and epoch,
+    // so the fetch unit matches a stale response to a fresh request and the
+    // instruction stream shifts by one instruction. Only a redirect changes the
+    // epoch, so a program that does not branch early would see it. Nothing is
+    // accepted, presented or counted during reset for that reason.
+    if (!rst && (dut_->imem_req_valid_o != 0) && (dut_->imem_req_ready_i != 0)) {
       Bus::Req r;
       r.we = false;
       r.addr = dut_->imem_req_addr_o;
@@ -636,12 +680,29 @@ class CoreRun {
       r.id = dut_->imem_req_id_o;
       r.epoch = dut_->imem_req_epoch_o;
       r.inst = true;
+      if (trace_ > 0 && rec_cycle_ >= uint64_t(trace_) &&
+        rec_cycle_ < uint64_t(trace_) + uint64_t(trace_n_)) {
+        std::printf("    [imem-req] cyc=%llu addr=%llx size=%u id=%u epoch=%u\n",
+                    (unsigned long long)rec_cycle_, (unsigned long long)r.addr,
+                    unsigned(r.size), unsigned(r.id), unsigned(r.epoch));
+      }
       imem->Accept(r, rec_cycle_);
     }
-    if ((dut_->imem_rsp_valid_i != 0) && (dut_->imem_rsp_ready_o != 0)) imem->Pop();
+    if (!rst && (dut_->imem_rsp_valid_i != 0) && (dut_->imem_rsp_ready_o != 0)) {
+      if (trace_ > 0 && rec_cycle_ >= uint64_t(trace_) &&
+        rec_cycle_ < uint64_t(trace_) + uint64_t(trace_n_)) {
+        std::printf("    [imem-pop] cyc=%llu for=%llx data=%08llx fault=%u ready=%u\n",
+                    (unsigned long long)rec_cycle_,
+                    (unsigned long long)imem->Current().addr,
+                    (unsigned long long)(dut_->imem_rsp_rdata_i & 0xffffffffull),
+                    unsigned(dut_->imem_rsp_fault_i),
+                    unsigned(dut_->imem_rsp_ready_o));
+      }
+      imem->Pop();
+    }
     imem->Advance();
 
-    if ((dut_->dmem_req_valid_o != 0) && (dut_->dmem_req_ready_i != 0)) {
+    if (!rst && (dut_->dmem_req_valid_o != 0) && (dut_->dmem_req_ready_i != 0)) {
       Bus::Req r;
       r.we = dut_->dmem_req_we_o != 0;
       r.addr = dut_->dmem_req_addr_o;
@@ -656,7 +717,7 @@ class CoreRun {
       }
       dmem->Accept(r, rec_cycle_);
     }
-    if ((dut_->dmem_rsp_valid_i != 0) && (dut_->dmem_rsp_ready_o != 0)) dmem->Pop();
+    if (!rst && (dut_->dmem_rsp_valid_i != 0) && (dut_->dmem_rsp_ready_o != 0)) dmem->Pop();
     dmem->Advance();
 
     dut_->clk = 0;
@@ -671,6 +732,30 @@ class CoreRun {
   void Observe(uint32_t retire_n) {
     const uint32_t mask = (retire_n >= 32) ? 0xffffffffu : ((1u << retire_n) - 1u);
     const uint32_t got = uint32_t(dut_->ev_valid_o) & mask;
+    if (trace_ > 0 && rec_cycle_ >= uint64_t(trace_) &&
+        rec_cycle_ < uint64_t(trace_) + uint64_t(trace_n_)) {
+      std::printf("    [trace] cyc=%llu valid=%x rd=%x pc=[%llx %llx] val=[%llx %llx] "
+                  "seq=[%llx %llx] len=[%llx %llx] we=%x commit=%u headv=%u headpc=%llx "
+                  "drd0=%u drd1=%u trap=%u cause=%llu epc=%llx tval=%llx redir=%u rpc=%llx\n",
+                  (unsigned long long)rec_cycle_, got,
+                  unsigned(dut_->ev_rd_o),
+                  (unsigned long long)PayloadLane(dut_->ev_pc_o, 0),
+                  (unsigned long long)PayloadLane(dut_->ev_pc_o, 1),
+                  (unsigned long long)PayloadLane(dut_->ev_value_o, 0),
+                  (unsigned long long)PayloadLane(dut_->ev_value_o, 1),
+                  (unsigned long long)uint64_t(dut_->ev_seq_o), 0ull,
+                  (unsigned long long)uint64_t(dut_->ev_len_o), 0ull,
+                  unsigned(dut_->ev_reg_we_o),
+                  unsigned(dut_->o_commit_o), unsigned(dut_->o_dbg_head_valid_o),
+                  (unsigned long long)dut_->o_dbg_head_pc_o,
+                  unsigned(dut_->o_dbg_desc_rd0_o), unsigned(dut_->o_dbg_desc_rd1_o),
+                  unsigned(dut_->o_trap_valid_o),
+                  (unsigned long long)dut_->o_trap_cause_o,
+                  (unsigned long long)dut_->o_trap_epc_o,
+                  (unsigned long long)dut_->o_trap_tval_o,
+                  unsigned(dut_->o_redirect_o),
+                  (unsigned long long)dut_->o_redirect_pc_o);
+    }
     if (debug_ < 6 && got != 0) {
       std::printf("    [dbg] valid=%x rd=0x%llx pc0=0x%llx pc1=0x%llx v0=0x%llx v1=0x%llx\n",
                   got, (unsigned long long)dut_->ev_rd_o,
@@ -702,6 +787,8 @@ class CoreRun {
   uint64_t rec_cycle_ = 0;
   int debug_ = 0;
   int dbg_mem_ = 0;
+  int trace_ = 0;
+  int trace_n_ = 120;
 };
 
 // ============================================================================
@@ -843,6 +930,21 @@ std::string Hexu(uint64_t v) {
   return buf;
 }
 
+std::vector<std::string> Split(const std::string& text, char sep) {
+  std::vector<std::string> out;
+  std::string cur;
+  for (char c : text) {
+    if (c == sep) {
+      if (!cur.empty()) out.push_back(cur);
+      cur.clear();
+    } else {
+      cur.push_back(c);
+    }
+  }
+  if (!cur.empty()) out.push_back(cur);
+  return out;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -863,13 +965,27 @@ int main(int argc, char** argv) {
   const uint32_t retire_n = dut.o_geom_retire_width_o;
 
   // ---------------------------------------------------------------- phase 1+2
+  // Debug hook (CACHE_PATH_RUNS): select which runs execute and in what order,
+  // so an anomaly can be attributed to `cache_en_i` or to run order.
   CoreRun off_run(&dut, &reporter);
-  RunRec off = off_run.Run(false, retire_n);
-  const std::vector<Retire> off_stream = off_run.observed();
-
   CoreRun on_run(&dut, &reporter);
-  RunRec on = on_run.Run(true, retire_n);
-  const std::vector<Retire> on_stream = on_run.observed();
+  const char* runs_sel = std::getenv("CACHE_PATH_RUNS");
+  const std::string sel = (runs_sel != nullptr) ? runs_sel : "off,on";
+
+  RunRec off;
+  RunRec on;
+  std::vector<Retire> off_stream;
+  std::vector<Retire> on_stream;
+  for (const std::string& tok : Split(sel, ',')) {
+    if (tok == "off") {
+      off = off_run.Run(false, retire_n);
+      off_stream = off_run.observed();
+    } else if (tok == "on") {
+      on = on_run.Run(true, retire_n);
+      on_stream = on_run.observed();
+    }
+  }
+  const bool full_compare = off_stream.size() != 0 && on_stream.size() != 0;
 
   {
     std::printf("cache.integrated_path: retire_width=%u off{cycles=%llu retires=%zu "
@@ -887,17 +1003,48 @@ int main(int argc, char** argv) {
                   off_stream[i].we ? 1 : 0, (unsigned long long)off_stream[i].value,
                   off_stream[i].len);
     }
+    for (size_t i = 0; i < on_stream.size() && i < 8; i++) {
+      std::printf("  on retire[%zu] pc=%llx rd=%u we=%d val=%llx len=%u\n", i,
+                  (unsigned long long)on_stream[i].pc, on_stream[i].rd,
+                  on_stream[i].we ? 1 : 0, (unsigned long long)on_stream[i].value,
+                  on_stream[i].len);
+    }
+    for (size_t k = 0; k < 6; k++) {
+      if (off_stream.size() > k) {
+        const size_t i = off_stream.size() - 1 - k;
+        std::printf("  off tail[%zu] pc=%llx rd=%u we=%d val=%llx len=%u\n", i,
+                    (unsigned long long)off_stream[i].pc, off_stream[i].rd,
+                    off_stream[i].we ? 1 : 0, (unsigned long long)off_stream[i].value,
+                    off_stream[i].len);
+      }
+      if (on_stream.size() > k) {
+        const size_t i = on_stream.size() - 1 - k;
+        std::printf("  on tail[%zu] pc=%llx rd=%u we=%d val=%llx len=%u\n", i,
+                    (unsigned long long)on_stream[i].pc, on_stream[i].rd,
+                    on_stream[i].we ? 1 : 0, (unsigned long long)on_stream[i].value,
+                    on_stream[i].len);
+      }
+    }
   }
+  if (!full_compare) return 0;
 
   reporter.Check(off.finished, "the cache-off run reaches the exit protocol");
   reporter.Check(on.finished, "the cache-on run reaches the exit protocol");
   reporter.Check(off.passed && on.passed, "both runs report PASS through tohost");
 
-  // The architectural result: the retirement stream.
-  bool stream_equal = on_stream.size() == off_stream.size();
+  // The architectural result: the retirement stream, compared up to and
+  // including the program's own park loop. Both runs retire the park and then
+  // spin in it; how many times the park is *sampled* before the harness stops is
+  // a property of the cycle in which the exit word became visible, not of the
+  // machine. Everything after the park entry must still be the park itself in
+  // both runs -- a machine that ran off past it would be caught by that -- and
+  // the park must be reached at the same retirement index in both.
+  const size_t off_park = ParkIndex(off_stream);
+  const size_t on_park = ParkIndex(on_stream);
+  bool stream_equal = off_park != kNoPark && off_park == on_park;
   size_t mismatch_at = 0;
   if (stream_equal) {
-    for (size_t i = 0; i < off_stream.size(); i++) {
+    for (size_t i = 0; i <= off_park; i++) {
       const Retire& a = off_stream[i];
       const Retire& b = on_stream[i];
       if (a.pc != b.pc || a.rd != b.rd || a.we != b.we || a.value != b.value ||
@@ -908,7 +1055,7 @@ int main(int argc, char** argv) {
       }
     }
   } else {
-    mismatch_at = std::min(on_stream.size(), off_stream.size());
+    mismatch_at = std::min(off_stream.size(), on_stream.size());
   }
   if (!stream_equal) {
     const size_t i = mismatch_at;
@@ -930,7 +1077,25 @@ int main(int argc, char** argv) {
     }
     reporter.Mismatch("cache-on retirement stream", "identical to cache-off", detail);
   }
-  reporter.Check(stream_equal, "cache-on and cache-off retire the same instructions");
+  reporter.Check(off_park == on_park && off_park != kNoPark,
+                 "both runs retire the program's park loop at the same index");
+  reporter.Check(stream_equal,
+                 "cache-on and cache-off retire the same instructions through the park");
+
+  // ... and then both stay in it: the park is `jal x0, .`, so every later
+  // retirement must be that same pc. This is what says the streams do not differ
+  // *after* the park for any reason other than how long the harness watched.
+  bool parked_clean = true;
+  for (size_t i = (off_park == kNoPark ? off_stream.size() : off_park + 1);
+       i < off_stream.size(); i++) {
+    if (off_stream[i].pc != g_park_pc) parked_clean = false;
+  }
+  for (size_t i = (on_park == kNoPark ? on_stream.size() : on_park + 1);
+       i < on_stream.size(); i++) {
+    if (on_stream[i].pc != g_park_pc) parked_clean = false;
+  }
+  reporter.Check(parked_clean,
+                 "both runs stay in the program's park loop once they reach it");
 
   // The architectural result: the signatures the program wrote.
   bool sig_equal = on.sig == off.sig && on.sig.size() == 4;

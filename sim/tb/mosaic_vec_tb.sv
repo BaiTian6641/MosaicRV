@@ -184,13 +184,6 @@ module mosaic_vec_tb (
     output logic                       alu_sat_o,
     output logic [7:0]                 alu_elems_o,
     output logic [7:0]                 alu_cur_o,
-    output logic [2:0]                 alu_state_o,
-    output logic [3:0]                 alu_step_o,
-    output logic                       alu_rd_valid_o,
-    output logic [4:0]                 alu_rd_base_o,
-    output logic [6:0]                 alu_rd_elem_o,
-    output logic [2:0]                 alu_rd_sew_o,
-    output logic [3:0]                 alu_rd_lmul_o,
     output logic [63:0]                alu_acc_o,
     output logic                       alu_trace_valid_o,
     output logic [7:0]                 alu_trace_elem_o,
@@ -498,12 +491,6 @@ module mosaic_vec_tb (
   assign mem_rd_rsp_tag_o   = vrf_rd_rsp_tag_f[15:0];
   assign mem_rd_rsp_data_o  = vrf_rd_rsp_data_f[63:0];
   assign mem_wr_gnt_o       = vrf_wr_gnt_f[0];
-  assign alu_rd_valid_o     = alu_rd_valid;
-  assign alu_rd_base_o      = alu_rd_base;
-  assign alu_rd_elem_o      = alu_rd_elem;
-  assign alu_rd_sew_o       = alu_rd_sew;
-  assign alu_rd_lmul_o      = alu_rd_lmul;
-  assign alu_wr_valid_o     = alu_wr_valid;
 
   mosaic_vrf #(
       .VLEN       (128),
@@ -630,8 +617,6 @@ module mosaic_vec_tb (
       .exec_sat_o         (alu_sat_o),
       .exec_elems_o       (alu_elems_o),
       .exec_cur_o         (alu_cur_o),
-      .exec_state_o       (alu_state_o),
-      .exec_step_o        (alu_step_o),
       .exec_acc_o         (alu_acc_o),
       .exec_trace_valid_o (alu_trace_valid_o),
       .exec_trace_elem_o  (alu_trace_elem_o),
