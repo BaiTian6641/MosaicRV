@@ -1706,6 +1706,40 @@
    ],
    "max_cycles": 200000,
    "seed": 1
+  },
+  "soc.bus_errors_and_ids": {
+   "task": "I-047",
+   "top": "mosaic_soc_tb",
+   "rtl": [
+    "rtl/core/mosaic_pkg.sv",
+    "rtl/soc/mosaic_soc.sv"
+   ],
+   "sv": [
+    "sim/tb/mosaic_soc_tb.sv"
+   ],
+   "cpp": [
+    "sim/unit/tb_soc.cpp"
+   ],
+   "max_cycles": 200000,
+   "seed": 1,
+   "pending": true
+  },
+  "rvv.descriptor_legality": {
+   "task": "I-051",
+   "top": "mosaic_vec_tb",
+   "rtl": [
+    "rtl/core/mosaic_pkg.sv",
+    "rtl/core/mosaic_vec_desc.sv"
+   ],
+   "sv": [
+    "sim/tb/mosaic_vec_tb.sv"
+   ],
+   "cpp": [
+    "sim/unit/tb_vec.cpp"
+   ],
+   "max_cycles": 200000,
+   "seed": 1,
+   "pending": true
   }
  }
 }
