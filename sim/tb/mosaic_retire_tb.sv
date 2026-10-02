@@ -905,6 +905,7 @@ module mosaic_retire_tb (
   logic [TB_RET_ARCH-1:0][TB_RET_TAG_W-1:0] map_stag;
   logic [TB_RET_ARCH-1:0][TB_RET_GEN_W-1:0] map_sgen;
   mosaic_rename u_ren (
+/* verilator lint_off PINCONNECTEMPTY */
       .clk               (clk),
       .rst               (rst),
 
@@ -1016,6 +1017,8 @@ module mosaic_retire_tb (
       .dbg_tag_gen       (ren_tag_gen),
       .dbg_spec_map      (ren_spec_map),
       .dbg_cmt_map       (ren_cmt_map),
+      .dbg_spec_map_fp   (),
+      .dbg_cmt_map_fp    (),
       .dbg_j_len         (ren_j_len),
       // Boundary reports the I-018 integration added after this wrapper was
       // written: tied off here because this card never squashes the rename
@@ -1081,6 +1084,7 @@ module mosaic_retire_tb (
   assign o_tag_w_o        = 32'(TB_RET_TAG_W);
   assign o_arch_regs_o    = 32'(TB_RET_ARCH);
 
+/* verilator lint_on PINCONNECTEMPTY */
 endmodule : mosaic_retire_tb
 
 `resetall

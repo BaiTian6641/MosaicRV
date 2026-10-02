@@ -10,7 +10,7 @@
   "image": "",
   "expect": "",
   "tool": "Verilator 5.052 2026-09-05",
-  "timestamp": "2026-10-02T09:16:14Z",
+  "timestamp": "2026-10-02T09:20:24Z",
   "first_mismatch": "csr-rule-ledger at cycle 3459: fflags.value positive: the read-back: read 0x0000000000000000, want 0x000000000000001f: expected every ledger rule holds on this machine, got contract violated",
   "failed_checks": ["no contract violation"]
 }

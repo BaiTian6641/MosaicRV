@@ -198,6 +198,7 @@ module mosaic_rename_tb (
 );
 
   mosaic_rename u_ren (
+/* verilator lint_off PINCONNECTEMPTY */
       .clk              (clk),
       .rst              (rst),
 
@@ -302,6 +303,8 @@ module mosaic_rename_tb (
       .dbg_tag_gen      (dbg_tag_gen),
       .dbg_spec_map     (dbg_spec_map),
       .dbg_cmt_map      (dbg_cmt_map),
+      .dbg_spec_map_fp  (),
+      .dbg_cmt_map_fp   (),
       .dbg_j_len        (dbg_j_len)
   );
   // The geometry, straight from the generated package this file already
@@ -319,6 +322,7 @@ module mosaic_rename_tb (
   assign o_journal   = 32'(TB_JOURNAL);
   assign o_jlen_w    = 32'(TB_JLEN_W);
 
+/* verilator lint_on PINCONNECTEMPTY */
 endmodule : mosaic_rename_tb
 
 `resetall

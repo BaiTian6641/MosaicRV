@@ -2,7 +2,7 @@
   "schema_version": 1,
   "case": "csr.precise_trap_mret",
   "verdict": "PASS",
-  "detail": "CSR contract holds: 6598 shadow comparisons over 6908 cycles, 21 CSRs, seed 1",
+  "detail": "CSR contract holds: 6597 shadow comparisons over 6907 cycles, 21 CSRs, seed 1",
   "seed": 1,
   "max_cycles": 200000,
   "checks": 10,
@@ -10,6 +10,6 @@
   "image": "",
   "expect": "",
   "tool": "Verilator 5.052 2026-09-05",
-  "timestamp": "2026-10-02T08:37:23Z",
+  "timestamp": "2026-10-02T09:19:10Z",
   "first_mismatch": ""
 }

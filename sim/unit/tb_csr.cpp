@@ -769,8 +769,13 @@ struct TableExpectation {
   bool        write_legal;
 };
 
-const TableExpectation kExpected[50] = {
+const TableExpectation kExpected[53] = {
     // name          addr    reset                       write mask                  legal
+    // F/D (I-050): fflags/frm/fcsr are one 8-bit FP control register's views,
+    // reset to zero, writable in their own fields.
+    {"fflags",     0x001,  UINT64_C(0x0000000000000000), UINT64_C(0x000000000000001f), true},
+    {"frm",        0x002,  UINT64_C(0x0000000000000000), UINT64_C(0x0000000000000007), true},
+    {"fcsr",       0x003,  UINT64_C(0x0000000000000000), UINT64_C(0x00000000000000ff), true},
     {"mstatus",     0x300,  UINT64_C(0x0000000000001800), UINT64_C(0x00000000000066aa), true},
     // misa is WARL with no writable bits in p0 (the clause: "writable bits are
     // optional in the spec, so the whole register is modelled read-only"), so a
@@ -838,11 +843,12 @@ const TableExpectation kExpected[50] = {
 void PhaseTable(mosaic::Reporter* reporter) {
   const std::string where = "table";
   Require(kTable.ok, where, kTable.problem);
-  Require(MOSAIC_CSR_COUNT == 50, where,
+  Require(MOSAIC_CSR_COUNT == 53, where,
           "the generated table has " + Dec(MOSAIC_CSR_COUNT) + " rows, the implementation "
-          "table declares 50 (mode_m.json's 21 machine-mode rows plus the 29 Zihpm "
-          "hpmcounter3..31 shadows the profile advertises)");
-  for (int i = 0; i < 50; i++) {
+          "table declares 53 (mode_m.json's 24 machine-mode rows -- including the three "
+          "FP control registers -- plus the 29 Zihpm hpmcounter3..31 shadows the profile "
+          "advertises)");
+  for (int i = 0; i < 53; i++) {
     const TableExpectation& e = kExpected[i];
     Require(std::string(MOSAIC_CSR_TABLE[i].name) == e.name, where,
             "row " + Dec(i) + " is " + MOSAIC_CSR_TABLE[i].name + ", expected " + e.name);
@@ -859,7 +865,7 @@ void PhaseTable(mosaic::Reporter* reporter) {
             std::string(e.name) + ": generated write-legality " +
                 Bool(MOSAIC_CSR_TABLE[i].write_legal != 0) + ", expected " + Bool(e.write_legal));
   }
-  reporter->Check(true, "table: all 50 generated rows equal the hand-derived expectations");
+  reporter->Check(true, "table: all 53 generated rows equal the hand-derived expectations");
 }
 
 void PhaseResetState(Harness* h, mosaic::Reporter* reporter) {

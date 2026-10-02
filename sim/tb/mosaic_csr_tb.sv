@@ -109,6 +109,7 @@ module mosaic_csr_tb (
 );
 
   mosaic_pkg::csr_op_e csr_op;
+/* verilator lint_off PINCONNECTEMPTY */
 
   assign csr_op = mosaic_pkg::csr_op_e'(csr_op_i);
 
@@ -187,12 +188,16 @@ module mosaic_csr_tb (
       .o_misa_o        (o_misa_o),
       .o_mcycle_o      (o_mcycle_o),
       .o_minstret_o    (o_minstret_o),
+      .o_fcsr_o        (),
+      .o_fflags_o      (),
+      .o_frm_o         (),
       .o_wr_ctr        (o_wr_ctr),
       .o_illegal_wr_ctr(o_illegal_wr_ctr),
       .o_trap_ctr      (o_trap_ctr),
       .o_mret_ctr      (o_mret_ctr)
   );
 
+/* verilator lint_on PINCONNECTEMPTY */
 endmodule : mosaic_csr_tb
 
 `resetall
