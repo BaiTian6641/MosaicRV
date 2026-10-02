@@ -6598,6 +6598,9 @@ void PhaseStopDrain(Cfg* cfg, Vec* vec, Lsu* lsu, LsuMem* mem, Reporter* rep,
     }
     LsuConfig(cfg, R.sew_l, VlmulOfExp(R.lmul), static_cast<uint64_t>(R.vl), 0, R.vta, R.vma);
     mem->ClearFaults();
+    // a longer latency plus a paced memory keeps two requests in flight, so the
+    // drain really is waiting on a busy macro rather than an empty pipeline
+    mem->latency = 4;
     RstAlloc(lsu, R.vl, 0, Vtypei(R.sew_l, R.lmul));
 
     // pace the memory so the pipeline is genuinely occupied; the broker's drain
@@ -6620,7 +6623,12 @@ void PhaseStopDrain(Cfg* cfg, Vec* vec, Lsu* lsu, LsuMem* mem, Reporter* rep,
     rep->Check(o.done && !o.stopped && !o.trap,
                name + ": done=" + Dec(o.done) + " stopped=" + Dec(o.stopped) + " trap=" +
                    Dec(o.trap) + " (the drain is not a stop)");
-    rep->Check(maxf >= 1, name + ": the pipeline was never occupied (max flight " + Dec(maxf) + ")");
+    // a load's unordered pipeline is two deep; a store is issued strictly (one
+    // in flight) by design, so its occupancy is one
+    const int minf = we ? 1 : 2;
+    rep->Check(maxf >= minf, name + ": the pipeline never held " + Dec(minf) +
+                                 " request(s) (max flight " + Dec(maxf) +
+                                 "), the drain would not be waiting on a busy macro");
     bool ok = true;
     for (int e = 0; e < vl; ++e) {
       if (we) {
@@ -6645,6 +6653,7 @@ void PhaseStopDrain(Cfg* cfg, Vec* vec, Lsu* lsu, LsuMem* mem, Reporter* rep,
     cov->cells[SK_DRAIN] += 1;
     RstRelease(lsu);
   }
+  mem->latency = 2;
 }
 
 void RunStopPathCase(Vmosaic_vec_tb* dut, ClockDriver* clk, Reporter* rep,
