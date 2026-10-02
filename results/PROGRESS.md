@@ -2288,3 +2288,58 @@ lint 58/58 on both profiles. Remaining for the goal: I-059..I-063 (lane quotas a
 LLB and locality work, multi-hart/cohort/pod (I-064..I-075), the measurement and release gates
 (I-076..I-086), the RVA23S64 mandatory matrix (I-092..I-098), and the mask-prefix `vstart` rule that two
 lanes have now reported.
+
+---
+
+## 2026-10-01 — the vector engine is in the machine, and a lying diagnostic (74 delivered)
+
+**`vec.integrated` passes: a decoded vector instruction now executes on the integrated out-of-order
+core.** The engine (configuration, descriptor, VRF, ALU, LSU, restart, chain) is instantiated in
+`mosaic_core.sv`; OP-V decodes with **one macro per instruction**; dispatch routes through the system
+insert port with an allocation barrier; the vector CSRs are on the core's CSR path with `mstatus.VS`
+dirtying per ROB slot; vector macros resolve at the ROB head and complete on writeback port 3; a fault
+is precise with `vstart` and a restart that keeps the committed prefix; and the packetizer's memory
+port is a **fourth owner** on the single data arbiter. **ACT4 held 127/127 through every step**, and
+forty-one cases were re-run green afterwards. On this program the vector path is *slower* (203 cycles
+against 103) — reported rather than hidden, and expected while vector registers are not renamed and
+macros are serialised by the barrier.
+
+**The defect found behind the failure is the story of the day.** The first attempt reported that the
+handler's *first* `csrr mtval` returned 0 while a later read returned the right value, and
+hypothesised a trap-entry staging latency — a defect any real handler would hit. The retry disproved
+that with evidence (one write, one cycle; the first read was correct; the core's own observation ports
+agreed) and found the actual cause of the wrong number: **the check's own failure message printed
+`run.Slot(16)` while the condition tested `run.Slot(2)`** — the testbench was describing a different
+word from the one it examined, and the word it described is always zero. Behind that artifact was a
+genuine ISA defect: the vector fault's `mtval` was computed as `base + (vstart << eew_sew)` where
+`eew_sew` is log2(EEW in **bits**) while the packetizer addresses in **bytes**, so the byte offset
+should be `vstart << (eew_sew - 3)`. For an e32 access at `vstart=2` the machine named `base+64` where
+the faulting element sits at `base+8` — wrong by the factor of eight that shifting bits instead of
+bytes produces, and **any handler computing from `mtval` for a vector memory fault was handed an
+address eight elements further on.** One term, fixed.
+
+The generalisation belongs next to the project's other rules: **a diagnostic that prints a plausible
+value and names a plausible mechanism can send an investigation in the wrong direction for its whole
+duration.** The first attempt spent its time on a hypothesised staging latency because its own message
+said "read 0" with a number attached; the value was real and the label was false. That is the same
+failure mode as the mutant that never reached the compiler and the case whose stimulus never arrived —
+a check whose *report* is not about the thing it *tested*.
+
+**I-060 (the LLB) is also delivered**, and its shape is the plan's argument made concrete: the
+structure is legal **only because its invalidation sources can be listed**, and eight are — this
+hart's store or AMO, an L1 refill, a snoop, a shootdown, `FENCE`, `FENCE.I`, `SFENCE.VMA` (exactly
+the named ASID and/or page, never treated as a data fence) and a context change. The key is the
+physical line plus the permission context with **no virtual address in it** (the mutant that keys on
+the virtual address is what forces that), data-line invalidations ignore the context so a store
+removes every context's copy, and the in-flight rule is stated and checked: an invalidating cycle
+grants no hit, the refusal is combinational with priority over the tag match, and it is *specific* —
+a lookup on another line still hits in the same cycle. The case asserts the buffer actually **hit**
+before each invalidation it tests, which is what stops it passing by accident.
+
+**State**: 74 ledger entries delivered, 16 capabilities advertised, ACT4 127/127, `make check` and
+every gate green, lint 59/59 on both profiles, and the exclusion ledger at 18 open / 36 covered.
+Remaining for the goal: I-059 (the lane broker, deliberately kept open — the integration is recorded
+as I-059a rather than being allowed to mark it delivered), I-061..I-063, wiring the LLB and the
+caches' locality into the core, vector register renaming, multi-hart/cohort/pod (I-064..I-075), the
+measurement and release gates (I-076..I-086), the RVA23S64 mandatory matrix (I-092..I-098), the
+mask-prefix `vstart` rule, and the `tb_vec.cpp` reset-traffic follow-up.
