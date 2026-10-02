@@ -12,10 +12,11 @@
 1. [原始文档库存与逐节覆盖](docs/source-inventory.md)：三份原报告，5,447 行、102 个标题，原文保持字节不变；记录所有思想的接受、修正与分期。
 2. [架构审查](docs/architecture-review.md)：固定物理结构/动态资源归属、每 hart 精确提交、tag/credit/恢复、内存顺序、RVV、LLB、cohort 与完整 core-fusion 边界。
 3. [细粒度实施计划](docs/implementation-plan.md)：98 个 I 工作包；profile、接口、未来 CLI、跨文档依赖、按声明决定的发布门槛及小模型任务交接。
-4. [验证计划](docs/validation-plan.md)：90 个 V 工作包；XiangShan/Difftest/NEMU 来源链、Verilator、独立参考、真实故障注入 replay、formal/litmus 与 ISA 正反例。
-5. [平台及 ASIC 计划](docs/platform-plan.md)：51 个 H 工作包；公共 RAM/clock/reset/CDC 合同、三个独立板级 flow、物理证据与 ASIC signoff。
-6. 十一个团队执行指南：[第0阶段](docs/stage-0-contracts-bringup.md)、[第1阶段](docs/stage-1-scalar-control.md)、[第2阶段](docs/stage-2-execution-fabric.md)、[第3阶段](docs/stage-3-memory-system.md)、[第4阶段](docs/stage-4-vector-locality.md)、[第5阶段](docs/stage-5-multihart-aggregation.md)、[第6阶段](docs/stage-6-verification-quality.md)、[第7阶段](docs/stage-7-fpga-hardware.md)、[第8阶段](docs/stage-8-asic-release.md)、[第9阶段](docs/stage-9-lockstep-safety.md)、[第10阶段](docs/stage-10-rva23-security.md)。每份含设计、依赖、可交接任务卡、阻断规则与 Track Log；可选 profile 的卡片不能反向阻断 p0。
-7. [文档检查与重跑指令](docs/verification.md)：239 个任务（98 I、90 V、51 H）、11 个指南、原文 hash/覆盖、合并依赖图与引用/链接/Git 检查；不包含 CPU 功能/板测/ASIC 成绩。
+4. [验证计划](docs/validation-plan.md):90 个 V 工作包;XiangShan/Difftest/NEMU 来源链、Verilator、独立参考、真实故障注入 replay、formal/litmus 与 ISA 正反例。
+5. [可伸缩配置计划](docs/scalability-plan.md):宽度/深度/单元数必须是配置输入(随 `config/geometry/*.json` 生成,非法组合由配置门按名拒绝);与 XiangShan Kunminghu V2(6 宽译码、160 ROB、64/128 KB L1、L2/L3)的参照表,以及**只在同构配置下才可声明绝对 IPC**、未匹配时只能报归一化指标的比较规则。
+6. [平台及 ASIC 计划](docs/platform-plan.md)：51 个 H 工作包；公共 RAM/clock/reset/CDC 合同、三个独立板级 flow、物理证据与 ASIC signoff。
+7. 十一个团队执行指南：[第0阶段](docs/stage-0-contracts-bringup.md)、[第1阶段](docs/stage-1-scalar-control.md)、[第2阶段](docs/stage-2-execution-fabric.md)、[第3阶段](docs/stage-3-memory-system.md)、[第4阶段](docs/stage-4-vector-locality.md)、[第5阶段](docs/stage-5-multihart-aggregation.md)、[第6阶段](docs/stage-6-verification-quality.md)、[第7阶段](docs/stage-7-fpga-hardware.md)、[第8阶段](docs/stage-8-asic-release.md)、[第9阶段](docs/stage-9-lockstep-safety.md)、[第10阶段](docs/stage-10-rva23-security.md)。每份含设计、依赖、可交接任务卡、阻断规则与 Track Log；可选 profile 的卡片不能反向阻断 p0。
+8. [文档检查与重跑指令](docs/verification.md)：239 个任务（98 I、90 V、51 H）、11 个指南、原文 hash/覆盖、合并依赖图与引用/链接/Git 检查；不包含 CPU 功能/板测/ASIC 成绩。
 
 
 
