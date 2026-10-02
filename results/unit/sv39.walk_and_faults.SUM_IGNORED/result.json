@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "case": "sv39.walk_and_faults",
+  "verdict": "FAIL",
+  "detail": "contract violated: directed/sum-off: fault bit disagrees with the rule",
+  "seed": 1,
+  "max_cycles": 4000000,
+  "checks": 1,
+  "failures": 1,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-02T06:55:01Z",
+  "first_mismatch": "directed/sum-off: expected fault=1, got fault=0 cause=0",
+  "failed_checks": ["no contract violation"]
+}

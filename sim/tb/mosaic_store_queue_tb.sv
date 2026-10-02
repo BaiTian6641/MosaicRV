@@ -311,6 +311,7 @@ module mosaic_store_queue_tb (
       .req_valid_i        (drain_req_valid),
       .req_ready_o        (ep_req_ready),
       .req_i              (sq_drain_req_s),
+      .req_tval_i         (sq_drain_req_s.base + sq_drain_req_s.imm),
       // RAM addresses only (I-038); see mosaic_load_queue_tb.
       .req_dev_i          (1'b0),
       // No PMP unit stands in front of this standalone endpoint, so every

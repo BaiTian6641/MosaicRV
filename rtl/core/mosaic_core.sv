@@ -799,12 +799,10 @@ module mosaic_core (
   logic [43:0] ptw_xl_ppn;
   logic        ptw_xl_sum, ptw_xl_mxr, ptw_xl_cancel;
   logic        ptw_xl_rsp_valid, ptw_xl_rsp_ready;
-  logic [63:0] ptw_xl_pa, ptw_xl_tval;
-  logic        ptw_xl_fault, ptw_xl_bare;
-  logic [3:0]  ptw_xl_cause, ptw_xl_perms;
+  logic [63:0] ptw_xl_pa;
+  logic        ptw_xl_fault;
+  logic [3:0]  ptw_xl_cause;
   logic        ptw_busy_q, ptw_owner_q;
-  logic [31:0] ptw_walk_ctr, ptw_bare_ctr, ptw_leaf_ctr, ptw_fault_ctr;
-  logic [31:0] ptw_ad_ctr, ptw_retry_ctr, ptw_cancel_ctr;
 
   // The PTE port and the endpoint's port, merged onto the core's `dmem` port by
   // a two-master arbiter (one transaction in flight, the walker first).
@@ -833,8 +831,8 @@ module mosaic_core (
   logic [63:0] lq_tx_tval;
   logic        lq_xl_req_valid, lq_xl_req_accepted, lq_xl_wait_q;
   mosaic_uop_pkg::lsu_req_t lq_hold_q;
-  logic [63:0] lq_hold_va_q, lq_hold_tval_q, lq_hold_pa_q;
-  logic [1:0]  lq_kind_q, lq_priv_q;
+  logic [63:0] lq_hold_tval_q, lq_hold_pa_q;
+  logic [1:0]  lq_priv_q;
   logic [3:0]  lq_mode_q;
   logic [43:0] lq_ppn_q;
   logic        lq_sum_q, lq_mxr_q;
@@ -846,7 +844,7 @@ module mosaic_core (
   // FIFO of translated physical addresses for the drains that follow.
   logic        st_hit0_c, st_hit1_c, st_fault0_c, st_fault1_c;
   logic [63:0] st_pa0_c, st_pa1_c;
-  logic [3:0]  st_cause0_c, st_cause1_c;
+  logic [3:0]  st_cause0_c;
   logic        st_lane0_blocks_c, st_lane1_blocks_c;
   logic        st_req_valid, st_req_lane1_c, st_req_lane1_q;
   logic        st_want0_c, st_want1_c;
@@ -858,7 +856,7 @@ module mosaic_core (
   logic [CORE_RGEN_W-1:0] st_r0_gen_q, st_r1_gen_q;
   logic [63:0] st_r0_pa_q, st_r1_pa_q;
   logic        st_r0_fault_q, st_r1_fault_q;
-  logic [3:0]  st_r0_cause_q, st_r1_cause_q;
+  logic [3:0]  st_r0_cause_q;
   logic        st_push0_c, st_push1_c, st_pop_c;
   logic [63:0] sq_drain_pa_c;
   logic [63:0] st_fifo_pa [0:CORE_SQ_N-1];
@@ -873,7 +871,7 @@ module mosaic_core (
   // transaction -- the same lifetime `ser_hold_dev_q` has.
   logic [63:0] ep_tval_c, sq_drain_tval_c;
   logic [63:0] ser_hold_tval_q;
-  logic        ptw_take_c, ptw_take_store_c;
+  logic        ptw_take_c;
   // The PMP commit-path address for the two lanes: the translated physical
   // address when there is one, the effective address otherwise.
   logic [CORE_XLEN-1:0] pmp_store_addr0_c, pmp_store_addr1_c;
@@ -2771,7 +2769,8 @@ module mosaic_core (
   // sake: a completed instruction at the head would otherwise retire in the same
   // cycle the interrupt was taken, and mepc would name an instruction that had
   // already committed. (`rob_head_ready` already excludes the exceptional case.)
-  assign ret_req_gated = ret_req[0] && !trap_decision && !store0_pmp_deny_c;
+  assign ret_req_gated = ret_req[0] && !trap_decision && !store0_pmp_deny_c &&
+                         !st_lane0_blocks_c && !store0_xl_fault_c;
 
   // The redirect request. A trap acts immediately (the trapping entry does not
   // retire); an MRET or a FENCE.I acts through the ordinary head-retire gate, in
@@ -2947,7 +2946,8 @@ module mosaic_core (
         // retires and the redirect that follows the trap flushes it from the
         // queue before it can reach memory.
         sys_trap_q       <= 1'b1;
-        sys_trap_cause_q <= mosaic_pkg::EXC_STORE_ACCESS;
+        sys_trap_cause_q <= store0_xl_fault_c ? {60'd0, st_cause0_c}
+                                              : mosaic_pkg::EXC_STORE_ACCESS;
         sys_trap_tval_q  <= store_pmp_trap_addr_c;
       end
 
@@ -3408,7 +3408,7 @@ module mosaic_core (
   // drain, or retiring -- lane 1 does not leave the ROB. (I-037.)
   assign head_fence_i_pending = sys_head && sys_fence_i_q;
   assign rob_retire_req_next = ret_req[1] && !head_pending_taken && !head_fence_i_pending &&
-                               !store1_pmp_deny_c;
+                               !store1_pmp_deny_c && !st_lane1_blocks_c && !st_fault1_c;
 
   always_comb begin
     retire_clr_valid[0] = rob_retire_ack;
@@ -3584,9 +3584,9 @@ module mosaic_core (
       .xl_pa_o         (ptw_xl_pa),
       .xl_fault_o      (ptw_xl_fault),
       .xl_cause_o      (ptw_xl_cause),
-      .xl_tval_o       (ptw_xl_tval),
-      .xl_perms_o      (ptw_xl_perms),
-      .xl_bare_o       (ptw_xl_bare),
+      .xl_tval_o       (),
+      .xl_perms_o      (),
+      .xl_bare_o       (),
       .pte_req_valid_o (ptw_mem_req_valid),
       .pte_req_ready_i (ptw_mem_req_ready),
       .pte_req_we_o    (ptw_mem_we),
@@ -3598,13 +3598,13 @@ module mosaic_core (
       .pte_rsp_rdata_i (ptw_mem_rdata),
       .pte_rsp_fault_i (ptw_mem_fault),
       .o_busy          (),
-      .o_walk_ctr      (ptw_walk_ctr),
-      .o_bare_ctr      (ptw_bare_ctr),
-      .o_leaf_ctr      (ptw_leaf_ctr),
-      .o_fault_ctr     (ptw_fault_ctr),
-      .o_ad_upd_ctr    (ptw_ad_ctr),
-      .o_retry_ctr     (ptw_retry_ctr),
-      .o_cancel_ctr    (ptw_cancel_ctr),
+      .o_walk_ctr      (),
+      .o_bare_ctr      (),
+      .o_leaf_ctr      (),
+      .o_fault_ctr     (),
+      .o_ad_upd_ctr    (),
+      .o_retry_ctr     (),
+      .o_cancel_ctr    (),
       .o_last_fault_cause (),
       .o_last_fault_tval  ()
   );
@@ -3614,7 +3614,8 @@ module mosaic_core (
   // walker has priority: its beat is short and it is on the critical path of
   // whatever the endpoint is waiting to translate, while the endpoint's data
   // beat has no translation left to do.
-  assign ptw_mem_rsp_ready = 1'b1;
+  // The walker's response is always taken (its `pte_rsp_ready_o` is tied high):
+  // it owns the single outstanding beat and has nowhere else to put it.
   assign ptw_mem_rdata     = dmem_rsp.rdata;
   assign ptw_mem_fault     = dmem_rsp.fault;
   assign ptw_mem_rsp_valid = dmem_rsp_valid && (mem_owner_q == MEM_OWN_PTW);
@@ -3723,7 +3724,6 @@ module mosaic_core (
   assign ptw_xl_mxr       = st_req_valid ? o_csr_mstatus[19] : lq_mxr_q;
   assign ptw_xl_rsp_ready = 1'b1;
   assign ptw_take_c       = ptw_xl_req_valid && ptw_xl_req_ready;
-  assign ptw_take_store_c = ptw_take_c && st_req_valid;
   assign lq_xl_req_accepted = ptw_take_c && !st_req_valid;
   // A redirect withdraws a load's walk. A store's walk is never cancelled: the
   // store at the head survives a younger redirect, and if a trap does discard it
@@ -3737,6 +3737,7 @@ module mosaic_core (
                      (st_r1_idx_q == rob_head1_index) && (st_r1_gen_q == rob_head1_gen);
   assign st_fault0_c = st_hit0_c && st_r0_fault_q;
   assign st_fault1_c = st_hit1_c && st_r1_fault_q;
+  assign st_cause0_c = st_r0_cause_q;
   assign st_pa0_c    = st_hit0_c ? st_r0_pa_q : sq_pay0_addr;
   assign st_pa1_c    = st_hit1_c ? st_r1_pa_q : sq_pay1_addr;
 
@@ -3767,8 +3768,13 @@ module mosaic_core (
   // are in retire order and pops in drain order -- both are program order -- so a
   // pop always names the store that was pushed first. The recorded address is
   // what makes a `satp` write after the store retire irrelevant to it.
-  assign st_push0_c = rob_retire_ack      && desc_is_store0;
-  assign st_push1_c = rob_retire_ack_next && desc_is_store1;
+  // The push conditions are the store queue's *authorisations*, not the ROB
+  // retirements: `commit_ok` is the queue saying it accepted the authorisation
+  // for the entry at its watermark, and the queue's watermark advances by
+  // exactly one per `commit_ok`/`commit2_ok`. Pushing on anything else would let
+  // the FIFO and the queue's authorisation watermark drift apart.
+  assign st_push0_c = sq_commit_ok;
+  assign st_push1_c = sq_commit2_ok;
   assign st_pop_c   = sq_drain_valid && sq_drain_ready;
   assign sq_drain_tval_c = sq_drain_req.base + sq_drain_req.imm;
   assign sq_drain_pa_c = (st_fifo_cnt_q != {CORE_MEM_CNT_W{1'b0}})
@@ -3818,7 +3824,6 @@ module mosaic_core (
           lq_xl_wait_q <= 1'b0;
           if (!lq_bypass_c && lq_req_valid) begin
             lq_hold_q      <= lq_req;
-            lq_hold_va_q   <= lq_req.base + lq_req.imm;
             lq_hold_tval_q <= lq_req.base + lq_req.imm;
             lq_priv_q      <= eff_priv_c;
             lq_mode_q      <= csr_satp[63:60];
@@ -3874,7 +3879,6 @@ module mosaic_core (
           st_r1_gen_q   <= st_req_gen_q;
           st_r1_pa_q    <= ptw_xl_pa;
           st_r1_fault_q <= ptw_xl_fault;
-          st_r1_cause_q <= ptw_xl_cause;
         end else begin
           st_r0_valid_q <= 1'b1;
           st_r0_idx_q   <= st_req_idx_q;
@@ -3899,7 +3903,9 @@ module mosaic_core (
         st_xl_alloc_ctr_q <= st_xl_alloc_ctr_q + 32'd1;
       end
       if (st_push1_c) begin
-        st_fifo_pa[st_fifo_tail_q + ST_FIFO_PTR_W'(1'b1)] <= st_pa1_c;
+        // The second lane's entry goes one past the first *only when the first
+        // lane pushed too*; a lane-1-only commit appends at the tail itself.
+        st_fifo_pa[st_fifo_tail_q + ST_FIFO_PTR_W'(st_push0_c)] <= st_pa1_c;
         st_xl_alloc_ctr_q <= st_xl_alloc_ctr_q + 32'd1;
       end
       if (st_pop_c) st_xl_pop_ctr_q <= st_xl_pop_ctr_q + 32'd1;
@@ -4077,6 +4083,7 @@ module mosaic_core (
       ser_hold_valid_q <= 1'b0;
       ser_dev_out_q    <= 1'b0;
       ser_hold_dev_q   <= 1'b0;
+      ser_hold_tval_q  <= 64'd0;
       dev_txn_ctr_q    <= 32'd0;
       ram_txn_ctr_q    <= 32'd0;
       dev_wait_ctr_q   <= 32'd0;
@@ -4086,6 +4093,11 @@ module mosaic_core (
         ser_hold_q       <= ep_req;
         ser_hold_valid_q <= 1'b1;
         ser_dev_out_q    <= 1'b1;
+        // I-045: the architectural tval travels with the held transaction for
+        // the same reason its identity and device attribute do -- the queue mux
+        // may be presenting a different request by the time the endpoint takes
+        // this one.
+        ser_hold_tval_q  <= ep_tval_c;
         // The PMA attribute of *this* transaction, not of whatever the mux
         // happens to offer after it. An AMO (also serialized) latches 0.
         ser_hold_dev_q   <= ser_is_device_c;
@@ -4159,7 +4171,10 @@ module mosaic_core (
   // above. `amo_taken_c` is the cycle the serializer takes the transaction: from
   // then on the fields are latched in `ser_hold_q` and the endpoint, and a second
   // copy here would be a second thing to keep in step.
-  assign amo_taken_c = ser_take_c && (ep_req.is_amo || ep_req.is_lr || ep_req.is_sc);
+  assign amo_taken_c = (ser_take_c &&
+                        (ep_req.is_amo || ep_req.is_lr || ep_req.is_sc)) ||
+                       (lq_xl_fault_valid &&
+                        (lq_hold_q.is_amo || lq_hold_q.is_lr || lq_hold_q.is_sc));
 
   mosaic_amo_unit u_amo (
       .clk            (clk),
@@ -4263,14 +4278,19 @@ module mosaic_core (
   assign store0_pmp_deny_c = 1'b0;
   assign store1_pmp_deny_c = 1'b0;
 `else
-  // Lane 0's store, refused.
-  assign store0_pmp_deny_c = first_store_c && desc_is_store0 && !pmp_store_allow0_c;
+  // Lane 0's store, refused. With paging on, the check runs on the translated
+  // physical address (`pmp_store_addr0_c` on the store-commit port below) and it
+  // is suppressed while the translation is unresolved or has itself faulted: a
+  // page fault is decided by the translation, not by the PMP.
+  assign store0_pmp_deny_c = first_store_c && desc_is_store0 && !pmp_store_allow0_c &&
+                             !st_lane0_blocks_c && !store0_xl_fault_c;
   // Lane 1's store, refused: either it is the first store (lane 0 is not a
   // store) and the watermark entry is refused, or lane 0 is a store and lane
   // 1's entry -- one past the watermark -- is the one refused.
   assign store1_pmp_deny_c =
-      (second_store_c && !store0_pmp_deny_c && !pmp_store_allow1_c) ||
-      (first_store_c && !desc_is_store0 && !pmp_store_allow0_c);
+      ((second_store_c && !store0_pmp_deny_c && !pmp_store_allow1_c) ||
+       (first_store_c && !desc_is_store0 && !pmp_store_allow0_c)) &&
+      !st_lane1_blocks_c && !st_fault1_c;
 `endif
 
   // The trap the commit path takes: the lane-0 store's own exception, at its
@@ -4278,7 +4298,8 @@ module mosaic_core (
   // access address as tval. It is latched only when no other trap is being
   // decided in the same cycle, so an interrupt at the same boundary wins and the
   // store is simply re-fetched and checked again after the handler returns.
-  assign store_pmp_trap_now    = store0_pmp_deny_c && !trap_decision;
+  assign store_pmp_trap_now    = (store0_pmp_deny_c || store0_xl_fault_now) &&
+                                 !trap_decision;
   assign store_pmp_trap_addr_c = sq_pay0_addr;
 
   mosaic_pmp u_pmp (
@@ -4303,10 +4324,10 @@ module mosaic_core (
       .f_allow_o          (pmp_fetch_allow),
       .f_matched_o        (pmp_fetch_matched),
       .f_locked_o         (pmp_fetch_locked),
-      .sc_req_addr0_i     (sq_pay0_addr),
+      .sc_req_addr0_i     (pmp_store_addr0_c),
       .sc_req_bytes0_i    (pmp_store_bytes0_c),
       .sc_req_priv0_i     (eff_priv_c),
-      .sc_req_addr1_i     (sq_pay1_addr),
+      .sc_req_addr1_i     (pmp_store_addr1_c),
       .sc_req_bytes1_i    (pmp_store_bytes1_c),
       .sc_req_priv1_i     (eff_priv_c),
       .sc_allow0_o        (pmp_store_allow0_c),
@@ -4332,15 +4353,23 @@ module mosaic_core (
       // sees it.
       .o_req_addr_o         (lsu_req_addr_c),
       .pmp_deny_i           (ep_pmp_deny_c),
+      // I-045: the architectural tval of the transaction the endpoint is being
+      // offered. With translation in the path `o_req_addr_o` is the *physical*
+      // address; the exception's tval is the virtual one, and for a held
+      // (device/atomic) transaction it is the copy latched with the hold.
+      .req_tval_i           (ser_hold_valid_q ? ser_hold_tval_q : ep_tval_c),
       .rsp_valid_o          (ep_rsp_valid),
       .rsp_ready_o          (ep_rsp_ready),
       .rsp_o                (ep_rsp),
-      .mem_req_valid_o      (dmem_req_valid),
-      .mem_req_ready_i      (dmem_req_ready),
-      .mem_req_o            (dmem_req),
-      .mem_rsp_valid_i      (dmem_rsp_valid),
-      .mem_rsp_ready_o      (dmem_rsp_ready),
-      .mem_rsp_i            (dmem_rsp),
+      // The endpoint's memory port is merged with the walker's PTE port onto the
+      // core's `dmem` port by the arbiter above; the endpoint never sees `dmem`
+      // directly.
+      .mem_req_valid_o      (ep_mem_req_valid),
+      .mem_req_ready_i      (ep_mem_req_ready),
+      .mem_req_o            (ep_mem_req),
+      .mem_rsp_valid_i      (ep_mem_rsp_valid),
+      .mem_rsp_ready_o      (ep_mem_rsp_ready),
+      .mem_rsp_i            (ep_mem_rsp),
       .ext_write_valid_i    (ext_write_valid),
       .ext_write_addr_i     (ext_write_addr),
       .ext_write_bytes_i    (ext_write_bytes),
@@ -4391,9 +4420,15 @@ module mosaic_core (
       ep_owner_q <= ser_owner_c;
     end
   end
-  assign lq_rsp_valid = ep_rsp_valid && !ep_owner_q;
+  // I-045: the load queue's response is either the endpoint's (for an access that
+  // reached it) or the translation stage's own fault (for an access that never
+  // did). The two cannot be offered in the same cycle -- the stage withholds its
+  // fault while the endpoint is delivering a load-queue response -- so the mux
+  // is exact, not a priority that could drop one.
+  assign lq_rsp_valid = (ep_rsp_valid && !ep_owner_q) || lq_xl_fault_valid;
   assign sq_rsp_valid = ep_rsp_valid &&  ep_owner_q;
-  assign ep_rsp_ready = ep_owner_q ? sq_rsp_ready : lq_rsp_ready;
+  assign ep_rsp_ready = ep_owner_q ? sq_rsp_ready
+                                   : (lq_rsp_ready && !lq_xl_fault_valid);
 
   mosaic_load_queue u_lq (
       .clk                  (clk),
@@ -4425,7 +4460,7 @@ module mosaic_core (
       .req_o                (lq_req),
       .rsp_valid_i          (lq_rsp_valid),
       .rsp_ready_o          (lq_rsp_ready),
-      .rsp_i                (ep_rsp),
+      .rsp_i                (lq_xl_fault_valid ? lq_xl_fault_rsp : ep_rsp),
       .result_valid_o       (lq_result_valid),
       .result_ready_i       (lq_result_ready),
       .result_id_o          (lq_result_id),

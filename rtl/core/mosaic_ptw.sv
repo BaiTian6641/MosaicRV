@@ -261,7 +261,6 @@ module mosaic_ptw (
   // ==========================================================================
   // Combinatorial helpers on the current PTE and walk position
   // ==========================================================================
-  logic        canonical_c;
   logic [8:0]  vpn_c;
   logic [43:0] ppn_eff_c;
   logic        align_bad_c;
@@ -282,9 +281,6 @@ module mosaic_ptw (
       default:    begin page_cause_c = 4'd13; access_cause_c = 4'd5; end
     endcase
   end
-
-  // "must have bits 63-39 all equal to bit 38" (Priv v1.12, Sv39).
-  assign canonical_c = (va_q[63:39] == {25{va_q[38]}});
 
   always_comb begin
     case (level_q)
@@ -339,7 +335,10 @@ module mosaic_ptw (
       end
       case (kind_q)
         KIND_STORE: perm_ok = pte_q[2];
-        KIND_FETCH: perm_ok = pte_q[3] | (mxr_q & pte_q[1]);
+        // MXR is the specification's "Make eXecutable Readable": it lets a
+        // *load* use a page whose X bit is set. It does not let a fetch use an
+        // R-only page -- an instruction access needs X, whatever MXR says.
+        KIND_FETCH: perm_ok = pte_q[3];
         default:    perm_ok = pte_q[1] | (mxr_q & pte_q[3]);
       endcase
 `ifdef MOSAIC_PTW_MUTANT_SUM_IGNORED
@@ -363,7 +362,25 @@ module mosaic_ptw (
   assign need_d_c = (kind_q == KIND_STORE) & ~pte_q[7];
 `endif
 
-  assign pte_new_c = pte_q | 64'h0000_0000_0000_00C0;
+  // Step 7's new value: A is always set; D only when the access is a store
+  // ("set pte.a to 1 and, if the original memory access is a store, also set
+  // pte.d to 1").
+  assign pte_new_c = pte_q | (need_d_c ? 64'h0000_0000_0000_00C0
+                                      : 64'h0000_0000_0000_0040);
+
+  // Request-time copies of the two decisions ST_IDLE makes *before* the request
+  // is latched: the canonicality test and the fault cause both depend on the
+  // request being presented, not on the latched copy of the previous walk.
+  logic        canonical_req_c;
+  logic [3:0]  page_cause_req_c;
+  always_comb begin
+    canonical_req_c = (xl_va_i[63:39] == {25{xl_va_i[38]}});
+    case (xl_kind_i)
+      KIND_STORE: page_cause_req_c = 4'd15;
+      KIND_FETCH: page_cause_req_c = 4'd12;
+      default:    page_cause_req_c = 4'd13;
+    endcase
+  end
 
   // ==========================================================================
   // The output registers and the port
@@ -476,24 +493,24 @@ module mosaic_ptw (
               // a defensive fault rather than a silent Bare.
               pa_q        <= 64'd0;
               fault_q     <= 1'b1;
-              cause_q     <= page_cause_c;
+              cause_q     <= page_cause_req_c;
               bare_q      <= 1'b0;
               rsp_valid_q <= 1'b1;
               fault_ctr_q <= fault_ctr_q + 32'd1;
-              last_fault_cause_q <= {60'd0, page_cause_c};
+              last_fault_cause_q <= {60'd0, page_cause_req_c};
               last_fault_tval_q  <= xl_va_i;
               state_q     <= ST_DONE;
             end else begin
 `ifndef MOSAIC_PTW_MUTANT_ALLOW_NONCANONICAL
-              if (!canonical_c) begin
+              if (!canonical_req_c) begin
                 // Step 1's canonicality test, before any physical access.
                 pa_q        <= 64'd0;
                 fault_q     <= 1'b1;
-                cause_q     <= page_cause_c;
+                cause_q     <= page_cause_req_c;
                 bare_q      <= 1'b0;
                 rsp_valid_q <= 1'b1;
                 fault_ctr_q <= fault_ctr_q + 32'd1;
-                last_fault_cause_q <= {60'd0, page_cause_c};
+                last_fault_cause_q <= {60'd0, page_cause_req_c};
                 last_fault_tval_q  <= xl_va_i;
                 state_q     <= ST_DONE;
               end else begin

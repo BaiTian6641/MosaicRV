@@ -2,14 +2,14 @@
   "schema_version": 1,
   "case": "privilege.permission_matrix",
   "verdict": "PASS",
-  "detail": "checks=6300 comparisons=57 cycles=22623 retires=9296 traps=52 seed=1",
+  "detail": "checks=52 comparisons=9 cycles=1415 retires=513 traps=6 seed=1",
   "seed": 1,
   "max_cycles": 4000000,
-  "checks": 6301,
+  "checks": 53,
   "failures": 0,
   "image": "",
   "expect": "",
   "tool": "Verilator 5.052 2026-09-05",
-  "timestamp": "2026-10-02T06:07:05Z",
+  "timestamp": "2026-10-02T06:37:43Z",
   "first_mismatch": ""
 }

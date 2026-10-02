@@ -462,6 +462,7 @@ module mosaic_load_queue_tb (
       .req_valid_i        (lq_req_valid_s),
       .req_ready_o        (ep_lq_req_ready),
       .req_i              (lq_req_s),
+      .req_tval_i         (lq_req_s.base + lq_req_s.imm),
       // This case uses ordinary RAM addresses only (I-038): the device
       // attribute is constant zero here. The attribute itself is covered by
       // CASE=mmio.exactly_once on the integrated core.
@@ -525,6 +526,7 @@ module mosaic_load_queue_tb (
       .req_valid_i        (sq_drain_req_valid),
       .req_ready_o        (ep_sq_req_ready),
       .req_i              (sq_drain_req_s),
+      .req_tval_i         (sq_drain_req_s.base + sq_drain_req_s.imm),
       .req_dev_i          (1'b0),
       .pmp_deny_i         (1'b0),
       .o_req_addr_o       (),

@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "case": "sv39.walk_and_faults",
+  "verdict": "FAIL",
+  "detail": "contract violated: directed/leaf-L0: an unnecessary A/D write was issued",
+  "seed": 1,
+  "max_cycles": 4000000,
+  "checks": 1,
+  "failures": 1,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-02T06:55:11Z",
+  "first_mismatch": "directed/leaf-L0: expected no A/D write, got a write happened",
+  "failed_checks": ["no contract violation"]
+}

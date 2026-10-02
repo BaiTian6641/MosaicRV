@@ -367,7 +367,51 @@ module mosaic_core_tb (
     output logic [31:0] o_geom_pmp_cfg_count_o,
     output logic [31:0] o_geom_has_s_o,
     output logic [31:0] o_geom_has_u_o,
-    output logic [31:0] o_geom_priv_least_o
+    output logic [31:0] o_geom_priv_least_o,
+
+    // ------------------------------------------- standalone Sv39 walker (I-045)
+    // A second DUT beside the core: the page-table walker on its own, so the
+    // directed translation matrix can drive every level, permission, SUM/MXR
+    // and fault case with the exact page tables the case builds and compare the
+    // physical address and the cause/tval pair against an independent model of
+    // the walk. The core's own instance is the *integrated* copy the program
+    // checks exercise; this one is the unit under direct control.
+    input  logic        ptw_xl_valid_i,
+    output logic        ptw_xl_ready_o,
+    input  logic [TB_XLEN-1:0] ptw_xl_va_i,
+    input  logic [1:0]  ptw_xl_kind_i,
+    input  logic [1:0]  ptw_xl_priv_i,
+    input  logic [3:0]  ptw_xl_mode_i,
+    input  logic [43:0] ptw_xl_ppn_i,
+    input  logic        ptw_xl_sum_i,
+    input  logic        ptw_xl_mxr_i,
+    input  logic        ptw_xl_cancel_i,
+    input  logic        ptw_xl_rsp_ready_i,
+    output logic        ptw_xl_rsp_valid_o,
+    output logic [TB_XLEN-1:0] ptw_xl_pa_o,
+    output logic        ptw_xl_fault_o,
+    output logic [3:0]  ptw_xl_cause_o,
+    output logic [TB_XLEN-1:0] ptw_xl_tval_o,
+    output logic [3:0]  ptw_xl_perms_o,
+    output logic        ptw_xl_bare_o,
+    output logic        ptw_mem_req_valid_o,
+    input  logic        ptw_mem_req_ready_i,
+    output logic        ptw_mem_req_we_o,
+    output logic [TB_XLEN-1:0] ptw_mem_req_addr_o,
+    output logic [TB_XLEN-1:0] ptw_mem_req_wdata_o,
+    output logic [7:0]  ptw_mem_req_wstrb_o,
+    input  logic        ptw_mem_rsp_valid_i,
+    output logic        ptw_mem_rsp_ready_o,
+    input  logic [TB_XLEN-1:0] ptw_mem_rsp_rdata_i,
+    input  logic        ptw_mem_rsp_fault_i,
+    output logic        o_ptw_busy_o,
+    output logic [31:0] o_ptw_walk_ctr_o,
+    output logic [31:0] o_ptw_leaf_ctr_o,
+    output logic [31:0] o_ptw_fault_ctr_o,
+    output logic [31:0] o_ptw_ad_ctr_o,
+    output logic [31:0] o_ptw_cancel_ctr_o,
+    output logic [31:0] o_ptw_retry_ctr_o,
+    output logic [31:0] o_ptw_bare_ctr_o
 );
 
   // ------------------------------------------------------------------ core
@@ -688,6 +732,54 @@ module mosaic_core_tb (
   assign o_geom_has_s_o          = mosaic_csr_pkg::MOSAIC_CSR_HAS_S ? 32'd1 : 32'd0;
   assign o_geom_has_u_o          = mosaic_csr_pkg::MOSAIC_CSR_HAS_U ? 32'd1 : 32'd0;
   assign o_geom_priv_least_o     = {30'd0, mosaic_csr_pkg::MOSAIC_PRIV_LEAST};
+
+  // --------------------------------------------------------------------------
+  // The standalone page-table walker (I-045). Its PTE port is driven directly by
+  // the case's physical-memory model, which is also what builds the page tables
+  // and can read them back to see the A/D bits the walk wrote.
+  // --------------------------------------------------------------------------
+  mosaic_ptw u_ptw (
+      .clk             (clk),
+      .rst             (rst),
+      .xl_req_valid_i  (ptw_xl_valid_i),
+      .xl_req_ready_o  (ptw_xl_ready_o),
+      .xl_va_i         (ptw_xl_va_i),
+      .xl_kind_i       (ptw_xl_kind_i),
+      .xl_priv_i       (ptw_xl_priv_i),
+      .xl_satp_mode_i  (ptw_xl_mode_i),
+      .xl_satp_ppn_i   (ptw_xl_ppn_i),
+      .xl_sum_i        (ptw_xl_sum_i),
+      .xl_mxr_i        (ptw_xl_mxr_i),
+      .xl_cancel_i     (ptw_xl_cancel_i),
+      .xl_rsp_valid_o  (ptw_xl_rsp_valid_o),
+      .xl_rsp_ready_i  (ptw_xl_rsp_ready_i),
+      .xl_pa_o         (ptw_xl_pa_o),
+      .xl_fault_o      (ptw_xl_fault_o),
+      .xl_cause_o      (ptw_xl_cause_o),
+      .xl_tval_o       (ptw_xl_tval_o),
+      .xl_perms_o      (ptw_xl_perms_o),
+      .xl_bare_o       (ptw_xl_bare_o),
+      .pte_req_valid_o (ptw_mem_req_valid_o),
+      .pte_req_ready_i (ptw_mem_req_ready_i),
+      .pte_req_we_o    (ptw_mem_req_we_o),
+      .pte_req_addr_o  (ptw_mem_req_addr_o),
+      .pte_req_wdata_o (ptw_mem_req_wdata_o),
+      .pte_req_wstrb_o (ptw_mem_req_wstrb_o),
+      .pte_rsp_valid_i (ptw_mem_rsp_valid_i),
+      .pte_rsp_ready_o (ptw_mem_rsp_ready_o),
+      .pte_rsp_rdata_i (ptw_mem_rsp_rdata_i),
+      .pte_rsp_fault_i (ptw_mem_rsp_fault_i),
+      .o_busy          (o_ptw_busy_o),
+      .o_walk_ctr      (o_ptw_walk_ctr_o),
+      .o_bare_ctr      (o_ptw_bare_ctr_o),
+      .o_leaf_ctr      (o_ptw_leaf_ctr_o),
+      .o_fault_ctr     (o_ptw_fault_ctr_o),
+      .o_ad_upd_ctr    (o_ptw_ad_ctr_o),
+      .o_retry_ctr     (o_ptw_retry_ctr_o),
+      .o_cancel_ctr    (o_ptw_cancel_ctr_o),
+      .o_last_fault_cause (),
+      .o_last_fault_tval  ()
+  );
 
 endmodule : mosaic_core_tb
 /* verilator lint_on PINCONNECTEMPTY */

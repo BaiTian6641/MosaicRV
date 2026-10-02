@@ -932,14 +932,27 @@ module mosaic_csr (
             sepc_d = csr_op_result & mosaic_csr_pkg::MOSAIC_CSR_WMASK_SEPC;
           mosaic_csr_pkg::MOSAIC_CSR_ADDR_SCAUSE: scause_d = csr_op_result;
           mosaic_csr_pkg::MOSAIC_CSR_ADDR_STVAL:  stval_d  = csr_op_result;
-          // satp is WARL, and the only MODE this profile can execute is Bare
-          // (0): translation is I-045's, and a register that read back "Sv39"
-          // for a machine that translates nothing would be a claim, not a
-          // configuration. So the MODE field canonicalises to Bare on every
-          // write, which is the same shape of rule mtvec's reserved encodings
-          // get above.
-          mosaic_csr_pkg::MOSAIC_CSR_ADDR_SATP:
-            satp_d = csr_op_result & ~(64'hF000_0000_0000_0000);
+          // satp is WARL (I-045). The honest value set is {0b0000 Bare,
+          // 0b1000 Sv39}: this profile implements Sv39 and claims no other
+          // paging mode, so a MODE the machine cannot execute must not read
+          // back as if it could. The rule is the specification's own for a
+          // WARL field with a restricted set -- "a write of any other MODE
+          // leaves the entire register unmodified" -- so an unsupported MODE
+          // writes nothing rather than silently selecting Sv39 or Bare.
+          //
+          // ASID is declared unmodifiable (config/csr/mode_su.json,
+          // `unmodifiable_bits 59:44`), so the write zeroes it; the PPN is
+          // storage and takes the written value. Selecting MODE=Bare is
+          // required by software to zero the remaining fields, and the hardware
+          // keeps whatever was written, which is one of the behaviours the
+          // specification permits.
+          mosaic_csr_pkg::MOSAIC_CSR_ADDR_SATP: begin
+            if ((csr_op_result[63:60] == 4'd0) || (csr_op_result[63:60] == 4'd8)) begin
+              satp_d = {csr_op_result[63:60], 16'd0, csr_op_result[43:0]};
+            end else begin
+              satp_d = satp_q;
+            end
+          end
         `endif
         `ifdef MOSAIC_CSR_MUTANT_CYCLE_WRITABLE
           // MUTANT: the read-only shadows write through to the counters.

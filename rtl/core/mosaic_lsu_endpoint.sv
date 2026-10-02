@@ -715,12 +715,12 @@ module mosaic_lsu_endpoint (
               // not cause 4; an LR is a load and takes cause 4.
               rsp_q.cause       <= (req_i.we || req_i.is_amo || req_i.is_sc)
                                    ? EXC_STORE_MISALIGNED : EXC_LOAD_MISALIGNED;
-              rsp_q.tval        <= tval_q;
+              rsp_q.tval        <= req_tval_i;
               rsp_q.data        <= 64'd0;
               rsp_valid_q       <= 1'b1;
               last_fault_cause_q <= (req_i.we || req_i.is_amo || req_i.is_sc)
                                     ? EXC_STORE_MISALIGNED : EXC_LOAD_MISALIGNED;
-              last_fault_tval_q  <= tval_q;
+              last_fault_tval_q  <= req_tval_i;
               rsp_ctr_q         <= rsp_ctr_q + 32'd1;
               state_q           <= ST_DONE;
             end else if (pmp_deny_i) begin
@@ -736,12 +736,12 @@ module mosaic_lsu_endpoint (
               rsp_q.fault       <= 1'b1;
               rsp_q.cause       <= (req_i.we || req_i.is_amo || req_i.is_sc)
                                    ? EXC_STORE_ACCESS : EXC_LOAD_ACCESS;
-              rsp_q.tval        <= tval_q;
+              rsp_q.tval        <= req_tval_i;
               rsp_q.data        <= 64'd0;
               rsp_valid_q       <= 1'b1;
               last_fault_cause_q <= (req_i.we || req_i.is_amo || req_i.is_sc)
                                     ? EXC_STORE_ACCESS : EXC_LOAD_ACCESS;
-              last_fault_tval_q  <= tval_q;
+              last_fault_tval_q  <= req_tval_i;
               rsp_ctr_q         <= rsp_ctr_q + 32'd1;
               state_q           <= ST_DONE;
             end else if (req_i.is_sc && !res_hit_c) begin
@@ -761,7 +761,7 @@ module mosaic_lsu_endpoint (
               rsp_q.id      <= req_i.id;
               rsp_q.fault   <= 1'b0;
               rsp_q.cause   <= EXC_STORE_ACCESS;
-              rsp_q.tval    <= tval_q;
+              rsp_q.tval    <= req_tval_i;
               rsp_q.data    <= SC_FAIL;
               rsp_valid_q   <= 1'b1;
               rsp_ctr_q     <= rsp_ctr_q + 32'd1;
