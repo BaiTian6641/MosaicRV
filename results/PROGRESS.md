@@ -1735,7 +1735,7 @@ out-of-order core running the whole p0 corpus. Everything below is re-derivable 
 (`config/status/implementation_status.json` is the ledger; `tests/unit/registry.json` is the case
 registry; `results/reports/` holds one report per package; `results/PROGRESS.md` is this file).
 
-**Delivered: 39 work packages; 49 registered cases; advertised ISA: .**
+**Delivered: 39 work packages; 49 registered cases; advertised ISA: rv64im_zicsr_zihpm (misa reset 0x8000000000001100).**
 
 | Area | What is true now |
 |---|---|
