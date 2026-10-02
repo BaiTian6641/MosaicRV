@@ -362,7 +362,7 @@ class NegativeControls(object):
     # -- the controls --------------------------------------------------------
 
     def run(self) -> int:
-        baseline, counts = check(self.root)
+        baseline, _ = check(self.root)
         if baseline:
             print("negative controls skipped: the ledger does not check out "
                   "(%d problem(s)); fix it before using these controls as evidence"
