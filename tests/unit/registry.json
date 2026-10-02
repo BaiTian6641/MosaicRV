@@ -2550,6 +2550,9 @@
   },
   "multihart.isolation": {
    "task": "I-064",
+   "profiles": [
+    "p3"
+   ],
    "top": "mosaic_multihart_tb",
    "rtl": [
     "rtl/core/mosaic_pkg.sv",
