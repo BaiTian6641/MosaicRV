@@ -186,6 +186,17 @@ constexpr bool kCompareMemory = false;
 constexpr bool kCompareMemory = true;
 #endif
 
+// The sign-extension sensitivity control: when defined, the ledger zero-extends
+// every load instead of applying the load's own signedness. The shipping machine
+// must then be *reported* as wrong at the first signed load, which is what shows
+// the load-source check is sensitive to the sign-extension bit and not merely to
+// the low bytes.
+#ifdef MOSAIC_VISIBILITY_ZERO_EXTEND
+constexpr bool kLedgerSignExtends = false;
+#else
+constexpr bool kLedgerSignExtends = true;
+#endif
+
 // The codec's first live use: every record this case emits is encoded to the
 // frozen binary layout and decoded back, field by field, before any comparison
 // uses it. The counters are reported so the round trip is measured, not claimed.
@@ -236,7 +247,7 @@ uint32_t EncJ(int32_t offset, uint32_t rd) {
 }
 
 // The register names the scene uses (the corpus's own convention).
-constexpr uint32_t kX0 = 0, kT0 = 5, kT1 = 6, kT2 = 7, kS3 = 19, kT3 = 28;
+constexpr uint32_t kX0 = 0, kT0 = 5, kT1 = 6, kT2 = 7, kX10 = 10, kS3 = 19, kT3 = 28;
 
 // A word is a store when its opcode is STORE and funct3 selects a width; the
 // size in bytes is 1 << funct3.
@@ -622,6 +633,8 @@ struct CommittedStore {
   uint32_t seq = 0;           // the event stream's retire_seq (the causal id)
   uint64_t rob_id = 0;        // the core's per-lane {generation, tag} identity
   uint64_t pc = 0;
+  uint32_t insn_bits = 0;     // the committed instruction's own encoding
+  unsigned insn_len = 0;      // 2 or 4
   uint64_t addr = 0;
   uint64_t data = 0;
   unsigned size = 0;          // bytes
@@ -653,6 +666,7 @@ struct Coverage {
   uint64_t directed_crossing_accesses = 0;
   uint64_t crossing_reached_memory = 0;
   uint64_t wrong_path_stores_directed = 0;
+  uint64_t stores_squashed = 0;
   uint64_t wrong_path_bytes_visible = 0;
   uint64_t same_pc_addr_pairs = 0;
   uint64_t bytes_written_twice = 0;
@@ -682,6 +696,7 @@ struct Coverage {
     directed_crossing_accesses += o.directed_crossing_accesses;
     crossing_reached_memory += o.crossing_reached_memory;
     wrong_path_stores_directed += o.wrong_path_stores_directed;
+    stores_squashed += o.stores_squashed;
     wrong_path_bytes_visible += o.wrong_path_bytes_visible;
     same_pc_addr_pairs += o.same_pc_addr_pairs;
     bytes_written_twice += o.bytes_written_twice;
@@ -839,6 +854,8 @@ class Harness {
     uint64_t value = 0;
     uint32_t seq = 0;
     uint64_t rob_id = 0;
+    uint32_t insn_bits = 0;
+    unsigned insn_len = 0;
     bool is_store = false;
     uint64_t store_addr = 0;
     uint64_t store_data = 0;
@@ -906,8 +923,10 @@ class Harness {
     record.cycle = s.commit_cycle;
     record.kind = static_cast<uint8_t>(mosaic::kEventKindRETIRE);
     record.pc_before = s.pc;
-    record.insn_bits = img_->Word(s.pc);
-    record.insn_len = 4;
+    // From the retire lane's own port, not re-read from the image: the record
+    // must carry the instruction as committed.
+    record.insn_bits = s.insn_bits;
+    record.insn_len = static_cast<uint8_t>(s.insn_len);
     record.mem_is_store = 1;
     record.mem_addr = s.addr;
     record.mem_data = s.data;
@@ -924,7 +943,11 @@ class Harness {
     record.hart_id = 0;
     record.cycle = s.drain_cycle;
     record.kind = static_cast<uint8_t>(mosaic::kEventKindMEM_VISIBLE);
-    record.pc_before = s.pc;
+    // pc_before, pc_after, insn_bits, insn_len and rob_id are valid only on
+    // RETIRE and TRAP (config/contracts/event_v1.json), so a MEM_VISIBLE record
+    // carries them zero and locates the effect by retire_seq -- which is exactly
+    // the store_drain_is_separate rule.
+    record.pc_before = 0;
     record.mem_is_store = 1;
     record.mem_addr = s.addr;
     record.mem_data = s.data;
@@ -966,6 +989,8 @@ class Harness {
       r.rob_id = (g_.ret_id_w > 0 && g_.ret_id_w <= 64)
                      ? PackedLane(dut_->ev_id_o, lane, g_.ret_id_w)
                      : 0;
+      r.insn_bits = static_cast<uint32_t>(PackedLane(dut_->ev_insn_o, lane, 32));
+      r.insn_len = static_cast<unsigned>(PackedLane(dut_->ev_len_o, lane, 3));
       r.reg_we = PackedLane(dut_->ev_reg_we_o, lane, 1) != 0;
       r.is_store = PackedLane(dut_->ev_store_o, lane, 1) != 0;
       r.store_addr = PayloadLane(dut_->ev_store_addr_o, lane);
@@ -1008,6 +1033,8 @@ class Harness {
         s.seq = r.seq;
         s.rob_id = r.rob_id;
         s.pc = r.pc;
+        s.insn_bits = r.insn_bits;
+        s.insn_len = r.insn_len;
         s.addr = r.store_addr;
         s.data = r.store_data;
         s.size = SizeBytes(r.store_size);
@@ -1034,7 +1061,8 @@ class Harness {
           continue;
         }
         const uint64_t raw = arch_mem_.RawValue(d.addr, d.size);
-        const uint64_t want = (d.sign && d.size < 8) ? SignExtend(raw, d.size) : raw;
+        const uint64_t want =
+            (kLedgerSignExtends && d.sign && d.size < 8) ? SignExtend(raw, d.size) : raw;
         cov_.loads++;
         cov_.load_source_checks++;
         cov_.load_widths[d.size == 1 ? 0u : d.size == 2 ? 1u : d.size == 4 ? 2u : 3u]++;
@@ -1122,6 +1150,9 @@ class Harness {
     const bool positional =
         drain_next_ < committed_.size() && PayloadMatches(req, committed_[drain_next_]);
     if (!positional) {
+      // Precedence: a store already drained (a duplicate), then a younger store
+      // (out of order), then the right store with the wrong size (a corrupt
+      // payload), then no committed producer at all.
       if (other != kNoMatch && other <= drain_next_) {
         cov_.duplicate_drains++;
         const CommittedStore& d = committed_[other];
@@ -1137,6 +1168,19 @@ class Harness {
              "at " +
                  U64(req.addr) + " size=" + Dec(bytes) + " drained while the older " +
                  "committed store " + StoreName(committed_[drain_next_]) + " had not");
+      }
+      if (drain_next_ < committed_.size() && PayloadMatches(req, committed_[drain_next_])) {
+        // The bytes are the right store's; what disagrees is the size or the
+        // strobes the drain presented.
+        const CommittedStore& s = committed_[drain_next_];
+        const unsigned low = static_cast<unsigned>(s.addr & 7u);
+        const unsigned expected_strb = ((1u << s.size) - 1u) << low;
+        cov_.unattributed_visibility++;
+        Fail(phase_ + " at cycle " + Dec(cycles_),
+             "the drain's byte mask is the store's own size: store " + StoreName(s) +
+                 " size=" + Dec(s.size) + " expected strobes " +
+                 U64(expected_strb & 0xFFu) + ", the data port carried strobes " +
+                 U64(req.wstrb) + " size=" + Dec(bytes));
       }
       cov_.unattributed_visibility++;
       Fail(phase_ + " at cycle " + Dec(cycles_),
@@ -1247,7 +1291,7 @@ class Harness {
       if (((req.wstrb >> lane) & 1u) == 0u) continue;
       if (lane < low) return false;
       const unsigned offset = lane - low;
-      if (offset >= s.size) return false;
+      if (offset >= 8) return false;  // the payload is one 64-bit operand
       const uint8_t payload = static_cast<uint8_t>((s.data >> (8 * offset)) & 0xFFu);
       const uint8_t from_port = static_cast<uint8_t>((req.wdata >> (8 * lane)) & 0xFFu);
       if (payload != from_port) return false;
@@ -1345,21 +1389,10 @@ std::string FindRepoRoot() {
 // ============================================================================
 // One run
 // ============================================================================
-struct RunOutcome {
-  uint64_t cycles = 0;
-  size_t retires = 0;
-  uint64_t loads = 0;
-  uint64_t stores = 0;
-  uint64_t write_txns = 0;
-  uint64_t read_txns = 0;
-};
-
 void RunOnce(Vmosaic_core_tb* dut, mosaic::Reporter* reporter, uint64_t max_cycles,
              const std::string& elf_path, const Expected& input, int program_index,
              int input_index, bool scene_run, const Geometry& geometry,
              std::vector<TraceLine>* trace, Coverage* totals) {
-  RunOutcome outcome;
-
   // ---- the image, the reset bricks, and (for a scene run) the scene ----
   ProgImage image;
   std::string load_detail;
@@ -1378,23 +1411,37 @@ void RunOnce(Vmosaic_core_tb* dut, mosaic::Reporter* reporter, uint64_t max_cycl
   Scene scene;
   if (scene_run) scene = WriteScene(&image, entry, geometry.reset_vector);
   const uint64_t target = scene_run ? scene.base : entry;
-  const int64_t offset =
-      static_cast<int64_t>(target) - static_cast<int64_t>(geometry.reset_vector);
+  // The jump sits at reset+4, after the auipc that forms the base.
+  const int64_t offset = static_cast<int64_t>(target) -
+                         static_cast<int64_t>(geometry.reset_vector + 4);
   if (offset < -(INT32_C(1) << 20) || offset >= (INT32_C(1) << 20)) {
     Fail("program", "the entry is out of JAL range from the reset vector");
   }
-  image.WriteWord(geometry.reset_vector, EncJ(static_cast<int32_t>(offset), 0));
-  // The two words after the entry branch are its fall-through, which is wrong
-  // path. They are a system instruction the machine refuses while no trap vector
-  // is installed (`ecall`, dispatch's l0_trap_unarmed), so they are fetched, held
-  // by the branch barrier and discarded by the redirect, and nothing else is
-  // claimed for them. A *store* here is deliberately not used: address 0 is the
-  // read-only boot ROM, so a store there cannot become a visible byte even if it
-  // leaked (the memory model refuses the write and the endpoint may refuse the
-  // access), and the card's wrong-path coverage is therefore placed in the scene,
-  // where the target is writable RAM the wrong-path store owns.
-  image.WriteWord(geometry.reset_vector + 4, 0x00000073u);  // ecall (refused, wrong path)
-  image.WriteWord(geometry.reset_vector + 8, 0x00000073u);  // ecall (refused, wrong path)
+  // The reset brick is three instructions, and every one of them is in the
+  // *reference* except the wrong-path stores:
+  //
+  //   reset+0   auipc x10, 0x10   x10 = reset + 0x10000 = 0x80010000 (RAM)
+  //   reset+4   jal   x0, target  the entry, taken
+  //   reset+8   sd    x10, 0(x10) WRONG PATH: a store to writable RAM
+  //   reset+12  sd    x10, 4(x10) WRONG PATH: crosses the 8-byte line boundary
+  //
+  // The two wrong-path words are the card's central failure in the smallest
+  // form: a store that must never execute, at an address where its bytes *would*
+  // be visible. The branch barrier holds dispatch until the jump's redirect
+  // purges the front end, so in the shipping machine they are fetched and
+  // discarded. With the barrier bypassed for memory macros
+  // (MOSAIC_CORE_MUTANT_MEM_BEHIND_BRANCH) they are dispatched and allocated,
+  // and if the drain's authorisation watermark is also removed
+  // (MOSAIC_SQ_MUTANT_VISIBLE_BEFORE_COMMIT) the first one's bytes reach memory
+  // before it commits: this case then names 0x80010000 and says the byte has no
+  // committed producer.
+  //
+  // The base is formed with `auipc` because `lui 0x80010` would sign-extend the
+  // 32-bit 0x80010000; the harness must build the address the architecture does.
+  image.WriteWord(geometry.reset_vector + 0, EncU(0x10u, kX10, 0x17u));  // auipc x10, 0x10
+  image.WriteWord(geometry.reset_vector + 4, EncJ(static_cast<int32_t>(offset), 0));
+  image.WriteWord(geometry.reset_vector + 8, EncS(0, kX10, kX10, 0x3u));   // sd x10, 0(x10)
+  image.WriteWord(geometry.reset_vector + 12, EncS(4, kX10, kX10, 0x3u));  // sd x10, 4(x10)
 
   // ---- the three memories: the DUT's, the reference's, the ledger's seed ----
   mosaic::MemoryModel dut_mem;
@@ -1417,6 +1464,9 @@ void RunOnce(Vmosaic_core_tb* dut, mosaic::Reporter* reporter, uint64_t max_cycl
 
   const std::string ph = "run-" + std::string(kPrograms[program_index].name) + "-in" +
                          Dec(input_index) + (scene_run ? "-scene" : "");
+  if (kCompareMemory && trace != nullptr) {
+    trace->push_back(TraceLine{"# run " + ph + " (" + elf_path + ")"});
+  }
   Harness harness(dut, reporter, max_cycles, &image, &dut_mem, &arch_seed, trace);
   harness.Configure(geometry);
   harness.Phase(ph);
@@ -1454,13 +1504,6 @@ void RunOnce(Vmosaic_core_tb* dut, mosaic::Reporter* reporter, uint64_t max_cycl
   // with the trace comparison off until the authorised stores have reached
   // memory (the exit store may still be draining).
   for (int i = 0; i < kDrainCycles && !dut_mem.finished(); i++) harness.Cycle(false);
-
-  outcome.cycles = harness.cycles();
-  outcome.retires = harness.retires();
-  outcome.loads = reference.loads;
-  outcome.stores = reference.stores;
-  outcome.write_txns = harness.write_txns();
-  outcome.read_txns = harness.read_txns();
 
   // ---- 1. the whole predicted stream retired ----
   harness.Check("the per-instruction retire stream matches the independent RV64IM "
@@ -1590,6 +1633,36 @@ void RunOnce(Vmosaic_core_tb* dut, mosaic::Reporter* reporter, uint64_t max_cycl
                     Dec(pmp_deny) + " pmp_store_deny=" + Dec(pmp_store_deny));
 
   }
+  // ---- 5b. the wrong-path targets are empty in *every* run ----
+  // The reset brick's two wrong-path stores target 0x80010000/0x80010004; the
+  // scene's three target 0x80010200/0x80010204/0x80010200. The four distinct
+  // addresses must have received neither a transaction nor a visible byte.
+  {
+    const uint64_t targets[4] = {kSceneBase, kSceneBase + 4, kSceneScratch,
+                                 kSceneScratch + 4};
+    for (uint64_t addr : targets) {
+      for (const DataMem::Txn& t : harness.txns()) {
+        // A *read* of the scene's scratch is legitimate (the scene loads it back
+        // to prove the wrong path left it alone); a write at a wrong-path target
+        // is the leak this case exists to name.
+        if (t.req.we && t.req.addr == addr) {
+          Fail(ph, "a wrong-path store's transaction reached memory at " + U64(addr));
+        }
+      }
+      for (const VisibleByte& v : harness.visible()) {
+        if (v.addr == addr) {
+          Fail(ph, "a wrong-path store's byte became visible at " + U64(addr));
+        }
+      }
+    }
+    harness.coverage().wrong_path_stores_directed += 2 + (scene_run ? 3 : 0);
+  }
+
+  // ---- 5c. no store was squashed, so no cancelled store could have leaked ----
+  if (kCompareMemory) {
+    harness.coverage().stores_squashed += dut->o_mem_sq_squash_o;
+  }
+
   // ---- 6. the scene's coverage, measured ----
   if (kCompareMemory) {
   if (scene_run) {
@@ -1693,7 +1766,6 @@ void RunOnce(Vmosaic_core_tb* dut, mosaic::Reporter* reporter, uint64_t max_cycl
               static_cast<unsigned long long>(harness.read_txns()),
               static_cast<unsigned long long>(harness.committed().size()),
               static_cast<unsigned long long>(cycles_at_end));
-  (void)outcome;
 }
 
 }  // namespace
@@ -1788,7 +1860,6 @@ int main(int argc, char** argv) {
       if (s.scene) scene_runs++;
     }
     total.directed_crossing_accesses = scene_runs;
-    total.wrong_path_stores_directed = scene_runs * 2;
 
     // ---- the coverage the card names, measured across the run set ----
     if (kCompareMemory) {
@@ -1876,6 +1947,20 @@ int main(int argc, char** argv) {
                     total.min_commit_drain_gap == UINT64_MAX ? 0
                                                              : total.min_commit_drain_gap),
                 static_cast<unsigned long long>(total.superseded_bytes));
+    std::printf("  widths: loads byte/half/word/double = %llu/%llu/%llu/%llu; stores = "
+                "%llu/%llu/%llu/%llu\n",
+                static_cast<unsigned long long>(total.load_widths[0]),
+                static_cast<unsigned long long>(total.load_widths[1]),
+                static_cast<unsigned long long>(total.load_widths[2]),
+                static_cast<unsigned long long>(total.load_widths[3]),
+                static_cast<unsigned long long>(total.store_widths[0]),
+                static_cast<unsigned long long>(total.store_widths[1]),
+                static_cast<unsigned long long>(total.store_widths[2]),
+                static_cast<unsigned long long>(total.store_widths[3]));
+    std::printf("  wrong-path stores directed %llu (at 4 addresses, none visible); "
+                "stores squashed out of the queue %llu\n",
+                static_cast<unsigned long long>(total.wrong_path_stores_directed),
+                static_cast<unsigned long long>(total.stores_squashed));
     std::printf("  coverage: sign-extended loads %llu, partial-mask drains %llu, "
                 "forwarded bytes %llu, load-source checks %llu, same-pc+address store "
                 "pairs %llu, protocol bytes %llu\n",
@@ -1885,6 +1970,10 @@ int main(int argc, char** argv) {
                 static_cast<unsigned long long>(total.load_source_checks),
                 static_cast<unsigned long long>(total.same_pc_addr_pairs),
                 static_cast<unsigned long long>(total.protocol_bytes));
+    reporter.Check(total.stores_squashed == 0,
+                   "no store was squashed out of the store queue, so no cancelled store "
+                   "could have leaked a byte (" +
+                       Dec(total.stores_squashed) + ")");
     std::printf("  note: I-036 (speculative load replay / late alias) is not enabled, so "
                 "replay/rollback evidence is not claimed; see "
                 "results/reports/V-018-visibility.md\n");

@@ -771,6 +771,112 @@ module mosaic_core (
   logic [CORE_RGEN_W-1:0]     sq_squash_gen;
   logic [CORE_MEM_CNT_W-1:0]  sq_count, sq_auth_cnt;
   logic [CORE_SQ_N*CORE_SQ_ENTRY_W-1:0] sq_entry_pay;
+  // The store payload's address and data, declared here (I-045) rather than with
+  // the rest of the retirement payload presentation below, because the Sv39
+  // translation section (13b) reads the head stores' `base + imm` to translate
+  // them and the trap controller reads the same value as the page fault's tval.
+  logic [CORE_XLEN-1:0]             sq_pay0_addr, sq_pay0_data;
+  logic [CORE_XLEN-1:0]             sq_pay1_addr, sq_pay1_data;
+
+  // ==========================================================================
+  // I-045 Sv39 translation declarations. They live here, with the other
+  // memory-path declarations, because the trap controller (section 10) reads
+  // the store page-fault decision and the memory path (section 14) drives it.
+  // ==========================================================================
+  localparam int unsigned ST_FIFO_PTR_W = (CORE_SQ_N <= 1) ? 1 : $clog2(CORE_SQ_N);
+
+  // The one global condition that turns translation on for a data access: the
+  // effective privilege is below M *and* satp selects a paging mode. Both are
+  // committed CSR state (`eff_priv_c` already folds MPRV), and in a profile with
+  // no satp the CSR file drives `csr_satp` to zero, so p0 is unchanged.
+  logic        xlate_active_c;
+
+  // The PTW's request, result and PTE-port wires.
+  logic        ptw_xl_req_valid, ptw_xl_req_ready;
+  logic [63:0] ptw_xl_va;
+  logic [1:0]  ptw_xl_kind, ptw_xl_priv;
+  logic [3:0]  ptw_xl_mode;
+  logic [43:0] ptw_xl_ppn;
+  logic        ptw_xl_sum, ptw_xl_mxr, ptw_xl_cancel;
+  logic        ptw_xl_rsp_valid, ptw_xl_rsp_ready;
+  logic [63:0] ptw_xl_pa, ptw_xl_tval;
+  logic        ptw_xl_fault, ptw_xl_bare;
+  logic [3:0]  ptw_xl_cause, ptw_xl_perms;
+  logic        ptw_busy_q, ptw_owner_q;
+  logic [31:0] ptw_walk_ctr, ptw_bare_ctr, ptw_leaf_ctr, ptw_fault_ctr;
+  logic [31:0] ptw_ad_ctr, ptw_retry_ctr, ptw_cancel_ctr;
+
+  // The PTE port and the endpoint's port, merged onto the core's `dmem` port by
+  // a two-master arbiter (one transaction in flight, the walker first).
+  logic        ptw_mem_req_valid, ptw_mem_req_ready;
+  logic        ptw_mem_we;
+  logic [63:0] ptw_mem_addr, ptw_mem_wdata;
+  logic [7:0]  ptw_mem_wstrb;
+  logic        ptw_mem_rsp_valid, ptw_mem_rsp_ready, ptw_mem_fault;
+  logic [63:0] ptw_mem_rdata;
+  logic        ep_mem_req_valid, ep_mem_req_ready;
+  mosaic_uop_pkg::mem_req_t ep_mem_req;
+  logic        ep_mem_rsp_valid, ep_mem_rsp_ready;
+  mosaic_uop_pkg::mem_rsp_t ep_mem_rsp;
+  logic [1:0]  mem_owner_q;
+  localparam logic [1:0] MEM_OWN_NONE = 2'd0, MEM_OWN_EP = 2'd1, MEM_OWN_PTW = 2'd2;
+
+  // The load translation stage. In Bare it is a wire (`lq_bypass_c`); with
+  // paging it holds the offered load until its translation is known, then either
+  // presents the physical request to the endpoint or hands the fault back to the
+  // load queue itself.
+  localparam logic [1:0] LS_EMPTY = 2'd0, LS_XL = 2'd1, LS_PRESENT = 2'd2,
+                         LS_FAULT = 2'd3;
+  logic [1:0]  lq_stg_state_q;
+  logic        lq_bypass_c, lq_tx_valid, lq_tx_ready;
+  mosaic_uop_pkg::lsu_req_t lq_tx_req;
+  logic [63:0] lq_tx_tval;
+  logic        lq_xl_req_valid, lq_xl_req_accepted, lq_xl_wait_q;
+  mosaic_uop_pkg::lsu_req_t lq_hold_q;
+  logic [63:0] lq_hold_va_q, lq_hold_tval_q, lq_hold_pa_q;
+  logic [1:0]  lq_kind_q, lq_priv_q;
+  logic [3:0]  lq_mode_q;
+  logic [43:0] lq_ppn_q;
+  logic        lq_sum_q, lq_mxr_q;
+  logic [3:0]  lq_xl_cause_q;
+  logic        lq_xl_fault_valid;
+  mosaic_uop_pkg::lsu_rsp_t lq_xl_fault_rsp;
+
+  // The store translation: a per-lane result for the commit decision and a
+  // FIFO of translated physical addresses for the drains that follow.
+  logic        st_hit0_c, st_hit1_c, st_fault0_c, st_fault1_c;
+  logic [63:0] st_pa0_c, st_pa1_c;
+  logic [3:0]  st_cause0_c, st_cause1_c;
+  logic        st_lane0_blocks_c, st_lane1_blocks_c;
+  logic        st_req_valid, st_req_lane1_c, st_req_lane1_q;
+  logic        st_want0_c, st_want1_c;
+  logic [63:0] st_req_va;
+  logic [CORE_IDX_W-1:0]  st_req_idx, st_req_idx_q;
+  logic [CORE_RGEN_W-1:0] st_req_gen, st_req_gen_q;
+  logic        st_r0_valid_q, st_r1_valid_q;
+  logic [CORE_IDX_W-1:0]  st_r0_idx_q, st_r1_idx_q;
+  logic [CORE_RGEN_W-1:0] st_r0_gen_q, st_r1_gen_q;
+  logic [63:0] st_r0_pa_q, st_r1_pa_q;
+  logic        st_r0_fault_q, st_r1_fault_q;
+  logic [3:0]  st_r0_cause_q, st_r1_cause_q;
+  logic        st_push0_c, st_push1_c, st_pop_c;
+  logic [63:0] sq_drain_pa_c;
+  logic [63:0] st_fifo_pa [0:CORE_SQ_N-1];
+  logic [CORE_MEM_CNT_W-1:0] st_fifo_cnt_q;
+  logic [ST_FIFO_PTR_W-1:0]  st_fifo_head_q, st_fifo_tail_q;
+  logic [31:0] st_fifo_ovf_ctr_q, st_xl_alloc_ctr_q, st_xl_pop_ctr_q;
+
+  // The store page-fault decision the trap controller and the retire gate read.
+  logic        store0_xl_fault_c, store0_xl_fault_now;
+  // The architectural tval presented to the endpoint with the transaction it is
+  // offered, and the serializer's latched copy for a held (device or atomic)
+  // transaction -- the same lifetime `ser_hold_dev_q` has.
+  logic [63:0] ep_tval_c, sq_drain_tval_c;
+  logic [63:0] ser_hold_tval_q;
+  logic        ptw_take_c, ptw_take_store_c;
+  // The PMP commit-path address for the two lanes: the translated physical
+  // address when there is one, the effective address otherwise.
+  logic [CORE_XLEN-1:0] pmp_store_addr0_c, pmp_store_addr1_c;
   logic [2:0]                 sq_alloc_size;
   logic [31:0]                sq_alloc_ctr, sq_commit_ctr, sq_commit_stale_ctr;
   logic [31:0]                sq_drain_ctr, sq_squash_ctr, sq_spared_ctr, sq_fault_ctr;
@@ -3113,8 +3219,6 @@ module mosaic_core (
   logic [CORE_MEM_CNT_W-1:0]        sq_pay0_slot, sq_pay1_slot;
   logic                             sq_pay0_valid, sq_pay1_valid;
   logic                             sq_pay0_ready, sq_pay1_ready;
-  logic [CORE_XLEN-1:0]             sq_pay0_addr, sq_pay0_data;
-  logic [CORE_XLEN-1:0]             sq_pay1_addr, sq_pay1_data;
   logic [CORE_SIZE_W-1:0]           sq_pay0_size, sq_pay1_size;
   // The size the payload presents. NEGATIVE CONTROL: every store is reported as
   // a word whatever the instruction asked for -- the valid bit, the address and
@@ -3423,7 +3527,396 @@ module mosaic_core (
   // The two queues' offers are muxed here -- the store drain has priority, as
   // above -- and the mux feeds the device serializer below, which is the last
   // point before the endpoint.
-  assign ep_req_valid = sq_drain_valid | lq_req_valid;
+  // ===========================================================================
+  // 14-pre. Sv39 address translation (I-045)
+  // ===========================================================================
+  // The translation engine (`mosaic_ptw`) sits here, between the queues and the
+  // endpoint, and it is owned in two places because the ISA gives a load and a
+  // store different points at which their translation must be resolved:
+  //
+  //   * a **load** (and an LR/AMO/SC, which the load queue issues) is translated
+  //     in the stage below, as it is offered. A translation fault is handed back
+  //     to the load queue as an ordinary fault response and the access never
+  //     reaches the endpoint -- "a PTE error is not an ordinary cache miss" made
+  //     structural.
+  //   * a **store** is translated at the commit boundary. A store may reach
+  //     memory only after it retires, so a page fault discovered at its drain
+  //     would be reported after the instruction had already committed; instead
+  //     the store's translation is resolved *before* its retirement, its
+  //     physical address is recorded, and a fault suppresses the retirement and
+  //     takes the trap at the store's own PC, exactly as the PMP commit check
+  //     does. The recorded address is what the drain then writes to.
+  //
+  // Both share the one serial walker and the one physical `dmem` port. The
+  // walker is a plain master of that port: an arbiter gives it the port ahead of
+  // the endpoint, and only one of the two can have a transaction outstanding at
+  // a time (the endpoint is in a translation stage while the walker reads PTEs,
+  // and the walker is idle for the endpoint's data beat).
+  //
+  // The `satp`-visibility rule (the brief's question, answered without
+  // SFENCE.VMA, which is I-046): a translation is performed once, at the access's
+  // own point in program order, and the resulting physical address is what the
+  // access uses. A later `satp` write therefore cannot retroactively change an
+  // access that already executed -- the store address FIFO below is the record
+  // that makes this true even for a store whose drain follows the write. A walk
+  // in flight when a redirect arrives is cancelled (`lq_flush`), so a stale walk
+  // cannot produce a translation for an instruction that was squashed.
+
+  assign xlate_active_c = (eff_priv_c != mosaic_csr_pkg::MOSAIC_PRIV_M) &&
+                          (csr_satp[63:60] != 4'd0);
+
+  // ------------------------------------------------------------------ the walker
+  mosaic_ptw u_ptw (
+      .clk             (clk),
+      .rst             (rst),
+      .xl_req_valid_i  (ptw_xl_req_valid),
+      .xl_req_ready_o  (ptw_xl_req_ready),
+      .xl_va_i         (ptw_xl_va),
+      .xl_kind_i       (ptw_xl_kind),
+      .xl_priv_i       (ptw_xl_priv),
+      .xl_satp_mode_i  (ptw_xl_mode),
+      .xl_satp_ppn_i   (ptw_xl_ppn),
+      .xl_sum_i        (ptw_xl_sum),
+      .xl_mxr_i        (ptw_xl_mxr),
+      .xl_cancel_i     (ptw_xl_cancel),
+      .xl_rsp_valid_o  (ptw_xl_rsp_valid),
+      .xl_rsp_ready_i  (ptw_xl_rsp_ready),
+      .xl_pa_o         (ptw_xl_pa),
+      .xl_fault_o      (ptw_xl_fault),
+      .xl_cause_o      (ptw_xl_cause),
+      .xl_tval_o       (ptw_xl_tval),
+      .xl_perms_o      (ptw_xl_perms),
+      .xl_bare_o       (ptw_xl_bare),
+      .pte_req_valid_o (ptw_mem_req_valid),
+      .pte_req_ready_i (ptw_mem_req_ready),
+      .pte_req_we_o    (ptw_mem_we),
+      .pte_req_addr_o  (ptw_mem_addr),
+      .pte_req_wdata_o (ptw_mem_wdata),
+      .pte_req_wstrb_o (ptw_mem_wstrb),
+      .pte_rsp_valid_i (ptw_mem_rsp_valid),
+      .pte_rsp_ready_o (ptw_mem_rsp_ready),
+      .pte_rsp_rdata_i (ptw_mem_rdata),
+      .pte_rsp_fault_i (ptw_mem_fault),
+      .o_busy          (),
+      .o_walk_ctr      (ptw_walk_ctr),
+      .o_bare_ctr      (ptw_bare_ctr),
+      .o_leaf_ctr      (ptw_leaf_ctr),
+      .o_fault_ctr     (ptw_fault_ctr),
+      .o_ad_upd_ctr    (ptw_ad_ctr),
+      .o_retry_ctr     (ptw_retry_ctr),
+      .o_cancel_ctr    (ptw_cancel_ctr),
+      .o_last_fault_cause (),
+      .o_last_fault_tval  ()
+  );
+
+  // --------------------------------------------------------- the PTE/dmem merge
+  // One transaction outstanding on `dmem` at a time, owned by a register. The
+  // walker has priority: its beat is short and it is on the critical path of
+  // whatever the endpoint is waiting to translate, while the endpoint's data
+  // beat has no translation left to do.
+  assign ptw_mem_rsp_ready = 1'b1;
+  assign ptw_mem_rdata     = dmem_rsp.rdata;
+  assign ptw_mem_fault     = dmem_rsp.fault;
+  assign ptw_mem_rsp_valid = dmem_rsp_valid && (mem_owner_q == MEM_OWN_PTW);
+  assign ep_mem_rsp_valid  = dmem_rsp_valid && (mem_owner_q == MEM_OWN_EP);
+  assign ep_mem_rsp        = dmem_rsp;
+
+  assign ptw_mem_req_ready = dmem_req_ready && (mem_owner_q == MEM_OWN_NONE);
+  assign ep_mem_req_ready  = dmem_req_ready && (mem_owner_q == MEM_OWN_NONE) &&
+                             !ptw_mem_req_valid;
+  assign dmem_req_valid    = (mem_owner_q == MEM_OWN_NONE) &&
+                             (ptw_mem_req_valid || ep_mem_req_valid);
+  always_comb begin
+    if (ptw_mem_req_valid) begin
+      // A PTE access is always an 8-byte access to the PTE's physical address.
+      dmem_req.we     = ptw_mem_we;
+      dmem_req.addr   = ptw_mem_addr;
+      dmem_req.size   = mosaic_pkg::SZ_DBL;
+      dmem_req.wstrb  = ptw_mem_wstrb;
+      dmem_req.wdata  = ptw_mem_wdata;
+      dmem_req.amo    = 1'b0;
+      dmem_req.amo_op = mosaic_pkg::AMO_ADD;
+      dmem_req.aq     = 1'b0;
+      dmem_req.rl     = 1'b0;
+    end else begin
+      dmem_req = ep_mem_req;
+    end
+  end
+  assign dmem_rsp_ready = (mem_owner_q == MEM_OWN_PTW) ? ptw_mem_rsp_ready
+                        : (mem_owner_q == MEM_OWN_EP)  ? ep_mem_rsp_ready
+                        : 1'b1;
+
+  always_ff @(posedge clk) begin
+    if (rst) begin
+      mem_owner_q <= MEM_OWN_NONE;
+    end else begin
+      if (dmem_req_valid && dmem_req_ready) begin
+        mem_owner_q <= ptw_mem_req_valid ? MEM_OWN_PTW : MEM_OWN_EP;
+      end
+      if (dmem_rsp_valid && dmem_rsp_ready) begin
+        mem_owner_q <= MEM_OWN_NONE;
+      end
+    end
+  end
+
+  // ===========================================================================
+  // The load translation stage
+  // ===========================================================================
+  // In Bare it is transparent (`lq_bypass_c`), so a machine with no paging sees
+  // exactly the wire it had. With paging it latches the offered load, walks, and
+  // then either presents the physical request or returns the fault.
+  assign lq_bypass_c = !xlate_active_c && (lq_stg_state_q == LS_EMPTY);
+
+  assign lq_tx_valid = lq_bypass_c ? lq_req_valid
+                     : (lq_stg_state_q == LS_PRESENT);
+  assign lq_tx_ready = ep_req_ready && !sq_drain_valid;
+
+  always_comb begin
+    if (lq_bypass_c) begin
+      lq_tx_req  = lq_req;
+      lq_tx_tval = lq_req.base + lq_req.imm;
+    end else begin
+      lq_tx_req           = lq_hold_q;
+      lq_tx_req.base      = lq_hold_pa_q;
+      lq_tx_req.imm       = {CORE_XLEN{1'b0}};
+      lq_tx_tval          = lq_hold_tval_q;
+    end
+  end
+
+  // The walker request the stage drives. The class is the access's own: an SC
+  // and an AMO are store-class (their fault is a store page fault), an LR is a
+  // load.
+  logic lq_is_store_c;
+  assign lq_is_store_c = lq_hold_q.we | lq_hold_q.is_amo | lq_hold_q.is_sc;
+  assign lq_xl_req_valid = (lq_stg_state_q == LS_XL) && !lq_xl_wait_q &&
+                           !st_req_valid;
+
+  // The load queue's ready is the stage's, not the endpoint's: the queue is told
+  // "taken" when the stage accepts it, and the stage owns it until its response.
+  assign lq_req_ready = lq_bypass_c ? lq_tx_ready
+                      : (lq_stg_state_q == LS_EMPTY);
+
+  // The fault response the stage hands to the load queue. It is offered only
+  // when the endpoint is not delivering a load-queue response in the same cycle,
+  // so the queue never sees two in one cycle.
+  assign lq_xl_fault_valid = (lq_stg_state_q == LS_FAULT) &&
+                             !(ep_rsp_valid && !ep_owner_q);
+  always_comb begin
+    lq_xl_fault_rsp.id    = lq_hold_q.id;
+    lq_xl_fault_rsp.fault = 1'b1;
+    lq_xl_fault_rsp.cause = {60'd0, lq_xl_cause_q};
+    lq_xl_fault_rsp.tval  = lq_hold_tval_q;
+    lq_xl_fault_rsp.data  = {CORE_XLEN{1'b0}};
+  end
+
+  // ------------------------------------------------------------- the PTW arbiter
+  // The store request has priority (it is holding up retirement), and the load
+  // request excludes itself while the store's is presented so only one is ever
+  // offered. One walk in flight at a time.
+  assign ptw_xl_req_valid = !ptw_busy_q && (st_req_valid || lq_xl_req_valid);
+  assign ptw_xl_va        = st_req_valid ? st_req_va : (lq_hold_q.base + lq_hold_q.imm);
+  assign ptw_xl_kind      = st_req_valid ? 2'd1 : (lq_is_store_c ? 2'd1 : 2'd0);
+  assign ptw_xl_priv      = st_req_valid ? eff_priv_c : lq_priv_q;
+  assign ptw_xl_mode      = st_req_valid ? csr_satp[63:60] : lq_mode_q;
+  assign ptw_xl_ppn       = st_req_valid ? csr_satp[43:0] : lq_ppn_q;
+  assign ptw_xl_sum       = st_req_valid ? o_csr_mstatus[18] : lq_sum_q;
+  assign ptw_xl_mxr       = st_req_valid ? o_csr_mstatus[19] : lq_mxr_q;
+  assign ptw_xl_rsp_ready = 1'b1;
+  assign ptw_take_c       = ptw_xl_req_valid && ptw_xl_req_ready;
+  assign ptw_take_store_c = ptw_take_c && st_req_valid;
+  assign lq_xl_req_accepted = ptw_take_c && !st_req_valid;
+  // A redirect withdraws a load's walk. A store's walk is never cancelled: the
+  // store at the head survives a younger redirect, and if a trap does discard it
+  // the result is keyed by a generation that can no longer match.
+  assign ptw_xl_cancel    = ptw_busy_q && (ptw_owner_q == 1'b0) && lq_flush;
+
+  // ------------------------------------------------------ the store translation
+  assign st_hit0_c = st_r0_valid_q && rob_head_valid &&
+                     (st_r0_idx_q == rob_head_index) && (st_r0_gen_q == rob_head_gen);
+  assign st_hit1_c = st_r1_valid_q && rob_head1_valid &&
+                     (st_r1_idx_q == rob_head1_index) && (st_r1_gen_q == rob_head1_gen);
+  assign st_fault0_c = st_hit0_c && st_r0_fault_q;
+  assign st_fault1_c = st_hit1_c && st_r1_fault_q;
+  assign st_pa0_c    = st_hit0_c ? st_r0_pa_q : sq_pay0_addr;
+  assign st_pa1_c    = st_hit1_c ? st_r1_pa_q : sq_pay1_addr;
+
+  assign st_want0_c = xlate_active_c && rob_head_valid && desc_is_store0 &&
+                      ret_req[0] && !st_hit0_c;
+  assign st_lane0_blocks_c = st_want0_c;
+  assign st_want1_c = xlate_active_c && rob_head1_valid && desc_is_store1 &&
+                      ret_req[1] && !st_hit1_c;
+  assign st_lane1_blocks_c = st_want1_c;
+  assign st_req_valid    = st_want0_c || (st_want1_c && !st_lane0_blocks_c);
+  assign st_req_lane1_c  = !st_want0_c && st_want1_c;
+  assign st_req_va       = st_req_lane1_c ? sq_pay1_addr : sq_pay0_addr;
+  assign st_req_idx      = st_req_lane1_c ? rob_head1_index : rob_head_index;
+  assign st_req_gen      = st_req_lane1_c ? rob_head1_gen : rob_head_gen;
+
+  // The commit-boundary fault, and the PMP address the commit check must use:
+  // the translated physical address when the store has one, its effective
+  // address otherwise (Bare, where they are the same value).
+  assign store0_xl_fault_c = xlate_active_c && rob_head_valid && desc_is_store0 &&
+                             ret_req[0] && st_fault0_c;
+  assign store0_xl_fault_now = store0_xl_fault_c && !trap_decision;
+  assign pmp_store_addr0_c = (st_hit0_c && desc_is_store0) ? st_r0_pa_q : sq_pay0_addr;
+  assign pmp_store_addr1_c = (st_hit1_c && desc_is_store1) ? st_r1_pa_q : sq_pay1_addr;
+
+  // ------------------------------------------------- the drain address FIFO
+  // Every retiring store pushes the address its drain must use: the translated
+  // physical address when it has one, its effective address otherwise. Pushes
+  // are in retire order and pops in drain order -- both are program order -- so a
+  // pop always names the store that was pushed first. The recorded address is
+  // what makes a `satp` write after the store retire irrelevant to it.
+  assign st_push0_c = rob_retire_ack      && desc_is_store0;
+  assign st_push1_c = rob_retire_ack_next && desc_is_store1;
+  assign st_pop_c   = sq_drain_valid && sq_drain_ready;
+  assign sq_drain_tval_c = sq_drain_req.base + sq_drain_req.imm;
+  assign sq_drain_pa_c = (st_fifo_cnt_q != {CORE_MEM_CNT_W{1'b0}})
+                       ? st_fifo_pa[st_fifo_head_q]
+                       : sq_drain_tval_c;
+
+  assign ep_tval_c = sq_drain_valid ? sq_drain_tval_c : lq_tx_tval;
+
+  // --------------------------------------------------------------------------
+  // The stage and store-translation state
+  // --------------------------------------------------------------------------
+  always_ff @(posedge clk) begin
+    if (rst) begin
+      lq_stg_state_q   <= LS_EMPTY;
+      lq_xl_wait_q     <= 1'b0;
+      ptw_busy_q       <= 1'b0;
+      ptw_owner_q      <= 1'b0;
+      st_r0_valid_q    <= 1'b0;
+      st_r1_valid_q    <= 1'b0;
+      st_req_lane1_q   <= 1'b0;
+      st_fifo_cnt_q    <= {CORE_MEM_CNT_W{1'b0}};
+      st_fifo_head_q   <= {ST_FIFO_PTR_W{1'b0}};
+      st_fifo_tail_q   <= {ST_FIFO_PTR_W{1'b0}};
+      st_fifo_ovf_ctr_q <= 32'd0;
+      st_xl_alloc_ctr_q <= 32'd0;
+      st_xl_pop_ctr_q   <= 32'd0;
+    end else begin
+      // ------------------------------------------------------- walker ownership
+      if (ptw_take_c) begin
+        ptw_busy_q  <= 1'b1;
+        ptw_owner_q <= st_req_valid;
+        st_req_lane1_q <= st_req_lane1_c;
+        st_req_idx_q   <= st_req_idx;
+        st_req_gen_q   <= st_req_gen;
+      end
+      if (ptw_xl_rsp_valid) begin
+        ptw_busy_q <= 1'b0;
+      end
+      // A cancellation has no response: clear the ownership directly.
+      if (ptw_xl_cancel) begin
+        ptw_busy_q <= 1'b0;
+      end
+
+      // ------------------------------------------------------ the load stage
+      case (lq_stg_state_q)
+        LS_EMPTY: begin
+          lq_xl_wait_q <= 1'b0;
+          if (!lq_bypass_c && lq_req_valid) begin
+            lq_hold_q      <= lq_req;
+            lq_hold_va_q   <= lq_req.base + lq_req.imm;
+            lq_hold_tval_q <= lq_req.base + lq_req.imm;
+            lq_priv_q      <= eff_priv_c;
+            lq_mode_q      <= csr_satp[63:60];
+            lq_ppn_q       <= csr_satp[43:0];
+            lq_sum_q       <= o_csr_mstatus[18];
+            lq_mxr_q       <= o_csr_mstatus[19];
+            if (xlate_active_c) lq_stg_state_q <= LS_XL;
+            else begin
+              lq_hold_pa_q   <= lq_req.base + lq_req.imm;
+              lq_stg_state_q <= LS_PRESENT;
+            end
+          end
+        end
+        LS_XL: begin
+          if (lq_flush) begin
+            lq_xl_wait_q   <= 1'b0;
+            lq_stg_state_q <= LS_EMPTY;
+          end else if (!lq_xl_wait_q) begin
+            if (lq_xl_req_accepted) lq_xl_wait_q <= 1'b1;
+          end else if (ptw_xl_rsp_valid && (ptw_owner_q == 1'b0)) begin
+            lq_xl_wait_q <= 1'b0;
+            if (ptw_xl_fault) begin
+              lq_xl_cause_q  <= ptw_xl_cause;
+              lq_stg_state_q <= LS_FAULT;
+            end else begin
+              lq_hold_pa_q   <= ptw_xl_pa;
+              lq_stg_state_q <= LS_PRESENT;
+            end
+          end
+        end
+        LS_PRESENT: begin
+          if (lq_flush) begin
+            lq_stg_state_q <= LS_EMPTY;
+          end else if (lq_tx_valid && lq_tx_ready) begin
+            lq_stg_state_q <= LS_EMPTY;
+          end
+        end
+        LS_FAULT: begin
+          if (lq_flush) begin
+            lq_stg_state_q <= LS_EMPTY;
+          end else if (lq_xl_fault_valid && lq_rsp_ready) begin
+            lq_stg_state_q <= LS_EMPTY;
+          end
+        end
+        default: lq_stg_state_q <= LS_EMPTY;
+      endcase
+
+      // ------------------------------------------------ the store result latch
+      if (ptw_xl_rsp_valid && (ptw_owner_q == 1'b1)) begin
+        if (st_req_lane1_q) begin
+          st_r1_valid_q <= 1'b1;
+          st_r1_idx_q   <= st_req_idx_q;
+          st_r1_gen_q   <= st_req_gen_q;
+          st_r1_pa_q    <= ptw_xl_pa;
+          st_r1_fault_q <= ptw_xl_fault;
+          st_r1_cause_q <= ptw_xl_cause;
+        end else begin
+          st_r0_valid_q <= 1'b1;
+          st_r0_idx_q   <= st_req_idx_q;
+          st_r0_gen_q   <= st_req_gen_q;
+          st_r0_pa_q    <= ptw_xl_pa;
+          st_r0_fault_q <= ptw_xl_fault;
+          st_r0_cause_q <= ptw_xl_cause;
+        end
+      end
+      // A result is consumed by the retirement it authorised, and a redirect
+      // discards anything it might still be used for.
+      if (rob_flush_pulse) begin
+        st_r0_valid_q <= 1'b0;
+        st_r1_valid_q <= 1'b0;
+      end
+      if (rob_retire_ack && desc_is_store0)      st_r0_valid_q <= 1'b0;
+      if (rob_retire_ack_next && desc_is_store1) st_r1_valid_q <= 1'b0;
+
+      // ------------------------------------------------------- the drain FIFO
+      if (st_push0_c) begin
+        st_fifo_pa[st_fifo_tail_q] <= st_pa0_c;
+        st_xl_alloc_ctr_q <= st_xl_alloc_ctr_q + 32'd1;
+      end
+      if (st_push1_c) begin
+        st_fifo_pa[st_fifo_tail_q + ST_FIFO_PTR_W'(1'b1)] <= st_pa1_c;
+        st_xl_alloc_ctr_q <= st_xl_alloc_ctr_q + 32'd1;
+      end
+      if (st_pop_c) st_xl_pop_ctr_q <= st_xl_pop_ctr_q + 32'd1;
+      if ((st_push0_c || st_push1_c) &&
+          (st_fifo_cnt_q == CORE_MEM_CNT_W'(CORE_SQ_N)) && !st_pop_c) begin
+        st_fifo_ovf_ctr_q <= st_fifo_ovf_ctr_q + 32'd1;
+      end
+      st_fifo_head_q <= st_fifo_head_q + ST_FIFO_PTR_W'(st_pop_c);
+      st_fifo_tail_q <= st_fifo_tail_q + ST_FIFO_PTR_W'(st_push0_c)
+                                       + ST_FIFO_PTR_W'(st_push1_c);
+      st_fifo_cnt_q  <= st_fifo_cnt_q
+                      + CORE_MEM_CNT_W'(st_push0_c) + CORE_MEM_CNT_W'(st_push1_c)
+                      - CORE_MEM_CNT_W'(st_pop_c);
+    end
+  end
+
+  assign ep_req_valid = sq_drain_valid | lq_tx_valid;
 
   // The AMO overlay (I-039). The operation and operand of the one atomic
   // read-modify-write the load queue is carrying live in mosaic_amo_unit; when
@@ -3432,7 +3925,7 @@ module mosaic_core (
   // unchanged: `amo_active_c` is high only for the load-queue offer of the held
   // AMO.
   logic amo_active_c;
-  assign amo_active_c = amo_hit && !sq_drain_valid;
+  assign amo_active_c = amo_hit && !sq_drain_valid && lq_tx_valid;
 
   // I-040: the class of the held atomic macro. The load queue issues all three
   // as load class and carries none of these fields (see its atomic-head port),
@@ -3442,7 +3935,18 @@ module mosaic_core (
   assign atomic_sc_c = amo_active_c && amo_hit_sc;
 
   always_comb begin
-    ep_req            = sq_drain_valid ? sq_drain_req : lq_req;
+    if (sq_drain_valid) begin
+      // A store drains to the physical address its translation recorded; in
+      // Bare that address is its effective address, so the expression is
+      // uniform. `imm` is zero because the whole address is in `base`.
+      ep_req      = sq_drain_req;
+      ep_req.base = sq_drain_pa_c;
+      ep_req.imm  = {CORE_XLEN{1'b0}};
+    end else begin
+      // A load arrives already translated (the stage above), with the physical
+      // address in `base` and `imm` zero.
+      ep_req = lq_tx_req;
+    end
     ep_req.store_data = amo_active_c ? amo_hit_operand : ep_req.store_data;
     ep_req.is_amo     = amo_active_c && !atomic_lr_c && !atomic_sc_c;
     ep_req.amo_op     = amo_active_c ? amo_hit_op : mosaic_pkg::AMO_ADD;
@@ -3453,7 +3957,6 @@ module mosaic_core (
   end
 
   assign sq_drain_ready = ep_req_ready;
-  assign lq_req_ready   = ep_req_ready && !sq_drain_valid;
 
   // --------------------------------------------------------------------------
   // The device serializer (I-038): non-speculative MMIO
@@ -3671,7 +4174,7 @@ module mosaic_core (
       .alloc_operand_i(disp_mem_data),
       .taken_i        (amo_taken_c),
       .flush_i        (lq_flush),
-      .probe_id_i     (lq_req.id),
+      .probe_id_i     ((!sq_drain_valid && lq_tx_valid) ? lq_tx_req.id : lq_req.id),
       .match_o        (amo_hit),
       .op_o           (amo_hit_op),
       .aq_o           (amo_hit_aq),
@@ -4152,8 +4655,16 @@ module mosaic_core (
 
   assign disp_store_addr  = disp_mem_base + disp_mem_imm;
   assign disp_store_fault = store_fault_kind(disp_store_addr, disp_mem_size);
+  // The region check is a *physical* test, so with paging turned on it cannot be
+  // made on the effective address: a valid Sv39 mapping may have a virtual
+  // address that lands in no region at all. It is therefore made only when
+  // translation is off; with translation on, misalignment is still decided here
+  // (it is a property of the low offset bits and is unaffected by translation)
+  // and the region/PMP decision moves to the store's commit boundary, where the
+  // physical address is known.
   assign disp_store_faults = disp_mem_valid && disp_mem_is_store &&
-                             (disp_store_fault != STORE_OK);
+                             ((disp_store_fault == STORE_MISALIGN) ||
+                              ((disp_store_fault == STORE_ACCESS) && !xlate_active_c));
 
   // A store that faults takes the *completion* path and not the queue's: it is
   // never allocated into the store queue (the queue's contract is that only a

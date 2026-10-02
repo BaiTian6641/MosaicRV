@@ -65,6 +65,14 @@ MUTANTS = [
         1,
     ),
     (
+        ["MOSAIC_SQ_MUTANT_VISIBLE_BEFORE_COMMIT"],
+        "the drain offer ignores the authorisation watermark: a store's bytes become "
+        "visible before it commits",
+        "every visible byte has a legal, committed producer",
+        True,
+        1,
+    ),
+    (
         ["MOSAIC_SQ_MUTANT_DRAIN_DUPLICATE"],
         "an accepted drain does not remove the entry: one store's bytes become visible "
         "twice",
@@ -89,10 +97,20 @@ MUTANTS = [
         0,
     ),
     (
-        ["MOSAIC_SQ_MUTANT_VISIBLE_BEFORE_COMMIT"],
-        "the drain offer ignores the authorisation watermark: a store's bytes become "
-        "visible before it commits",
-        "no byte becomes visible before its commit",
+        ["MOSAIC_VISIBILITY_ZERO_EXTEND"],
+        "the ledger zero-extends every load instead of applying its signedness: the "
+        "shipping machine is then reported wrong at the first signed load",
+        "a load's returned value matches an allowed source",
+        True,
+        1,
+    ),
+    (
+        ["MOSAIC_CORE_MUTANT_MEM_BEHIND_BRANCH"],
+        "the branch barrier stops holding memory macros: a wrong-path memory access is "
+        "dispatched and reaches the data port before the redirect discards it (the "
+        "store side then needs the authorisation mutant too, because an unfaced store "
+        "is never authorised)",
+        "exactly one data transaction per load and per store",
         True,
         1,
     ),
@@ -113,18 +131,21 @@ MUTANTS = [
         1,
     ),
     (
-        ["MOSAIC_LSU_MUTANT_NO_SIGN_EXTEND"],
-        "a signed load is not sign-extended: the value it returns is not what any source "
-        "holds",
-        "a load's returned value matches an allowed source",
-        True,
+        ["MOSAIC_SQ_MUTANT_COMMIT_OUT_OF_ORDER"],
+        "an authorisation naming a younger entry is applied to it -- but the watermark "
+        "is derived from the *leading* survivors, so it cannot advance past an "
+        "unauthorised older entry and no store ever becomes visible out of order",
+        "(no drain can move; the unit case store.wrong_path_visibility sees it on the "
+        "queue's own commit port)",
+        False,
         1,
     ),
     (
-        ["MOSAIC_CORE_MUTANT_MEM_BEHIND_BRANCH"],
-        "the branch barrier stops holding memory macros: a wrong-path store is "
-        "dispatched, allocated and then squashed before it commits",
-        "(no byte is expected to leak without the drain mutant too)",
+        ["MOSAIC_LSU_MUTANT_NO_SIGN_EXTEND"],
+        "the endpoint's sign extension is removed -- but the integrated load value is "
+        "extracted by mosaic_load_queue (extended_c/final_ext_c), so the endpoint's "
+        "extraction is not on the value path",
+        "(not observable through the integrated core)",
         False,
         1,
     ),
@@ -248,7 +269,8 @@ def main() -> int:
             failures += 1
             continue
         mutant = os.path.join(mutant_dir, CASE)
-        differs = sha256(shipping) != sha256(mutant)
+        mutant_sha = sha256(mutant)
+        differs = sha256(shipping) != mutant_sha
         result = run_case(mutant, CASE, os.path.join(root, "out-" + label), max_cycles)
         log = result.stdout.decode("utf-8", "replace")
         if want_exit == 0:
@@ -264,6 +286,7 @@ def main() -> int:
             status += " (fails, but not on %r)" % expected
         print("%-64s %-5d %-9s %s" % (label, result.returncode,
                                       "differs" if differs else "identical", status))
+        print("%-64s       sha256 %s" % ("", mutant_sha))
         print("%-64s       %s" % ("", first_result_line(log)))
         print("%-64s       %s" % ("", first_failure_line(log)))
         if differs and not observable:

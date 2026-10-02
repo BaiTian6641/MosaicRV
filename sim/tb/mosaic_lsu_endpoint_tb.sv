@@ -211,6 +211,9 @@ module mosaic_lsu_endpoint_tb (
       .req_ready_o         (up_req_ready),
       .req_i               (up_req_s),
       .req_dev_i           (up_req_dev),
+      // I-045: with no translator in front of the endpoint in this case, the
+      // architectural tval is the same `base + imm` the endpoint computes.
+      .req_tval_i          (up_req_s.base + up_req_s.imm),
       // This case covers the endpoint's own fault boundary; no PMP unit stands
       // in front of it here, so every access is allowed. The endpoint's computed
       // request address is driven out but not observed.

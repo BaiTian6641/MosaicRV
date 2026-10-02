@@ -1439,8 +1439,7 @@
     "sim/common/event_codec.cpp"
    ],
    "max_cycles": 4000000,
-   "seed": 1,
-   "pending": true
+   "seed": 1
   },
   "sv39.walk_and_faults": {
    "task": "I-045",

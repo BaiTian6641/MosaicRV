@@ -210,6 +210,16 @@ package mosaic_pkg;
   localparam logic [63:0] EXC_ECALL_U         = 64'd8;
   localparam logic [63:0] EXC_ECALL_S         = 64'd9;
   localparam logic [63:0] EXC_ECALL_M         = 64'd11;
+  // I-045 (Sv39). The three page-fault causes, one per access class. The
+  // privileged specification names them by the *class* of the original access,
+  // not by the walk step that failed, so a translation error on a store reports
+  // 15 even though the store is performed by the memory path: "Attempting to
+  // execute a store, store-conditional, or AMO instruction whose effective
+  // address lies within a page without write permissions raises a store
+  // page-fault exception."
+  localparam logic [63:0] EXC_INSN_PAGE        = 64'd12;
+  localparam logic [63:0] EXC_LOAD_PAGE        = 64'd13;
+  localparam logic [63:0] EXC_STORE_PAGE       = 64'd15;
 
   // ------------------------------------------------------------- decode ctrl
   // One struct, packed, so the decoder output can cross a module boundary as a

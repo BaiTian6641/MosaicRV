@@ -145,6 +145,13 @@ module mosaic_lsu_endpoint (
     // own effective address rather than on a second copy of `base + imm`.
     output logic [63:0]                   o_req_addr_o,
     input  logic                          pmp_deny_i,
+    // I-045: the architectural address this access reports when it faults. Once
+    // Sv39 translation is in the path the memory port carries the *physical*
+    // address while a load/store page fault, misaligned fault or access fault
+    // reports the *virtual* one, so the two cannot be the same signal. The
+    // caller supplies it and it is latched with the transaction, exactly like
+    // `req_dev_i`. A caller with no translation drives it with `base + imm`.
+    input  logic [63:0]                   req_tval_i,
     output logic                          rsp_valid_o,
     input  logic                          rsp_ready_o,
     output mosaic_uop_pkg::lsu_rsp_t      rsp_o,
@@ -309,6 +316,10 @@ module mosaic_lsu_endpoint (
 
   txn_t            req_q;
   logic [XLEN-1:0] addr_q;
+  // I-045: the architectural address this transaction reports when it faults,
+  // latched with the transaction (`addr_q` is the *physical* address once
+  // translation is in the path).
+  logic [XLEN-1:0] tval_q;
 
   // The aligned doubleword the atomic read beat returned. Latched between the
   // read and the write so the new field can be computed from it and the *old*
@@ -626,6 +637,7 @@ module mosaic_lsu_endpoint (
       // to hold a value nothing can observe, which is the trade
       // rtl/common/mosaic_ram.sv documents for storage in general.
       addr_q             <= 64'd0;
+      tval_q             <= 64'd0;
       rsp_valid_q        <= 1'b0;
       amo_old_q          <= 64'd0;
 `ifdef MOSAIC_AMO_MUTANT_SPLIT
@@ -683,6 +695,7 @@ module mosaic_lsu_endpoint (
             req_q.is_lr      <= req_i.is_lr;
             req_q.is_sc      <= req_i.is_sc;
             addr_q           <= addr_c;
+            tval_q           <= req_tval_i;
 
             if (req_i.we) store_ctr_q <= store_ctr_q + 32'd1;
             else          load_ctr_q  <= load_ctr_q  + 32'd1;
@@ -702,12 +715,12 @@ module mosaic_lsu_endpoint (
               // not cause 4; an LR is a load and takes cause 4.
               rsp_q.cause       <= (req_i.we || req_i.is_amo || req_i.is_sc)
                                    ? EXC_STORE_MISALIGNED : EXC_LOAD_MISALIGNED;
-              rsp_q.tval        <= addr_c;
+              rsp_q.tval        <= tval_q;
               rsp_q.data        <= 64'd0;
               rsp_valid_q       <= 1'b1;
               last_fault_cause_q <= (req_i.we || req_i.is_amo || req_i.is_sc)
                                     ? EXC_STORE_MISALIGNED : EXC_LOAD_MISALIGNED;
-              last_fault_tval_q  <= addr_c;
+              last_fault_tval_q  <= tval_q;
               rsp_ctr_q         <= rsp_ctr_q + 32'd1;
               state_q           <= ST_DONE;
             end else if (pmp_deny_i) begin
@@ -723,12 +736,12 @@ module mosaic_lsu_endpoint (
               rsp_q.fault       <= 1'b1;
               rsp_q.cause       <= (req_i.we || req_i.is_amo || req_i.is_sc)
                                    ? EXC_STORE_ACCESS : EXC_LOAD_ACCESS;
-              rsp_q.tval        <= addr_c;
+              rsp_q.tval        <= tval_q;
               rsp_q.data        <= 64'd0;
               rsp_valid_q       <= 1'b1;
               last_fault_cause_q <= (req_i.we || req_i.is_amo || req_i.is_sc)
                                     ? EXC_STORE_ACCESS : EXC_LOAD_ACCESS;
-              last_fault_tval_q  <= addr_c;
+              last_fault_tval_q  <= tval_q;
               rsp_ctr_q         <= rsp_ctr_q + 32'd1;
               state_q           <= ST_DONE;
             end else if (req_i.is_sc && !res_hit_c) begin
@@ -748,7 +761,7 @@ module mosaic_lsu_endpoint (
               rsp_q.id      <= req_i.id;
               rsp_q.fault   <= 1'b0;
               rsp_q.cause   <= EXC_STORE_ACCESS;
-              rsp_q.tval    <= addr_c;
+              rsp_q.tval    <= tval_q;
               rsp_q.data    <= SC_FAIL;
               rsp_valid_q   <= 1'b1;
               rsp_ctr_q     <= rsp_ctr_q + 32'd1;
@@ -779,7 +792,7 @@ module mosaic_lsu_endpoint (
               // remember the write for later, and give the port back.
               rsp_q.id      <= req_q.id;
               rsp_q.fault   <= mem_rsp_i.fault;
-              rsp_q.tval    <= addr_q;
+              rsp_q.tval    <= tval_q;
               rsp_q.cause   <= EXC_STORE_ACCESS;
               rsp_q.data    <= extracted_c;
               rsp_valid_q   <= 1'b1;
@@ -804,7 +817,7 @@ module mosaic_lsu_endpoint (
 `else
             rsp_q.fault <= mem_rsp_i.fault;
 `endif
-            rsp_q.tval  <= addr_q;
+            rsp_q.tval  <= tval_q;
             rsp_q.cause <= (req_q.we || req_q.is_amo || req_q.is_sc)
                            ? EXC_STORE_ACCESS : EXC_LOAD_ACCESS;
             // An AMO's response is the *old* value, extracted exactly like a
@@ -820,7 +833,7 @@ module mosaic_lsu_endpoint (
               access_fault_ctr_q <= access_fault_ctr_q + 32'd1;
               last_fault_cause_q <= (req_q.we || req_q.is_amo || req_q.is_sc)
                                     ? EXC_STORE_ACCESS : EXC_LOAD_ACCESS;
-              last_fault_tval_q  <= addr_q;
+              last_fault_tval_q  <= tval_q;
             end
 
             if (req_q.is_sc) begin
@@ -869,14 +882,14 @@ module mosaic_lsu_endpoint (
             // (which reads `amo_old_q` in this state); the fault is the write's.
             rsp_q.id    <= req_q.id;
             rsp_q.fault <= mem_rsp_i.fault;
-            rsp_q.tval  <= addr_q;
+            rsp_q.tval  <= tval_q;
             rsp_q.cause <= EXC_STORE_ACCESS;
             rsp_q.data  <= extracted_c;
             rsp_valid_q <= 1'b1;
             if (mem_rsp_i.fault) begin
               access_fault_ctr_q <= access_fault_ctr_q + 32'd1;
               last_fault_cause_q <= EXC_STORE_ACCESS;
-              last_fault_tval_q  <= addr_q;
+              last_fault_tval_q  <= tval_q;
             end
             rsp_ctr_q <= rsp_ctr_q + 32'd1;
 `ifdef MOSAIC_AMO_MUTANT_SPLIT
