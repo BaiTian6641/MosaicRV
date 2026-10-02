@@ -1,15 +1,15 @@
 {
   "schema_version": 1,
-  "case": "lrsc.reservation_progress",
+  "case": "privilege.permission_matrix",
   "verdict": "PASS",
-  "detail": "checks=73 seed=1",
+  "detail": "checks=52 comparisons=9 cycles=1415 retires=513 traps=6 seed=1",
   "seed": 1,
   "max_cycles": 4000000,
-  "checks": 74,
+  "checks": 53,
   "failures": 0,
   "image": "",
   "expect": "",
   "tool": "Verilator 5.052 2026-09-05",
-  "timestamp": "2026-10-02T05:57:28Z",
+  "timestamp": "2026-10-02T06:02:43Z",
   "first_mismatch": ""
 }

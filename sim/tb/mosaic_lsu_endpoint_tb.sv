@@ -211,6 +211,11 @@ module mosaic_lsu_endpoint_tb (
       .req_ready_o         (up_req_ready),
       .req_i               (up_req_s),
       .req_dev_i           (up_req_dev),
+      // This case covers the endpoint's own fault boundary; no PMP unit stands
+      // in front of it here, so every access is allowed. The endpoint's computed
+      // request address is driven out but not observed.
+      .pmp_deny_i          (1'b0),
+      .o_req_addr_o        (),
 
       .rsp_valid_o         (up_rsp_valid),
       .rsp_ready_o         (up_rsp_ready),

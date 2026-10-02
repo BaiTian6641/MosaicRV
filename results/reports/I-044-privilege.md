@@ -518,3 +518,227 @@ Attempt 1's configuration work is real and this case depends on all of it:
    the fault routed to the ROB. That is the memory path's change, not this lane's.
 2. A re-run of this case under p1 with the shipping build passing, which is what
    turns the control table in §8 into evidence.
+
+---
+
+# Append — attempt 3: D5 fixed
+
+Attempts 1 and 2 above are unchanged by this append: their D1–D4 fixes, their
+configuration work and their refusal to count any control while the shipping
+build was failing all stand. This append records the D5 fix itself, the case
+defects that only became reachable once D5 was gone, and the control table §8
+left uncounted.
+
+## 14. The defect, reproduced first
+
+From a deleted build directory:
+`python3 tools/run_unit.py --profile p1 --case privilege.permission_matrix`
+fails at the first mismatch, exactly as recorded in §7 D5:
+
+| row | observed before | what the ISA requires |
+|---|---|---|
+| `s-store-deny-w` | trap cause 9 — the stub's `ecall`; no write | cause **7**, `tval` = 0x80012018; no write |
+| `u-store-deny-w` | trap cause 8 — the `ecall`; no write | cause **7**, `tval` = 0x80012300; no write |
+| `lock-deny-m-store` | **no trap at all**; no write | cause **7**, `tval` = 0x80018408; no write |
+| `mprv-store-uses-mpp` | **no trap at all**; no write | cause **7**, `tval` = 0x80012808; no write |
+
+`RESULT FAIL … s-store-deny-w … mcause=0x9 expected 0x7`. The "no side effect"
+half held; the fault was the missing half.
+
+## 15. The rule the fix implements
+
+> **A store's PMP permission is decided when the ROB authorises the store to
+> retire. A refusal suppresses that authorisation and is taken as the store's own
+> store access fault: cause 7, `tval` = the access address, at the store's PC,
+> after older effects and before younger work.**
+
+Why authorisation, and not the two tempting alternatives:
+
+* **At drain** (the endpoint's own check today) the store has already retired;
+  the refusal can only be *counted*, never *taken*. That is D5.
+* **At dispatch** the CSR state is speculative: a PMP CSR write older than the
+  dispatched store may not have executed yet, so a dispatch-time query can be
+  wrong in the unsafe direction — it would pass this matrix, whose rows settle the
+  CSR state long before the store dispatches, and it would still be a real defect.
+* **At authorisation** the store is the ROB head: every older instruction,
+  including any PMP CSR write and any `mstatus` write, has retired, so the entries
+  and the MPRV-adjusted privilege are committed; younger work is still
+  discardable. The check is non-speculative by construction.
+
+## 16. Implementation
+
+`rtl/core/mosaic_pmp.sv`, `rtl/core/mosaic_core.sv`, plus the observation port in
+`sim/tb/mosaic_core_tb.sv`.
+
+* `mosaic_pmp` gains a **store-commit query port**: two store-class accesses per
+  cycle (both ROB retire lanes can be stores), each checked for W only, answered
+  by the same lowest-numbered-matching-entry engine as the data and fetch ports.
+  A profile with no `pmp` block ties both answers to allow.
+* `mosaic_core` computes, for the store at the store queue's authorisation
+  watermark (lane 0) and for the second retiring store one entry past it (lane 1),
+  whether the PMP refuses. The address and size are the queue's own `base + imm`
+  and size — the same values the retire event publishes — and the privilege is
+  `eff_priv_c`, the same MPRV-adjusted privilege the endpoint uses.
+* `ret_req_gated` (lane 0) and `rob_retire_req_next` (lane 1) are gated by the
+  refusal, so **the store does not retire and the store queue is never told to
+  authorise it**. Its entry stays unauthorised and is removed by the redirect's
+  squash. The store queue's own source is unchanged: the core withholds the
+  authorisation where the ROB's retire signal is, which is the same decision.
+* The refusal is latched into the existing system-trap staging register
+  (`sys_trap_q`) with `EXC_STORE_ACCESS` and the access address, so the trap
+  controller takes it one cycle later exactly as it takes an ECALL/illegal-CSR
+  trap: `mepc` = the store's PC (the ROB head), `mtval` = the address, younger
+  work squashed by the trap flush. The latch is refused while another trap is
+  being decided (`!trap_decision`), so an interrupt at the same boundary wins and
+  the store is simply re-checked after the handler returns.
+* New observable `o_pmp_store_deny_ctr` counts authorisation-time store refusals;
+  the case requires it non-zero in a profile with PMP, so the fix cannot be
+  satisfied by the old count-only path.
+* A negative control `MOSAIC_PMP_MUTANT_STORE_DENY_NOT_TAKEN` removes exactly this
+  check and reinstates D5 (§18).
+
+## 17. After the fix
+
+| row | observed after | ISA |
+|---|---|---|
+| `s-store-deny-w` | cause **7** from S, tval 0x80012018, word unwritten, no store transaction | ✔ |
+| `u-store-deny-w` | cause **7** from U, tval 0x80012300, word unwritten, no store transaction | ✔ |
+| `lock-deny-m-store` | cause **7** from M, tval 0x80018408, word unwritten, no store transaction | ✔ |
+| `mprv-store-uses-mpp` | cause **7** from M, tval 0x80012808, word unwritten, no store transaction | ✔ |
+
+* `--profile p1`: **PASS**, 75 matrix rows observed,
+  `RESULT PASS privilege.permission_matrix checks=6300 comparisons=57 cycles=22623 retires=9296 traps=52 seed=1`.
+* `--profile p0`: **PASS**, 12 rows observed,
+  `RESULT PASS privilege.permission_matrix checks=52 comparisons=9 cycles=1415 retires=513 traps=6 seed=1`
+  — unchanged, because p0 implements no PMP and the new path is inert by
+  construction.
+
+## 18. Controls, with the shipping build passing
+
+Each control is built from a deleted build directory with its `-D` on the
+Verilator command line; the hash differs from shipping wherever the mutated code
+is in the build; and each exits 1 with a named first failure.
+`python3 tools/run_priv_controls.py --profile p1`:
+
+| control | sha256 (12) | exit | first failure |
+|---|---|---|---|
+| shipping | `b57f1cbf64d8` | 0 | — |
+| `MOSAIC_PMP_MUTANT_LOCK_IGNORED` | `920b2aec11b8` | 1 | `lock-cfg-write-ignored`: pmpcfg2=0 expected 0x91909090 |
+| `MOSAIC_PMP_MUTANT_OVERLAP_INVERTED` | `2a78c3ff01a6` | 1 | `s-overlap-lower-allows`: mcause 5 expected 9 |
+| `MOSAIC_PMP_MUTANT_M_MODE_ENFORCED` | `4f3269b05210` | 1 | max-cycles exhausted (113683 traps) |
+| `MOSAIC_PMP_MUTANT_STORE_DENY_NOT_TAKEN` | `e9bb481e0f9b` | 1 | `s-store-deny-w`: mcause 9 expected 7 |
+| `MOSAIC_PRIV_MUTANT_FAULT_WRITES` | `1c310adf6164` | 1 | `s-load-deny-r`: destination register written |
+
+**This is now evidence.** The shipping build passes; every control fails,
+including the one that reintroduces D5 (`s-store-deny-w` mcause 9 instead of 7 —
+the pre-fix observation, by name). The table in §8, honestly marked "not
+evidence" there, is thereby turned into evidence for the four original mutants as
+well.
+
+`--profile p0` for completeness (not evidence — no PMP path exists there):
+
+| control | sha256 (12) | exit |
+|---|---|---|
+| shipping | `655a7dffdaeb` | 0 |
+| `LOCK_IGNORED` / `OVERLAP_INVERTED` / `M_MODE_ENFORCED` | `655a7dffdaeb` (identical: the p0 elaboration compiles the PMP engine out, so the mutant code is not in that build) | 0 |
+| `STORE_DENY_NOT_TAKEN` | `9272225d10d9` | 0 (the `-D` alters the core build, but p0 has no PMP entry to refuse a store) |
+| `FAULT_WRITES` | `78add6b202dd` | 0 (inert: p0 runs no refused access) |
+
+## 19. Case-driver and standalone-wrapper defects the fix surfaced
+
+The comparison harness aborts on the first mismatch, so every earlier run —
+attempts 1 and 2 included — stopped at `s-store-deny-w` and never reached rows
+24–75. With D5 gone the checks ran on and found four more case defects and three
+red wrappers. **None is in the shipping memory path**; all are in the case or its
+standalone glue, and all are now fixed:
+
+1. **The model compared a fetch as an 8-byte read.** `PmpModel` was handed the
+   data scenarios' 8-byte default width and both `r` and `x` for an instruction
+   access, so it denied a NA4 entry that covers the instruction exactly
+   (`s-fetch-allow`) and allowed a NA4 entry with X=0,R=1 (`s-fetch-deny-x`).
+   Fixed: a fetch is four bytes and checks X alone.
+2. **S/U CSR write rows expected `mepc` = the stub's first instruction.** The CSR
+   instruction follows a three-instruction operand prologue, so the fault is
+   taken 12 bytes later (`s-csr-mstatus-write-illegal`: observed `0x80007b48` =
+   the `csrw`; expected `0x80007b3c` = the stub start). The machine was right;
+   the expectation was wrong. Fixed by recording the CSR instruction's own PC
+   while emitting it.
+3. **`lock-off-matches-nothing` locked PMP entry 13**, and the lock bit is sticky
+   ("writes to `pmp_i cfg` and `pmpaddr_i` are ignored" while L=1, §2.7.1), so
+   `lock-tor-prev-addr-ignored` — which runs next and needs `pmpaddr13`
+   *programmable* before entry 14's TOR lock freezes it — could never write
+   `pmpaddr13` at all and read back the previous row's value. The row now uses
+   entry 15, which no other row uses.
+4. **The "no side effect" scan matched any transaction in the address's
+   doubleword.** The matrix reuses the data region and the LR rows legitimately
+   *read* the very doubleword `s-store-deny-w` names, so the scan failed on
+   another instruction's read once the cause check stopped masking it. Scoped to
+   store transactions, which is what "the refused store never became visible"
+   means.
+5. **Three standalone wrappers did not connect `mosaic_lsu_endpoint`'s
+   `pmp_deny_i` / `o_req_addr_o`** (ports added by I-044 and I-033), so
+   `store.wrong_path_visibility` (I-034), `lsu.byte_forwarding` (I-035) and
+   `lsu.size_fault_boundaries` (I-033) failed to **build** (Verilator PINMISSING).
+   The pins are now tied (no PMP in those cases) / left open. These three were
+   red on arrival, not broken by the D5 fix.
+
+## 20. Cases re-run (each from a deleted build directory, `--profile p0`)
+
+```
+PASS store.wrong_path_visibility    task=I-034
+PASS mmio.exactly_once              task=I-038
+PASS amo.linearization              task=I-039
+PASS lrsc.reservation_progress      task=I-040
+PASS core.mem_program               task=I-023
+PASS core.corpus_sweep              task=I-023
+PASS fence.code_and_data_order      task=I-037
+PASS core.trap_csr_program          task=I-023
+PASS lsu.byte_forwarding            task=I-035
+PASS lsu.size_fault_boundaries      task=I-033
+```
+
+plus `privilege.permission_matrix` under both p0 and p1 (§17). The four memory
+packages the card names (`store.wrong_path_visibility`, `mmio.exactly_once`,
+`amo.linearization`, `lrsc.reservation_progress`) all pass; the store queue's
+authorisation contract is unchanged, which is why they do.
+
+Gates:
+
+```
+python3 tools/lint_rtl.py --profile p0                         -> 43 source file(s) clean
+slang-tidy --std 1800-2017 --single-unit -I build/p0/rtl ...    -> clean (exit 0)
+python3 tools/check_records.py                                 -> records agree: 52 delivered, 61 registered
+python3 tools/check_event_contract.py --profile p0 --negative  -> 36/36 illegal interfaces rejected
+make check                                                     -> exit 0
+```
+
+## 21. Not covered (in addition to §12)
+
+* **The endpoint's post-retirement PMP check remains** as a backstop; a store
+  refused at commit never reaches it. A store *allowed at commit* and later
+  refused at drain is reachable only if the PMP entries or the privilege change
+  between retirement and drain; that window is not exercised here and is not
+  claimed.
+* **Lane 1's refusal is implemented but not exercised.** A second store refused in
+  the same cycle as an allowed first store is suppressed in lane 1 and taken as
+  lane 0 the following cycle; no row drives that back-to-back pattern.
+* **AMO/LR/SC are outside this path** — they are serialised and take their fault
+  at the endpoint before retirement (their rows already pass and are unchanged).
+* **The M-mode "last byte matches but the first does not" divergence** recorded in
+  §12 is still not asserted and was **not changed**: the RTL still decides "no
+  match" from the first byte for the M-mode succeeds-by-default rule.
+* **No interrupt is asserted**, so the `!trap_decision` precedence between an
+  interrupt and a store refusal at the same boundary is implemented but not
+  observed.
+* The p0 profile's PMP and S/U rows remain inapplicable by construction (§4).
+
+## 22. Deliberately not changed
+
+* The dispatch-time PMA store check (`store_fault_kind`) and the store queue's
+  authorisation contract are untouched; the fix withholds the ROB's authorisation
+  rather than altering the queue.
+* `mosaic_lsu_endpoint`'s `pmp_deny_i` behaviour is untouched (the endpoint still
+  refuses a drained access and counts it); only the standalone wrappers gained
+  the missing pin connections.
+* No case was weakened. The four controls from §8 now fail against a *passing*
+  shipping build, which is exactly what §8 said it lacked.

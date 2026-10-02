@@ -292,6 +292,7 @@ struct Scenario {
   uint64_t frame = 0;
   uint64_t rec = 0;
   uint64_t access_pc = 0;
+  uint64_t csr_fault_pc = 0;   // the CSR instruction itself, past its prologue
   uint64_t stub_pc = 0;
   uint64_t expect_epc_fault = 0;
   uint64_t expect_epc_nofault = 0;
@@ -1016,7 +1017,11 @@ std::vector<Scenario> BuildScenarios() {
     s.skip_without_pmp = true;
     s.addr = kDataB + 0x430;
     s.rule = "L=1 locks an entry even when A=OFF, and A=OFF still matches nothing";
-    s.entries.push_back(Ent{13, Cfg(true, kAOff, false, false, false), TorAddr(s.addr)});
+    // Entry 15, not 13: the lock bit is sticky, so a row that locked entry 13
+    // here would leave it locked for `lock-tor-prev-addr-ignored`, whose whole
+    // point is that *entry 14's* TOR lock -- and not entry 13's own L bit -- is
+    // what freezes pmpaddr13. Entry 15 is used by no other scenario.
+    s.entries.push_back(Ent{15, Cfg(true, kAOff, false, false, false), TorAddr(s.addr)});
     s.exp = Expect{false, 0};
     add(s);
   }
@@ -1381,7 +1386,7 @@ void EmitHandler(Asm* a) {
   a->Mret();
 }
 
-void EmitAccess(Asm* a, const Scenario& s) {
+void EmitAccess(Asm* a, Scenario& s) {
   const bool w8 = (s.width == 8);
   switch (s.cls) {
     case Cls::kLoad: if (w8) a->Ld(5, 8, 0); else a->Lwu(5, 8, 0); break;
@@ -1397,9 +1402,15 @@ void EmitAccess(Asm* a, const Scenario& s) {
     case Cls::kCsr:
       for (const CsrOp& op : s.csr_ops) {
         if (op.write) {
+          // The operand materialisation is a prologue: the CSR instruction --
+          // and therefore the PC a fault on it reports -- is the one after it.
+          // Recording it here is what lets the S/U epc expectation name the
+          // instruction that traps rather than the stub's first instruction.
           a->LiAbs(9, op.operand);
+          if (s.csr_fault_pc == 0) s.csr_fault_pc = a->pc();
           a->Csrrw(0, op.csr, 9);
         } else {
+          if (s.csr_fault_pc == 0) s.csr_fault_pc = a->pc();
           a->Csrrs(5, op.csr, 0);
         }
       }
@@ -1504,8 +1515,13 @@ ProgImage BuildProgram(std::vector<Scenario>* scs, const Geometry& g) {
       s.access_pc = a.pc();
       EmitAccess(&a, s);
       // A refused instruction access reports the PC it *could not fetch*, which
-      // is the target, not the jump that asked for it.
-      s.expect_epc_fault = (s.cls == Cls::kFetch) ? s.addr : s.access_pc;
+      // is the target, not the jump that asked for it. A refused CSR access
+      // reports the CSR instruction's own PC, which is past the operand
+      // prologue for a write; every other access is the stub's first
+      // instruction, which is also `access_pc`.
+      s.expect_epc_fault = (s.cls == Cls::kFetch) ? s.addr
+                          : (s.cls == Cls::kCsr)  ? s.csr_fault_pc
+                          : s.access_pc;
       // An allowed instruction access runs the `ecall` that lives at the
       // target, and that trap's mepc is the target too. Every other allowed
       // scenario traps nothing at all in M-mode.
@@ -1544,7 +1560,9 @@ ProgImage BuildProgram(std::vector<Scenario>* scs, const Geometry& g) {
     s.access_pc = a.pc();
     EmitAccess(&a, s);
     s.expect_epc_fault = (s.cls == Cls::kFetch) ? s.addr
-                        : (s.cls == Cls::kScLr) ? s.stub_pc + 4 : s.stub_pc;
+                        : (s.cls == Cls::kScLr) ? s.stub_pc + 4
+                        : (s.cls == Cls::kCsr)  ? s.csr_fault_pc
+                        : s.stub_pc;
     s.expect_epc_nofault = (s.cls == Cls::kFetch) ? s.addr : a.pc();
     a.Ecall();
   }
@@ -1957,9 +1975,12 @@ void RunCase(Vmosaic_core_tb* dut, mosaic::Reporter* reporter, const Geometry& g
     if (s.cls != Cls::kCsr && s.cls != Cls::kNop && s.cls != Cls::kMret &&
         s.cls != Cls::kSret) {
       // The class the specification names: a load or load-reserved checks R, a
-      // store, store-conditional or AMO checks W, an instruction access checks X.
+      // store, store-conditional or AMO checks W, an instruction access checks X
+      // and *not* R -- an instruction access is not a read of the instruction
+      // bytes, so admitting R would let a NA4 entry with R=1 and X=0 allow a
+      // fetch the ISA refuses. (The second driver defect the D5 fix surfaced.)
       const bool r = (s.cls == Cls::kLoad || s.cls == Cls::kLr ||
-                      s.cls == Cls::kScLr || s.cls == Cls::kFetch);
+                      s.cls == Cls::kScLr);
       const bool w = IsStoreLike(s.cls);
       const bool x = s.cls == Cls::kFetch;
       unsigned priv = static_cast<unsigned>(s.mode);
@@ -1974,7 +1995,14 @@ void RunCase(Vmosaic_core_tb* dut, mosaic::Reporter* reporter, const Geometry& g
         }
       }
       if (s.cls == Cls::kFetch) priv = static_cast<unsigned>(s.mode);
-      const bool allowed = PmpModel(modelled).Allow(s.addr, s.width, r, w, x, priv);
+      // An instruction access is one four-byte instruction, whatever the data
+      // scenarios' `width` default is. Passing the 8-byte default made the
+      // model test the byte after the instruction, outside a NA4 entry that
+      // covers the instruction exactly, and report a denial the ISA does not
+      // have -- a driver defect the D5 fix surfaced, because the earlier failure
+      // (the missing store access fault) was reported first.
+      const unsigned model_bytes = (s.cls == Cls::kFetch) ? 4u : s.width;
+      const bool allowed = PmpModel(modelled).Allow(s.addr, model_bytes, r, w, x, priv);
       const uint64_t model_cause =
           allowed ? 0 : (w ? kExcStoreAccess : (x ? kExcInsnAccess : kExcLoadAccess));
       harness.Compare(tag + ": the model agrees with the hand-written rule",
@@ -2071,9 +2099,17 @@ void RunCase(Vmosaic_core_tb* dut, mosaic::Reporter* reporter, const Geometry& g
         harness.Check(tag + ": the refused store left the protected word alone",
                       now == want,
                       "word=" + U64(now) + " expected " + U64(want));
+        // "No side effect" means the refused *store* never became visible, so
+        // the observable is that no write reached the data port for this
+        // address. A read is not this store's side effect: the matrix reuses the
+        // data region across scenarios (the LR rows legitimately read the very
+        // doubleword `s-store-deny-w` names), and scanning for any transaction
+        // at the address would fail on another instruction's access. The D5 fix
+        // surfaced this because the earlier failure (the missing cause 7) aborted
+        // the scenario before the scan was reached.
         for (const DataMem::Txn& t : harness.txns()) {
-          const bool same = (t.req.addr & ~7ull) == (s.addr & ~7ull);
-          harness.Check(tag + ": no transaction for the refused address "
+          const bool same = t.req.we && ((t.req.addr & ~7ull) == (s.addr & ~7ull));
+          harness.Check(tag + ": no store transaction for the refused address "
                              "reached the data port",
                         !same,
                         "a transaction at " + U64(t.req.addr) + " in cycle " +
@@ -2244,6 +2280,13 @@ void RunCase(Vmosaic_core_tb* dut, mosaic::Reporter* reporter, const Geometry& g
     harness.Check("the permission unit refused at least one access",
                   dut->o_pmp_deny_ctr_o > 0,
                   "deny counter=" + Dec(dut->o_pmp_deny_ctr_o));
+    // D5: a store refused by the PMP is refused *at authorisation*, so the
+    // commit path takes the trap. If this counter is zero the store rows were
+    // refused somewhere else (or nowhere), which is the defect the case is here
+    // to catch.
+    harness.Check("a store was refused by the PMP at authorisation (D5)",
+                  dut->o_pmp_store_deny_ctr_o > 0,
+                  "store-deny counter=" + Dec(dut->o_pmp_store_deny_ctr_o));
     harness.Check("the permission unit refused at least one instruction access",
                   dut->o_pmp_fetch_deny_ctr_o > 0,
                   "fetch deny counter=" + Dec(dut->o_pmp_fetch_deny_ctr_o));

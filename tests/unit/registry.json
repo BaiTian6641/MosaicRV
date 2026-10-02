@@ -1330,8 +1330,7 @@
     "sim/common/event_tap.cpp"
    ],
    "max_cycles": 4000000,
-   "seed": 1,
-   "pending": true
+   "seed": 1
   },
   "fp.operation_matrix": {
    "task": "I-049",
@@ -1436,7 +1435,8 @@
     "sim/unit/tb_core_visibility.cpp",
     "sim/common/elf_loader.cpp",
     "sim/common/memory_model.cpp",
-    "sim/common/event_tap.cpp"
+    "sim/common/event_tap.cpp",
+    "sim/common/event_codec.cpp"
    ],
    "max_cycles": 4000000,
    "seed": 1,

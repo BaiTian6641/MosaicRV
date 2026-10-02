@@ -1,16 +1,15 @@
 {
   "schema_version": 1,
   "case": "privilege.permission_matrix",
-  "verdict": "FAIL",
-  "detail": "contract violated: priv-matrix at cycle 22374: s-store-deny-w (S/store/napot): mcause is the ISA's: mcause=0x0000000000000009 expected 0x0000000000000007",
+  "verdict": "PASS",
+  "detail": "checks=6300 comparisons=57 cycles=22623 retires=9296 traps=52 seed=1",
   "seed": 1,
   "max_cycles": 4000000,
-  "checks": 82,
-  "failures": 2,
+  "checks": 6301,
+  "failures": 0,
   "image": "",
   "expect": "",
   "tool": "Verilator 5.052 2026-09-05",
-  "timestamp": "2026-10-02T05:37:43Z",
-  "first_mismatch": "priv-matrix at cycle 22374: s-store-deny-w (S/store/napot): mcause is the ISA's: mcause=0x0000000000000009 expected 0x0000000000000007: expected every privilege/access/PMP cell matches the ISA, got contract violated",
-  "failed_checks": ["priv-matrix: s-store-deny-w (S/store/napot): mcause is the ISA's -- mcause=0x0000000000000009 expected 0x0000000000000007", "no contract violation"]
+  "timestamp": "2026-10-02T06:07:05Z",
+  "first_mismatch": ""
 }

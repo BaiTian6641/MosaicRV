@@ -313,6 +313,11 @@ module mosaic_store_queue_tb (
       .req_i              (sq_drain_req_s),
       // RAM addresses only (I-038); see mosaic_load_queue_tb.
       .req_dev_i          (1'b0),
+      // No PMP unit stands in front of this standalone endpoint, so every
+      // access is allowed; the address the endpoint computes is not observed
+      // here (the case drives `req_i` and reads the memory port).
+      .pmp_deny_i         (1'b0),
+      .o_req_addr_o       (),
 
       .rsp_valid_o        (ep_rsp_valid),
       .rsp_ready_o        (sq_drain_rsp_ready),

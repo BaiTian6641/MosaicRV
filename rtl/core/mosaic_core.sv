@@ -396,6 +396,10 @@ module mosaic_core (
     output logic [31:0]                 o_pmp_deny_ctr,
     output logic [31:0]                 o_pmp_fetch_deny_ctr,
     output logic [31:0]                 o_pmp_locked_ctr,
+    // D5: how many times a store was refused by the PMP at authorisation, i.e.
+    // how often the commit path took the store access fault. Zero in every
+    // profile that implements no PMP entries.
+    output logic [31:0]                 o_pmp_store_deny_ctr,
     // The shape of each decision, so a case can require *which* answer it got
     // rather than only whether the machine trapped: a denial that came from a
     // locked entry is a different fact from one that came from a low-numbered
@@ -885,6 +889,16 @@ module mosaic_core (
   logic                       fetch_pmp_deny_c;
   logic [31:0]                pmp_deny_ctr, pmp_fetch_deny_ctr, pmp_query_ctr;
   logic [31:0]                pmp_locked_ctr;
+  // The store-commit PMP check (D5). A store's PMP permission is decidable in
+  // the cycle the ROB authorises it -- every older instruction has retired, so
+  // the PMP entries and mstatus are committed and the check is not speculative
+  // -- and a refusal must be taken as the store's own exception rather than
+  // left to the endpoint's post-retirement drain, which can only count it.
+  logic                       pmp_store_allow0_c, pmp_store_allow1_c;
+  logic                       store0_pmp_deny_c, store1_pmp_deny_c;
+  logic                       store_pmp_trap_now;
+  logic [CORE_XLEN-1:0]       store_pmp_trap_addr_c;
+  logic [31:0]                pmp_store_deny_ctr;
   logic [63:0]                irq_mip;
   logic                       irq_valid;
   logic [63:0]                irq_cause;
@@ -2651,7 +2665,7 @@ module mosaic_core (
   // sake: a completed instruction at the head would otherwise retire in the same
   // cycle the interrupt was taken, and mepc would name an instruction that had
   // already committed. (`rob_head_ready` already excludes the exceptional case.)
-  assign ret_req_gated = ret_req[0] && !trap_decision;
+  assign ret_req_gated = ret_req[0] && !trap_decision && !store0_pmp_deny_c;
 
   // The redirect request. A trap acts immediately (the trapping entry does not
   // retire); an MRET or a FENCE.I acts through the ordinary head-retire gate, in
@@ -2756,6 +2770,7 @@ module mosaic_core (
       exc_gen_mismatch_ctr <= 32'd0;
       trap_irq_ctr       <= 32'd0;
       sys_redirect_ctr   <= 32'd0;
+      pmp_store_deny_ctr <= 32'd0;
     end else begin
       // One completion with an exception payload per cycle, and its slot's
       // generation with it.
@@ -2817,10 +2832,22 @@ module mosaic_core (
         // The staged macro is the ROB head here, so its PC is the faulting
         // address the trap value must carry.
         sys_trap_tval_q  <= sys_fetch_fault_q ? rob_head_pc : {CORE_XLEN{1'b0}};
+      end else if (store_pmp_trap_now) begin
+        // D5: the ROB was about to authorise a store whose PMP check refuses
+        // it. The authorisation is suppressed this cycle (`ret_req_gated`) and
+        // the refusal is latched here so the trap controller takes it next
+        // cycle, at the store's own PC, with the access address as tval --
+        // exactly the route an excepting system macro takes. The store never
+        // retires and the redirect that follows the trap flushes it from the
+        // queue before it can reach memory.
+        sys_trap_q       <= 1'b1;
+        sys_trap_cause_q <= mosaic_pkg::EXC_STORE_ACCESS;
+        sys_trap_tval_q  <= store_pmp_trap_addr_c;
       end
 
       if (sys_wb_valid)     sys_exec_ctr <= sys_exec_ctr + 32'd1;
       if (exc_capture)      exc_capture_ctr <= exc_capture_ctr + 32'd1;
+      if (store0_pmp_deny_c) pmp_store_deny_ctr <= pmp_store_deny_ctr + 32'd1;
       if (head_exc_trap && (exc_gen_match != rob_head_gen))
         exc_gen_mismatch_ctr <= exc_gen_mismatch_ctr + 32'd1;
       if (trap_is_irq && !trap_irq_prev) trap_irq_ctr <= trap_irq_ctr + 32'd1;
@@ -2860,6 +2887,7 @@ module mosaic_core (
   assign o_pmp_deny_ctr        = pmp_deny_ctr;
   assign o_pmp_fetch_deny_ctr  = pmp_fetch_deny_ctr;
   assign o_pmp_locked_ctr      = pmp_locked_ctr;
+  assign o_pmp_store_deny_ctr  = pmp_store_deny_ctr;
   assign o_pmp_data_matched    = pmp_data_matched;
   assign o_pmp_data_locked     = pmp_data_locked;
   assign o_pmp_fetch_matched   = pmp_fetch_matched;
@@ -3275,7 +3303,8 @@ module mosaic_core (
   // exactly "a stale byte executed". So while a FENCE.I is the head -- waiting to
   // drain, or retiring -- lane 1 does not leave the ROB. (I-037.)
   assign head_fence_i_pending = sys_head && sys_fence_i_q;
-  assign rob_retire_req_next = ret_req[1] && !head_pending_taken && !head_fence_i_pending;
+  assign rob_retire_req_next = ret_req[1] && !head_pending_taken && !head_fence_i_pending &&
+                               !store1_pmp_deny_c;
 
   always_comb begin
     retire_clr_valid[0] = rob_retire_ack;
@@ -3685,6 +3714,70 @@ module mosaic_core (
 
   assign ep_pmp_deny_c = ser_req_valid && !pmp_data_allow;
 
+  // --------------------------------------------------- store-commit PMP check
+  // D5. The endpoint's refusal is a fact about a transaction; the ISA's store
+  // access fault is a fact about the *instruction*, and it is precise only if
+  // the store has not retired when it is taken. So the permission question is
+  // asked here, in the cycle the ROB is about to authorise the store, when the
+  // CSR state that answers it is committed: `req_priv` is `eff_priv_c`, the same
+  // MPRV-adjusted privilege the endpoint uses, and the entries are the
+  // committed ones because every older instruction -- including any PMP CSR
+  // write -- has retired.
+  //
+  // The address and size are the store queue's own view of the entry at the
+  // authorisation watermark, the same `base + imm` and size the retire event
+  // publishes; the check cannot describe a different access from the one that
+  // would reach memory. The questions are asked of the PMP unit's store-commit
+  // port, which is separate from the endpoint's data port because a younger
+  // load can be using that one in the same cycle.
+  //
+  // The first store the ROB would commit this cycle is lane 0's when the head
+  // is a store, otherwise lane 1's (a non-store lane 0 authorises nothing, so a
+  // store behind it is still the first unauthorised entry); either way it sits
+  // at the watermark. The second store can only exist when lane 0 is also a
+  // store, and it then sits one entry past the watermark.
+  logic [3:0] pmp_store_bytes0_c, pmp_store_bytes1_c;
+
+  assign pmp_store_bytes0_c = 4'(mosaic_uop_pkg::size_bytes(sq_pay0_size));
+  assign pmp_store_bytes1_c = 4'(mosaic_uop_pkg::size_bytes(sq_pay1_size));
+
+  logic first_store_c, second_store_c;
+  assign first_store_c  = ret_req[0] && rob_head_valid && rob_head_ready &&
+                          (desc_is_store0 ||
+                           (rob_head1_valid && desc_is_store1 && rob_head1_ready)) &&
+                          sq_pay0_ready;
+  assign second_store_c = ret_req[0] && rob_head_valid && desc_is_store0 &&
+                          rob_head1_valid && desc_is_store1 && rob_head1_ready &&
+                          sq_pay1_ready;
+
+`ifdef MOSAIC_PMP_MUTANT_STORE_DENY_NOT_TAKEN
+  // NEGATIVE CONTROL for D5: the commit-path check is removed, so a store is
+  // authorised on its retirement exactly as it was before the fix and the
+  // endpoint's post-retirement refusal is counted and dropped. The store then
+  // retires and the program's trailing instruction is what traps -- the defect
+  // the fix exists to remove. CASE=privilege.permission_matrix's
+  // `s-store-deny-w` must fail on it.
+  assign store0_pmp_deny_c = 1'b0;
+  assign store1_pmp_deny_c = 1'b0;
+`else
+  // Lane 0's store, refused.
+  assign store0_pmp_deny_c = first_store_c && desc_is_store0 && !pmp_store_allow0_c;
+  // Lane 1's store, refused: either it is the first store (lane 0 is not a
+  // store) and the watermark entry is refused, or lane 0 is a store and lane
+  // 1's entry -- one past the watermark -- is the one refused.
+  assign store1_pmp_deny_c =
+      (second_store_c && !store0_pmp_deny_c && !pmp_store_allow1_c) ||
+      (first_store_c && !desc_is_store0 && !pmp_store_allow0_c);
+`endif
+
+  // The trap the commit path takes: the lane-0 store's own exception, at its
+  // own PC (the trap controller's synchronous epc is the ROB head) with the
+  // access address as tval. It is latched only when no other trap is being
+  // decided in the same cycle, so an interrupt at the same boundary wins and the
+  // store is simply re-fetched and checked again after the handler returns.
+  assign store_pmp_trap_now    = store0_pmp_deny_c && !trap_decision;
+  assign store_pmp_trap_addr_c = sq_pay0_addr;
+
   mosaic_pmp u_pmp (
       .clk_i              (clk),
       .rst_i              (rst),
@@ -3707,6 +3800,14 @@ module mosaic_core (
       .f_allow_o          (pmp_fetch_allow),
       .f_matched_o        (pmp_fetch_matched),
       .f_locked_o         (pmp_fetch_locked),
+      .sc_req_addr0_i     (sq_pay0_addr),
+      .sc_req_bytes0_i    (pmp_store_bytes0_c),
+      .sc_req_priv0_i     (eff_priv_c),
+      .sc_req_addr1_i     (sq_pay1_addr),
+      .sc_req_bytes1_i    (pmp_store_bytes1_c),
+      .sc_req_priv1_i     (eff_priv_c),
+      .sc_allow0_o        (pmp_store_allow0_c),
+      .sc_allow1_o        (pmp_store_allow1_c),
       .o_query_ctr        (pmp_query_ctr),
       .o_deny_ctr         (pmp_deny_ctr),
       .o_locked_ctr       (pmp_locked_ctr),

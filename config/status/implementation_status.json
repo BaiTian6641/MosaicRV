@@ -53,7 +53,8 @@
     "I-032",
     "I-049",
     "I-042",
-    "V-017"
+    "V-017",
+    "I-044"
   ],
   "evidence": {
     "I-001": {
@@ -649,9 +650,22 @@
       "verdict": "PASS",
       "notes": "The CSR legality comparator: a machine-readable rule ledger with a positive and a negative example per rule, and a case that visits every rule and fails if any is unvisited. Case PASS from a clean build: 54 rules, 108 examples, 6493 comparisons over 3064 cycles, 769 retires, 22 traps. Deliverables: config/csr/rule_ledger.json (54 rules), config/schema/csr_rules.schema.json, ledger validation wired into tools/mosaic/config_check.py (so a malformed rule fails the config gate), a generated header build/<profile>/sim/mosaic_csr_rules.h, the driver sim/unit/tb_core_csr_rules.cpp and tools/run_csrrules_controls.py. Six controls each differ from the shipping binary and exit 1 with a named first failure, and they are exactly the card's three fail modes plus three RTL rules: SKIP_RULE (a rule silently unvisited), AUTO_WAIVER (a waiver generated from an observed difference instead of a declared rule -- the card's central prohibition), UNIMPL_ZERO (an unimplemented CSR accepted unconditionally as zero), CYCLE_WRITABLE, RO_WRITE_ACCEPTED and NO_FIELD_MASK. The 'reject the adjacent illegal result' requirement is what the example pairs encode: a strict rule's pair differs in one bit, and a WARL-allowed pair is paired with the adjacent pair that must be rejected. Gates green: lint 43 sources clean, slang-tidy exit 0, check_records, check_profile --all, make check, lint-cpp 57 files. NOT covered, stated by the lane: p0 is M-only so a permission error in the wrong mode is unreachable at runtime (the address-encoded minimum-privilege rule is checked structurally instead); mstatus.FS/VS early-dirty is not exercisable because p0 implements neither F/D nor V, so only the WARL encoding of both fields is tested and the precondition is recorded in the ledger; mip.MEIP reads zero (no PLIC) and is tested as read-only-zero; unimplemented CSRs are checked at three representative addresses rather than enumerated; counter values are pinned to ranges because they free-run; and mtvec vectored-entry arithmetic and misa's WARL extension bits are not re-derived here. RTL was read only, not edited.",
       "report": "results/reports/V-017-csr.md"
+    },
+    "I-044": {
+      "cases": [
+        "privilege.permission_matrix"
+      ],
+      "commands": [
+        "python3 tools/run_unit.py --profile p1 --case privilege.permission_matrix",
+        "python3 tools/run_unit.py --profile p0 --case privilege.permission_matrix"
+      ],
+      "verdict": "PASS",
+      "notes": "S/U privilege and PMP, delivered on the THIRD attempt (the first two are recorded in this file's blocked_tasks history and in the report; the defect that blocked them was D5, and the fix is the substance of this entry). Under --profile p1 -- the profile the card names -- the permission matrix passes with all 75 rows matching the ISA: checks=6300, 57 comparisons, 22623 cycles, 9296 retires, 52 traps. Under p0 it passes too (52 checks; p0 has no PMP entry, so those rows do not run there). THE FIX: a store's PMP check is now non-speculative and happens at ROB authorisation, which is the only place it can be both precise and non-speculative -- mosaic_pmp gained a store-commit query (two store-class lanes, W-only) and mosaic_core gates the retire request on the refusal and latches the system-trap staging register with EXC_STORE_ACCESS and tval = the access address. A refused store therefore never becomes visible, never retires as a success, and traps precisely with cause 7 at its own PC. The store queue's own source needed no change. Five controls each differ in hash and exit 1 with a named first failure, and one of them is D5 itself: STORE_DENY_NOT_TAKEN (shipping b57f1cbf64d8 exit 0; the mutant e9bb481e0f9b exits 1 at s-store-deny-w with mcause 9 where 7 is required), alongside LOCK_IGNORED, OVERLAP_INVERTED, M_MODE_ENFORCED and a driver-side FAULT_WRITES control for 'a permission fault still writes'. p0's PMP controls are inert and are recorded as inert rather than counted. FOUR defects were found and fixed across the three attempts (NAPOT comparing the free bits instead of the fixed ones, so an entry matched about one word of its region; a supervisor-CSR decode arm that never raised addr_impl; a read-only CSR encoding applied to reads; an illegal MRET/SRET executing before its exception), and this attempt found five more case/glue defects that the first-mismatch abort had been masking -- including THREE STANDALONE WRAPPERS that failed to elaborate because they never connected the endpoint's PMP ports, which means store.wrong_path_visibility, lsu.byte_forwarding and lsu.size_fault_boundaries were RED ON ARRIVAL from attempt 1 and are now repaired and re-verified here. Ten memory and core cases were re-run green. NOT covered, stated by the lane: the endpoint's post-retirement PMP check remains as a backstop; a lane-1 same-cycle store refusal is implemented but not exercised; AMO/LR/SC are unchanged; the M-mode 'last byte matches but first does not' divergence from attempt 2 is deliberately left untested and unchanged; interrupt-versus-store-refusal precedence is implemented but not observed; translation does not exist (I-045/I-046) and every address here is physical; satp is exercised only as a CSR and TVM/TW have no row of their own; no interrupt is ever asserted, so PMP at an interrupt boundary is untested.",
+      "report": "results/reports/I-044-privilege.md"
     }
   },
-  "blocked_tasks": {
+  "blocked_tasks": {},
+  "resolved_blocks": {
     "I-044": {
       "attempts": 2,
       "verdict": "NOT DELIVERED -- do not advertise S, U or PMP",

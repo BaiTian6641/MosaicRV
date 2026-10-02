@@ -466,6 +466,10 @@ module mosaic_load_queue_tb (
       // attribute is constant zero here. The attribute itself is covered by
       // CASE=mmio.exactly_once on the integrated core.
       .req_dev_i          (1'b0),
+      // No PMP unit in this standalone case: every access is allowed; the
+      // endpoint's computed address is not observed here.
+      .pmp_deny_i         (1'b0),
+      .o_req_addr_o       (),
 
       .rsp_valid_o        (ep_lq_rsp_valid),
       .rsp_ready_o        (lq_rsp_ready),
@@ -522,6 +526,8 @@ module mosaic_load_queue_tb (
       .req_ready_o        (ep_sq_req_ready),
       .req_i              (sq_drain_req_s),
       .req_dev_i          (1'b0),
+      .pmp_deny_i         (1'b0),
+      .o_req_addr_o       (),
 
       .rsp_valid_o        (ep_sq_rsp_valid),
       .rsp_ready_o        (sq_drain_rsp_ready),

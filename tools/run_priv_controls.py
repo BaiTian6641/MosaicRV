@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Rebuild CASE=privilege.permission_matrix with one control at a time and run it.
 
-The controls are the four fail modes docs/implementation-plan.md I-044 names:
+The controls are the fail modes docs/implementation-plan.md I-044 names, plus the
+control for defect D5:
 
   MOSAIC_PMP_MUTANT_LOCK_IGNORED      a locked entry's configuration byte can be
                                       overwritten (RTL switch in mosaic_pmp)
@@ -9,6 +10,14 @@ The controls are the four fail modes docs/implementation-plan.md I-044 names:
                                       instead of the lowest (RTL switch)
   MOSAIC_PMP_MUTANT_M_MODE_ENFORCED   an unlocked entry's permissions are
                                       enforced against an M-mode access (RTL)
+  MOSAIC_PMP_MUTANT_STORE_DENY_NOT_TAKEN
+                                      the store-commit PMP check is removed, so
+                                      a PMP-refused store is authorised and
+                                      retired and the endpoint's refusal is
+                                      counted and dropped: D5 itself (RTL switch
+                                      in mosaic_core). This is the control that
+                                      shows the case detects D5 rather than the
+                                      failure having been argued away.
   MOSAIC_PRIV_MUTANT_FAULT_WRITES     "a permission fault still writes": the
                                       *checker* is mutated to expect the refused
                                       access to have taken effect (driver-side;
@@ -18,9 +27,7 @@ The controls are the four fail modes docs/implementation-plan.md I-044 names:
 Each control is built from a deleted build directory with its -D on the Verilator
 command line, so the binary hash differs from the shipping one, and the run is
 expected to exit 1 with a named first failure. This script prints the shipping
-baseline first, because a control is only evidence if the shipping build passes
--- and for this case under --profile p1 it does not (see
-results/reports/I-044-privilege.md).
+baseline first, because a control is only evidence if the shipping build passes.
 
 Usage: python3 tools/run_priv_controls.py [--profile p0|p1]
 """
@@ -48,6 +55,7 @@ CONTROLS = [
     ("LOCK_IGNORED", "MOSAIC_PMP_MUTANT_LOCK_IGNORED"),
     ("OVERLAP_INVERTED", "MOSAIC_PMP_MUTANT_OVERLAP_INVERTED"),
     ("M_MODE_ENFORCED", "MOSAIC_PMP_MUTANT_M_MODE_ENFORCED"),
+    ("STORE_DENY_NOT_TAKEN", "MOSAIC_PMP_MUTANT_STORE_DENY_NOT_TAKEN"),
     ("FAULT_WRITES", "MOSAIC_PRIV_MUTANT_FAULT_WRITES"),
 ]
 
