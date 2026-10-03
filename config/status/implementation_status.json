@@ -83,7 +83,8 @@
     "I-084",
     "I-064",
     "V-061",
-    "V-062"
+    "V-062",
+    "V-064"
   ],
   "evidence": {
     "I-001": {
@@ -1034,6 +1035,18 @@
       "verdict": "PASS",
       "notes": "Lead re-ran the case: RESULT PASS cache.coalescer_boundaries coalescer: miss=18 coalesce=9 refill=8 fault=1 wb=1 reads=9 writes=1 cycles=108 | cancel-keeps-others (85 checks, p1; p1 because p0's RAM is non-cacheable, which would make the MMIO/AMO bypass clause vacuous). The card's enumeration is covered where the port can express it: same line different bytes -> merged with each waiter answered its own word; duplicate bytes -> merged and answered once; cross line sharing set+offset (low 8 bits equal) -> NOT merged, two entries and two reads; cross page -> NOT merged; MMIO and AMO -> NOT merged, both bypass the cache and memory sees the exact transaction (a cacheable non-atomic control shows the bypass clause is non-vacuous); a coalesced fault -> per-consumer fault answers with no install and a successful retry; cancelling one of two coalesced consumers leaves the survivor answered once with its own word. Four controls, each from a deleted build directory, each exit 1 with a named first failure and a binary hash distinct from the shipping 9623e30f8a072eb1: COALESCE_LOW_BITS 7afbe386c2be7d03 ('cross-line-same-set: two different lines are two entries'), STORE_MASK_DROP eca1f9a654f77c26 ('store-byte-merge: only the selected byte lanes changed'), WRONG_WAITER e8904a65b26e6c77 ('same-line-different-bytes: word 1 returned to its own request'), FAULT_VALID ed1986620a1e5057 ('coalesced-fault-per-request: every consumer is faulted, not just the first'). NOT COVERED, with the reason rather than a check that passes: differing permissions (no permission or PMT field on the cache's request port -- permission is raised upstream in the LSU/PMP), same-VA/different-PA and same-PA/different-VA (the coalescer key is a physical line with no VA field; covered at the LLB by V-061's same-address-aliasing campaign), ordering incompatibility beyond the AMO class (no ordering tag on the port; aq/rl tied off), same-byte write-write ordering and store merge across eviction, cross-hart coalescing (V-070) and formal proof. The lead also re-ran the two cases this lane could not build while another lane held mosaic_core.sv: amo.linearization PASS and cache.integrated_path PASS. NOTE: the shared cache testbench now elaborates an inert access-path instance, so the binary hashes cited in the I-042/I-043 reports are historical; their checks and traces are unchanged.",
       "report": "results/reports/cache.coalescer_boundaries.md"
+    },
+    "V-064": {
+      "cases": [
+        "multihart.context_isolation"
+      ],
+      "commands": [
+        "python3 tools/run_unit.py --profile p3 --case multihart.context_isolation",
+        "python3 tools/run_multihart_context_controls.py"
+      ],
+      "verdict": "PASS",
+      "notes": "Lead re-ran the case: RESULT PASS multihart.context_isolation h0=157 h1=12100 retires, fcsr=0x0000000000000010/0x0000000000000028 vl=1/3 seed=1 (41 checks, p3, seven Pass clauses covered). A REAL DEFECT WAS FOUND AND FIXED, not worked around: mosaic_csr read mhartid from the single generated constant MOSAIC_CSR_RESET_MHARTID and mosaic_core never wired HART_ID into it, so BOTH harts read 0 -- architecturally wrong for any multi-hart machine, since mhartid is a hart's own identifier. Fix: mosaic_csr gains a MHARTID_VALUE parameter whose default is the generated constant (single-hart builds stay bit-identical) and mosaic_core passes CORE_XLEN'(HART_ID); the shared-id behaviour survives only inside the MOSAIC_MUTANT_MHARTID_SHARED control branch. Three controls, each from a deleted build directory with a hash distinct from the shipping 26486c13bea91c5921c886b97239f97418076fbc4473ee52a582f9b08eb61015 and exit 1 with a named first failure: MOSAIC_MUTANT_MHARTID_SHARED 520c54d2cd4a9b27... ('hart 0 reads mhartid 0 and hart 1 reads mhartid 1'), MOSAIC_MH_CTX_MUTANT_HALT_ALL 487e9b16a4efedcc... ('hart 1 retired its program and parked'), and a driver-level --control-share-ref which compares hart 1 against hart 0's reference -- the card's own named failure mode, one shared reference state -- exit 1 with 'MISMATCH stream/h1'. The change was re-verified against every case it can move, each from a deleted build directory: core.act_dut (p1) PASS, core.corpus_sweep (p1) PASS, csr.precise_trap_mret (p0) PASS, core.trap_csr_program (p0) PASS, multihart.isolation (p3) PASS, lint_rtl 65/65 on both profiles. No ACT4 or corpus program reads mhartid, so no golden moved. NOT COVERED, with reasons: no 4-hart configuration (the wrapper hardcodes two harts and p3 declares two), no interrupt-controller topology (the IRQ is a self-raised mip/mie software interrupt, not CLINT/PLIC routing), instruction fetch is not translated in this core so 'the same PC' is a physical PC, no cross-hart memory ordering or coherence (disjoint pages; V-065..V-067 own it), vector register state is observed only through a vector store (vmv.x.s is not wired), and halt causes other than WFI plus park.",
+      "report": "results/reports/multihart.context_isolation.md"
     }
   },
   "blocked_tasks": {},

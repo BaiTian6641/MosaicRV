@@ -222,7 +222,32 @@ module mosaic_multihart #(
     output logic [MH_XLEN-1:0]                     h1_mcause,
     output logic [MH_XLEN-1:0]                     h1_mtval,
     output logic [MH_MEM_ID_W-1:0]                 h1_dmem_id,
-    output logic                                   h1_dmem_id_valid
+    output logic                                   h1_dmem_id_valid,
+
+    // ============================================ per-hart context evidence (V-064)
+    // The architectural context each hart's own program established, tapped
+    // straight from that core so the context-isolation case states per-hart
+    // state rather than inferring it. Every one of these is per-hart and owned
+    // by one core: there is deliberately no shared copy. `o_wfi_halt` is the
+    // hart's own WFI halt (a hart that halted is not fetching or committing);
+    // `fcsr`/`vec_*` are the FP and vector control state the hart wrote; the
+    // trap-interrupt pair says whether the hart's last trap was an interrupt.
+    output logic                                   h0_wfi_halt,
+    output logic                                   h1_wfi_halt,
+    output logic [MH_XLEN-1:0]                     h0_fcsr,
+    output logic [MH_XLEN-1:0]                     h1_fcsr,
+    output logic [MH_XLEN-1:0]                     h0_vec_vl,
+    output logic [MH_XLEN-1:0]                     h1_vec_vl,
+    output logic [MH_XLEN-1:0]                     h0_vec_vtype,
+    output logic [MH_XLEN-1:0]                     h1_vec_vtype,
+    output logic [MH_XLEN-1:0]                     h0_vec_vstart,
+    output logic [MH_XLEN-1:0]                     h1_vec_vstart,
+    output logic                                   h0_vec_vill,
+    output logic                                   h1_vec_vill,
+    output logic [31:0]                            h0_trap_irq_ctr,
+    output logic [31:0]                            h1_trap_irq_ctr,
+    output logic                                   h0_trap_is_irq,
+    output logic                                   h1_trap_is_irq
 );
 
   // The two cores have far more evidence outputs than this package consumes
@@ -245,6 +270,12 @@ module mosaic_multihart #(
   // card's first named fail mode. CASE=multihart.isolation's "hart 1's stream
   // is unaffected" check must catch it.
   assign h1_rst = rst | ~hart_en_i[1] | h0_redirect_valid_w;
+`elsif MOSAIC_MH_CTX_MUTANT_HALT_ALL
+  // NEGATIVE CONTROL (V-064): hart 0's WFI halt resets hart 1. This is the
+  // card's "one hart stopping implicitly stops the other" failure mode at the
+  // wrapper level. CASE=multihart.context_isolation's "hart 1 parked" and
+  // "hart 1 kept committing after hart 0 halted" checks must catch it.
+  assign h1_rst = rst | ~hart_en_i[1] | h0_wfi_halt;
 `else
   assign h1_rst = rst | ~hart_en_i[1];
 `endif
@@ -470,20 +501,20 @@ module mosaic_multihart #(
       .o_csr_mscratch       (),
       .o_csr_mie            (),
       .o_csr_mip            (),
-      .o_csr_fcsr           (),
+      .o_csr_fcsr           (h0_fcsr),
       .o_csr_fflags         (),
       .o_csr_frm            (),
       .o_fp_issue_ctr       (),
       .o_fp_commit_ctr      (),
       .o_fp_flags_ctr       (),
       .o_fp_merge_ctr       (),
-      .o_vec_vtype          (),
-      .o_vec_vl             (),
-      .o_vec_vstart         (),
+      .o_vec_vtype          (h0_vec_vtype),
+      .o_vec_vl             (h0_vec_vl),
+      .o_vec_vstart         (h0_vec_vstart),
       .o_vec_vcsr           (),
       .o_vec_vlenb          (),
       .o_vec_vlmax          (),
-      .o_vec_vill           (),
+      .o_vec_vill           (h0_vec_vill),
       .o_vec_macro_ctr      (),
       .o_vec_elem_ctr       (),
       .o_vec_trap_ctr       (),
@@ -530,7 +561,7 @@ module mosaic_multihart #(
       .o_csr_trap_ctr       (),
       .o_csr_mret_ctr       (),
       .o_trap_valid         (h0_trap_valid),
-      .o_trap_is_irq        (),
+      .o_trap_is_irq        (h0_trap_is_irq),
       .o_trap_cause         (h0_trap_cause),
       .o_trap_tval          (h0_trap_tval),
       .o_trap_epc           (h0_trap_epc),
@@ -568,13 +599,13 @@ module mosaic_multihart #(
       .o_irq_valid          (),
       .o_irq_cause          (),
       .o_irq_ctr            (),
-      .o_wfi_halt           (),
+      .o_wfi_halt           (h0_wfi_halt),
       .o_spurious_wake_ctr  (),
       .o_halt_cycles        (),
       .o_sys_exec_ctr       (),
       .o_exc_capture_ctr    (),
       .o_exc_gen_mismatch_ctr(),
-      .o_trap_irq_ctr       (),
+      .o_trap_irq_ctr       (h0_trap_irq_ctr),
       .o_sys_redirect_ctr   (),
       .o_tlb_hit_ctr        (),
       .o_tlb_miss_ctr       (),
@@ -803,20 +834,20 @@ module mosaic_multihart #(
       .o_csr_mscratch       (),
       .o_csr_mie            (),
       .o_csr_mip            (),
-      .o_csr_fcsr           (),
+      .o_csr_fcsr           (h1_fcsr),
       .o_csr_fflags         (),
       .o_csr_frm            (),
       .o_fp_issue_ctr       (),
       .o_fp_commit_ctr      (),
       .o_fp_flags_ctr       (),
       .o_fp_merge_ctr       (),
-      .o_vec_vtype          (),
-      .o_vec_vl             (),
-      .o_vec_vstart         (),
+      .o_vec_vtype          (h1_vec_vtype),
+      .o_vec_vl             (h1_vec_vl),
+      .o_vec_vstart         (h1_vec_vstart),
       .o_vec_vcsr           (),
       .o_vec_vlenb          (),
       .o_vec_vlmax          (),
-      .o_vec_vill           (),
+      .o_vec_vill           (h1_vec_vill),
       .o_vec_macro_ctr      (),
       .o_vec_elem_ctr       (),
       .o_vec_trap_ctr       (),
@@ -863,7 +894,7 @@ module mosaic_multihart #(
       .o_csr_trap_ctr       (),
       .o_csr_mret_ctr       (),
       .o_trap_valid         (h1_trap_valid),
-      .o_trap_is_irq        (),
+      .o_trap_is_irq        (h1_trap_is_irq),
       .o_trap_cause         (h1_trap_cause),
       .o_trap_tval          (h1_trap_tval),
       .o_trap_epc           (h1_trap_epc),
@@ -901,13 +932,13 @@ module mosaic_multihart #(
       .o_irq_valid          (),
       .o_irq_cause          (),
       .o_irq_ctr            (),
-      .o_wfi_halt           (),
+      .o_wfi_halt           (h1_wfi_halt),
       .o_spurious_wake_ctr  (),
       .o_halt_cycles        (),
       .o_sys_exec_ctr       (),
       .o_exc_capture_ctr    (),
       .o_exc_gen_mismatch_ctr(),
-      .o_trap_irq_ctr       (),
+      .o_trap_irq_ctr       (h1_trap_irq_ctr),
       .o_sys_redirect_ctr   (),
       .o_tlb_hit_ctr        (),
       .o_tlb_miss_ctr       (),

@@ -154,7 +154,15 @@
 /* verilator lint_on UNUSEDPARAM */
 /* verilator lint_on UNUSEDPARAM */
 
-module mosaic_csr (
+module mosaic_csr #(
+    // The hart's own identifier, read back through `mhartid` (V-064). The
+    // default is the generated single-hart value, so every existing single-hart
+    // instantiation reads exactly what it read before; a multi-hart build passes
+    // the core's HART_ID so each hart reads its own number. A hart identifier is
+    // per-hart architectural state, not a machine-wide constant: two harts that
+    // both read 0 cannot be told apart by software.
+    parameter logic [63:0] MHARTID_VALUE = mosaic_csr_pkg::MOSAIC_CSR_RESET_MHARTID
+) (
     input  logic                   clk_i,
     input  logic                   rst_i,
 
@@ -695,7 +703,7 @@ module mosaic_csr (
       mosaic_csr_pkg::MOSAIC_CSR_ADDR_MVENDORID:  csr_rdata_stored = mosaic_csr_pkg::MOSAIC_CSR_RESET_MVENDORID;
       mosaic_csr_pkg::MOSAIC_CSR_ADDR_MARCHID:    csr_rdata_stored = mosaic_csr_pkg::MOSAIC_CSR_RESET_MARCHID;
       mosaic_csr_pkg::MOSAIC_CSR_ADDR_MIMPID:     csr_rdata_stored = mosaic_csr_pkg::MOSAIC_CSR_RESET_MIMPID;
-      mosaic_csr_pkg::MOSAIC_CSR_ADDR_MHARTID:    csr_rdata_stored = mosaic_csr_pkg::MOSAIC_CSR_RESET_MHARTID;
+      mosaic_csr_pkg::MOSAIC_CSR_ADDR_MHARTID:    csr_rdata_stored = MHARTID_VALUE;
       mosaic_csr_pkg::MOSAIC_CSR_ADDR_MCYCLE:     csr_rdata_stored = mcycle_q;
       mosaic_csr_pkg::MOSAIC_CSR_ADDR_MINSTRET:   csr_rdata_stored = minstret_q;
       mosaic_csr_pkg::MOSAIC_CSR_ADDR_CYCLE:      csr_rdata_stored = mcycle_q;   // read-only shadow

@@ -1,15 +1,18 @@
 // ============================================================================
-// mosaic_multihart_tb -- the testbench wrapper for CASE=multihart.isolation
-// (work package I-064).
+// mosaic_multihart_ctx_tb -- the testbench wrapper for
+// CASE=multihart.context_isolation (work package V-064).
 //
-// The wrapper adds no timing of its own. It flattens the two-hart design's
-// ports to plain vectors so the C++ driver contains no geometry, and it fixes
-// the two harts' reset PCs (the two programs live at different physical
-// addresses). Everything else -- the two cores, the shared hart-tagged memory
-// service and its arbiter -- is `mosaic_multihart`.
+// Same two-hart machine as mosaic_multihart_tb, with one deliberate change: both
+// harts reset to the SAME PC. The case's whole point is that the same PC with
+// different per-hart architectural state (GPR, privilege, ASID, FP, vector)
+// stays independent, so the two harts must fetch the same instruction stream
+// and diverge only through their own state -- which in this machine starts with
+// each hart's own `mhartid`.
 //
-// Geometry is taken from the generated packages by scope reference, never
-// re-derived by a formula this wrapper invented.
+// The wrapper adds no timing of its own and flattens the design's ports to plain
+// vectors so the C++ driver contains no geometry. Geometry is taken from the
+// generated packages by scope reference, never re-derived by a formula this
+// wrapper invented.
 // ============================================================================
 
 `default_nettype none
@@ -38,12 +41,11 @@ localparam int unsigned TB_MH_HART_W   = mosaic_id_pkg::MOSAIC_ID_W_HART;
 localparam int unsigned TB_MH_MEM_ID_W = $bits(mosaic_uop_pkg::uop_id_t);
 localparam int unsigned TB_MH_HARTS    = 2;
 
-// The two harts' reset PCs. Hart 0's program is assembled at the first and hart
-// 1's at the second; the driver has the same two constants.
-localparam logic [63:0] TB_MH_H0_RESET_PC = 64'h0000_0000_8000_2000;
-localparam logic [63:0] TB_MH_H1_RESET_PC = 64'h0000_0000_8000_4000;
+// Both harts reset to the SAME PC: the case interleaves one instruction stream
+// with two different architectural contexts. The driver has the same constant.
+localparam logic [63:0] TB_MH_CTX_RESET_PC = 64'h0000_0000_8000_2000;
 
-module mosaic_multihart_tb (
+module mosaic_multihart_ctx_tb (
 
     input  logic                          clk,
     input  logic                          rst,
@@ -182,7 +184,28 @@ module mosaic_multihart_tb (
     output logic [TB_MH_XLEN-1:0]                     h1_mcause,
     output logic [TB_MH_XLEN-1:0]                     h1_mtval,
     output logic [TB_MH_MEM_ID_W-1:0]                 h1_dmem_id,
-    output logic                                   h1_dmem_id_valid
+    output logic                                   h1_dmem_id_valid,
+
+    // ============================================ per-hart context evidence (V-064)
+    // Tapped straight from each core: each hart's own WFI halt, FP control/status
+    // and vector configuration state. They exist so the case can state per-hart
+    // context rather than infer it.
+    output logic                                   h0_wfi_halt,
+    output logic                                   h1_wfi_halt,
+    output logic [TB_MH_XLEN-1:0]                     h0_fcsr,
+    output logic [TB_MH_XLEN-1:0]                     h1_fcsr,
+    output logic [TB_MH_XLEN-1:0]                     h0_vec_vl,
+    output logic [TB_MH_XLEN-1:0]                     h1_vec_vl,
+    output logic [TB_MH_XLEN-1:0]                     h0_vec_vtype,
+    output logic [TB_MH_XLEN-1:0]                     h1_vec_vtype,
+    output logic [TB_MH_XLEN-1:0]                     h0_vec_vstart,
+    output logic [TB_MH_XLEN-1:0]                     h1_vec_vstart,
+    output logic                                   h0_vec_vill,
+    output logic                                   h1_vec_vill,
+    output logic [31:0]                            h0_trap_irq_ctr,
+    output logic [31:0]                            h1_trap_irq_ctr,
+    output logic                                   h0_trap_is_irq,
+    output logic                                   h1_trap_is_irq
 );
 
   // The shared bus's two packet types, assembled from the flat driver ports.
@@ -208,15 +231,9 @@ module mosaic_multihart_tb (
     mh_rsp.fault  = mem_rsp_fault;
   end
 
-  // The per-hart context evidence V-064 added to mosaic_multihart (wfi_halt,
-  // fcsr, the vector configuration, the trap-interrupt pair) is consumed by the
-  // sibling wrapper mosaic_multihart_ctx_tb; this wrapper's case
-  // (multihart.isolation) predates it and does not read it. They are left
-  // unconnected deliberately rather than wired to dead nets.
-  /* verilator lint_off PINMISSING */
   mosaic_multihart #(
-      .HART0_RESET_PC (TB_MH_H0_RESET_PC),
-      .HART1_RESET_PC (TB_MH_H1_RESET_PC)
+      .HART0_RESET_PC (TB_MH_CTX_RESET_PC),
+      .HART1_RESET_PC (TB_MH_CTX_RESET_PC)
   ) u_mh (
       .clk (clk),
       .rst (rst),
@@ -320,10 +337,25 @@ module mosaic_multihart_tb (
       .h1_mcause (h1_mcause),
       .h1_mtval (h1_mtval),
       .h1_dmem_id (h1_dmem_id),
-      .h1_dmem_id_valid (h1_dmem_id_valid)
+      .h1_dmem_id_valid (h1_dmem_id_valid),
+      .h0_wfi_halt (h0_wfi_halt),
+      .h1_wfi_halt (h1_wfi_halt),
+      .h0_fcsr (h0_fcsr),
+      .h1_fcsr (h1_fcsr),
+      .h0_vec_vl (h0_vec_vl),
+      .h1_vec_vl (h1_vec_vl),
+      .h0_vec_vtype (h0_vec_vtype),
+      .h1_vec_vtype (h1_vec_vtype),
+      .h0_vec_vstart (h0_vec_vstart),
+      .h1_vec_vstart (h1_vec_vstart),
+      .h0_vec_vill (h0_vec_vill),
+      .h1_vec_vill (h1_vec_vill),
+      .h0_trap_irq_ctr (h0_trap_irq_ctr),
+      .h1_trap_irq_ctr (h1_trap_irq_ctr),
+      .h0_trap_is_irq (h0_trap_is_irq),
+      .h1_trap_is_irq (h1_trap_is_irq)
   );
-  /* verilator lint_on PINMISSING */
 
-endmodule : mosaic_multihart_tb
+endmodule : mosaic_multihart_ctx_tb
 
 `default_nettype wire

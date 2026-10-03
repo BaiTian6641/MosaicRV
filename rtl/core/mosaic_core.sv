@@ -5267,7 +5267,23 @@ module mosaic_core #(
   // detectable without a second copy of the table here.
   assign csr_we = sys_wb_valid && sys_csr_writes_q && !csr_is_vec;
 
-  mosaic_csr u_csr (
+  // `mhartid` is this hart's own identifier (V-064). The generated
+  // `MOSAIC_CSR_RESET_MHARTID` is a single-hart constant, so a two-hart build
+  // that passed it unchanged would have both harts answer 0 -- a machine whose
+  // software cannot tell its harts apart. The parameter carries HART_ID instead;
+  // the constant stays the default for every single-hart instantiation.
+  // `MOSAIC_MUTANT_MHARTID_SHARED` is the negative control: it wires the shared
+  // constant back in so both harts report the same id, which the case's
+  // distinctness check must catch.
+`ifdef MOSAIC_MUTANT_MHARTID_SHARED
+  localparam logic [63:0] CORE_MHARTID_VALUE = mosaic_csr_pkg::MOSAIC_CSR_RESET_MHARTID;
+`else
+  localparam logic [63:0] CORE_MHARTID_VALUE = CORE_XLEN'(HART_ID);
+`endif
+
+  mosaic_csr #(
+      .MHARTID_VALUE      (CORE_MHARTID_VALUE)
+  ) u_csr (
       .clk_i              (clk),
       .rst_i              (rst),
       .csr_addr_i         (csr_addr),
