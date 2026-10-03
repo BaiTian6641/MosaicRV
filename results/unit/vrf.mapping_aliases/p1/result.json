@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "case": "vrf.mapping_aliases",
+  "verdict": "PASS",
+  "detail": "vrf contract holds: 3806 per-cycle comparisons over 3846 cycles; read latency 1 cycle; lane counts 2/4/8 read the same logical vector; seed 1",
+  "seed": 1,
+  "max_cycles": 200000,
+  "checks": 11,
+  "failures": 0,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-03T03:05:04Z",
+  "first_mismatch": ""
+}

@@ -2,14 +2,14 @@
   "schema_version": 1,
   "case": "prefetch.fault_and_pollution",
   "verdict": "PASS",
-  "detail": "prefetch harm bound holds: 13 prefetches (useful 5, useless 2, late 1, cancelled 1), 56 demand reads, over 94 cycles",
+  "detail": "prefetch harm bound holds: 13 prefetches (useful 5, useless 2, late 1, cancelled 1), 56 demand reads, over 99 cycles",
   "seed": 1,
   "max_cycles": 200000,
-  "checks": 14,
+  "checks": 17,
   "failures": 0,
   "image": "",
   "expect": "",
   "tool": "Verilator 5.052 2026-09-05",
-  "timestamp": "2026-10-02T21:10:34Z",
+  "timestamp": "2026-10-03T03:01:04Z",
   "first_mismatch": ""
 }

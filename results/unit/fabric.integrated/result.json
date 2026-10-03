@@ -2,7 +2,7 @@
   "schema_version": 1,
   "case": "fabric.integrated",
   "verdict": "PASS",
-  "detail": "image=p02_branch.i0.elf fixed_cycles=448406 dyn_cycles=448468 fixed_retires=71123 dyn_retires=71123 fixed_issues=214/17624/17767/17769/0 dyn_issues=8498/9340/18790/16746/0 dyn_unit_issues=27886/29395/0/0 dyn_reasons=0,0,0,0,14,57267 bp_captured=17849 bp_hit=33 arch_identical=yes",
+  "detail": "image=p02_branch.i0.elf fixed_cycles=448406 dyn_cycles=448467 fixed_retires=71123 dyn_retires=71123 fixed_issues=214/17624/17767/17769/0 dyn_issues=8498/9340/18789/16747/0 dyn_unit_issues=27885/29395/0/0 dyn_reasons=0,0,0,0,14,57266 bp_captured=17849 bp_hit=33 arch_identical=yes",
   "seed": 1,
   "max_cycles": 4000000,
   "checks": 15,
@@ -10,6 +10,6 @@
   "image": "",
   "expect": "",
   "tool": "Verilator 5.052 2026-09-05",
-  "timestamp": "2026-10-02T19:10:14Z",
+  "timestamp": "2026-10-03T02:48:03Z",
   "first_mismatch": ""
 }

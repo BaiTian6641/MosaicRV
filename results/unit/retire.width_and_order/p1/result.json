@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "case": "retire.width_and_order",
+  "verdict": "PASS",
+  "detail": "checks=1195 events=119 retires=118 comparisons=973 dual=28 single=63 same_rd=1 trap_blocked=1 store_load=1 cycles=573 seed=1",
+  "seed": 1,
+  "max_cycles": 4000000,
+  "checks": 1196,
+  "failures": 0,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-03T03:02:15Z",
+  "first_mismatch": ""
+}

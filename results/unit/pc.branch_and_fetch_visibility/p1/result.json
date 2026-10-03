@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "case": "pc.branch_and_fetch_visibility",
+  "verdict": "PASS",
+  "detail": "checks=93 runs=6 retires=85 line_straddles=2 page_straddles=1 wrongpath_faults=14 cycles=805 seed=1",
+  "seed": 1,
+  "max_cycles": 4000000,
+  "checks": 94,
+  "failures": 0,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-03T03:00:16Z",
+  "first_mismatch": ""
+}

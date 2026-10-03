@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "case": "harness.reset_traffic",
+  "verdict": "PASS",
+  "detail": "first=nonredirect reset_request_cycles=8 reset_accepts=0 stream_events=15 stream_matches=1 control_accepts=4 control_completed=1 stale_response_class=demonstrated 39 checks",
+  "seed": 1,
+  "max_cycles": 4000000,
+  "checks": 40,
+  "failures": 0,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-03T02:57:21Z",
+  "first_mismatch": ""
+}

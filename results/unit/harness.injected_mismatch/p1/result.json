@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "case": "harness.injected_mismatch",
+  "verdict": "PASS",
+  "detail": "injected mismatch detected and located precisely",
+  "seed": 1,
+  "max_cycles": 2000,
+  "checks": 9,
+  "failures": 0,
+  "image": "",
+  "expect": "",
+  "tool": "mosaic harness I-004",
+  "timestamp": "2026-10-03T02:57:16Z",
+  "first_mismatch": ""
+}

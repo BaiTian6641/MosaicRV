@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "case": "prf.read_bank_collision",
+  "verdict": "PASS",
+  "detail": "prf contract holds: 5263 shadow comparisons over 5311 cycles, 96 entries / 4 banks of 24 rows, seed 1; 822 writes, 1309 granted reads, 568 conflicts, 1101 mismatches, 205 never-written reads",
+  "seed": 1,
+  "max_cycles": 200000,
+  "checks": 10,
+  "failures": 0,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-03T03:01:06Z",
+  "first_mismatch": ""
+}

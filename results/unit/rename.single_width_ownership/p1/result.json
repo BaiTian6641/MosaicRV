@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "case": "rename.single_width_ownership",
+  "verdict": "PASS",
+  "detail": "rename contract holds: 5646 shadow comparisons over 5686 cycles, 96 entries / 4 banks, seed 1",
+  "seed": 1,
+  "max_cycles": 200000,
+  "checks": 9,
+  "failures": 0,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-03T03:01:49Z",
+  "first_mismatch": ""
+}

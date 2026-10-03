@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "case": "csr.rule_ledger",
+  "verdict": "FAIL",
+  "detail": "contract violated: csr-rule-ledger: the rule ledger is empty; config/csr/rule_ledger.json does not cover profile p0",
+  "seed": 1,
+  "max_cycles": 4000000,
+  "checks": 1,
+  "failures": 1,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-03T02:55:08Z",
+  "first_mismatch": "csr-rule-ledger: the rule ledger is empty; config/csr/rule_ledger.json does not cover profile p0: expected every ledger rule holds on this machine, got contract violated",
+  "failed_checks": ["no contract violation"]
+}

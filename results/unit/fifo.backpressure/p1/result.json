@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "case": "fifo.backpressure",
+  "verdict": "PASS",
+  "detail": "97069 checks over 3189 cycles, 16 reset cycles",
+  "seed": 1,
+  "max_cycles": 20000,
+  "checks": 0,
+  "failures": 0,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-03T02:56:26Z",
+  "first_mismatch": ""
+}

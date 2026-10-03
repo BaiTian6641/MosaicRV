@@ -2,7 +2,7 @@
   "schema_version": 1,
   "case": "store.wrong_path_visibility",
   "verdict": "PASS",
-  "detail": "store queue contract holds: 299262 checks over 3331 cycles; 112 stores allocated, 24 drained, 82 squashed, 1 faulted; seed 1",
+  "detail": "store queue contract holds: 299453 checks over 3337 cycles; 112 stores allocated, 24 drained, 82 squashed, 1 faulted; seed 1",
   "seed": 1,
   "max_cycles": 200000,
   "checks": 1,
@@ -10,6 +10,6 @@
   "image": "",
   "expect": "",
   "tool": "Verilator 5.052 2026-09-05",
-  "timestamp": "2026-10-02T22:49:54Z",
+  "timestamp": "2026-10-03T03:03:34Z",
   "first_mismatch": ""
 }

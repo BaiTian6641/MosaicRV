@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "case": "core.corpus_branch",
+  "verdict": "PASS",
+  "detail": "checks=31 comparisons=9264 cycles=1846 retires=322 control=102 taken=80 branches=48(taken 26) jal=30 jalr=24 back_edges=41 inputs=3 seed=1",
+  "seed": 1,
+  "max_cycles": 4000000,
+  "checks": 32,
+  "failures": 0,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-03T02:51:49Z",
+  "first_mismatch": ""
+}

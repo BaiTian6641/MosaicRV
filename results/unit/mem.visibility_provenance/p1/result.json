@@ -2,14 +2,14 @@
   "schema_version": 1,
   "case": "mem.visibility_provenance",
   "verdict": "PASS",
-  "detail": "checks=1608 retires=450 loads=88 stores=116 drains=116 seed=1",
+  "detail": "checks=1626 retires=450 loads=88 stores=116 drains=116 seed=1",
   "seed": 1,
   "max_cycles": 4000000,
-  "checks": 1609,
+  "checks": 1627,
   "failures": 0,
   "image": "",
   "expect": "",
   "tool": "Verilator 5.052 2026-09-05",
-  "timestamp": "2026-10-02T22:49:52Z",
+  "timestamp": "2026-10-03T02:59:09Z",
   "first_mismatch": ""
 }

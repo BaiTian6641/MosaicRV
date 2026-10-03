@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "case": "mmio.side_effect_model",
+  "verdict": "PASS",
+  "detail": "checks=261 contract(retires=51,dev=16,ram=10,effects=8,traps=0,cycles=255) cancelled(retires=41,dev=2,ram=3,effects=2,traps=1,cycles=158) illegal_width(retires=25,dev=2,ram=3,effects=1,traps=1,cycles=95) unmapped_read(retires=25,dev=1,ram=4,effects=1,traps=1,cycles=90) unmodelled_reg(retires=25,dev=2,ram=3,effects=1,traps=1,cycles=95) misaligned(retires=25,dev=1,ram=3,effects=1,traps=1,cycles=88) unmapped_write(retires=25,dev=1,ram=3,effects=1,traps=1,cycles=87) harness_write(retires=25,dev=1,ram=3,effects=1,traps=1,cycles=87) seed=1",
+  "seed": 1,
+  "max_cycles": 4000000,
+  "checks": 262,
+  "failures": 0,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-03T02:59:53Z",
+  "first_mismatch": ""
+}

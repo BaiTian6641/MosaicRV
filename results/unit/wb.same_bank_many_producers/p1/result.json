@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "case": "wb.same_bank_many_producers",
+  "verdict": "PASS",
+  "detail": "completion path holds: 956 cycle comparisons over 522 cycles; offered=194 published=194 writes=188 wakeups=188 stale=1 duplicate=1 rob_stale=1 no_dst=3 wide_gen=1 collisions=23 seed 1",
+  "seed": 1,
+  "max_cycles": 200000,
+  "checks": 1,
+  "failures": 0,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-03T03:05:06Z",
+  "first_mismatch": ""
+}

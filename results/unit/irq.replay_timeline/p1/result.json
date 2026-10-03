@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "case": "irq.replay_timeline",
+  "verdict": "PASS",
+  "detail": "checks=70 cycles=545 retires=308 traps=3 trace=0x7e9036cdf4885a4c seed=1",
+  "seed": 1,
+  "max_cycles": 4000000,
+  "checks": 71,
+  "failures": 0,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-03T02:57:54Z",
+  "first_mismatch": ""
+}

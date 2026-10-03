@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "case": "rvv.stop_path_inflight",
+  "verdict": "PASS",
+  "detail": "checks=63 kinds=4 cells=7 resumes=5 inflight=3 cycles=626",
+  "seed": 1,
+  "max_cycles": 200000,
+  "checks": 63,
+  "failures": 0,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-03T03:03:23Z",
+  "first_mismatch": ""
+}

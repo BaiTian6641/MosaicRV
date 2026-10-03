@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "case": "core.unwritten_reg_read",
+  "verdict": "PASS",
+  "detail": "checks=70 cycles=16 retires=3 (x5=0x0000000000000000 at cycle 11) (x6=0x0000000000000009 at cycle 12) (x7=0x0000000000000009 at cycle 14) stopped=1 free=64",
+  "seed": 1,
+  "max_cycles": 4000000,
+  "checks": 71,
+  "failures": 0,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-03T02:54:47Z",
+  "first_mismatch": ""
+}

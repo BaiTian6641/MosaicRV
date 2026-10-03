@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "case": "fp.precise_flags_and_boxing",
+  "verdict": "FAIL",
+  "detail": "checks=106 phases=7 seed=1",
+  "seed": 1,
+  "max_cycles": 4000000,
+  "checks": 107,
+  "failures": 4,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-03T02:56:50Z",
+  "first_mismatch": "",
+  "failed_checks": ["fs-dirty: a software write of FS=Initial lands: mstatus reads 0x0000000000002000", "fs-dirty: fmv.x.w does not dirty mstatus.FS: reads 0x0000000000002000", "fs-dirty: an FP write sets mstatus.FS = Dirty: reads 0x0000000000006000", "fs-dirty: fsw does not dirty mstatus.FS: reads 0x0000000000002000"]
+}

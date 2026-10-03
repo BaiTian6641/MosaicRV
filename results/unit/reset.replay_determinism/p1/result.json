@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "case": "reset.replay_determinism",
+  "verdict": "PASS",
+  "detail": "reset sweep 32 runs over 4 reset lengths x 4 release instants, 4 aborts, 245 reset edges and 4896 live edges driven, 439 checks, every stream bit-identical",
+  "seed": 1,
+  "max_cycles": 4000000,
+  "checks": 440,
+  "failures": 0,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-03T03:01:52Z",
+  "first_mismatch": ""
+}

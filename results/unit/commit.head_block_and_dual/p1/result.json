@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "case": "commit.head_block_and_dual",
+  "verdict": "PASS",
+  "detail": "retire contract holds: 469499 shadow comparisons over 0 cycles; 117 events (26 in two-wide cycles, 91 alone), 17 traps, 60 committed-map updates, 2 x0 retirements, 14 CSR writes, 12 store authorisations, 399 flushes, 2271 blocked cycles, seed 1",
+  "seed": 1,
+  "max_cycles": 200000,
+  "checks": 1,
+  "failures": 0,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-03T02:50:17Z",
+  "first_mismatch": ""
+}

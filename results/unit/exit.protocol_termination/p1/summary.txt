@@ -1,0 +1,18 @@
+MosaicRV V-012 exit.protocol_termination
+profile p1, DUT mosaic_bringup_tb
+reset_vector 0x0000000080000000, TOHOST 0x0000000080001000
+signature window [0x0000000080000400, 0x0000000080000420), guard band [0x0000000080000420, 0x0000000080000600)
+budget 20000 cycles/scenario, drain window 32 cycles
+operands 0x0000000080001080 (written by the harness)
+  x01_normal status=PASS(0) expected=PASS(0) cycles=120 phase=COMPLETE tohost=0x0000000000000001 sig=0x1,0x2468acf13579bdd,0xfffffffffffffffd,0x91a2b3c4d5e6f75 want=0x1,0x2468acf13579bdd,0xfffffffffffffffd,0x91a2b3c4d5e6f75 uart=0
+  x02_fail status=PROGRAM_FAIL(1) expected=PROGRAM_FAIL(1) cycles=120 phase=EXIT/PROGRAM_FAIL tohost=0x0000000000000054 sig=0x8000000000000000,0x7ffffffffffffffe,0x7ffffffffffffffe,0xfffffffffffffff9 want=0x8000000000000000,0x7ffffffffffffffe,0x7ffffffffffffffe,0xfffffffffffffff9 uart=0
+  x03_spin status=TIMEOUT(2) expected=TIMEOUT(2) cycles=20000 phase=RUN/TIMEOUT tohost=0x0000000000000000 sig=0x7ffffffffffffffe,0x8000000000000002,0x7ffffffffffffffe,0x3f want=0x7ffffffffffffffe,0x8000000000000002,0x7ffffffffffffffe,0x3f uart=0
+  x04_wfi status=WFI_STALL(3) expected=WFI_STALL(3) cycles=20000 phase=RUN/WFI tohost=0x0000000000000000 sig=0xf0e215685baabdfc,0xcc7968773a53221e,0xcc99e8975a553de2,0xf56df77e57f78042 want=0xf0e215685baabdfc,0xcc7968773a53221e,0xcc99e8975a553de2,0xf56df77e57f78042 uart=0
+  x05_signature_mismatch status=SIGNATURE_MISMATCH(4) expected=SIGNATURE_MISMATCH(4) cycles=123 phase=SIGNATURE tohost=0x0000000000000001 sig=0xffffffffffffffff,0x1e1e1e1e1e1e1e1f,0xfffffffffffffffe,0x787878787878787f want=0xffffffffffffffff,0x1e1e1e1e1e1e1e1f,0xffffffffffffffff,0x787878787878787f uart=0
+  x06_signature_overrun status=SIGNATURE_OVERRUN(5) expected=SIGNATURE_OVERRUN(5) cycles=140 phase=OVERRUN tohost=0x0000000000000001 sig=0x3333333333333333,0xeeeeeeeeeeeeeeef,0x3333333333333333,0x88888888888888bb want=0x3333333333333333,0xeeeeeeeeeeeeeeef,0x3333333333333333,0x88888888888888bb uart=0
+  x07_pending_store status=UNDRAINED_STORE(6) expected=UNDRAINED_STORE(6) cycles=115 phase=DRAIN/COMPLETENESS tohost=0x0000000000000001 sig=0xffffffffffffffff,0x5555555555555555,0xffffffffffffffff,0x555555555555554f want=0xffffffffffffffff,0x5555555555555555,0xffffffffffffffff,0x555555555555554f uart=0
+  x08_runaway status=TIMEOUT(2) expected=TIMEOUT(2) cycles=6 phase=RUN/PC_ESCAPED tohost=0x0000000000000000 sig=0x0,0x0,0x0,0x0 want=0x3,0xffffffffffffffff,0x3,0xb uart=0
+  x01_normal(second inputs) status=PASS(0) expected=PASS(0) cycles=120 phase=COMPLETE tohost=0x0000000000000001 sig=0xffffffffffffffff,0xfffe0001fffe0001,0xffffffffffffffff,0xfff80007fff80011 want=0xffffffffffffffff,0xfffe0001fffe0001,0xffffffffffffffff,0xfff80007fff80011
+  control:corrupt magic status=IMAGE_REJECTED(7) expected=IMAGE_REJECTED(7) phase=IMAGE/LOADER (bad-magic: missing \x7fELF magic)
+  control:wrong entry point status=IMAGE_REJECTED(7) expected=IMAGE_REJECTED(7) phase=IMAGE/ENTRY (entry point 0x0000000080000004 is not the profile reset vector 0x0000000080000000)
+checks 28, failures 0, total cycles 40744

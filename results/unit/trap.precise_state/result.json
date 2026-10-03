@@ -2,7 +2,7 @@
   "schema_version": 1,
   "case": "trap.precise_state",
   "verdict": "PASS",
-  "detail": "checks=167810 comparisons=65917 cycles=12081 retires=4740 traps=35 seed=1",
+  "detail": "checks=167810 comparisons=65817 cycles=12056 retires=4740 traps=35 seed=1",
   "seed": 1,
   "max_cycles": 4000000,
   "checks": 167811,
@@ -10,6 +10,6 @@
   "image": "",
   "expect": "",
   "tool": "Verilator 5.052 2026-09-05",
-  "timestamp": "2026-10-02T17:53:02Z",
+  "timestamp": "2026-10-03T02:48:26Z",
   "first_mismatch": ""
 }

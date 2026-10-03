@@ -2,7 +2,7 @@
   "schema_version": 1,
   "case": "fabric.fixed_two_cluster",
   "verdict": "PASS",
-  "detail": "checks=59 comparisons=678 cycles=129 retires=17 c0_alu=8 c1_alu=8 muldiv=1 dual_grant_cycles=0 max_occupied=6 ooo(index 13 completed at 49, index 12 at 114) seed=1",
+  "detail": "checks=59 comparisons=684 cycles=130 retires=17 c0_alu=8 c1_alu=8 muldiv=1 dual_grant_cycles=0 max_occupied=6 ooo(index 13 completed at 49, index 12 at 114) seed=1",
   "seed": 1,
   "max_cycles": 200000,
   "checks": 60,
@@ -10,6 +10,6 @@
   "image": "",
   "expect": "",
   "tool": "Verilator 5.052 2026-09-05",
-  "timestamp": "2026-10-02T17:51:23Z",
+  "timestamp": "2026-10-03T02:47:59Z",
   "first_mismatch": ""
 }

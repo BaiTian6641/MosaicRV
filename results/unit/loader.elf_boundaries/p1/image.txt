@@ -1,0 +1,4 @@
+# entry and vaddr are hex; filesz, memsz and flags are decimal; payload is hex
+entry 80000800
+seg 80000000 8 72 7 6f0000001a4f84b9
+seg 80000800 32 48 7 578cc1f62b6095cafe35689fd2093c73a5de134479b2e7184c87baed205b8ec1
