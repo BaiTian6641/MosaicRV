@@ -3085,3 +3085,34 @@ ports with the encoding the module already uses, and visible immediately to a pr
 the *specification*. That is the argument for the self-checking corpus existing at all, and it is why
 the corpus programs are hand-derived rather than DUT-derived: a DUT-derived expectation would have
 agreed with the DUT about `vsew` and found nothing.
+
+---
+
+## 2026-10-02 — audit: does every delivered package actually have a control that fails?
+
+The goal's second success criterion is that **every delivered package has at least one negative control
+observed to FAIL with a named first failure**. That is a claim about 85 packages, and a claim about 85
+things is exactly the kind that should be audited rather than trusted — so I audited it against the
+ledger, and then against the reports where the ledger was silent.
+
+**Result: all 85 have one. Sixteen of them do not say so in the ledger's `notes` field** — the audit's
+first pass flagged `I-003, I-004, I-007, I-009, I-026, I-034, I-035, I-037, I-038, V-013, V-014, V-016,
+V-019, I-058, I-064, I-084`, and reading each one's report found a named mutant with `exit 1` in fifteen
+of them, plus `I-007`'s bringup campaign, which carries five mutants of which **four fail with exit 1 and
+the fifth is documented as being unable to fail, with the reason** — a mutant that cannot fail is a
+defect in the mutant, and the report says which one and why rather than quietly dropping it.
+
+**The finding is therefore about the ledger's prose, not about the evidence**: a package's control is
+recorded in its report and sometimes not restated in the ledger entry, so an audit of the ledger alone
+would report sixteen false alarms. Two of those are worth naming because their controls are of the
+*malformed-input* kind the criterion explicitly allows where no mutant can express the rule: `I-003`'s
+config gate (an unknown profile exits 2 with no fallback, and a configuration that does not check out
+produces no manifest) and `I-004`'s harness cases (`harness.bad_image`, `harness.injected_mismatch`,
+`harness.timeout` — a harness that is a labelled test double, so its negative controls are malformed
+inputs rather than RTL mutants).
+
+**What this does not establish, stated so the audit is not read as more than it is**: the check was
+textual — it establishes that each package's record names a control and a failure, not that the control
+was rebuilt in the state the tree is in *today*. The per-package re-runs the goal asks for are the
+stronger claim, and they are what each lane's report and my own re-runs record; this audit closes the
+*coverage* question (does every package have one?) and leaves the *freshness* question where it was.
