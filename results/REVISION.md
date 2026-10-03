@@ -5,14 +5,33 @@ running the tool named next to it, in this tree, today. Nothing is inherited fro
 where something is unknown it says so.
 
 ```
-python3 tools/check_coverage.py --verbose   -> 239 packages (98 I / 90 V / 51 H), 84 delivered,
+python3 tools/check_coverage.py --verbose   -> 239 packages (98 I / 90 V / 51 H), 85 delivered,
                                                34 ladder capabilities, 18 advertisable
-python3 tools/check_records.py              -> 84 delivered packages, 102 registered cases,
+python3 tools/check_records.py              -> 85 delivered packages, 102 registered cases,
                                                every claimed case exists and belongs to its package
 python3 tools/lint_rtl.py --profile p0|p1   -> 65/65 source files clean, both profiles
 make check                                  -> exit 0 (records, exclusions, closure, capability
                                                matrix, isolation, docs)
+python3 tools/check_event_contract.py --negative
+                                            -> 36/36 illegal interfaces rejected
+git status --porcelain                      -> empty (233 commits, no uncommitted files)
 ```
+
+**The ISA strings the recorded evidence now implies** (`tools/gen_manifest.py --profile <p>`), which is
+the project's public statement of what it can run — and the reason the two capability flips this stretch
+matter:
+
+| profile | published ISA string |
+|---|---|
+| p0 | `rv64im_zicntr_zicsr_zifencei_zihpm` |
+| p1 | `rv64acim_zaamo_zalrsc_zicbom_zicbop_zicntr_zicsr_zifencei_zihpm` |
+| p2 | `rv64acim_zaamo_zalrsc_zicbom_zicbop_zicntr_zicsr_zifencei_zihpm_zve64d` |
+| p3 | `rv64acim_zaamo_zalrsc_zicbom_zicbop_zicntr_zicsr_zifencei_zihpm_zve64d` |
+
+Note what these strings say by omission: **no F, no D, no V, no Zkt/Zvkt, no Sha** — the four families the
+machine implements in RTL (F/D in `mosaic_fp_unit`, V's 16 families, the crypto units where they exist) are
+absent because their *verification* packages are undelivered, which is the ladder's rule working as
+intended rather than a gap in the manifest.
 
 ## 1. What this repository is, in one paragraph
 
