@@ -3005,3 +3005,38 @@ inputs do not exist. There is **no lane-count axis in any geometry profile** (la
 the broker hands out, not parallel datapaths) and **no vector program in the corpus** (`tests/programs/src/`
 is scalar, p01..p13). Both are prerequisites that the project has never built, and the second is also
 the only way to make "one×8 vs two×4 vs four×2" measurable at all. F and D wait on V-060 alone now.
+
+---
+
+## 2026-10-02 — V-060's third prerequisite, which is deeper than the first two
+
+The lane-partition card needs three things, and only one of them is a document change:
+
+1. **A lane-count configuration axis** — absent from every geometry profile (lanes are an attribution
+   the broker hands out, not parallel datapaths). This is S-3's "vector ALU / lane count" row seen from
+   the other side, and it is ordinary configuration work.
+2. **A vector program corpus** — `tests/programs/src/` is scalar (p01..p13), so there is no program to
+   run under 2/4/8 lanes even if the lanes existed.
+3. **A reference that can model RVV at all** — and this is the one that matters. `tools/host_oracle.py`,
+   the only sanctioned producer of golden signatures (`--record`), is an **806-line scalar reference
+   with zero vector references**: `grep -cE "vadd|vsetvli|VECTOR|OP_V"` returns 0. So the corpus path
+   cannot record a vector program's signature, and "write 64 vector programs" is not the work — the work
+   is that **the project has no reference capable of executing RVV**, which is why the exclusion ledger
+   already carries this class ("unimplemented reference feature", 15 entries) and why `EX-041` records
+   that NEMU is built and its Difftest ABI is checked but **no MosaicRV adapter produces or consumes the
+   Difftest state layout**.
+
+**The path, stated so it is not rediscovered**: NEMU is already pinned, built and RVV-capable (the
+XiangShan/NEMU CoreMark reproduction in this repository's own record used it), so a vector reference is
+not a research problem — it is an adapter problem. Either the Difftest state layout gets an adapter
+(EX-041's own remedy), or a smaller harness runs a vector program under NEMU and dumps a signature the
+corpus can consume. Both are real work; neither is a design decision, so either can be scheduled. What
+must **not** happen is a vector program admitted to the corpus with a signature produced by the DUT,
+which would make the corpus an echo and every downstream comparison circular.
+
+**Also dispatched**: `I-076` (the PMU and event consistency), which is the single package holding
+**Zicntr** back — and the registers already exist (`mcycle`, `minstret`, `cycle`, `instret`, `time` are
+all handled in `mosaic_csr.sv`, and Zihpm is already advertised), so what the package owes is the
+**trace accounting**: every counter reconciled against a hand-computable derivation, with no
+under-counting and no double-counting, plus the explicit statement of which counters are CSR-visible
+and which are debug-only and therefore not reference-comparable.
