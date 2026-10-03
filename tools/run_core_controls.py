@@ -154,9 +154,33 @@ TRAP_MUTANTS = [
     ),
 ]
 
+# CASE=p0.prototype_gate's controls (I-080). Each names the dynamic-path rule it
+# breaks and the text of the first failure the mutation must produce.
+PROTOTYPE_GATE_MUTANTS = [
+    (
+        "MOSAIC_DISPATCH_MUTANT_SINGLE_CLUSTER",
+        "the dispatch affinity never alternates, so every macro is inserted into "
+        "cluster 0's queue and the second cluster is never used",
+        "two clusters were alive simultaneously",
+    ),
+    (
+        "MOSAIC_FAB_MUTANT_NO_DELTA",
+        "the strategy the fabric sees is held low, so the 'dynamic' run is the "
+        "fixed machine and no macro is ever routed to the other cluster",
+        "a remote route occurred",
+    ),
+    (
+        "MOSAIC_FAB_MUTANT_DYN_SWAP_SRC",
+        "the dynamic route's two operand-value wires cross, so a two-register ALU "
+        "op computes a different result in the dynamic configuration only",
+        "retires the oracle's architecture",
+    ),
+]
+
 MUTANTS_BY_CASE = {
     "core.mem_program": CORE_MEM_MUTANTS,
     "core.trap_csr_program": TRAP_MUTANTS,
+    "p0.prototype_gate": PROTOTYPE_GATE_MUTANTS,
 }
 
 
