@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "case": "vec.selfcheck_corpus",
+  "verdict": "PASS",
+  "detail": "7/7 self-checking RVV programs reached the pass trap",
+  "seed": 1,
+  "max_cycles": 500000,
+  "checks": 7,
+  "failures": 0,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-03T01:40:04Z",
+  "first_mismatch": ""
+}
