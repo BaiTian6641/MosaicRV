@@ -159,6 +159,16 @@ void QuietBlockingCaches(Vmosaic_cache_tb* dut) {
   dut->ddbg_index = 0; dut->idbg_index = 0;
   dut->dm_req_ready = 0; dut->dm_resp_valid = 0; dut->dm_resp_fault = 0;
   dut->im_req_ready = 0; dut->im_resp_valid = 0; dut->im_resp_fault = 0;
+  // The L1 access path is idle by default: en low makes it a wire, and every
+  // input low means that wire carries nothing.
+  dut->lp_en_i = 0; dut->lp_flush_i = 0; dut->lp_inv_valid_i = 0;
+  dut->lp_inv_pa_i = 0;
+  dut->lp_cpu_req_valid_i = 0; dut->lp_cpu_req_we_i = 0;
+  dut->lp_cpu_req_addr_i = 0; dut->lp_cpu_req_size_i = 0;
+  dut->lp_cpu_req_wstrb_i = 0; dut->lp_cpu_req_wdata_i = 0;
+  dut->lp_cpu_req_amo_i = 0;
+  dut->lp_mem_req_ready_i = 0; dut->lp_mem_rsp_valid_i = 0;
+  dut->lp_mem_rsp_rdata_i = 0; dut->lp_mem_rsp_fault_i = 0;
   uint8_t zero[kLineBytes] = {};
   AssignLine(&dut->dm_resp_rdata, zero);
   AssignLine(&dut->im_resp_rdata, zero);
@@ -209,6 +219,7 @@ class Harness {
     ClearCpuRequests();
     i_fl_valid_m_ = d_fl_valid_m_ = false;
     i_pend_ = d_pend_ = false;
+    LpIdle();
     for (int i = 0; i < cycles; ++i) Tick(/*rst=*/true);
     Tick(/*rst=*/false);
   }
@@ -321,6 +332,50 @@ class Harness {
       if (ic ? i_fl_done_ : d_fl_done_) break;
     }
   }
+
+  // ------------------------------------------------------ L1 access path
+  // (V-062 bypass phase.) The module is driven a cycle at a time; `TickNow`
+  // presents exactly what these setters hold and samples the outputs.
+  void LpIdle() {
+    lp_en_m_ = false; lp_flush_m_ = false; lp_inv_valid_m_ = false;
+    lp_inv_pa_m_ = 0;
+    lp_cpu_valid_m_ = false; lp_cpu_we_m_ = false; lp_cpu_amo_m_ = false;
+    lp_cpu_addr_m_ = 0; lp_cpu_size_m_ = 0; lp_cpu_wstrb_m_ = 0; lp_cpu_wdata_m_ = 0;
+    lp_mem_ready_m_ = false; lp_mem_rsp_valid_m_ = false;
+    lp_mem_rsp_fault_m_ = false; lp_mem_rsp_rdata_m_ = 0;
+  }
+  void LpSetEn(bool en) { lp_en_m_ = en; }
+  void LpSetReq(bool valid, bool we, uint64_t addr, uint8_t size, uint8_t wstrb,
+                uint64_t wdata, bool amo) {
+    lp_cpu_valid_m_ = valid; lp_cpu_we_m_ = we; lp_cpu_addr_m_ = addr;
+    lp_cpu_size_m_ = size; lp_cpu_wstrb_m_ = wstrb; lp_cpu_wdata_m_ = wdata;
+    lp_cpu_amo_m_ = amo;
+  }
+  void LpSetMemReady(bool ready) { lp_mem_ready_m_ = ready; }
+  void LpSetMemRsp(bool valid, uint64_t rdata, bool fault) {
+    lp_mem_rsp_valid_m_ = valid; lp_mem_rsp_rdata_m_ = rdata;
+    lp_mem_rsp_fault_m_ = fault;
+  }
+  bool     LpCpuReady() const { return lp_cpu_ready_; }
+  bool     LpCpuRspValid() const { return lp_cpu_rsp_valid_; }
+  uint64_t LpCpuRspRdata() const { return lp_cpu_rsp_rdata_; }
+  bool     LpCpuRspFault() const { return lp_cpu_rsp_fault_; }
+  bool     LpMemValid() const { return lp_mem_valid_; }
+  bool     LpMemAmo() const { return lp_mem_amo_; }
+  bool     LpMemWe() const { return lp_mem_we_; }
+  uint64_t LpMemAddr() const { return lp_mem_addr_; }
+  uint8_t  LpMemSize() const { return lp_mem_size_; }
+  uint8_t  LpMemWstrb() const { return lp_mem_wstrb_; }
+  uint64_t LpMemWdata() const { return lp_mem_wdata_; }
+  bool     LpHit() const { return lp_hit_; }
+  bool     LpMiss() const { return lp_miss_; }
+  bool     LpRefill() const { return lp_refill_; }
+  bool     LpWriteback() const { return lp_writeback_; }
+  bool     LpFault() const { return lp_fault_; }
+  uint32_t LpCpuTxn() const { return lp_cpu_txn_; }
+  uint32_t LpMemBeat() const { return lp_mem_beat_; }
+  uint32_t LpLineTxn() const { return lp_line_txn_; }
+  uint32_t LpBypassTxn() const { return lp_bypass_txn_; }
 
   // ------------------------------------------------------- debug state view
   bool DebugValid(bool ic, uint32_t addr) {
@@ -488,6 +543,24 @@ class Harness {
     dut_->idbg_index = i_dbg_index_m_;
     QuietMshr(dut_);
 
+    // The L1 access path (V-062 bypass phase). Every field is zero unless the
+    // bypass phase set it, so with `lp_en_m_` false the module is a wire.
+    dut_->lp_en_i            = lp_en_m_ ? 1 : 0;
+    dut_->lp_flush_i         = lp_flush_m_ ? 1 : 0;
+    dut_->lp_inv_valid_i     = lp_inv_valid_m_ ? 1 : 0;
+    dut_->lp_inv_pa_i        = lp_inv_pa_m_;
+    dut_->lp_cpu_req_valid_i = lp_cpu_valid_m_ ? 1 : 0;
+    dut_->lp_cpu_req_we_i    = lp_cpu_we_m_ ? 1 : 0;
+    dut_->lp_cpu_req_addr_i  = lp_cpu_addr_m_;
+    dut_->lp_cpu_req_size_i  = lp_cpu_size_m_;
+    dut_->lp_cpu_req_wstrb_i = lp_cpu_wstrb_m_;
+    dut_->lp_cpu_req_wdata_i = lp_cpu_wdata_m_;
+    dut_->lp_cpu_req_amo_i   = lp_cpu_amo_m_ ? 1 : 0;
+    dut_->lp_mem_req_ready_i = lp_mem_ready_m_ ? 1 : 0;
+    dut_->lp_mem_rsp_valid_i = lp_mem_rsp_valid_m_ ? 1 : 0;
+    dut_->lp_mem_rsp_rdata_i = lp_mem_rsp_rdata_m_;
+    dut_->lp_mem_rsp_fault_i = lp_mem_rsp_fault_m_ ? 1 : 0;
+
     // Memory-side response, one cycle after a read was accepted. Delivery goes
     // through the same gate: no response crosses a reset.
     const bool deliver = bus_gate_.MayDeliver(rst);
@@ -519,6 +592,28 @@ class Harness {
     i_fl_accept_  = i_fl_valid_m_ && (dut_->ifl_ready != 0);
     d_fl_done_    = dut_->dfl_done != 0;
     i_fl_done_    = dut_->ifl_done != 0;
+
+    // --- sample the L1 access path (V-062) ---------------------------------
+    lp_cpu_ready_  = dut_->lp_cpu_req_ready_o != 0;
+    lp_cpu_rsp_valid_ = dut_->lp_cpu_rsp_valid_o != 0;
+    lp_cpu_rsp_rdata_ = dut_->lp_cpu_rsp_rdata_o;
+    lp_cpu_rsp_fault_ = dut_->lp_cpu_rsp_fault_o != 0;
+    lp_mem_valid_  = dut_->lp_mem_req_valid_o != 0;
+    lp_mem_amo_    = dut_->lp_mem_req_amo_o != 0;
+    lp_mem_we_     = dut_->lp_mem_req_we_o != 0;
+    lp_mem_addr_   = dut_->lp_mem_req_addr_o;
+    lp_mem_size_   = dut_->lp_mem_req_size_o;
+    lp_mem_wstrb_  = dut_->lp_mem_req_wstrb_o;
+    lp_mem_wdata_  = dut_->lp_mem_req_wdata_o;
+    lp_hit_        = dut_->lp_hit_o != 0;
+    lp_miss_       = dut_->lp_miss_o != 0;
+    lp_refill_     = dut_->lp_refill_o != 0;
+    lp_writeback_  = dut_->lp_writeback_o != 0;
+    lp_fault_      = dut_->lp_fault_o != 0;
+    lp_cpu_txn_    = dut_->lp_cpu_txn_o;
+    lp_mem_beat_   = dut_->lp_mem_beat_o;
+    lp_line_txn_   = dut_->lp_line_txn_o;
+    lp_bypass_txn_ = dut_->lp_bypass_txn_o;
 
     // --- sample trace pulses -------------------------------------------------
     d_ev_.hit       += dut_->dev_hit != 0;
@@ -583,6 +678,26 @@ class Harness {
   uint64_t d_coalesce_ = 0;
   uint64_t d_mem_reads_ = 0, d_mem_writes_ = 0;
   uint64_t i_mem_reads_ = 0, i_mem_writes_ = 0;
+
+  // ---------------------------------------------------------- L1 access path
+  // Driven only by the V-062 bypass phase; all zero otherwise (idle wire).
+  bool     lp_en_m_ = false, lp_flush_m_ = false, lp_inv_valid_m_ = false;
+  uint64_t lp_inv_pa_m_ = 0;
+  bool     lp_cpu_valid_m_ = false, lp_cpu_we_m_ = false, lp_cpu_amo_m_ = false;
+  uint64_t lp_cpu_addr_m_ = 0, lp_cpu_wdata_m_ = 0;
+  uint8_t  lp_cpu_size_m_ = 0, lp_cpu_wstrb_m_ = 0;
+  bool     lp_mem_ready_m_ = false, lp_mem_rsp_valid_m_ = false;
+  bool     lp_mem_rsp_fault_m_ = false;
+  uint64_t lp_mem_rsp_rdata_m_ = 0;
+
+  bool     lp_cpu_ready_ = false, lp_cpu_rsp_valid_ = false, lp_cpu_rsp_fault_ = false;
+  uint64_t lp_cpu_rsp_rdata_ = 0;
+  bool     lp_mem_valid_ = false, lp_mem_amo_ = false, lp_mem_we_ = false;
+  uint64_t lp_mem_addr_ = 0, lp_mem_wdata_ = 0;
+  uint8_t  lp_mem_size_ = 0, lp_mem_wstrb_ = 0;
+  bool     lp_hit_ = false, lp_miss_ = false, lp_refill_ = false;
+  bool     lp_writeback_ = false, lp_fault_ = false;
+  uint32_t lp_cpu_txn_ = 0, lp_mem_beat_ = 0, lp_line_txn_ = 0, lp_bypass_txn_ = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -1728,6 +1843,440 @@ class NbCacheCampaign {
   mosaic::Reporter* rep_;
 };
 
+// ===========================================================================
+// V-062 -- CASE=cache.coalescer_boundaries.
+//
+// The DUT is the L1D `mosaic_cache`, whose per-line waiter FIFO *is* the
+// line/byte coalescer: requests that miss a line already being fetched join one
+// entry, each remembering its own word and, for a store, its own byte enables
+// (`wmask`). The oracle is the flat byte array the I-042/I-043 campaigns
+// already use, so a merged load is compared against memory word for word, not
+// against the DUT's own line.
+//
+// The card's enumeration classes, one phase each:
+//
+//   same-line-different-bytes  three words of one line join one entry, one
+//                              memory read, three answers, each its own word;
+//   duplicate-bytes            an exact duplicate coalesces and is answered
+//                              once with its own word, not merged into the
+//                              first answer;
+//   store-byte-merge           two partial stores to one word plus a whole
+//                              store to another merge only the byte lanes each
+//                              selected;
+//   cross-line-same-set        two *different* lines that share a set and an
+//                              offset are two entries and two reads: the whole
+//                              line address is the key, not the low bits;
+//   cross-page                 the same for two lines in different 4 KiB pages;
+//   coalesced-fault-per-request a faulted refill answers every coalesced
+//                              consumer with its own fault, installs nothing,
+//                              and the retry returns each word.
+//
+// The per-consumer cancel clause ("cancelling one consumer does not cancel the
+// others") is a property of the id-tagged `mosaic_mshr`, so it is driven there
+// after the L1D phases (the two harnesses hold each other quiet).
+class CoalescerCampaign {
+ public:
+  CoalescerCampaign(Harness* h, mosaic::Reporter* rep) : h_(h), rep_(rep) {}
+  void Check(bool ok, const std::string& what) { rep_->Check(ok, what); }
+
+  std::string Run() {
+    h_->Reset(4);
+    SameLineDifferentBytes();
+    DuplicateBytes();
+    StoreByteMerge();
+    CrossLineSameSet();
+    CrossPage();
+    CoalescedFaultPerRequest();
+    BypassNotMerged();
+    return Final();
+  }
+
+ private:
+  // Tick until `want` CPU responses have been collected from the L1D, or a
+  // generous bound. Responses drain one per cycle in FIFO (request) order.
+  std::vector<Result> DrainResponses(int want) {
+    std::vector<Result> got;
+    for (int i = 0; i < 4000 && static_cast<int>(got.size()) < want; ++i) {
+      h_->TickNow();
+      if (h_->RespValidNow(false)) {
+        Result r;
+        r.fault = h_->RespFaultNow(false);
+        r.rdata = h_->RespDataNow(false);
+        got.push_back(r);
+      }
+    }
+    return got;
+  }
+
+  // Three words of one line, offered while the line's refill is held: they must
+  // coalesce onto one entry and one memory read, and each must be answered with
+  // the word it asked for.
+  void SameLineDifferentBytes() {
+    h_->Phase("same-line-different-bytes");
+    const uint32_t base = Addr(5, 2, 0);
+    const uint64_t w0 = h_->MemWord(base + 0);
+    const uint64_t w1 = h_->MemWord(base + 8);
+    const uint64_t w2 = h_->MemWord(base + 16);
+    const uint64_t reads_before = h_->DcMemReads();
+    const uint64_t coal_before = h_->DcCoalesce();
+    h_->StallMemory(48);
+    h_->Offer(false, false, base + 0);
+    Check(h_->TickAccepted(false), "same-line-different-bytes: the first word is accepted");
+    h_->Offer(false, false, base + 8);
+    Check(h_->TickAccepted(false), "same-line-different-bytes: the second word joins the line");
+    h_->Offer(false, false, base + 16);
+    Check(h_->TickAccepted(false), "same-line-different-bytes: the third word joins the line");
+    h_->Withdraw(false);
+    Check(h_->OutstandingNow() == 1, "same-line-different-bytes: one line, one entry");
+    h_->StallMemory(0);
+    const std::vector<Result> r = DrainResponses(3);
+    Check(r.size() == 3, "same-line-different-bytes: one response per request");
+    Check(h_->DcCoalesce() == coal_before + 2,
+          "same-line-different-bytes: the two later words coalesced");
+    Check(h_->DcMemReads() == reads_before + 1,
+          "same-line-different-bytes: one line read for three requests");
+    if (r.size() == 3) {
+      Check(!r[0].fault && r[0].rdata == w0,
+            "same-line-different-bytes: word 0 returned to its own request");
+      Check(!r[1].fault && r[1].rdata == w1,
+            "same-line-different-bytes: word 1 returned to its own request");
+      Check(!r[2].fault && r[2].rdata == w2,
+            "same-line-different-bytes: word 2 returned to its own request");
+    }
+  }
+
+  // An exact duplicate of a request already coalesced on a line: it must merge
+  // into the same entry and be answered in its own right (its own word, once),
+  // never folded into the first answer.
+  void DuplicateBytes() {
+    h_->Phase("duplicate-bytes");
+    const uint32_t base = Addr(6, 4, 0);
+    const uint64_t w0 = h_->MemWord(base + 0);
+    const uint64_t w2 = h_->MemWord(base + 16);
+    const uint64_t reads_before = h_->DcMemReads();
+    const uint64_t coal_before = h_->DcCoalesce();
+    h_->StallMemory(48);
+    h_->Offer(false, false, base + 16);
+    Check(h_->TickAccepted(false), "duplicate-bytes: the first request is accepted");
+    h_->Offer(false, false, base + 16);
+    Check(h_->TickAccepted(false), "duplicate-bytes: the duplicate joins the same entry");
+    h_->Offer(false, false, base + 0);
+    Check(h_->TickAccepted(false), "duplicate-bytes: another word of the line joins too");
+    h_->Withdraw(false);
+    Check(h_->OutstandingNow() == 1, "duplicate-bytes: one entry serves all three requests");
+    h_->StallMemory(0);
+    const std::vector<Result> r = DrainResponses(3);
+    Check(r.size() == 3,
+          "duplicate-bytes: a duplicate is not dropped and does not swallow another answer");
+    Check(h_->DcCoalesce() == coal_before + 2, "duplicate-bytes: both later requests coalesced");
+    Check(h_->DcMemReads() == reads_before + 1, "duplicate-bytes: one line read");
+    if (r.size() == 3) {
+      Check(!r[0].fault && r[0].rdata == w2, "duplicate-bytes: the first request gets its word");
+      Check(!r[1].fault && r[1].rdata == w2, "duplicate-bytes: the duplicate gets the same word once");
+      Check(!r[2].fault && r[2].rdata == w0, "duplicate-bytes: the other word is unaffected");
+    }
+  }
+
+  // Two partial stores to one word and a whole store to the next word, all
+  // coalesced onto the line's refill. Only the byte lanes each store selected
+  // may change; the line is then flushed and memory compared byte for byte.
+  void StoreByteMerge() {
+    h_->Phase("store-byte-merge");
+    const uint32_t base = Addr(7, 5, 0);
+    uint8_t expect[kLineBytes];
+    for (int w = 0; w < kLineBytes / kCpuBytes; ++w) {
+      const uint64_t word = h_->MemWord(base + w * kCpuBytes);
+      for (int b = 0; b < kCpuBytes; ++b) {
+        expect[w * kCpuBytes + b] = static_cast<uint8_t>(word >> (8 * b));
+      }
+    }
+    // Store A: word 0, bytes 0-1. Store B: word 0, bytes 2-3. Store C: word 1,
+    // all bytes. A and B are disjoint, so both must survive.
+    const uint64_t a_data = 0x000000000000BBAAull;
+    const uint64_t b_data = 0x00000000DDCC0000ull;
+    const uint64_t c_data = 0x0102030405060708ull;
+    const uint8_t a_mask = 0x03, b_mask = 0x0c, c_mask = 0xff;
+    expect[0] = 0xAA; expect[1] = 0xBB; expect[2] = 0xCC; expect[3] = 0xDD;
+    for (int b = 0; b < kCpuBytes; ++b) expect[kCpuBytes + b] = static_cast<uint8_t>(c_data >> (8 * b));
+
+    const uint64_t reads_before = h_->DcMemReads();
+    h_->StallMemory(48);
+    h_->Offer(false, true, base + 0, a_data, a_mask);
+    Check(h_->TickAccepted(false), "store-byte-merge: the first partial store is accepted");
+    h_->Offer(false, true, base + 0, b_data, b_mask);
+    Check(h_->TickAccepted(false), "store-byte-merge: the second partial store joins the line");
+    h_->Offer(false, true, base + 8, c_data, c_mask);
+    Check(h_->TickAccepted(false), "store-byte-merge: the whole store joins the line");
+    h_->Withdraw(false);
+    Check(h_->OutstandingNow() == 1, "store-byte-merge: one entry serves all three stores");
+    h_->StallMemory(0);
+    const std::vector<Result> r = DrainResponses(3);
+    Check(r.size() == 3, "store-byte-merge: every store is answered");
+    Check(h_->DcMemReads() == reads_before + 1,
+          "store-byte-merge: one read-for-ownership for the line");
+    h_->Flush(false);
+    bool bytes_ok = true;
+    for (int w = 0; w < kLineBytes / kCpuBytes && bytes_ok; ++w) {
+      const uint64_t word = h_->MemWord(base + w * kCpuBytes);
+      for (int b = 0; b < kCpuBytes; ++b) {
+        const uint8_t got = static_cast<uint8_t>(word >> (8 * b));
+        if (got != expect[w * kCpuBytes + b]) bytes_ok = false;
+      }
+    }
+    Check(bytes_ok,
+          "store-byte-merge: only the selected byte lanes changed (wmask honoured)");
+  }
+
+  // Two different lines that share a set and an offset. Coalescing on the low
+  // address bits would fuse them; the whole line address must not.
+  void CrossLineSameSet() {
+    h_->Phase("cross-line-same-set");
+    const uint32_t a = 0x3000u;
+    const uint32_t b = 0x3100u;   // tag+1, same set and offset, different line
+    Check(SetOf(a) == SetOf(b) && LineOf(a) != LineOf(b),
+          "cross-line-same-set: the stimulus really is two lines in one set");
+    const uint64_t wa = h_->MemWord(a);
+    const uint64_t wb = h_->MemWord(b);
+    const uint64_t reads_before = h_->DcMemReads();
+    const uint64_t coal_before = h_->DcCoalesce();
+    h_->StallMemory(48);
+    h_->Offer(false, false, a);
+    Check(h_->TickAccepted(false), "cross-line-same-set: the first line is accepted");
+    h_->Offer(false, false, b);
+    Check(h_->TickAccepted(false), "cross-line-same-set: the second line is accepted (not merged)");
+    h_->Withdraw(false);
+    Check(h_->OutstandingNow() == 2,
+          "cross-line-same-set: two different lines are two entries");
+    h_->StallMemory(0);
+    const std::vector<Result> r = DrainResponses(2);
+    Check(r.size() == 2, "cross-line-same-set: two responses");
+    Check(h_->DcCoalesce() == coal_before,
+          "cross-line-same-set: nothing coalesced across the two lines");
+    Check(h_->DcMemReads() == reads_before + 2,
+          "cross-line-same-set: two lines, two memory reads");
+    if (r.size() == 2) {
+      Check(!r[0].fault && r[0].rdata == wa, "cross-line-same-set: first line returns its own word");
+      Check(!r[1].fault && r[1].rdata == wb, "cross-line-same-set: second line returns its own word");
+    }
+  }
+
+  // The same separation across a 4 KiB page boundary (the two addresses also
+  // share the low address bits, so a low-bit key would fuse them).
+  void CrossPage() {
+    h_->Phase("cross-page");
+    const uint32_t a = 0x4000u;
+    const uint32_t b = 0x5000u;   // next page, same set and offset
+    Check(((a ^ b) & ~(kLineMask)) != 0, "cross-page: the stimulus spans two lines");
+    Check((a & ~0xFFFu) != (b & ~0xFFFu), "cross-page: the stimulus spans two 4 KiB pages");
+    const uint64_t wa = h_->MemWord(a);
+    const uint64_t wb = h_->MemWord(b);
+    const uint64_t reads_before = h_->DcMemReads();
+    const uint64_t coal_before = h_->DcCoalesce();
+    h_->StallMemory(48);
+    h_->Offer(false, false, a);
+    Check(h_->TickAccepted(false), "cross-page: the first page is accepted");
+    h_->Offer(false, false, b);
+    Check(h_->TickAccepted(false), "cross-page: the second page is accepted (not merged)");
+    h_->Withdraw(false);
+    Check(h_->OutstandingNow() == 2, "cross-page: two pages are two entries");
+    h_->StallMemory(0);
+    const std::vector<Result> r = DrainResponses(2);
+    Check(r.size() == 2, "cross-page: two responses");
+    Check(h_->DcCoalesce() == coal_before, "cross-page: nothing coalesced across the page boundary");
+    Check(h_->DcMemReads() == reads_before + 2, "cross-page: two pages, two memory reads");
+    if (r.size() == 2) {
+      Check(!r[0].fault && r[0].rdata == wa, "cross-page: first page returns its own word");
+      Check(!r[1].fault && r[1].rdata == wb, "cross-page: second page returns its own word");
+    }
+  }
+
+  // A faulted refill is line-level: every consumer coalesced on it must receive
+  // its own fault (not one shared answer, not a silent drop), the line must not
+  // install, and the retry must return each word.
+  void CoalescedFaultPerRequest() {
+    h_->Phase("coalesced-fault-per-request");
+    const uint32_t base = Addr(8, 6, 0);
+    h_->Poison(LineOf(base));
+    const Counters before = h_->Dc();
+    const uint64_t reads_before = h_->DcMemReads();
+    h_->StallMemory(48);
+    h_->Offer(false, false, base + 0);
+    Check(h_->TickAccepted(false), "coalesced-fault-per-request: the first consumer is accepted");
+    h_->Offer(false, false, base + 8);
+    Check(h_->TickAccepted(false), "coalesced-fault-per-request: the second consumer joins");
+    h_->Offer(false, false, base + 16);
+    Check(h_->TickAccepted(false), "coalesced-fault-per-request: the third consumer joins");
+    h_->Withdraw(false);
+    Check(h_->OutstandingNow() == 1, "coalesced-fault-per-request: one line, one entry");
+    h_->StallMemory(0);
+    const std::vector<Result> r = DrainResponses(3);
+    Check(r.size() == 3, "coalesced-fault-per-request: one fault response per consumer");
+    if (r.size() == 3) {
+      Check(r[0].fault && r[1].fault && r[2].fault,
+            "coalesced-fault-per-request: every consumer is faulted, not just the first");
+    }
+    Check(h_->Dc().fault == before.fault + 1, "coalesced-fault-per-request: one refill fault");
+    Check(h_->DcMemReads() == reads_before + 1, "coalesced-fault-per-request: one memory read");
+    Check(!h_->DebugValid(false, base),
+          "coalesced-fault-per-request: a faulted refill never installs the line");
+
+    const uint64_t w0 = h_->MemWord(base + 0);
+    const uint64_t w1 = h_->MemWord(base + 8);
+    h_->StallMemory(48);
+    h_->Offer(false, false, base + 0);
+    Check(h_->TickAccepted(false), "coalesced-fault-per-request: the retry is accepted");
+    h_->Offer(false, false, base + 8);
+    Check(h_->TickAccepted(false), "coalesced-fault-per-request: the retry coalesces");
+    h_->Withdraw(false);
+    h_->StallMemory(0);
+    const std::vector<Result> rr = DrainResponses(2);
+    Check(rr.size() == 2, "coalesced-fault-per-request: the retry answers both consumers");
+    if (rr.size() == 2) {
+      Check(!rr[0].fault && rr[0].rdata == w0, "coalesced-fault-per-request: the retry returns word 0");
+      Check(!rr[1].fault && rr[1].rdata == w1, "coalesced-fault-per-request: the retry returns word 1");
+    }
+  }
+
+  // ---------------------------------------------------------------- bypass
+  // The card's "MMIO / AMO requests are never merged" clause. Both classes are
+  // refused the cache by the I-042 access path, so they reach the memory service
+  // unchanged and never enter the coalescer (no line transaction). A cacheable
+  // non-atomic access is the non-vacuous control: it *does* enter the cache.
+  static constexpr uint8_t  kSizeWord     = 2;              // mosaic_pkg::SZ_WORD
+  static constexpr uint64_t kRamCacheable = 0x80001000ull;  // p1 RAM, cacheable
+  static constexpr uint64_t kUartMmio     = 0x100000ull;    // p1 UART, non-cacheable
+
+  void BypassOne(const std::string& ctx, uint64_t addr, bool amo) {
+    const uint32_t bypass_before = h_->LpBypassTxn();
+    const uint32_t line_before   = h_->LpLineTxn();
+    const uint32_t cpu_before    = h_->LpCpuTxn();
+    const uint64_t wdata = 0x0102030405060708ull;
+    const uint8_t  wstrb = 0x0f;
+
+    // Present the request with the memory ready, so the wrapper accepts it and
+    // offers the bypass in the same cycle.
+    h_->LpSetMemReady(true);
+    h_->LpSetReq(true, /*we=*/true, addr, kSizeWord, wstrb, wdata, amo);
+    h_->TickNow();
+    const bool     offered   = h_->LpMemValid();
+    const uint64_t mem_addr  = h_->LpMemAddr();
+    const uint8_t  mem_size  = h_->LpMemSize();
+    const uint8_t  mem_wstrb = h_->LpMemWstrb();
+    const uint64_t mem_wdata = h_->LpMemWdata();
+    const bool     mem_amo   = h_->LpMemAmo();
+    h_->LpSetReq(false, false, 0, 0, 0, 0, false);
+
+    // Answer the bypassed access and collect its response.
+    h_->LpSetMemRsp(true, 0xCAFEF00DD00DBEEFull, false);
+    h_->TickNow();
+    h_->LpSetMemRsp(false, 0, false);
+    bool got = false;
+    for (int i = 0; i < 8 && !got; ++i) {
+      h_->TickNow();
+      got = h_->LpCpuRspValid();
+    }
+    const uint64_t rdata = h_->LpCpuRspRdata();
+    const bool     rsp_fault = h_->LpCpuRspFault();
+    h_->TickNow();
+
+    Check(offered, ctx + ": the access reaches the memory service");
+    Check(mem_addr == addr && mem_size == kSizeWord && mem_wstrb == wstrb &&
+              mem_wdata == wdata && mem_amo == amo,
+          ctx + ": the bypass preserves the transaction exactly");
+    Check(h_->LpBypassTxn() == bypass_before + 1, ctx + ": the access bypassed the cache");
+    Check(h_->LpLineTxn() == line_before,
+          ctx + ": the address never entered the cache as a line (so nothing merged it)");
+    Check(h_->LpCpuTxn() == cpu_before + 1, ctx + ": the access was counted once");
+    Check(got && !rsp_fault && rdata == 0xCAFEF00DD00DBEEFull,
+          ctx + ": the bypassed response is returned unchanged");
+  }
+
+  void BypassNotMerged() {
+    h_->Phase("bypass-not-merged");
+    h_->LpIdle();
+    h_->LpSetEn(true);
+    // An atomic (read-modify-write) to a cacheable address: it cannot be split
+    // across a line, so it bypasses.
+    BypassOne("bypass-not-merged/amo-cacheable", kRamCacheable, /*amo=*/true);
+    // A non-cacheable device (MMIO) access: the platform map refuses it a line.
+    BypassOne("bypass-not-merged/mmio-device", kUartMmio, /*amo=*/false);
+
+    // Non-vacuous control: a cacheable non-atomic load is NOT bypassed; it
+    // enters the cache as a line read.
+    const uint32_t line_before   = h_->LpLineTxn();
+    const uint32_t bypass_before = h_->LpBypassTxn();
+    h_->LpSetMemReady(true);
+    h_->LpSetReq(true, /*we=*/false, kRamCacheable, kSizeWord, 0xff, 0, false);
+    h_->TickNow();
+    h_->LpSetReq(false, false, 0, 0, 0, 0, false);
+    for (int i = 0; i < 12; ++i) h_->TickNow();
+    Check(h_->LpLineTxn() > line_before,
+          "bypass-not-merged: a cacheable load enters the cache as a line read");
+    Check(h_->LpBypassTxn() == bypass_before,
+          "bypass-not-merged: a cacheable load is not bypassed");
+
+    h_->LpIdle();
+    h_->LpSetEn(false);
+    h_->TickNow();
+  }
+
+  std::string Final() {
+    h_->Phase("coalescer-final");
+    Check(h_->OutstandingNow() == 0, "coalescer-final: no live entry at rest");
+    const Counters d = h_->Dc();
+    Check(h_->DcMemReads() == d.refill + d.fault,
+          "coalescer-final: every L1D memory read is a refill or a fault");
+    Check(h_->DcMemWrites() == d.writeback,
+          "coalescer-final: every L1D memory write is a writeback");
+    Check(d.refill >= 8 && d.fault >= 1 && d.writeback >= 1 && h_->DcCoalesce() >= 6,
+          "coverage: the coalescer exercised merge, separation, byte merge and fault");
+    char detail[256];
+    std::snprintf(detail, sizeof(detail),
+                  "coalescer: miss=%llu coalesce=%llu refill=%llu fault=%llu wb=%llu "
+                  "reads=%llu writes=%llu cycles=%llu",
+                  (unsigned long long)d.miss, (unsigned long long)h_->DcCoalesce(),
+                  (unsigned long long)d.refill, (unsigned long long)d.fault,
+                  (unsigned long long)d.writeback, (unsigned long long)h_->DcMemReads(),
+                  (unsigned long long)h_->DcMemWrites(),
+                  (unsigned long long)h_->cycles());
+    return std::string(detail);
+  }
+
+  Harness* h_;
+  mosaic::Reporter* rep_;
+};
+
+// V-062 Pass clause: cancelling one consumer must not cancel the others on the
+// same line. The per-consumer cancel port lives on the id-tagged `mosaic_mshr`,
+// so this drives that DUT: two consumers coalesce on one line, one is
+// cancelled, and the survivor must still be answered with its own word while
+// the cancelled id gets nothing.
+void RunCancelKeepsOthers(MshrHarness* h, mosaic::Reporter* rep) {
+  h->Phase("cancel-keeps-others");
+  h->Reset(4);
+  const uint32_t base = 0x6000u;
+  const uint32_t survivor_word = base + 0;
+  const uint32_t victim_word = base + 8;
+  h->StallMemory(32);
+  h->Issue(survivor_word, 0, false, "cancel-keeps-others survivor");
+  h->Issue(victim_word, 1, false, "cancel-keeps-others victim");
+  rep->Check(h->Outstanding() == 1, "cancel-keeps-others: one entry serves both consumers");
+  rep->Check(h->EvCoalesce() == 1, "cancel-keeps-others: the second consumer coalesced");
+  const uint64_t reads_before = h->MemReads();
+  h->Cancel(1);
+  rep->Check(h->Cancels() == 1, "cancel-keeps-others: exactly one cancellation was applied");
+  h->StallMemory(0);
+  h->DeliverRead(0);
+  h->WaitResponses(1);
+  h->TickFor(4);
+  rep->Check(h->TotalResponses() == 1,
+             "cancel-keeps-others: only the surviving consumer is answered");
+  rep->Check(h->MemReads() == reads_before + 1,
+             "cancel-keeps-others: one line read still served the survivor");
+  rep->Check(h->Outstanding() == 0, "cancel-keeps-others: the entry frees after the survivor");
+  rep->Check(h->ExpEmpty(), "cancel-keeps-others: the survivor got a response for its own id");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -1748,7 +2297,8 @@ int main(int argc, char** argv) {
   std::string detail = "campaign did not start";
   const bool mshr_case = options.case_id == "cache.mshr_nonblocking";
   const bool cache_case = options.case_id == "cache.refill_evict_fault";
-  if (!mshr_case && !cache_case) {
+  const bool coalescer_case = options.case_id == "cache.coalescer_boundaries";
+  if (!mshr_case && !cache_case && !coalescer_case) {
     std::fprintf(stderr, "unknown case %s\n", options.case_id.c_str());
     return mosaic::kExitUsage;
   }
@@ -1764,6 +2314,15 @@ int main(int argc, char** argv) {
       Harness nb_harness(&dut, &clk, &reporter, options.max_cycles);
       NbCacheCampaign nb_campaign(&nb_harness, &reporter);
       detail += " | " + nb_campaign.Run();
+    } else if (coalescer_case) {
+      Harness harness(&dut, &clk, &reporter, options.max_cycles);
+      CoalescerCampaign campaign(&harness, &reporter);
+      detail = campaign.Run();
+      // The per-consumer cancel clause lives on the id-tagged MSHR; run it after
+      // the L1D phases, each harness holding the other instance quiet.
+      MshrHarness mshr_harness(&dut, &clk, &reporter, options.max_cycles);
+      RunCancelKeepsOthers(&mshr_harness, &reporter);
+      detail += " | cancel-keeps-others";
     } else {
       Harness harness(&dut, &clk, &reporter, options.max_cycles);
       Campaign campaign(&harness, &reporter);

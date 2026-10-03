@@ -2664,6 +2664,32 @@
    ],
    "max_cycles": 200000,
    "seed": 1
+  },
+  "cache.coalescer_boundaries": {
+   "task": "V-062",
+   "profiles": [
+    "p1"
+   ],
+   "top": "mosaic_cache_tb",
+   "rtl": [
+    "rtl/core/mosaic_pkg.sv",
+    "rtl/core/mosaic_uop_pkg.sv",
+    "rtl/core/mosaic_cache.sv",
+    "rtl/core/mosaic_mshr.sv",
+    "rtl/core/mosaic_cache_line_bridge.sv",
+    "rtl/core/mosaic_llb.sv",
+    "rtl/core/mosaic_prefetch.sv",
+    "rtl/core/mosaic_locality_path.sv",
+    "rtl/core/mosaic_l1_cache_path.sv"
+   ],
+   "sv": [
+    "sim/tb/mosaic_cache_tb.sv"
+   ],
+   "cpp": [
+    "sim/unit/tb_cache.cpp"
+   ],
+   "max_cycles": 200000,
+   "seed": 1
   }
  }
 }

@@ -342,8 +342,18 @@ module mosaic_cache #(
     for (int i = 0; i < MSHR_ENTRIES; i++) begin
       // A faulted entry is not coalesced onto: its line is not being fetched
       // any more, so a new request must allocate afresh and retry the refill.
+`ifdef MOSAIC_CACHE_MUTANT_COALESCE_LOW_BITS
+      // MUTANT (V-062 control): two requests coalesce when their low address
+      // bits (set + offset) match, so two *different* lines that happen to
+      // share a set and an offset join one entry and the second consumer is
+      // answered from the first line -- "matching on low address bits alone".
+      if (!dup_found && e_valid[i] && !e_installed[i] && !e_fault[i] &&
+          (e_line[i][OFFSET_BITS+INDEX_BITS-1:0] ==
+           req_line[OFFSET_BITS+INDEX_BITS-1:0])) begin
+`else
       if (!dup_found && e_valid[i] && !e_installed[i] && !e_fault[i] &&
           (e_line[i] == req_line)) begin
+`endif
         dup_found = 1'b1;
         dup_idx   = i[ENT_IDX_BITS-1:0];
       end
@@ -524,10 +534,18 @@ module mosaic_cache #(
       if ((k[WIDX_BITS-1:0] - whead[inst_idx]) < wcnt[inst_idx][WIDX_BITS-1:0]) begin
         if (wwe[inst_idx][k] && !READ_ONLY) begin
           for (int unsigned b = 0; b < CPU_BYTES; b++) begin
+`ifdef MOSAIC_CACHE_MUTANT_STORE_MASK_DROP
+            // MUTANT (V-062 control): every byte lane of a store waiter is
+            // written whatever `wmask` says, so a partial store clobbers the
+            // bytes it did not select -- "losing byte enables".
+            inst_line_data[(int'(wword[inst_idx][k]) * CPU_BYTES + b) * 8 +: 8]
+              = wdata[inst_idx][k][8*b +: 8];
+`else
             if (wmask[inst_idx][k][b]) begin
               inst_line_data[(int'(wword[inst_idx][k]) * CPU_BYTES + b) * 8 +: 8]
                 = wdata[inst_idx][k][8*b +: 8];
             end
+`endif
           end
           inst_dirty = 1'b1;
         end

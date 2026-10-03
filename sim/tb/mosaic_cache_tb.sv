@@ -14,6 +14,20 @@
 // test that silently checks the wrong number of sets.
 // ============================================================================
 
+// The V-062 case (CASE=cache.coalescer_boundaries) also drives the I-042
+// access path `mosaic_l1_cache_path` from this wrapper, to show that MMIO and
+// AMO requests are refused the cache. Its dependency files are included here
+// under their own include guards, so an entry whose source list predates the
+// instance still builds: a case that lists them separately is unaffected (the
+// guard makes the include a no-op), and a case that does not gets them without
+// a registry change. `mosaic_cache`/`mosaic_mshr` are not included because every
+// entry that builds this wrapper already lists them (and they carry no guard).
+`include "mosaic_llb.sv"
+`include "mosaic_prefetch.sv"
+`include "mosaic_cache_line_bridge.sv"
+`include "mosaic_locality_path.sv"
+`include "mosaic_l1_cache_path.sv"
+
 `default_nettype none
 `resetall
 
@@ -137,7 +151,50 @@ module mosaic_cache_tb (
   output logic         nb_ev_refill,
   output logic         nb_ev_fault,
   output logic         nb_ev_cancel,
-  output logic         nb_ev_drop
+  output logic         nb_ev_drop,
+
+  // ------------------------------------------ L1 cache path (I-042, V-062)
+  // The width-adapted L1 access path that carries the platform map's
+  // cacheability rule and the atomic bypass. Only the V-062 bypass phase drives
+  // it; every other campaign holds `lp_en_i` low, which makes the module a wire
+  // and leaves this instance inert.
+  input  logic         lp_en_i,
+  input  logic         lp_flush_i,
+  output logic         lp_flush_done_o,
+  input  logic         lp_inv_valid_i,
+  input  logic [63:0]  lp_inv_pa_i,
+  input  logic         lp_cpu_req_valid_i,
+  output logic         lp_cpu_req_ready_o,
+  input  logic         lp_cpu_req_we_i,
+  input  logic [63:0]  lp_cpu_req_addr_i,
+  input  logic [2:0]   lp_cpu_req_size_i,
+  input  logic [7:0]   lp_cpu_req_wstrb_i,
+  input  logic [63:0]  lp_cpu_req_wdata_i,
+  input  logic         lp_cpu_req_amo_i,
+  output logic         lp_cpu_rsp_valid_o,
+  output logic [63:0]  lp_cpu_rsp_rdata_o,
+  output logic         lp_cpu_rsp_fault_o,
+  output logic         lp_mem_req_valid_o,
+  input  logic         lp_mem_req_ready_i,
+  output logic         lp_mem_req_we_o,
+  output logic [63:0]  lp_mem_req_addr_o,
+  output logic [2:0]   lp_mem_req_size_o,
+  output logic [7:0]   lp_mem_req_wstrb_o,
+  output logic [63:0]  lp_mem_req_wdata_o,
+  output logic         lp_mem_req_amo_o,
+  input  logic         lp_mem_rsp_valid_i,
+  output logic         lp_mem_rsp_ready_o,
+  input  logic [63:0]  lp_mem_rsp_rdata_i,
+  input  logic         lp_mem_rsp_fault_i,
+  output logic         lp_hit_o,
+  output logic         lp_miss_o,
+  output logic         lp_refill_o,
+  output logic         lp_writeback_o,
+  output logic         lp_fault_o,
+  output logic [31:0]  lp_cpu_txn_o,
+  output logic [31:0]  lp_mem_beat_o,
+  output logic [31:0]  lp_line_txn_o,
+  output logic [31:0]  lp_bypass_txn_o
 );
 
   localparam int CPU_DATA_WIDTH = 64;
@@ -231,6 +288,77 @@ module mosaic_cache_tb (
     .ev_hit (nb_ev_hit), .ev_miss (nb_ev_miss), .ev_coalesce (nb_ev_coalesce),
     .ev_refill (nb_ev_refill), .ev_fault (nb_ev_fault), .ev_cancel (nb_ev_cancel),
     .ev_drop (nb_ev_drop)
+  );
+
+  // ------------------------------------------------ L1 access path (V-062)
+  // The I-042 integration wrapper, driven only by the V-062 bypass phase. With
+  // `lp_en_i` low it is a wire, so it cannot disturb the three instances above.
+  mosaic_uop_pkg::mem_req_t lp_cpu_req;
+  mosaic_uop_pkg::mem_rsp_t lp_cpu_rsp;
+  mosaic_uop_pkg::mem_req_t lp_mem_req;
+  mosaic_uop_pkg::mem_rsp_t lp_mem_rsp;
+  always_comb begin
+    lp_cpu_req.we     = lp_cpu_req_we_i;
+    lp_cpu_req.addr   = lp_cpu_req_addr_i;
+    lp_cpu_req.size   = lp_cpu_req_size_i;
+    lp_cpu_req.wstrb  = lp_cpu_req_wstrb_i;
+    lp_cpu_req.wdata  = lp_cpu_req_wdata_i;
+    lp_cpu_req.amo    = lp_cpu_req_amo_i;
+    lp_cpu_req.amo_op = mosaic_pkg::AMO_ADD;
+    lp_cpu_req.aq     = 1'b0;
+    lp_cpu_req.rl     = 1'b0;
+  end
+  assign lp_cpu_rsp_rdata_o = lp_cpu_rsp.rdata;
+  assign lp_cpu_rsp_fault_o = lp_cpu_rsp.fault;
+  assign lp_mem_req_we_o    = lp_mem_req.we;
+  assign lp_mem_req_addr_o  = lp_mem_req.addr;
+  assign lp_mem_req_size_o  = lp_mem_req.size;
+  assign lp_mem_req_wstrb_o = lp_mem_req.wstrb;
+  assign lp_mem_req_wdata_o = lp_mem_req.wdata;
+  assign lp_mem_req_amo_o   = lp_mem_req.amo;
+  assign lp_mem_rsp.rdata   = lp_mem_rsp_rdata_i;
+  assign lp_mem_rsp.fault   = lp_mem_rsp_fault_i;
+
+  mosaic_l1_cache_path #(
+    .IS_FETCH       (1'b0),
+    .LINE_BYTES     (32),
+    .SETS           (8),
+    .ADDR_WIDTH     (64),
+    .CPU_DATA_WIDTH (64),
+    .ID_W           (1),
+    .EPOCH_W        (1)
+  ) u_l1_path (
+    .clk (clk), .rst (rst),
+    .en_i (lp_en_i), .flush_i (lp_flush_i), .flush_done (lp_flush_done_o),
+    .inv_valid_i (lp_inv_valid_i), .inv_pa_i (lp_inv_pa_i),
+    .cpu_req_valid_i (lp_cpu_req_valid_i), .cpu_req_ready_o (lp_cpu_req_ready_o),
+    .cpu_req_i (lp_cpu_req), .cpu_req_id_i (1'b0), .cpu_req_epoch_i (1'b0),
+    .cpu_rsp_valid_o (lp_cpu_rsp_valid_o), .cpu_rsp_ready_i (1'b1),
+    .cpu_rsp_o (lp_cpu_rsp), .cpu_rsp_id_o (), .cpu_rsp_epoch_o (), .cpu_rsp_len_o (),
+    .mem_req_valid_o (lp_mem_req_valid_o), .mem_req_ready_i (lp_mem_req_ready_i),
+    .mem_req_o (lp_mem_req), .mem_req_id_o (), .mem_req_epoch_o (),
+    .mem_rsp_valid_i (lp_mem_rsp_valid_i), .mem_rsp_ready_o (lp_mem_rsp_ready_o),
+    .mem_rsp_i (lp_mem_rsp), .mem_rsp_id_i (1'b0), .mem_rsp_epoch_i (1'b0),
+    .mem_rsp_len_i (3'd0),
+    .o_hit (lp_hit_o), .o_miss (lp_miss_o), .o_refill (lp_refill_o),
+    .o_writeback (lp_writeback_o), .o_fault (lp_fault_o),
+    .o_cpu_txn (lp_cpu_txn_o), .o_mem_beat (lp_mem_beat_o),
+    .o_line_txn (lp_line_txn_o), .o_bypass_txn (lp_bypass_txn_o),
+    .loc_llb_en_i (1'b0), .loc_pf_en_i (1'b0), .loc_pf_conf_thresh_i (2'd0),
+    .loc_vpn_i (27'd0), .loc_asid_i (16'd0), .loc_pc_i (64'd0),
+    .loc_inv_store_valid_i (1'b0), .loc_inv_store_pa_i (64'd0),
+    .loc_inv_snoop_valid_i (1'b0), .loc_inv_snoop_pa_i (64'd0),
+    .loc_inv_snoop_all_i (1'b0),
+    .loc_fence_valid_i (1'b0), .loc_fence_kind_i (2'd0), .loc_fence_vpn_i (27'd0),
+    .loc_fence_has_vpn_i (1'b0), .loc_fence_asid_i (16'd0),
+    .loc_fence_has_asid_i (1'b0), .loc_ctx_flush_valid_i (1'b0),
+    .o_loc_llb_hit (), .o_loc_llb_miss (), .o_loc_llb_bypass (),
+    .o_loc_llb_fill (), .o_loc_llb_fill_refused (), .o_loc_llb_inv (),
+    .o_loc_mem_line (),
+    .o_loc_pf_issued (), .o_loc_pf_useful (), .o_loc_pf_useless (),
+    .o_loc_pf_late (), .o_loc_pf_cancelled (), .o_loc_pf_admitted (),
+    .o_loc_pf_fill (), .o_loc_pf_fill_refused (), .o_loc_pf_mem (),
+    .dbg_index_i (3'd0), .dbg_valid_o (), .dbg_dirty_o ()
   );
 
   // Elaboration guard against the driver's mirrored geometry.
