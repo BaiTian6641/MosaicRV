@@ -686,3 +686,41 @@ flowchart TD
 |---|---|---|---|---|
 | 2026-09-29 | 初始团队指南由完整架构/验证/平台计划生成 | 本文件、source-inventory、references | 规划集成 | 各团队冻结输入并更新上表 |
 | 2026-09-29 | 面向较小模型/新工程师补充自然语言执行说明 | 本文件任务卡的执行者目标/须知/建议顺序/停止条件 | 规划集成 | 实施团队按卡执行并回填证据 |
+
+## 8. 2026-10-02 权威补充：前端供给与两遍融合入口（研究，未实现）
+
+本节追加而不重写历史任务卡。§4 的 `Not started` 是 2026-09-29 规划快照，**不是当前实现状态**；交付状态以 [实现账本](../config/status/implementation_status.json)、[进度](../results/PROGRESS.md) 和最新逐包报告为准。本节 EF 子卡是原 I/V 卡内的研究纵切，不新增 I/V/H ID、不计入 239 包交付、不修改原 Pass/Fail。`PROPOSED/BLOCKED` 只描述研究准入，不能作 ISA、性能或硬件能力证据。
+
+### 8.1 已实现边界与研究接口
+
+- 实际已有有界 fetch、decode、双宽 rename/ROB allocation、深度 8 decoded queue；**same-cycle 第二 insert 已删除并保持 HELD**。见 [held-insert](../results/reports/held-insert.md) 和 [frontend-width](../results/reports/frontend-width.md)。前者覆盖后者旧测量结论：allocation 在其记录的当前几何上确实发生，但 pair insert 不发生；不得把双宽分配写成双宽 issue。退役/ROB lane-1 的已记录错误是恢复 insert 的先决条件，不能通过减少 V-013 覆盖放行。
+- `rtl/core/mosaic_core.sv` 的 decoded queue 和向量 VLEN/配额仍有本地常量；宽度配置目标不等于每条路径已消费配置。研究源提出的 32 B/cycle、6-wide decode、后续 8-wide rename、decoded-uOP cache/loop buffer、TAGE-class、多分支 fetch-block 都是**待配置、待验证候选**，不是当前前端广告，也不是必须达成的 IPC 门槛。
+- 前端保持 ordered/latency-sensitive 域，不经全局 fabric cycle-by-cycle 仲裁。MPP 是旁路研究：predecode 的 memory intent、IMC 返回的 `MemoryPreviewToken`、IMC/placement/fusion hints 都允许丢弃，不能对 fetch/decode/rename 引入强制等待。内存语义和安全门在 [Stage 3](stage-3-memory-system.md) 的 MP 子卡；本阶段只交接身份和 hint，不授权 load 值、更不授权 store。
+- 两遍融合：rename 前只给出 instruction-bits/architectural-register **候选提示**；rename 后必须重新验证 physical tag/generation 的真实依赖。非相邻融合、load→ALU、ALU→store、AGU→load、load-modify-store 的执行合同由 [Stage 2](stage-2-execution-fabric.md) EF-05/EF-06 拥有。MPP 的 fusion signature/MacroGroup hint 不得成为语义判据。
+
+### EF-01 — 配置驱动前端带宽与无阻塞研究旁路
+
+- **Owner / Status / 宿主**：fetch、decoder、rename 负责人联合；`PROPOSED`；I-009/I-010/I-014/I-021，验证交接 V-013/V-016/V-027/V-076。
+- **Depends / Inputs**：现有 fetch-generation、instruction length/original bits、redirect 合同；scalability 配置消费矩阵；held-insert 的 I-017 根因与修复证据是恢复第二 insert 的独立 `BLOCKED` 前提，不是本卡可绕过项。
+- **Action / 微步骤**：先冻结 fetch bytes、fetch outstanding、decode/rename/dispatch/commit widths 和 queue depths 的配置→生成字段→实际端口消费矩阵；再逐项选择 wider fetch、uOP cache/loop buffer、预测器、多分支块候选；每次只启用一个机制。按 ROB starvation、vector macro supply、branch confidence 有界调节 aggressiveness，不改变 decode legality。32 B/6/8 作为扫描点而非既定当前值。
+- **字段 / 生命周期**：每个 entry 保留 `{hart, fetch sequence+generation, PC, original bits, length, fetch fault, branch provenance}`；fusion hint 保留候选成员序列与 hint generation，preview-token handle 保留 token generation。allocate→hold-under-backpressure→consume 或 redirect/evict→drop；uOP cache key 必含代码/translation/context generation，FENCE.I、自修改代码和上下文变化失效。candidate、token 或 cache miss 一律回普通 decode；不得以相同 PC 重用动态 load 身份。
+- **正确性 / Recovery**：跨行/页和 C/32-bit 混排仍逐指令保存 fault PC/tval；redirect 同拍 push/pop 规则明确；错误路径或旧 generation 不进入 rename。宽度变化不能半分配 RAT/free-list/ROB；资源耗尽拒绝整组，不靠补零。旁路 drop 与需求流水线无循环 ready 依赖。
+- **Outputs / Handoff**：交给 S2 的配置消费表、每槽原始指令身份、两遍融合候选协议、token attach/drop 表；交给验证 owner 的 off/on 同输入 trace、逐宽度正/负例清单、queue occupancy/fetch supply 原始统计。这些是要求产物，当前尚未产生研究证据。
+- **Pass**：所有合法配置 preserving architectural trace；跨页 fault/redirect/FENCE.I/缓存 alias、单剩余资源、lane0 trap 的 finite matrix 全覆盖；preview/hint queue 满时需求继续。吞吐来自真实 accepted/issued/retired 计数，不从配置数推断；无收益也保留。
+- **Fail / 回退**：stale 指令、丢长度/fault、非法组合默许、第二 insert 无 V-013 修复即恢复、将队列深度当 bandwidth；关闭新增机制，保持当前 allocation-only 路径。原 V-013 双退休义务不变。
+- **来源**：`New document(2).txt` 632–665、1861–1943、1979–2008；`deep-research-report(2).md` 55–129、1878–1928。论文及源文百分比均不作本卡 Pass。
+
+### 8.2 研究细粒度签收记录
+
+每一微门分别登记 owner、输入版本/hash、输出路径/hash、正控制与实际激活的负控制、审查签收、阻断请求对象及复审日期；某一门完成不得把整个 EF-01 或其宿主包改成研究能力交付。
+
+| 子卡微门 | 初始状态 | Owner | 输出 / 下游 | 阻断条件 |
+|---|---|---|---|---|
+| EF-01.a 配置消费与非法几何表 | PROPOSED | fetch/decoder | 配置→端口矩阵 / scalability owner | 未消费字段被当成已实现 |
+| EF-01.b 队列与宽度身份/恢复 | PROPOSED | rename/recovery | per-slot lifecycle / V-013、V-027 | slot 顺序、分支边界或半分配不闭合 |
+| EF-01.c uOP-cache/预测供给候选 | PROPOSED | BPU/frontend | 逐机制 on/off 输入清单 / V-016 | 代码 freshness 或上下文 key 缺失 |
+| EF-01.d MPP/token/fusion hint 旁路 | BLOCKED | frontend + MP owner | attach/drop 协议 / EF-05、MP token owner | MP 合同未冻结、hint 可阻塞需求 |
+| EF-01.e 第二 insert 恢复 | BLOCKED | I-017 commit/ROB | 根因修复与原 V-013 全证据 / 集成负责人 | held-insert 的退休顺序错误未闭合 |
+| EF-01.f 供给/恢复成本归因 | BLOCKED | V-076 实验 | 配对结果含负收益 / 研究集成 | 上述启用机制无正确性证据 |
+
+2026-10-02：本节完成文档研究纳入；未修改 RTL、原始来源、交付账本或任何历史验收记录，未产生新的运行成绩。

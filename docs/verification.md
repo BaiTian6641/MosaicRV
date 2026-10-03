@@ -264,3 +264,21 @@ make check-upstream-pinned
 **MosaicRV 验收边界**：没有 MosaicRV 专属 ACT4 UDB/Sail/linker/`rvmodel_macros.h` 配置、DUT ELF runner 或 NEMU/Difftest adapter。ACT 51/51 是 Sail-max self-replay；Rosetta Docker CoreMark 是 XiangShan/NEMU 上游校准；两者都不等于新核 p0 correctness。任何“DUT PASS”仍要求显式 MosaicRV profile、DUT execution 与可重放证据。
 
 后续完成 MosaicRV DUT ACT/Difftest adapter 或更换 source/image/tool pin 时，另起带版本与哈希的 run record；上游 sample PASS 不自动升级为 DUT PASS。
+
+## 7. 2026-10-02 SRC-04 设计增补：本轮验证边界
+
+本轮是设计文档集成，不修改 RTL、profile、capability ladder 或 delivered evidence。旧 §6 的“没有 DUT ACT runner”等状态是当时记录，不覆盖最新 [PROGRESS](../results/PROGRESS.md)、[REVISION](../results/REVISION.md) 与 implementation ledger；已记录 p0/p1 sweep 不在本轮重新执行，不借它们证明新增 MPP/L/T/helper 已实现。
+
+本次检查使用当前仓库入口 `make check-docs`（`tools/check_docs.py`），不是直接执行历史嵌入式脚本：wrapper 显式排除 results/tests 的实现文档，并纳入 scalability-plan；其余既有 source hash/102标题/239工作包字段/DAG/62引用/links/跟踪/whitespace/11指南检查不变。SRC-04另核hash和1–2232连续覆盖；MP/EF/VX子卡不加入旧I/V/H分母。
+
+本轮文档验收还要求：18研究子卡各有唯一stage定义，memory progression与全局roadmap一致，所有新scope显式未实现/blocked/deferred；permissions/MMIO/no-A-D、finite token/transport/version、real AGU/LSQ与L0 freshness、fusion独立宏身份、中间值可恢复、helper无commit/store、QoS/reference/真实lane gates、安全disable与私有L0残余风险均在设计和验证矩阵中有落点。性能百分比保持假设；primary读取与未核实来源在 [references.md](references.md) §5。
+
+检查结果只证明文档的可追溯性/内部结构/旧合同保留，不证明推测安全、协议活性、RTL实现、芯片性能或physical timing。新机制的未来smoke/负控制按stage卡执行，不在本轮伪造CPU运行记录。
+
+### 7.1 本轮实际检查结果
+
+2026-10-02，所有子系统文档集成后运行 `make check-docs && python3 tools/check_coverage.py && python3 tools/check_records.py`，exit 0：文档检查 PASS，三份初始报告hash不变，102标题、239任务（98 I/90 V/51 H）、90集成行、642无环依赖边、62原引用ID、235本地链接、93外部URL格式、23规划文档、11指南、239原任务卡、12 claim gate及whitespace均通过。coverage报告85已交付、34 ladder能力/18可广告；records确认85包与102注册case归属一致。这里只检查广告依赖/记录结构，**没有执行这些CPU case**，不为已记录的HPM/RVV等finding追加功能证明。
+
+另以throwaway内存脚本直接读取SRC-04和更新的stage/roadmap：原文SHA-256、2232行/52635 bytes匹配，45个处置区间连续无洞/无重叠覆盖1–2232，18个MP/EF/VX子卡各有且仅有一个stage定义，roadmap包含全部18个索引；实际输出 `PASS SRC-04: unchanged hash, 2232 lines, 45 contiguous disposition ranges; 18 unique stage subcards and complete roadmap index`。没有保存脚手架或新增永久测试。
+
+全套设计/来源/状态复读由三份子系统交接的完整read inventory确认；涵盖19份docs、三原报告、新研究、README、REVISION、PROGRESS、完整status ledger、113份Markdown实现reports及vector程序README。代码仅按相关接口有界检查，不宣称逐行读全部RTL；event/signature转储不纳入“设计文档全文”统计。本次交付为设计/追踪更新，无RTL、ISA广告、硬件或性能实现变化。

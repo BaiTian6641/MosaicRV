@@ -381,3 +381,27 @@ flowchart TD
 |---|---|---|---|---|
 | 2026-09-29 | 初始团队指南由完整架构/验证/平台计划生成 | 本文件、source-inventory、references | 规划集成 | 各团队冻结输入并更新上表 |
 | 2026-09-29 | 面向较小模型/新工程师补充自然语言执行说明 | 本文件任务卡的执行者目标/须知/建议顺序/停止条件 | 规划集成 | 实施团队按卡执行并回填证据 |
+
+## 8. 2026-10-02 追加：研究模式的 ASIC cutover 与发布门
+
+本节只整合新研究，不是 ASIC 实现/signoff成绩。历史团队表和 `REVISION.md` 不覆盖 [`implementation_status.json`](../config/status/implementation_status.json)、最新 [`PROGRESS.md`](../results/PROGRESS.md) 与对应报告；不重报 snapshot 数量。MP/EF/VX 为原卡内18研究子卡，PROPOSED/BLOCKED，原239 I/V/H与原H-036–H-047/发布卡合同不变。路线和语义矩阵见 [实施计划 §13](implementation-plan.md)、[验证计划 §10](validation-plan.md)。
+
+### 8.1 先功能和模式闭合，再物理转换
+
+ASIC candidate显式冻结 MPP/IMC、L/T、criticality/locality、RC、fusion、shadow/runahead、compressed representations和controller的编译/运行时模式与manifest hash；未验收模式不默认开启。首先处理现有缺陷、配置width/tag、外部reference和实际QoS/PMU门，再依 preview-only→token/L0→fusion→ownership→earlyconsume逐步。RTL仅“有端口/有unit”不等于候选模式；FPGA成功不替ASIC SRAM/clock/IO/PVT证据。
+
+| 既有 ASIC 纵切 / Owner | 新研究必须进入的实际产物 | 负例/阻断 |
+|---|---|---|
+| H-036–H-040 合法输入、宏与floorplan；library/physical owner | PDK/lib/SRAM/IO/RC与各PVT许可锁；predictor/intent/token/L0/RC/shadow metadata和mask/valid/version/source-pin存储映射；L-path local island/T-path network placement；新增bit/port/wire面积账本 | 不把1139bytes文献控制metadata当helper总成本；未知macro/collision/portlatency或无合法库保持BLOCKED |
+| H-041 DFT；DFT owner | 新状态的scan/MBIST/ATPG可控可观测性、functional/test isolation、fault site/分母/不可测原因；replica/checker若广告DCLS分别保护 | 不能因为有scan insertion就声称ATPG/MBIST覆盖；测试模式不得产生store/MMIO或泄漏跨domain数据 |
+| H-042/H-043 routed timing；STA owner | netlist/寄生/constraint hashes，同candidate各mode/corner setup/hold/clock/coverage；L-path bypass、RC比较、criticality select、IMC/MSHR/version、fusion chain、representation materialization、controller/授权gate实路径 | 0/1cycle与simulation cycles不是Fmax；不以false-path/多cycle掩盖真实critical path；pipeline设计调整须重验语义/latency |
+| H-044 power/IR/EM/thermal；power owner | 同mode/workload活动输入、真实功耗模型与corner，新增网络/L0/RC/helper额外成本，fixed/adaptive matched-resource comparison | toggle不冒W；没有PVT/活动/物理模型的列不可测，IPC增益不能掩盖clock/power倒退 |
+| H-045/H-047 物理/equivalence/release；signoff owner | post-route逻辑等价、DRC/LVS/ERC和waiver、mode/config软件发现、replay与恢复包；关闭probe和研究模式不破坏既有合法架构行为 | 跨候选拼报告、漏test/power/speculation mode、只Verilator则ASIC claim BLOCKED；只阻断关联claim |
+
+preview基线仍TLB-hit-only、permission/PMP/PMA检查、无PTW/PTE A/D/MMIO；strict-security默认关闭未经证明preview/helper/earlyconsume，privateL0不消除cache/PTW/interconnect侧信道。ownership模式需真实coherence/RVWMO/LRSC证据；earlyconsume及arbitraryvalue/dualpath最后、确认前全部后继不可退休/外显。新增metadata全部进入reset/kill/drain/finite-wrap与owner-change证明，不能只验证datapath。
+
+### 8.2 发布状态和不可测列
+
+I-085/H-047/I-086逐claim发布：normal RTL profile、FPGA、ASIC-ready/实际signoff、RVA23/security、optional DCLS分别签收。ASIC DCLS另收H-049，同candidate/mode/corner的replica/shared-domain/fault/物理证据；完整RVA23 mandatory与Zkt/Zvkt DIEL不因关闭研究省略。未选研究保持NOT_CLAIMED/PROPOSED/BLOCKED，不反向阻断合法仅p0发布。
+
+每模式交付 `research subcard / 原I,V,H / owner / depends verdict / fields+lifecycle / positive+negative+replay / actual clock-area-power / artifact hashes / limitations / reviewer`。无tool/PDK/RTL/端口/板卡信息时明列缺项，不能填fake fallback/论文收益。等资源single/组合/remove ablation保留0/负收益，追加counter/controllerdecision追踪以便重放。个人owner尚无研究签收、无新增silicon/physical evidence；本次不运行构建/测试/综合/signoff/checks/formatters。原PDK选择、商业/制造/DFT/waiver和软件release不可替代边界保持不变。

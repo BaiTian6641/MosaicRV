@@ -600,3 +600,27 @@ Gowin 搜索索引提到 `gw_sh`/`run all`，但本次 SUG918/Tcl PDF 获取返�
 | HR-014 | [TI SDAA393, June 2026](https://www.ti.com/lit/pdf/sdaa393) | 支持DCLS检测-only/common-mode限制与安全等级需系统论证；不把DCLS当作fault-tolerant TMR或自动认证。 |
 
 SRC-02 完整阅读证据：1–260、261–520、521–780、781–1040、1041–1213，均显式raw范围；补充读取SRC-03的370–539、790–1123、1997–2346。原报告的初期VCU118建议改为三family独立gate；FPGA预算数值不继承为事实；DFX保留为粗粒度可选研究；实板与ASIC成果均必须有独立证据。
+
+## 11. 2026-10-02 追加：研究机制的平台模式与物理验收
+
+当前实现和接受事实以 [`implementation_status.json`](../config/status/implementation_status.json)、最新 [`PROGRESS.md`](../results/PROGRESS.md) 及对应 reports 为准；本文历史规划/预算、`REVISION.md`、工具存在或模拟 PASS 均不是实板/ASIC 成绩。MPP/IMC、L/T、criticality/locality、RC、shadow/runahead、fusion、compressed vector、controller 仅 PROPOSED/BLOCKED 研究子卡，原 51 H 和 239 I/V/H 总量不变，研究定义/顺序见 [实施计划 §13](implementation-plan.md)，验证见 [验证计划 §10](validation-plan.md)。
+
+### 11.1 同一物理候选的可发现模式
+
+每个 FPGA image/ASIC candidate 的 manifest 必须绑定 `research_modes / prediction_config / queue-token-generation widths / L0-RC geometry / helper lane-MSHR budget / fusion whitelist / representation modes / controller sampling-hysteresis / strict-security / DCLS` 与 source/config/tool/image/netlist hashes。编译关闭与运行时关闭分列；上电/reset 默认关闭未验收研究，软件读到的模式/能力只来自同 manifest。严格安全模式不允许 controller 重新开启 MPP/helper/early-consume。研究功能关闭不能静默改变 RISC-V profile/原内存图或当作 full ISA 缺项的免责。
+
+| 平台纵切 / 既有 H owner | 物理与功能交接 | 错误/负例及允许回退 | 研究状态 |
+|---|---|---|---|
+| H-003–H-005 RAM/CDC/reset；公共 wrapper owner | predictor/intent/token/L0/RC/shadow/representation 表实际 RAM 映射、mask/read-during-write/valid latency、metadata reset；generation/version/reset kill；跨 clock 多位握手 | 禁止依靠仿真 DPI 隐藏 collision；reset 不产生 architectural store/MMIO，旧响应不跨 reset；未知器件 collision 由仲裁禁止 | PROPOSED；依赖真实 exact-part wrapper |
+| H-009/H-014/H-023/H-029 timing；对应家族 owner | L-path bypass/RC hit→consumer、criticality select、IMC admission/MSHR merge、fusion chains、representation materialization、controller feedback 的 post-route 实路径 | 逻辑 0/1 cycle 不是 timing proof；新增长链应选固定 pipeline stage/背压，而不是动态改物理级数或 false-path 掩盖；不满足则关闭该模式并保留失败报告 | BLOCKED（尚无新增物理证据） |
+| H-008/H-010/H-016/H-024/H-030/H-032/H-033；板级验证 owner | 同 profile 固定/adaptive 与 feature-off/on signatures；真实 fault/control 和 reset/drain/recover；预测/副本/version/credit 内部 trace 与逐架构事件关联 | ISA 等价不能只用 UART banner；stale token/version/permission、store early-visible、helper fault/kill、starvation 有激活负例；禁止向 flash 写未知用户内容 | BLOCKED（exact board/tool/研究 RTL 前提） |
+| H-038–H-045/H-047；ASIC owner | 合法库/SRAM/IO/PDK、floorplan、MCMM routed STA、power/IR/EM、DFT/MBIST/ATPG 与 post-route equivalence；新增 metadata 和模式均纳入 | 不把 FPGA RAM/Fmax 当 SRAM/ASIC 成绩；未知 mode/corner/macro 或 inactive net 不计 covered；无资源则保持 BLOCKED | BLOCKED |
+| H-048/H-049/H-050/H-051；Safety/security owner | DCLS consequential state 冗余/比较，共享域保护；RVA23/DIEL/threat model；同 candidate/mode/corner 的物理证据 | private L0 不消除 cache/PTW/interconnect side channel；shared predictor 不自动 fault-contained；无正式评估不广告 ASIL/SIL/免侧信道 | BLOCKED，按实际 claim 触发 |
+
+### 11.2 资源匹配和模式退出
+
+H-033 与 I-076/I-077/I-084/V-076 共同锁 workload/toolchain/measurement window、width/ROB/FU/cache/MSHR/bandwidth及新增预测表、token/waiter、L0/RC/helper metadata 与存储端口。逐个开关/移除 ablation 保留总物理成本，报告 LUT/FF/BRAM/URAM 或 ASIC 面积、actual operating clock/WNS/TNS、useful work、IPC×实际 clock、可测功耗/能效和零/负收益；没有 routed/测量产物的列写不可测，不补论文数字。
+
+关闭/切换研究模式按 STOP_ADMIT→DRAIN（含 token/MSHR waiter、RC live source、shadow/packet/representation、committed store）→ACK→PUBLISH→RESUME，未 drain 不复用身份/owner、不替换私有 context；CPU architectural state 不迁移给 helper。多 hart ownership/coherence/DMA 的实际拓扑需独立冻结，只有相关拓扑存在时才宣称覆盖。DFX仍是粗粒度 H-034 可选功能，不负责 per-uOP L/T 或 helper persona 切换。
+
+各载体具体补充见 [Stage 7 §8](stage-7-fpga-hardware.md)、[Stage 8 §8](stage-8-asic-release.md)、[Stage 9 §8](stage-9-lockstep-safety.md)。板级/ASIC/Safety 义务只阻断本次声明，不反向阻断未声明研究的合法 p0。个人研究 owner 尚无签收、无新增 physical artifact；本次文档整合未执行工具/构建/测试/检查或 formatters。exact board/part/tool/license/PDK 决策、原 RAM/clock/DFX/boot/ISA/security 合同未改写。

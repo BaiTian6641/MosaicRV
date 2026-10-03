@@ -1201,3 +1201,50 @@ RVA23U64/S64 mandatory conformance 增加 V-085–V-087，S64 必须包含 U64 �
 - 主源确证了 XiangShan V2→Difftest/ready-to-run→NEMU 的来源链，发现固定 128-bit vector 参考布局、vector skip 限制、主线 Spike SC 范围、Sail/ACT4 版本组合及 ACT4 默认排除风险。
 - 90 个未来验证任务覆盖 scalar→A/C/privilege→F/D/V→LLB/MEF→多 hart/cohort→pod→程序/Linux→完整 RVA23U64/S64 mandatory /逐项 ratified options /项目自选 Secure→独立平台回放；每项含依赖、输入、动作、输出与 pass/fail。它们不是已完成的实现或测试。
 - 可运行性、参考 ABI 兼容性、工具/镜像 digest、准确 profile 参数、宽 VLEN adapter、SMP memory checker、板卡 trace 及 ASIC 工具全部是后续任务的明确验收产物；本轮没有用安装/构建/模拟结果冒充文献核实。
+
+## 10. 2026-10-02 追加：研究机制验证矩阵
+
+**状态与范围：** 本节整合 `New document(2).txt` 的研究义务，不记录新的 DUT PASS、性能或硬件成绩。前文的环境/实现状态和 finite-suite 数量是历史合同，当前接受事实以 [`implementation_status.json`](../config/status/implementation_status.json)、最新 [`PROGRESS.md`](../results/PROGRESS.md) 及同 profile 最新 report 为准；`REVISION.md` 和早期 report 不覆盖后来的修复或限制。原 90 V 与全部 239 I/V/H 包保持不变。MP-01..MP-08、EF-01..EF-06、VX-01..VX-04 是原卡内研究子卡，定义见 [Stage 1 §8](stage-1-scalar-control.md)、[Stage 2 §8](stage-2-execution-fabric.md)、[Stage 3 §8](stage-3-memory-system.md)、[Stage 4 §8](stage-4-vector-locality.md)、[Stage 5 §8](stage-5-multihart-aggregation.md)；本节只给交叉验证，不重复定义卡片。
+
+### 10.1 前置正确性门与模式顺序
+
+先闭合当前缺陷、held 双宽 insert 的 retirement-order replay、配置宽度/tag 寿命、外部 RVV reference/adapter、实际 core ownership/QoS 和 PMU accounting。禁止由 RTL/unit 存在推断已经接入，禁止由自主 DUT signature 证明 RVV，禁止用 CSR 可读零证明 bottleneck events 已映射。独立 oracle/reference 的 ISA、VLEN、异常策略和事件 ABI 不兼容时记 UNSUPPORTED/BLOCKED，只阻断相关 claim。
+
+研究启用顺序为：preview-only（TLB-hit-only、权限检查、无 PTW/A/D 更新）→完整 token 关联/回收→versioned L0 placement→保留 architectural identity 的 fusion→后置 store ownership preparation→最后 early-consume/value speculation。L/T、locality/RC、压缩表示和 helpers 分别过其依赖门；shadow window 不等于扩大 architectural ROB，DVR 不等于完整 RVV 合规。任何 preview/helper 资源满、低 confidence、translation miss 或模式不允许，立即 drop/fallback，不能反压正常 fetch/rename/LSU。
+
+### 10.2 冻结输入的有限正反例矩阵
+
+下表每行必须展开为有明确 case ID、输入、seed/预算、预期事件/不变量和负控制的 manifest；“至少覆盖以下边界”不是本轮已运行数量。每研究子卡的初始状态为 PROPOSED/BLOCKED，owner 是对应原卡的设计负责人和下表 V 验证负责人，个人尚未签收、研究证据尚无。
+
+| 研究关联 / 原验证归属 | 必须观测的正例与跨边界组合 | 必须真实激活的负例 / 首差异 | 通过条件及恢复 |
+|---|---|---|---|
+| MP intent/predictor，V-016/V-024/V-028 | C/非C 边界、跨 block/page 原 PC/bits/length、last/stride/dependence chooser、branch/address/locality confidence 独立变化；full decode 对 predecode 提示复核 | 非法编码发 preview；同 PC 不同 code generation/ASID 被误关联；错误 placement 造成 architectural squash | 错误提示只改变流量/位置，full decode/AGU 权威；unknown/drop 走普通执行，instruction-fetch permission/fault 不被替代 |
+| MP permissions/translation，V-017/V-019/V-047/V-048 | effective privilege、MPRV/MPP、SUM/MXR、ASID/VMID/root、PMP/PMA、read-only/non-idempotent/device、页与访问宽度边界；context/fence/PMP 变化插在 admission 和 consume 之间 | 越权 cache lookup/fill；MMIO/device/AMO 被 preview；TLB miss 触发基线 PTW；PTE A/D 被更新；旧 permission/context 重用 | 发请求前合法性检查，consume 时按真实 context 再验；基线 miss/drop 无 PTE/设备副作用；后置 two-stage/PTW 模式必须单独验收，不能靠 ASID 字段宣称支持 |
+| MP token/tag/kill，V-029–V-032/V-035 | 同 PC 多次执行、有限 slot/gen 超过两次 wrap、最老响应保留、cancel+response+reallocate 同周期；branch/trap/IRQ/reset/fence/context/owner transfer | tag-only/epoch-only 匹配、旧响应复活 ready、跨 hart 命中、double credit/free、kill 丢失合法 older work | 完整 identity 关联，错代响应无 PRF/VRF/ROB/ready/store 变化；drop/stale 有可计数观测；drain/ack 或 ABA 寿命证明后才重用 |
+| MP IMC/MSHR/coalescing，V-018/V-032/V-033/V-062/V-063 | demand/PTW/preview/helper 同争 bank/MSHR/return bandwidth；相同 line 不同 offset/size/waiter/context；取消一个保留其他 waiter；response fault 与 retry | preview 占满需求保留槽、criticality 永久饿死非关键请求；不兼容权限/order 合并；fault 安装有效数据；取消一个误丢其他 waiter | waiter identity/byte/fault 保真，exactly-once response/credit；在冻结环境假设下 demand、合法 PTW 和低优先级请求有服务界；无 core age/class 接口时 V-063 集成保持 BLOCKED |
+| MP L0/freshness，V-061/V-065/V-067 | store/AMO/SC/CMO/snoop/DMA（仅实际 topology）与 fill/hit 同周期；sector invalidation、line eviction/reuse、version wrap；ASID/owner reassignment；别名 | clean-copy 无效化遗漏、line-version 相同但 identity 已换、权限/token version 错配、错误 sector byte 回用 | L1/LSQ 是 order/coherence 权威；真实 AGU/权限/order/version 均通过才消费；不一致则 ordinary load/re-fetch，不能把 stale data 作为 ready |
+| MP late ownership/store，V-018/V-019/V-045/V-046/V-065 | ownership request 与普通 store commit、AMO/LRSC、fence、coherence invalidate、取消交错；无实际 coherence 拓扑时显式缺输入 | speculative/predicted store 写共享数据；ownership grant 被当 commit；device destination 被预取；普通 ld/add/sd 被提升 atomic RMW | 准备不等于写入；store data 仅经真实地址/权限及 SQ retirement/order authorization 发布；后置 ownership 流量须独立证明 coherence/RVWMO/LRSC，不继承 preview-only 结论 |
+| EF L/T/criticality/locality，V-027/V-028/V-033/V-076 | local RAW chain、remote roundtrip、错误 producer/memory affinity、priority WB/cache port 下低优先级 aged 请求；fixed/local/dynamic 等资源 | hint 改变结果、远程 stale operand、local reservation 导致 starvation、0/1-cycle 路径未物理实现却当频率证明 | architecture event 相同；执行完成/value-visible 分离；age 服务界成立；逻辑延迟与 post-route 时序分别交证据 |
+| EF register cache，V-027/V-029/V-031/V-034 | physical tag+generation 再分配、跨 hart/domain/owner、eviction+consumer read、同周期 bypass/WB、trap recovery、PRF durable write 延迟 | RC 数字 tag 命中旧值、未写 PRF 丢 sole live copy、read pin 过早释放、RC hit 越过 source lifetime | 缓存值绑定活 producer，source pin/唯一值持有者与 durable visibility 可证明；miss 回 PRF/合法 bypass，不伪造 ready；kill/drain 包含 RC 与在途 value packets |
+| EF fusion / MP fusion hints，V-013/V-014/V-018/V-025/V-027/V-028 | shift-add、address+load、load+ALU、ALU+store、load-modify-store；每 member 处 trap/IRQ/debug step；中间目的值有外部 consumer；非相邻候选有 intervening hazard | 一 ROB 身份替多条指令、漏计 minstret、后 member trap 撤销已 retired prefix、隐藏仍可观测中间结果、store early visible、普通 RMW 新增原子性 | 每 member 原 PC/ROB/destination/flags/trap/retirement boundary 可还原；必要时 materialize 中间值/拆 packet，fused/unfused 逐事件相同；MMIO/serializing/atomic 边界按 whitelist 排除 |
+| VX compressed representations，V-052–V-059/V-062 | FULL_VECTOR/UNIFORM/AFFINE/SPARSE 与原始表示对照；vl/vtype/vstart/mask/tail/LMUL/EEW snapshot；SEW 溢出、非均匀回退、masked inactive 元素、partial fault/FOF/restart | 不满足 uniform/affine 仍压缩、signed/SEW wrap 错、implicit mask 擦掉 fault、lane 改 architectural VLEN、agnostic 任意值放行 | materialization 前后合法 architectural bytes/elements 和 fault progress 相同；压缩 metadata 保存代际/context；agnostic/prestart 依冻结规范合法集合比较，不 blanket waive |
+| VX shadow/runahead/helpers，V-019/V-029/V-032–V-035/V-058/V-063 | main miss、poison dependence、slice branch cutoff、helper translation/cache fault、lane demand reclaim、trap/reset/drain；helper 普通读与非幂等 region | helper 发 architectural trap/CSR/store/MMIO；poison value 当地址；helper kill 改 main state；suppress fault 掩盖真实 main load fault；helper 吃完 MSHR | helper fault 仅终止/丢该预测，真实 main 指令照常产生自己的 fault；无 commit/架构写、可撤销 request、exactly-once credits；slot/lane/MSHR 与 demand 服务界可观测 |
+| VX bottleneck/controller，V-033–V-035/V-040/V-074/V-076 | PMU trace-accounting；每类 FRONTEND/BRANCH/DEPENDENCY/MEMORY/COMPUTE/VECTOR/THROUGHPUT phase 和急变；sampling/hysteresis/min-residence；配置边界 | counters 零/重复/漏映射误分类；每周期抖动；未 drain 即换 owner；禁止模式被控制器重新打开；移除低优先级服务 | classification 只改变已批准配额/route/clock-enable，不变 ISA/物理资源数；switch 必须走原 reconfigure FSM，失败保留最后合法 policy；记录 decisions/reasons 供 replay |
+| MP early-consume/value speculation，V-014/V-018/V-029/V-030/V-035 | address/value/order/version 对与错、transitive dependent slice、分支后 speculative epoch、真实权限 fault、同周期 validation+trap | 错值 descendant 在 confirm 前 retire、store/CSR/MMIO 已外显、依赖传播遗漏、checkpoint 不足仍猜测 | 后置且默认关闭；确认前所有 consequential descendants 阻止退休/外显；wrong address/order/version/value 则精确恢复/re-execute，真实 fault 保留；不是 preview-only 的同一通过口径 |
+| 所有推测模式侧信道，V-019/V-061/V-063/V-085/V-089 + 安全 owner | 跨 domain cache/PTW/interconnect/bandwidth 观测，wrong-path 与正确路径、private L0/shared L1；context flush 与严格关闭模式；规定 Zkt/Zvkt 指令 latency | 宣称 private L0 无侧信道；未授权 preview 已发物理流量；secret value 决定 DIEL 指令 routing/fusion/representation latency | 明确 threat model/观测点/残余风险；基线 permission check 不是完整非干扰证明；严格模式关闭未经证明的 speculation；DIEL 独立验适用指令，不能替代完整微架构侧信道证明 |
+
+### 10.3 等资源 ablation 与物理效能归因
+
+研究性能交给 I-076/I-077/I-084、V-074/V-076，不能在 correctness 失败时用 IPC 掩盖。每组冻结程序/input/compiler/reference/reset、测量窗口、width/ROB/IQ/PRF、FU/lane 数、cache/MSHR/bandwidth、预测表/L0/RC/shadow 的额外 bit/port/credit 与 placement seed。新增资源不能“关 feature 就不算面积”：比较总物理资源匹配版本，或分别公布等资源替代基线与增量成本。Kunminghu 绝对 IPC 只在同构匹配配置和同计量定义下比较，否则仅报归一化指标，不宣称超越。
+
+必须做单开/逐步组合/逐个移除的 ablation：固定 steering→L/T→criticality→locality→RC；传统 prefetch→同容量 MPP preview-only→token→L0→fusion hints/dataflow fusion→ownership→early-consume；helper off/on、shadow/DVR 分开、FULL_VECTOR 对压缩表示、fixed controller 对 adaptive，以及 prediction-oracle 上界（明确不是可实现结果）。检测 locality/criticality、preview/fusion、L0/RC、helpers/MSHR 的重叠收益，不能相加原文百分比。对随机 pointer chain、unpredictable branch、stream pollution、hot-bank、low-ILP、uniform/affine 与完全非均匀向量均保留零/负收益。
+
+输出 useful committed work、cycles/IPC、每类 stall、有效 frontend supply、MLP/critical-load latency、accuracy/coverage/late/useless preview、line/byte traffic、MSHR/service-age 分布、remote hops、PRF/VRF/WB 压力、fusion split/materialization/replay、helper kills/faults、controller residence/transition。真实频率/面积/功耗必须来自对应 H flow：post-route clock、WNS/TNS、RAM/FF/LUT/URAM 或合法 PDK 面积/PVT/功耗；不能把 toggle 当 W、simulation 逻辑 0/1 cycle 当 Fmax，或只有 IPC 却声称总体加速。
+
+DVR 文献的 2.4× 是特定评估的 harmonic mean，x86 Sniper6、5-wide/350 ROB/24 MSHR；1139 bytes 是重用既有 vector/PRF 后的新增控制 metadata，**不是整个 helper 的资源成本**。原文所有性能区间均待实验，不是本核保证。Mini-MDP 的“48-entry、0.06%”当前无已核实 primary，保持未验证，不作为 predictor 容量或验收依赖；主源状态以 [参考总账](references.md) 为准。
+
+### 10.4 闭合规则
+
+原 evidence-manifest 增加 `research_subcard / mode / context-permission-generation / token-waiter-generation / line-version / packet-member / helper-domain / representation / controller-decision` 的调试观测与完整 schema hash；内部调试 tag 不能冒充 reference architectural 字段。每 case 明示关联原 V/I/H、owner、依赖 verdict、覆盖 bins、正负控制激活证据、首差异/replay、实际运行 profile、不可测列和 reviewer。未接入端口、不可激活 negative、缺 external reference/physical input 均保留 BLOCKED，不静默减 finite denominator。
+
+原 V-077/V-079 的物理义务按**实际声明载体**触发：RTL-only release 不因本节研究增加三板前置；FPGA claim 收相应 exact-target 回放，ASIC claim 收独立物理证据，DCLS 再追加 V-081–V-084 与 H-048/H-049。研究状态只有依赖、实现、正反例、恢复和所宣称性能/物理证据全部闭合才可由双 owner 签收；本次仅文档追加，全部新机制尚无实现验收证据。

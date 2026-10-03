@@ -799,3 +799,69 @@ flowchart TD
 |---|---|---|---|---|
 | 2026-09-29 | 初始团队指南由完整架构/验证/平台计划生成 | 本文件、source-inventory、references | 规划集成 | 各团队冻结输入并更新上表 |
 | 2026-09-29 | 面向较小模型/新工程师补充自然语言执行说明 | 本文件任务卡的执行者目标/须知/建议顺序/停止条件 | 规划集成 | 实施团队按卡执行并回填证据 |
+
+## 8. 2026-10-02 权威补充：shadow window、Vector Runahead 与值表示研究
+
+本节追加，不重写历史 I/V 卡；§4 `Not started` 是规划快照，实际已交付列表和范围以 [账本](../config/status/implementation_status.json)、[最新进度](../results/PROGRESS.md)、逐包报告为准。VX 是卡内研究子卡，**不是新 I/V/H 包，也不属于已实现能力**；所有研究初态 PROPOSED/BLOCKED。现有 VLEN、lane attribution、descriptor、mask、LLB 或 coalescing 的交付证据不能自动覆盖新机制。
+
+### 8.1 已有实现与不可以继承的结论
+
+- `mosaic_core.sv` 已串行接入 descriptor/VRF/vector ALU/LSU/restart/chain，`vec_block_i` 对整个 macro 生命周期阻止 younger allocation，VRF 为 architectural storage、不是 vector rename。当前 core 的向量内存是 unit-stride physical 路径，不经过标量 Sv39/L1；EEW=SEW 限制仍是单独的 RVV 不符合项，见 [vtype 修复报告](../results/reports/vtype-vsew-encoding.md)，不可当作规范要求沿用。
+- [lane broker](../results/reports/I-059-lane-broker.md) 实际复用 ownership FSM，在 macro drain/ack 后发布 2/4/8 **配额**与 generation，但 core 单 VRF read slot/单 element datapath，8 个 attribution 不是 8 路并行执行。1×8/2×4 的旧 case 是一个 hart 的两组 interleaved register regions，不是两 hart 共享 lane 的实现或性能证据。
+- [vector-family-advertisement](../results/reports/vector-family-advertisement.md) 记录 core 16/17 family 可达、NARROW 因 2×SEW source truncation 未广告；[vec README](../tests/programs/vec/README.md) 和 19 个 hand-derived self-check 程序是 execution/arithmetic evidence，非完整 RVV reference/conformance。不得借此解除 V-060 的真实 lane-count 轴、64 程序及独立 RVV adapter 前置。
+- 新源的 shadow window 128–512 uOP、约 160 architectural ROB、4/8 spare lanes 均为配置扫描建议，不修改当前 geometry、更不是扩大的已实现 CPU。DVR 的 [原作者论文](https://users.elis.ugent.be/~leeckhou/papers/MICRO2023.pdf) 2.4× 是其 workload/baseline 的 harmonic mean；1139 bytes 是复用向量/PRF 条件下增量 control metadata，不能作整个 helper 成本、MosaicRV 预期加速或 RVV 可移植性证明。
+
+### VX-01 — 有界 shadow window 的非提交 load-only 域
+
+- **Owner / Status / 宿主**：runahead/slice + recovery + MP security 负责人；`PROPOSED`；I-051/I-056/I-057/I-063/I-066，验证 V-029/V-033/V-056/V-061/V-063。
+- **Depends / Inputs**：真实主 hart snapshot 的 source tag/generation 与 branch/context provenance；Stage 3 的 MPP/IMC/MemoryPreviewToken、权限/PMA/freshness、demand-first 准入合同；EF-02 路径合法性。当前缺少这些 helper 集成，不能宣称已运行。
+- **Action / 微步骤**：先定义小状态 executable contract 与 load-only address slice allowlist，再冻结 finite window entries、source/temporary storage、instructions/cycles/depth、outstanding loads、MSHR/queue/bandwidth 预算；128–512 仅待扫描范围。unknown dependence/无 source、控制越界、budget full 一律 stop/drop，不等待主流水线资源。
+- **字段 / 生命周期**：`ShadowDescriptor{shadow ID+generation, home hart, start sequence/branch boundary, context/translation/permission generation, source snapshot generation, op allowlist, dependency/invalid-value bits, budget counters, pending requests, cancel reason}`；snapshot→extract→issue bounded local work→prefetch hints→stop→cancel/drain→release。与 architectural RAT/PRF/VRF/ROB namespace 分离，结果不进入普通 wakeup/retire/CSR/event stream。
+- **正确性 / Security**：仅纯地址计算+允许的 ordinary cacheable loads；store/AMO/LRSC/CSR/MMIO/device、不可逆操作、未知或未证明 store dependence 不提取；已知值可取自 immutable snapshot 或验证过的 source，未获取 load 标 invalid 并停止 dependent 地址，不用任意预测值冒充真值。helper 无 architectural hart、无 commit/store/flags/vstart updates。baseline 只 permission-checked TLB-hit，TLB miss/drop、无 PTW/no A/D update；translation discovery、PTW warming 是后置独立研究。private L0 不消除 cache/PTW/interconnect timing side channel，强隔离模式默认禁用或经威胁模型门禁。
+- **Recovery**：main redirect/exception/context/PMP/translation epoch change→停止新 helper issue→按 generation 丢晚包并恰一次回 credit；已共享的物理 prefetch 可完成，但不唤醒被杀 shadow/普通 load。主 hart 不回滚到 shadow、shadow 不修补主状态。
+- **Outputs / Handoff**：slice allow/reject 表、有限资源账本、namespace/kill 状态模型交 VX-02；prefetch-only packet 与 context provenance 交 IMC；forbidden-op/invalid-source/security/recovery 输入清单交 V owners。
+- **Pass**：off/on 主 architectural trace 一致；empty/full window、unknown source/store dependence、device/MMIO、权限失败、TLB miss、redirect+late return、generation wrap、持续 demand 下 drop/preempt 的 finite 正负例闭合；no architectural write/commit/store assertion 与非法准入 mutant 实际失败。不得以增加 MSHR 或 ROB 作为同资源对照。
+- **Fail / 回退**：shadow result 出现在普通 PRF/retire、扩大 OS-visible hart、盲 PTW、可见 speculative store 或预算耗尽阻塞 main；禁 shadow，ordinary CPU 不受影响。
+- **来源**：新源 88–199、459–517、670–724；旧源 1929–1996 的 elastic waiting state 不等于可提交 shadow。
+
+### VX-02 — spare vector lanes 的 decoupled runahead 地址切片
+
+- **Owner / Status / 宿主**：vector-runahead、lane broker、MEF 负责人；`BLOCKED`（VX-01、真实并行 lane 轴及 demand-first 准入未冻结）；I-056/I-059/I-061/I-062/I-063/I-066，验证 V-034/V-056/V-060/V-062/V-063/V-076。
+- **Depends / Inputs**：VX-01 namespace/snapshot 与 MP token/IMC 权限；I-059 macro-boundary drain；V-060 所需真实 lane datapath 配置与独立 RVV oracle，不用 attribution counters 填补前置。每 home hart 的 source/context 独立，借空闲 lane 不成为 helper hart。
+- **Action / 字段**：只向量化获准的 load-only address slice，例如未来 `B[i+N]`→地址计算→`A[...]` prefetch；冻结 `{slice ID+generation, home, base/stride or index, lookahead distance, logical element IDs, valid/mask bits, source versions, lane lease generation, max groups, request provenance}`。不能推断 arbitrary scalar binary 存在可向量化并行；mask/invalid element 不发访问。
+- **生命周期 / 预算**：通过 lease 准入 spare group→执行有界 indirect load/AGU→交 IMC/coalescer hint→停止/取消→drain VRF/read/FU/result/memory/return references→ack→归还；shadow scratch/temporary vector state 不覆盖 architectural VRF。需求 scalar/vector/PTW 服务优先，helper 有独立 max outstanding、bandwidth tokens、MSHR cap/TTL；demand 紧张拒绝或撤销未发 work，不侵吞必需逃生容量，已发包结算后归还。
+- **Recovery / 正确性**：load 返回仅用于下一步 preview 地址，绝不成为主 load architecturally consumed value；真实主 load 仍由 AGU/LSQ/translation/permission/order/freshness 校验。dependent invalid-bit 传播，错误分支/context cancel 独立，不改主 `vl/vtype/vstart/fflags/vxsat`；side-channel 门禁和 TLB-hit-only/no A/D baseline 与 VX-01 相同。
+- **Outputs / Handoff**：spare-lane lease+cancel/drain ledger 交 VX-04；per-element prefetch consumers/permissions 交原 coalescer/MP owner；主结果等价和 requests/usefulness/pollution/demand p99 原始统计交实验。
+- **Pass**：direct/indirect、负/零 stride、重复 line、invalid/masked address、fault/permission/context、main 反向取 lane、helper return 悬挂、full MSHR 与持续 demand 的矩阵闭合；drop/preemption 不损主进展；普通与 helper 消费者不混 fault/value。移除 namespace/demand reservation/invalid-bit guard 的 mutant 须激活失败；无收益/污染结果保留。
+- **Fail / 回退**：helper 有 architectural store/hart/commit、未经查权限 prefetch、coalescing 隐去 element provenance、被当成 RVV program PASS；禁 helper 保留普通 vector 执行，原 V-060/V-063 不降级到单元证明。
+- **来源**：新源 88–145、150–199、670–775；[DVR 原论文](https://users.elis.ugent.be/~leeckhou/papers/MICRO2023.pdf) 只作研究背景。
+
+### VX-03 — FULL_VECTOR / UNIFORM / AFFINE / SPARSE 精确表示
+
+- **Owner / Status / 宿主**：VRF/vector ALU + RVV numerical 验证负责人；`PROPOSED`；I-051/I-053/I-054/I-055/I-056/I-058，验证 V-052/V-054/V-055/V-056/V-058/V-059。
+- **Depends / Inputs**：真实 vector configuration/source/mask generations、合法 EEW/EMUL/overlap 表和完整 old destination；独立 RVV oracle。当前 NARROW/EEW 限制不是压缩规则允许改变 ISA 的理由。
+- **Action / 微步骤**：先 verified FULL_VECTOR baseline，再 exact UNIFORM、AFFINE `{base,stride}`；SPARSE 作为同卡后置 `{index set, values, valid mask}`，必须算全 metadata 和展开成本，不作为默认免费结构。classification 必须检查全有效元素/来源，不仅抽样；只有保持封闭且精确的 operation 才在压缩域算一次/broadcast，所有其余 materialize 后走原 datapath。
+- **字段 / 生命周期**：`{home, vector-group/version, repr kind, SEW/EEW/EMUL, vl/vstart/config generation, source/mask version, base/stride or sparse indices+values, logical valid/defined ranges, preserved old-destination reference, materialization state, holds}`；detect→encode→read compressed/expand→逐合法 logical element 更新→commit/partial trap；overlap、partial write 或 config 变更前 materialize 或保留精确 mixed representation。ownership/kill 不复用旧代 metadata。
+- **精确 RVV 语义**：active `vstart≤i<vl && mask[i]`；prestart 和 tu/mu 元素保留 old bits，ta/ma 只取规范允许 agnostic 值，`vl=0` 不意外更新。AFFINE 必按目标元素宽度的 modular integer 算术与 widening/narrowing/overflow 规则，不能把 FP affine 当数学实数等价；fixed-point `vxrm/vxsat`、FP `frm/fflags`、NaN/signed zero/subnormal、ordered reduction 每步舍入、unordered allowed relation 保持原规范。masked-off 不访问/无异常/无 flags；saturation、非封闭 permute/reduction、masked mixed old values、rounding 后非 affine 一律展开。mask/sparse 表示不改变 packed bit 顺序、tail 规则或 `vlenb`。
+- **Recovery**：partial trap/restart 精确保留每 logical element 的允许 prefix 和 old destination，不把“一次 scalar compute”误当一次 vector commit；取消只移除未合法保留状态，重复 packet 不重复更新。SCALAR broadcast 不增加/减少 architectural instructions。
+- **Outputs / Handoff**：每 family representation closure/expand/legality 表、partial-update/materialization 状态机交 VRF/recovery owner；compressed/off 逐元素/flags/reference cases 与故意错误 affine/mask/tail/rounding 负控制交验证；traffic/metadata/expansion 成本交 VX-04。
+- **Pass**：全/零/交替/单 bit mask、全部 ta/ma、`vl=0`/短/full、nonzero vstart、fractional/integer LMUL、mixed old destination、SEW wrap、NaN/sNaN/signed zero、rounding tie/saturation、overlap 和 partial fault 等 defined state/allowed relations 与 FULL_VECTOR 一致；错误 classification 必 fallback 不放宽 comparator。
+- **Fail / 回退**：uniform 抽样误判、affine overflow/FP rounding 不同、tail/prestart 丢失、one scalar flag 替代元素语义；materialize 到普通表示，原 I/V family acceptance 与完整 V obligations 不变。
+- **来源**：新源 519–571、1052–1072；旧源 396–539 的 packet/lane 结构。
+
+### 8.2 细粒度研究签收与 S5 handoff
+
+| 子卡微门 | 初始状态 | Owner | 输出 / 下游 | 阻断条件 |
+|---|---|---|---|---|
+| VX-01.a load-only allowlist/snapshot | PROPOSED | slice/recovery | allow/reject+invalid-bit 表 / VX-02 | 不能提取未知 source/store dependence |
+| VX-01.b namespace/finite budget/security | PROPOSED | MP security/MEF | budget+TLB-hit gate / V-029、V-063 | 无隔离/权限合同不准启用 |
+| VX-01.c cancel/drain/no architectural effects | BLOCKED | recovery | generation/credit replay / VX-04 | 前两门未签收 |
+| VX-02.a 真 lane 配置+oracle 前置 | BLOCKED | vector geometry/reference | datapath 轴+独立程序结果 / V-060 | attribution 不等于并行 lanes |
+| VX-02.b indirect slice/invalid-element | BLOCKED | vector-runahead | per-element provenance / V-056、V-062 | VX-01 未签收 |
+| VX-02.c demand priority/lease revoke | BLOCKED | MEF/lane broker | 有界服务+drain / V-034、V-063 | 不以 unit QoS 冒充 core 集成 |
+| VX-03.a uniform/affine 闭包与展开 | PROPOSED | vector ALU/VRF | exact closure 表 / V-054、V-055 | family/RVV oracle 未完整 |
+| VX-03.b masks/tail/flags/partial recovery | BLOCKED | RVV recovery/numerical | 逐元素关系 / V-058、V-059 | 不能丢 old destination |
+| VX-03.c sparse 后置表示 | BLOCKED | VRF | indices+materialization 成本 / 实验 | exact semantics 与成本未闭合 |
+| VX-01–VX-03 配对成本/收益 | BLOCKED | V-076 实验 | off/on 含无收益/污染 / S5 VX-04 | 每启用微门先正确性和独立 oracle |
+
+每微门回填输入/输出 hash、实际执行正/负例、owner/验证签收、阻断请求对象/复审日期；无 evidence 留空并保留 BLOCKED，不沿用旧报告的 PASS。2026-10-02 本节为文档研究集成，无 RTL/测试/交付状态变更。

@@ -1271,3 +1271,57 @@ I-086 是可复现**已声明集合**的发布/归档责任，不将未声明的
 - **AR-019** — [VeeR EL2 Dual-Core Lockstep documentation](https://chipsalliance.github.io/Cores-VeeR-EL2/html/main/docs_rendered/html/dual-core-lock-step.html)，访问 2026-09-29。支持 delayed shadow、共享ICCM/DCCM/Icache、输入延迟/输出比较、debug限制、synthesis barrier与验证计划；不是MosaicRV宽OoO fabric的完整证明。
 - **AR-020** — [Antmicro, Dual-core Lockstep in the VeeR EL2 RISC-V core](https://antmicro.com/blog/2026/04/dual-core-lockstep-in-veer-el2)，2026-04-13，访问 2026-09-29。支持DMR/DCLS工程解释、可配置shadow delay、multibit控制/状态与错误注入；不证明MosaicRV的FPGA/ASIC故障覆盖或安全等级。
 - **AR-021** — [TI, Industrial Functional Safety PLC Architecture, SDAA393, June 2026](https://www.ti.com/lit/pdf/sdaa393)，访问 2026-09-29。支持DCLS只检测、无fault tolerance、common-cause限制，以及SIL/ASIL分解需独立/diversity/traceability/justification；不是对MosaicRV符合ISO 26262/IEC 61508的证明。
+
+## 13. 2026-10-02 追加：新研究路线图与细粒度门禁
+
+**权威状态追加：** 开头“目前记录 I-001–I-006”、旧 suite registry/CLI 描述与阶段表是其撰写时的快照，不是当前实现清单。当前交付和能力广告只从 [`implementation_status.json`](../config/status/implementation_status.json)、capability ladder、最新 [`PROGRESS.md`](../results/PROGRESS.md) 与对应 profile reports 判定；`REVISION.md`、早期报告和 `resolved_blocks` 的历史失败条目不能覆盖后来的 accepted evidence。本节不重新报 snapshot 交付数量、不撤销既有 ledger、不把研究方案当现有 RTL。
+
+[新增研究原文](../New%20document%282%29.txt) 和 `deep-research-report(1).md` 的“固定物理资源、集中 architectural control、分散 dataflow”原则汇合：RISC-V ISA/每 hart 退休权威不变，以短 L-path 保关键标量依赖，以 T-path、MPP/IMC 和可撤销 helpers 隐藏延迟、减少移动。它们都是待验证机制，不是“超过 Kunminghu”的实现或性能结论。原 98 I、90 V、51 H（239 包）不变；下列 **18 个研究子卡**没有新的 delivered ID，完整定义仅在各所属 stage §8，本文是索引/门禁，不复制定义。
+
+### 13.1 首先稳定实际实现
+
+| 入口门 | 现有合同 / Owner | 当前应处理的事实及所需证据 | 对研究的约束 |
+|---|---|---|---|
+| 退休与 ISA 缺陷 | I-017/I-014、V-013/V-014；scalar/vector owner | held same-cycle second insert 暴露 lane-1 退休顺序错误，allocation-only 保留；NARROW、EEW/SEW、vtype、decoder packed width 等按最新修复/replay逐项判定，不能照搬旧 REVISION 的 open/closed 状态 | 未闭合不得以 fusion、多路径或早消费扩张退休域；unit 与 core 激活路径分别验 |
+| 配置与有限身份 | I-001/I-002/I-014/I-016/I-031、V-024/V-027/V-031；geometry/protocol owner | decode/queue/rename/commit/FP/VEC/lane width 必须实际消费配置；reader/codec/RTL 同源宽度；age、epoch、token/version/owner generation 的 ABA 和晚到上界 | 不是只加 schema keys；非法组合明确拒绝，资源不足背压/preview drop |
+| 独立 RVV reference | V-002/V-004/V-008/V-052–V-060；adapter owner | 支持本次 ISA/VLEN 的真实参考接口、assembler 编码和非 DUT golden corpus；真实 lane-count axis | V-060 缺前提保留 BLOCKED，不用同错 oracle 宣称 full V 或 helper 正确 |
+| 实际 memory QoS 与观测 | I-062/I-076、V-033/V-063/V-074；唯一 memory ownership owner+PMU owner | unit QoS 不等于 core age/criticality 接线；单 outstanding mux 的 response routing/PTW priority 组合需一个服务合同；HPM 事件必须映射且 trace 对账 | MPP/helper/MSHR 扩张先证明 demand/PTW 与非关键请求服务界；controller 不读假/零事件 |
+
+以上门针对关联研究，不将未声明的 board/ASIC/DCLS/RVA23 自动变为 p0 前置；原 §3.1 依赖并集和 §3.2 claim-scoped gate 仍有效。
+
+### 13.2 子卡索引、依赖与责任
+
+| 子卡（定义不在本表） | 所属 stage / 原工作包承载 | 前提与交接输出 | Owner / 当前研究状态 |
+|---|---|---|---|
+| EF-01 配置驱动前端带宽与无阻塞研究旁路 | [Stage 1 §8](stage-1-scalar-control.md)；I-009/I-010/I-014/I-021 | 入口宽度/身份门；实际 useful fetch supply、decode buffering、MPP 旁路 drop 和原 PC/bits/length | frontend/config owner；PROPOSED/BLOCKED，以定义卡逐微步骤为准 |
+| EF-02 L-path/T-path 分层执行与进展 | [Stage 2 §8](stage-2-execution-fabric.md)；I-022/I-023/I-027/I-029/I-030 | EF-01/现有 completion 合同；固定短本地链、可容忍远程延迟路径、age 服务界和物理 timing 交接 | fabric/bypass owner；PROPOSED/BLOCKED |
+| EF-03 criticality/data-centric placement | Stage 2 §8；I-029/I-030/I-076 | EF-02、真实 producer/memory locality/PMU；hint-only 分类、错误 placement 普通回退、priority 不饿死 aged 工作 | scheduler/locality owner；PROPOSED/BLOCKED |
+| EF-04 tile register-value cache | Stage 2 §8；I-015/I-026/I-027/I-031 | EF-02/03、PRF generation/source lifetime；RC hit/miss/evict/drain 与 durable completion，不能丢 sole live value | PRF/WB owner；PROPOSED/BLOCKED |
+| EF-05 两遍 dataflow fusion | Stage 2 §8；I-010/I-014/I-016/I-017/I-026 | 退休入口门、EF-04 lifetime；pre-rename 提示/post-rename验证、有序 member identity/partial trap/中间值恢复 | decoder/rename/retire owner；BLOCKED（正确性前提） |
+| EF-06 非原子 compound memory forms | Stage 2 §8；I-033–I-038/I-084 | EF-05、真实 LSQ/权限/order；与 MP-05 提示交接，向 MP-06 输出 compound 合同（不是互为前置）；load+ALU、ALU+store、load-modify-store保多退休边界，不新增 atomic 语义 | fusion+LSQ owner；BLOCKED |
+| MP-01 intent 与 TLB-hit-only 许可门 G0 | [Stage 3 §8](stage-3-memory-system.md)；I-009/I-010/I-044–I-046/I-063 | 合同字段/真实权限/幂等 PMA；只检测 ordinary memory，miss drop、不发 PTW/改 A/D | frontend+memory permission owner；PROPOSED |
+| MP-02 specialist predictors+IMC bounded L1 preview G1 | Stage 3 §8；I-043/I-062/I-063 | MP-01、实际 core ownership/QoS；last/stride/dependence chooser、confidence、bounded preview admission/MSHR waiter | predictor+memory QoS owner；BLOCKED（V-063/core mux） |
+| MP-03 occurrence/token/ABA/真实 AGU/LSQ 校验 G2 | Stage 3 §8；I-002/I-018/I-033–I-035/I-043 | MP-02、有限 slot/generation/context；完整 MemoryPreviewToken、真实地址/权限/order 消费和晚到丢弃 | token/LSQ owner；BLOCKED |
+| MP-04 clean L0/sector/version placement G3 | Stage 3 §8；I-060/I-061 | MP-03、freshness/invalidation/owner drain；confidence/locality 分级 placement，版本回绕/sector 生命周期 | L0/coherence owner；BLOCKED |
+| MP-05 pre-rename fusion hints G4 | Stage 3 §8；I-010/I-014/I-063 | MP-03/04、EF-05；Memory Intent Cache/fusion signature 只建议，full decode/rename 复核 | frontend fusion owner；BLOCKED |
+| MP-06 post-rename memory fusion G5 | Stage 3 §8；I-016/I-017/I-033–I-038 | MP-05、EF-05/06、partial trap/intermediate register materialization；每 member 独立 retirement/store authorization | memory fusion/retire owner；BLOCKED |
+| MP-07 optional ownership preparation G6 | Stage 3 §8；I-034/I-039/I-040/I-065 | MP-06、真实 coherence/LRSC/fence/order 合同；准备 destination，不写 speculative store data | coherence/SQ owner；BLOCKED |
+| MP-08 deferred early consume G7 | Stage 3 §8；I-018/I-036/I-084 | MP-07 及全部恢复门、完整 dependent-slice epoch/checkpoint；confirm前不退休/外显，错则精确 replay | speculation/recovery owner；BLOCKED，默认关闭 |
+| VX-01 shadow window load-only domain | [Stage 4 §8](stage-4-vector-locality.md)；I-058/I-059/I-063/I-084 | scalar/main 精确路径、bounded credits/QoS、安全 whitelist；非 architectural window，poison传播/kill，不提交 | shadow/fabric owner；PROPOSED/BLOCKED |
+| VX-02 vector runahead address slice | Stage 4 §8；I-056–I-059/I-061/I-063 | VX-01、真实 vector reference/lane axis、slice提取和依赖有效性；仅普通读/地址预取，helper fault不掩盖main fault | vector/helper owner；PROPOSED/BLOCKED |
+| VX-03 exact uniform/affine/sparse representations | Stage 4 §8；I-051–I-058/I-061 | 完整 RVV snapshot/lifetime/partial restart；representation tag/payload，精确 materialization 和非均匀回退 | VRF/vector descriptor owner；PROPOSED/BLOCKED |
+| VX-04 slow bottleneck controller | [Stage 5 §8](stage-5-multihart-aggregation.md)；I-031/I-071/I-076/I-084 | 前述每模式的合法门、真实 PMU、min-residence/hysteresis；只重分已有资源，经 STOP_ADMIT/DRAIN/ACK/PUBLISH | policy/PMU+fabric owner；PROPOSED/BLOCKED |
+
+EF/VX 的逐卡初始状态及微步骤以其唯一定义为准，本表 `PROPOSED/BLOCKED` 表示设计提议与未许可启用分列，不是假定已开始。owner 为现有责任域，尚无个人研究签收、无研究实现验收证据。额外 arbitrary value prediction/选择性 dual-path 保留为后置研究纵切，挂在 MP-08/VX-04 恢复与资源合同下，不新增编号、默认不开启；强前端/uOP cache/loop buffer/多分支预测同样只在 EF-01 可测瓶颈条件下进入，不把 6/8-wide 或 32 B/cycle 目标当既成事实。
+
+### 13.3 每个子卡的进度与接受动作
+
+复用阶段 Track Log，每个微步骤独立登记 `Subcard / Parent I,V,H / Stage section / Owner / Status / Depends verdict / Input hash / Fields+lifecycle / Positive+negative cases / First divergence+replay / Artifact hash / Reviewer / Next gate`。研究初始只有 PROPOSED/BLOCKED；个人尚无签收和 evidence 尚无必须显写，不凭原 delivered 卡自动标 Accepted。已完成设计阅读只可记“文档整合”，不能记 implementation/pass/performance。
+
+1. MP-01/02 首轮只 preview-only，permission/context 检查前不发请求，TLB miss drop、无 PTW/PTE A/D、device/MMIO/AMO 排除，normal path 不等待预测。
+2. MP-03/04 后才允许 token-associated consume，必须实际 AGU/LSQ/权限/line-version 全部校验，wrong placement 只换访问路径；private L0 不是侧信道免疫。
+3. EF-05/06 与 MP-05/06 保原 macro/ROB 身份和中间可观测值、trap/IRQ/debug boundary、fflags/minstret；普通 load-modify-store 不成为 AMO，SQ 普通授权才使 store 可见。
+4. MP-07 必须新增 coherence ownership 物理/功能证据；MP-08 arbitrary-value/early-consume 与选择性 dual-path 最后，确认前全部 descendants 不退休/外显，完整恢复可重放。
+5. VX helpers只无 architectural effect 的普通内存读/地址预取；shadow 不取代 ROB，fault可抑制的是 helper自身而非main真实指令，poison/kill/QoS/信用均验。压缩表示精确 materialization，VLEN不随lane变；controller按批准模式、慢采样/hysteresis和原FSM切换。
+
+验证矩阵与 matched-resource ablation 见 [验证计划 §10](validation-plan.md)，物理/安全模式见 [平台计划 §11](platform-plan.md)、[Stage 7 §8](stage-7-fpga-hardware.md)、[Stage 8 §8](stage-8-asic-release.md)、[Stage 9 §8](stage-9-lockstep-safety.md)。新策略必须允许零/负收益；原文预测百分比不相加，DVR 2.4×/1139 bytes 的范围与 Mini-MDP 未核实主源限制见验证追加节和参考总账。本次只有文档变化，不执行任何 builds/tests/checks/formatters，原源码、报告和 delivered ledger 不改。

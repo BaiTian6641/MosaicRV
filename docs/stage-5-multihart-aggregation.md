@@ -731,3 +731,52 @@ flowchart TD
 |---|---|---|---|---|
 | 2026-09-29 | 初始团队指南由完整架构/验证/平台计划生成 | 本文件、source-inventory、references | 规划集成 | 各团队冻结输入并更新上表 |
 | 2026-09-29 | 面向较小模型/新工程师补充自然语言执行说明 | 本文件任务卡的执行者目标/须知/建议顺序/停止条件 | 规划集成 | 实施团队按卡执行并回填证据 |
+
+## 8. 2026-10-02 权威补充：latency-source morphable 控制与后置推测
+
+本节追加到原 Stage 5，§4 `Not started` 是历史规划，不是 [当前 delivered ledger](../config/status/implementation_status.json)。当前两 hart context 隔离的 evidence 不证明 cohort、跨 hart coherence、真实多 lane pool、shadow helper 或 controller。新源说“已有 vector lanes + allocation + L0 + coalescer”只指已有模块/有限集成的基础，不能当成新机制可运行的证据；[Stage 4 §8](stage-4-vector-locality.md) 列明单 datapath 配额 attribution、RVV reference 与内存路径边界。
+
+### 8.1 三种身份绝不混用
+
+1. architectural hart（原 I-064–I-070）：独立 PC/RAT/ROB/CSR/trap/commit/memory permissions；同 PC 不是相同地址空间。
+2. 普通 vector/remote execution packet：借执行资源但返回唯一 home commit domain，lane quota 不改变 architectural VLEN。
+3. VX-01/VX-02 **非提交 helper/shadow domain**：复用 spare compute，但不创建 OS-visible hart、CSR/interrupt identity、普通 commit 或 store；helper 的临时 PC/sequence 只是 slice metadata。主 hart 不接收 helper 的 speculative value 为 architectural completion。多 hart 的 demand 有服务合同；prefetch/helper 可以丢弃，不能因 spare 模式让另一 hart 被迫同步、split 或改变程序。
+
+### VX-04 — 有界 bottleneck controller、lane drain 与迟滞
+
+- **Owner / Status / 宿主**：personality/broker、PMU、MEF + 架构/security 负责人；`BLOCKED`（VX-01/VX-02/EF-02 准入与真实资源轴/观测未闭合）；I-031/I-059/I-062/I-066/I-071/I-076/I-078/I-079，验证 V-034/V-035/V-060/V-063/V-064/V-071/V-076。
+- **Depends / Inputs**：经过 trace 校准而且确实接线的 frontend starvation、branch recovery、critical-load stalls、L1/L2 miss（不存在 L2 时该字段 absent，不能假计数）、MSHR/IQ pressure、remote bytes、WB congestion、vector **实际** utilization；当前 attribution 不作 parallel utilization。复用原 ownership drain 与 demand service 合同，不另造互斥 ownership 模型。
+- **Action / 微步骤**：先显式手工选择模式与固定 baseline，再有界采样 window/饱和 counters，分类 `FRONTEND_BOUND/BRANCH_BOUND/DEPENDENCY_BOUND/MEMORY_BOUND/COMPUTE_BOUND/VECTOR_BOUND/THROUGHPUT_BOUND`；冻结各模式合法资源配额、minimum demand reservation、helper cap 和 transition allowlist。enter/exit 双阈值、最短驻留、连续窗口置信、cooldown、最大切换率及切换成本 amortization 必须是配置输入，不套用源文 8-tile 3/4/1、6/2 等图中的数量。
+- **字段 / 生命周期**：`{controller generation, observation window, per-hart/resource counters, phase confidence, mode, requested allocation, owner/lease generations, demand reserve, hysteresis/dwell/cooldown, outstanding/ack classes, abort reason}`；observe→propose→check legal capacity→STOP_ADMIT→DRAIN→ACK→PUBLISH→RESUME→cooldown。停止新 helper/vector 准入但继续旧 work/result/return/cancel 服务；同时结算 IQ/FU/VRF/read holds/result/memory/MSHR/preview token/shadow references，不能只看 IQ 空。首选 vector instruction boundary；mid-macro migration 是独立后置研究。
+- **正确性 / Recovery**：reset/IRQ/trap/context、主 hart 需求突升与切换竞争有明确优先级；abort 保留旧 mode/owner generation，不放弃已接收事务，不强清 architectural VRF/RAT/LSQ；同控制请求幂等、late reply 按全 generation 拒绝且归还 credit。主 demand 保留 finite service，helper 可暂停/丢弃；不能用“demand priority”饿死已接收的其他 hart/vector demand。
+- **Outputs / Handoff**：calibrated-event availability 表、mode budgets 与 transition/abort/ack 表交 EF/MP/VX owners；每 hart 不变 trace、mode residence/switch cost/requests dropped/demand p99/correctness run 交 V-076/I-079。无 clock/area/power evidence 则明确 absent，cycles 不折算 fabricated useful work/sec。
+- **Pass**：manual/adaptive/off 相同资源、程序/输入/同步；phase 太短、阈值附近抖动、hot MSHR/WB、critical flood、mid-macro resize、helper in-flight、one-hart fault、drain timeout、重复请求/reset 的矩阵全覆盖；最小驻留/服务/最大切换率可检查且 controller off 正对照。early publish、忽略 return/shadow credit、无 cooldown、counter 未接线但驱动决策的 mutant 实际失败。
+- **Fail / 回退**：策略通过重置主 CPU 换模式、隐藏被抢 hart 的等待、丢剩余元素、quota 当 physical width、抖动到零 useful work；回 fixed/manual mode 禁新增 helpers；原 I-071/V-034/V-060/V-063 完整验收不减。
+- **来源**：新源 632–775、788–906；旧源 282–323、727–789。controller 不是现有 PMU schema 已交付就等于已实现。
+
+### 8.2 VX-04 内后置研究：dual-path 与 arbitrary value speculation
+
+这两项保留完整研究范围，**不是本轮 baseline、不是 helper load-only 权限的扩展，也不是新 task ID**。MPP preview-only 先行；早 consume 受 Stage 3 MP 后置子卡，任意 load-value prediction 的概率准确率不代替真实 load/order/freshness 校验。
+
+| 纵切 | Owner / 初态 | Dependencies / Inputs | 字段与生命周期 | Outputs / Pass / Fail |
+|---|---|---|---|---|
+| VX-04.dual selective alternate branch path | BPU、rename/recovery、security；BLOCKED | EF-01 实际 spare fetch bandwidth、精确每成员恢复、VX-01 非提交隔离与 drain、low-confidence predictor 校准；仅 idle tile/有界低置信条件 | branch ID+generation、path ID、独立 source/checkpoint/context、预算/side-effect allowlist；复制候选→两路有限执行→真实 branch resolve→选择/丢弃→drain；baseline 后置模型只非提交 pure/load-only，store/CSR/device 不执行；任何走 architectural execution 的扩展必须独立证明 RAT/ROB/LSQ 和精确边界，不借 shadow 自动 promotion | 交 V-014/V-015/V-029/V-030 path/kill/replay 表和 source/fetch 成本；Pass 为 nested branch、wrong-path fault/权限、IRQ/debug、full queue、late losing-path response、main demand 下 trace 合法且边界精确；Fail 为失败路径值/flags/store 外泄、预算无限、无 spare fetch 仍抢供给，禁 dual 回单预测路径 |
+| VX-04.value arbitrary value prediction | load prediction、LSQ/recovery、security；BLOCKED | MP preview-only/early-consume 各自签收、EF-05 intermediate recovery、真实 LSU/LSQ 校验与 transitive dependency tracker；不能只靠地址/值 confidence | prediction ID+generation、predicted value/address/source version、dependency epoch、消费者集合、checkpoint、validation state；predict→隔离 transitive consumer→actual load/address/order/permission/freshness verify→confirm 或全依赖 replay/squash→drain；validation 前不 retire、无 store visibility/CSR/flags effect；依赖覆盖溢出拒绝预测 | 交 V-018/V-029/V-030/V-065 验证/恢复表；Pass 为偶然值相同但地址/权限/ordering 错、overlapping store、stale preview、跨 hart invalidation、nested dependent/branch、tag wrap 与 exhausted tracker 全恢复；漏一个 dependent/提前 confirm/只比 value 的 mutant 实际失败；Fail 回真实 load 等待，不以 special-case 结果掩盖 replay |
+
+private Tile-L0 仍可能通过 cache/TLB/PTW/interconnect/资源竞争泄漏；上述后置两项必须独立 threat model 与安全模式关闭/partition/flush 门禁。preview baseline 为已检查权限的 TLB-hit-only/no A/D update，不因“两个分支都算”允许 forbidden translation/device probe。源文的 0–3%、4.8%/71% 和 speculative IPC 目标是外部/未复现研究陈述，不能相加、不能冒充本项目收益。
+
+### 8.3 细粒度 progress 与 handoff
+
+| 微门 | 初始状态 | Owner | 输出 / 下游 | Blocker / 下一签收 |
+|---|---|---|---|---|
+| VX-04.a PMU 实接线/采样可用性 | PROPOSED | PMU | trace-accounted signals / broker | schema 存在不等于接线；absent L2 不决策 |
+| VX-04.b manual budgets/需求服务合同 | BLOCKED | broker/MEF | 合法 mode 表 / V-063、V-064 | 真 lane axis、helper 准入缺失 |
+| VX-04.c hysteresis/dwell/cooldown | BLOCKED | personality | finite policy/phase replay / V-071 | a/b 尚未闭合 |
+| VX-04.d 全义务 drain/abort | BLOCKED | recovery/lane broker | ack+credit 表 / V-034、V-035、V-060 | shadow/token/result 引用未纳入 |
+| VX-04.e same-resource/no-go 归因 | BLOCKED | I-079/V-076 实验 | per-hart+p99+switch costs / 集成 | 所有启用门先正确性签收 |
+| VX-04.dual.a identity/budget/threat model | BLOCKED | BPU/recovery/security | 两路 executable contract / 验证 | spare fetch、精确恢复/隔离未闭合 |
+| VX-04.dual.b kill/boundary/negative coverage | BLOCKED | V-014/V-029 owner | nested/fault/IRQ 负例 / 实验 | dual.a 未签收 |
+| VX-04.value.a transitive validation tracker | BLOCKED | LSQ/recovery/security | bounded dependency/checkpoint 表 / MP owner | early-consume 与真实校验未闭合 |
+| VX-04.value.b replay/side effects/negative coverage | BLOCKED | V-018/V-030 owner | 完整 dependent replay / 实验 | value.a 未签收 |
+
+各微门单独登记 input/output hash、owner、真实 case/seed/正反例激活和首失败、架构/验证签字、阻断请求与复审日期；未运行不得填写 PASS。本节研究完成文档纳入不等于微门 Evidence complete，更不反写 delivered ledger。2026-10-02：仅追加设计/阶段合同，无 RTL/原文/历史成绩更改，无本轮性能或运行验证声明。

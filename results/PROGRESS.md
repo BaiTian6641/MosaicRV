@@ -3168,3 +3168,52 @@ same species as the diagnostic that named a plausible line, which this project h
 
 **Still not swept**: p2 and p3 (the user asked for a suspension before those runs, so they are recorded as
 not-yet-run rather than implied green — p2 and p3 are where the vector cases live and they are the slowest).
+
+---
+
+## 2026-10-02 — SRC-04 design integration: two-speed execution and secondary memory preparation
+
+**Scope: documentation only.** `New document(2).txt` is retained byte-for-byte (2232 lines,
+52635 bytes, SHA-256 `0139c8978b0482817171a140be4605f27dfdd010e3c0357eef75fd70cb1f83ea`).
+The new source's full contiguous disposition is in `docs/source-inventory.md` §8.
+The implementation ledger remains 85 delivered packages / 85 evidence entries; this revision
+does not add delivered tasks, alter capability advertisements, close findings, or run CPU cases.
+
+`docs/architecture-review.md` §15 defines L-path/T-path, fetch-side MPP, IMC, occurrence-bound
+MemoryPreviewToken, real AGU/LSQ permission/order/forwarding/freshness validation, L1-backed Tile-L0,
+PRF-backed register locality, multi-macro ExecutionPacket fusion, noncommitting shadow/DVR,
+exact vector representations and a bounded bottleneck controller. Existing stage guides carry
+18 named research subcards (MP-01..08, EF-01..06, VX-01..04), not new I/V/H package IDs;
+implementation/validation/platform/scalability/security/safety documents carry their integration gates.
+
+**Decisions:** preview-only and read-only TLB-hit probe first; no speculative PTW/A-D mutation,
+device access, predicted stores, architectural completion or early dependent execution.
+Hint overflow drops hints instead of stalling the real pipeline. Existing core ownership/QoS
+and response routing must be explicitly resolved before IMC producer integration; V-063's
+acceptance is not weakened. Real vector lanes and independent RVV reference remain gates for
+vector helper claims; present attribution/self-check evidence is not substituted for V-060.
+Register/fusion optimisations initially retain architectural intermediate values in durable backing.
+Ownership preparation and early consumption remain separate late gates.
+
+**Research evidence:** the author DVR paper supports its 2.4× harmonic-mean result only for its
+x86 Sniper 5-wide/350-ROB/24-MSHR selected-workload setup; 1139 bytes is incremental metadata
+over reused execution/register resources, not this project's total helper cost. Mini-MDP's
+48-entry/0.06% claim and other unlocated numeric citations are explicitly UNVERIFIED.
+Private Tile-L0 does not eliminate TLB/cache/MSHR/interconnect/DRAM or coherence side channels.
+All SRC-04 speedup ranges remain non-additive hypotheses, not measured MosaicRV results.
+
+**Next implementation handoff:** MP-01 intent/permission detection can be specified against
+current fetch and MMU contracts; MP-02 live memory traffic stays blocked until one core memory
+service/response-ownership model and original QoS progress evidence are closed. EF frontend/L/T
+work must respect the held insert and width-consumption gates. Feature-off builds remain valid;
+optional speculation is not silently made mandatory for p0 publication.
+
+**Observed documentation verification:** `make check-docs && python3 tools/check_coverage.py &&
+python3 tools/check_records.py` exited 0 after integration. Preserved 239 package definitions,
+642 acyclic dependency edges and 11 stage guides; 235 local links checked. Coverage/records
+still report 85 delivered packages and 102 registered cases; no cases executed in this revision.
+A throwaway documentation smoke verified the new source hash/2232 lines/52635 bytes,
+45 continuous source-disposition ranges, all 18 uniquely defined stage subcards and complete
+roadmap indexing. The three completed read inventories cover 113/113 Markdown implementation
+reports with no unread report; all 19 design documents, original research and status/progress
+documents were read. Exact results and scope are in `docs/verification.md` §7.1.

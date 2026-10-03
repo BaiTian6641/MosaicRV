@@ -480,3 +480,83 @@ SRC-01 的 XiangShan 寄存器／ROB／FU／operand／队列数量、示例 pipe
 | AR-027 | [RISC-V Server Platform v1.0](https://docs.riscv.org/reference/server-platform/v1.0/server_platform_requirements.html)，2026-09-29读取 | RVA23S64 server hart、Sv48/Sdtrig/Sdext/Zkr/Ssccfg/Ssstrict/Ssaia、SEE一致性、RoT/secure boot边界 | Server Platform 不是 RVA23 profile本身；RoT/TPM/UEFI是平台责任，不是core内部指令 |
 
 架构交接的最终判定：本文件给出可实施的保守起点、不可破坏的语义边界和每个激进目标的重启门槛；它没有把尚未实现的宽 fabric、distributed ROB、完整 RVV 或 core fusion 伪装为完成品，也没有将这些最终目标从项目中删去。
+
+## 15. 2026-10-02 修订：双速执行与第二内存准备流水线
+
+本节是 SRC-04（`New document(2).txt`，全文 1–2232 行）的设计裁决，优先于上文历史状态快照；不修改原始研究、既有任务验收或已交付账本。仓库已有 SV RTL、Verilator harness、双 cluster、cache/MMU、LLB、coalescer 与向量子系统；实际验收以 `config/status/implementation_status.json` 和对应 reports 为准。“仓库只有报告”是初次审查时的历史状态，不再描述当前仓库。**本节所有新机制仍是 [提案]，不是已集成实现。**
+
+### 15.1 决策与当前接入边界
+
+采用 **短依赖 L-path + 弹性 T-path + 非提交 shadow engine**。L-path 保留本地 IQ、ALU、真实 bypass 和 durable completion；依赖链不为平均利用率被强制迁往远端。T-path 承担可容忍传输延迟的独立标量、RVV/cohort 工作。两者共用每 hart rename/ROB/LSQ 的体系结构授权，不能各自退休。现有 local bypass/steering 是接入基础，不等于已有 criticality classifier、tile register cache 或完整双速路由。
+
+MPP 从已确认指令边界的 predecode 旁路产生 memory intent；IMC 只安排合法的提前搬运。MPP 不在 fetch/decode/rename 的 mandatory ready 链中：队列、token、带宽或预测置信度不足就丢弃 hint，普通 LSU 继续。shadow window 则执行未来地址依赖切片；它与 MPP 共用有界 memory ingress，但拥有独立 helper 身份与 scratch state。MPP 不需要先实现 shadow window，shadow window 也不创造更大的 architectural ROB。
+
+```mermaid
+flowchart TD
+  F[Fetch / instruction boundaries] --> D[Decode / Rename / per-hart ROB]
+  F --> P[MPP: intent / address / placement hint]
+  P --> M[IMC: permission / translation / bounded ingress]
+  D --> L[L-path: local IQ / ALU / bypass]
+  D --> T[T-path: elastic scalar / RVV / cohort]
+  D -. validated slice seeds .-> S[Shadow engine: no commit / no stores]
+  S --> M
+  M --> C[L1-backed Tile-L0 / shared cache hierarchy]
+  C -. candidate data, not completion .-> V[Real AGU / translation / LSQ / freshness validation]
+  L --> R[Durable completion / precise commit]
+  T --> V
+  V --> R
+```
+
+当前 core memory path 仍有 single-outstanding ownership/response-routing 边界；`mosaic_mem_qos` 单元存在不等于 core 已接入 age/criticality arbitration。V-063 不能被 preview 流量绕过或改成“unit PASS 就完成”。进入共享 IMC 前必须冻结唯一服务模型、demand/PTW/preview 响应归属和仲裁证明。V-060 需要真实 lane-count datapath、独立 RVV reference adapter；已有 lane attribution 和 self-check 程序不替代它们。已记录 retire lane-1、NARROW、EEW/SEW、HPM 发现按最新报告确认是否修复，不能凭本设计更新关闭。
+
+### 15.2 MPP/IMC：preview-only 是首个实现合同
+
+1. **检测与预测**：PC-indexed Memory Intent Cache 保存 instruction/code identity、load/store/width、last validated address、stride、confidence、reuse/placement class、dependence/fusion hint。首轮只做 last-address/stride；pointer-chain/region/affine predictor 后置。训练使用真实已验证访问且可回滚，或直接退休后更新；同 PC 多次动态出现不能共享一个未分代的预测地址游标。branch/address/dependence/locality confidence 是校准后的有界 selector 输入，不把相乘的分数当独立概率证明。
+2. **翻译与属性**：初版仅允许已有有效 translation 的只读 probe；TLB miss 丢弃，不启动 speculative PTW、不置 PTE A/D。无 VM 的物理模式同样检查 PMP/PMA。携带 hart、privilege/effective access privilege、地址空间/root/ASID 与 translation/protection generation；以后 H/VMID/two-stage 能力启用时必须扩展，不用 ASID 单独作全局身份。只允许已验证可读、cacheable、idempotent ordinary RAM；MMIO、AMO、LR/SC、CMO/特殊页与非幂等区排除。预测 store 初版只产生 placement/translation hint，不拿 predicted data 写 memory。
+3. **准入与合并**：按合法 PA line、属性、安全域与 transaction generation 检查 resident/MSHR；不能凭 VA、PC 或相同数值 ASID 合并。已在途 refill 可共享搬运，但每个 preview/demand waiter 单独取消、验证和回收。preview 不拥有 architectural LQ/SQ credit；独立容量和 response sink。限制 outstanding 数、bytes、每 hart quota、每周期端口与 cache pollution；保留 demand、PTW、completion/cancel 进展资源，预览永远不能成为需求路径必须等待的前提。
+4. **候选值消费**：real AGU 计算全部 EA，检查 width/byte mask、alignment、实际翻译与权限/PMA、最年轻更老 store 每 byte forwarding、memory order 和 L1 freshness。preview 命中不能绕过未知 store 或替代 forwarding。token 不是 completion；无 token、错误地址、过期数据、错误 tile 都回正常 LSU。地址仅预测但未被使用时不需要 squash；wrong-tile 只改合法读路径。已验证 demand 后发生的普通 ordering violation 仍按 LSQ replay 规则处理。
+5. **Tile-L0**：沿用 LLB 的 L1-backed 子副本模型，不另建 per-tile autonomous coherence。entry 带 PA line、sector/byte valid、L1 authority/incarnation、version、domain/generation；invalidation 与 demand hit 在共享授权点序列化。L1 eviction/refill 同 PA 也改变 incarnation；有限 version wrap 前必须 drain/invalidate，不能只比较版本相等。版本检查到消费/退休的竞态通过 invalidation/replay 或受保护窗口闭合，单次“version 相等”不是证明。
+
+`MemoryPreviewToken` 至少引用 `{hart, fetch_occurrence, code_generation, branch_age/path, token_slot/generation, context_generation}`，另存 predicted VA/PA/offset/width、target tile、confidence、transaction slot/generation、data location/version/valid mask 和 validated/dropped reason。PC 用于预测索引，不用于动态匹配。fetch→decode→rename 保留 occurrence 身份；token 在 rename 前没有 ROB identity，绑定后记录 MacroTag/AttemptTag，replay 不能接受旧 attempt 值。使用小 tag 强制覆盖 wrap、branch kill、slot reuse 与晚到 refill。
+
+生命周期：`DETECTED → ELIGIBLE → ADMITTED → IN_FLIGHT → CANDIDATE → VALIDATED → RELEASED`；任意未终结阶段可转 `DROPPED/KILLED`，已接受 transport 仍接收 response 清账。kill token 不取消共享 demand waiter；不可撤销 refill 可成为普通 cache warming，但不能重新绑定到下一代 token。FENCE.I 清 code/intent 身份，SFENCE.VMA/权限变化阻止旧 translation candidate；context switch、reset、lane reassignment 必须清域或 drain，不能只清 valid 然后复用 live ID。
+
+### 15.3 Criticality、数据放置与寄存器局部性
+
+2-bit criticality 是性能 hint，不是 age/permission/credit。先按 capability、generation、quota、真实 transport/result credit 筛选，再按 bounded age/progress，最后最小化 queue delay、operand hops、memory placement、WB pressure 和 critical-path remote penalty 的整数 cost。源值与 consumer 都 local 的关键链默认 local；mandatory remote FU 仍可走 T-path。保留固定、age-first、load-balance-only、locality-only、criticality+locality 对照；失准退化而不改变 trace。critical 优先不能永久饿死 bulk/其他 hart。
+
+tile register-value cache 是 PRF-backed 性能副本，key 为完整 PhysTag/class/allocation generation；tag+value remote transfer 不是 mapping 迁移。首版所有 architectural destination 仍 durable 写回 PRF 后才 ROB done/真实 ready；cache eviction 随时可回 PRF。若未来省 PRF write，必须另证唯一值 pin/refcount、replay/trap/debug materialization 和缓存满/kill 时的 backing 路径，不能把“暂时只有一个 consumer”视为永久死值。
+
+### 15.4 ExecutionPacket 与 fusion 的精确边界
+
+内部 packet 是可变 execution protocol，不是新增外部 ISA。pre-rename 只给 pattern hint；post-rename 验证真实 PhysTag dataflow、源寿命、年龄、合法 FU、独立异常与恢复边界。SHIFT_ADD、ALU-chain、address+load、load+ALU、ALU+store、load-modify-store 都保留成员 MacroTag、独立 ROB completion/PC/exception/counter/debug 边界和各自 LQ/SQ identity。第一阶段只减少 operand routing，保留全部 architectural intermediate PRF 值；后续省写必须证明未来 consumer、producer 已退休而 consumer fault、interrupt/single-step 等情况下仍可恢复该值。
+
+load-modify-store 不是 AMO：load 与 store 保持原程序的非原子行为，store 仅进入本 hart SQ，等自身正常 retirement/order 授权才可写。禁止跨 branch/CSR/fence/MMIO/atomic/权限边界盲目 fusion；非相邻 fusion 额外保留中间指令年龄与恢复信息。predictor 的 fusion signature 只提示，不证明 alias/依赖。资源不足 unfuse 回独立执行；不能在已发 packet 后漏掉某成员 terminal 事件。
+
+### 15.5 Shadow/window、表示压缩与控制器
+
+shadow 地址切片需要有界 extraction/template、seed snapshot/source lifetime、helper-local register map、poison/valid bits、loop-bound/stride confidence、lane mask、branch divergence 和 watchdog。仅 whitelist 整数地址运算与合法 ordinary loads；未知源、异常、权限失败、非幂等访问和队列溢出终止相应 helper，不产生 architectural trap/flags/store/commit。helper 值不更新主 PRF/RAT/CSR，main 不等待 helper。128–512 shadow µOP、1–4 KiB L0、16–32 B sectors、160 ROB、8 tiles 等均是 sweep 候选，不是当前配置或承诺。
+
+FULL_VECTOR/UNIFORM/AFFINE/SPARSE 是可选内部表示，必须保持 exact SEW 运算、overflow、mask/prestart/tail、old destination、vstart、EEW/EMUL、ordered reduction 与 FP flags。表示失效回 full representation；不能从数个采样 lane 推断全向量 uniform。lane grouping 只改物理吞吐，不改 VLEN。shadow/DVR 在向量规范与真实 lane/reference gate 后实现；未闭合门槛不得用 helper 加速掩盖现有 RVV 缺陷。
+
+bottleneck controller 以可复核 PMU/events 观察 frontend starvation、critical-load stalls、MSHR/IQ/WB 压力、remote bytes、vector utilization。采用窗口、阈值、hysteresis、minimum dwell、freeze/drain/install；默认关闭、可固定模式回放。controller 改 quota/personality，不发明新 ALU/AGU。MPP、runahead、demand 等功能不能被同一不可靠分类器共同取消全部服务。任意 value speculation、early-consume MemSpecEpoch 和 selective dual-path branch 是独立后期研究门，不进首轮 correctness baseline。
+
+### 15.6 分期、交接与证据门
+
+| 顺序 | 设计子卡与负责域 | 启动/放行条件 | 当前状态 |
+|---|---|---|---|
+| 0 | 当前 correctness/配置/reference/QoS owner | retire/known ISA findings有处置；S-1…S-4真实消费，V-060/V-063输入闭合；旧 I/V 验收不降低 | 各项以最新 ledger/report 为准 |
+| 1 | EF-01…EF-03，S1/S2 | 实测 local latency，criticality/locality 可关闭，trace等价与公平对照 | PROPOSED |
+| 2 | MP-01…MP-02，S3 | intent/translation-hit-only/有界 IMC；不阻塞主路径；唯一 response ownership | PROPOSED，core服务模型门 BLOCKED |
+| 3 | MP-03…MP-04，S3/S4 | occurrence token与L1-backed L0授权、kill/ABA/freshness/LSQ消费证据 | PROPOSED |
+| 4 | EF-04…EF-06 与 MP-05…MP-06，S1/S2/S3 | register副本与fusion成员独立退休、中间值保留；先hint再执行优化 | PROPOSED |
+| 5 | VX-01…VX-04，S4/S5 | 真实lanes/reference、shadow隔离、exact表示与控制器稳定性 | PROPOSED，lane/reference门 BLOCKED |
+| 6 | MP-07…MP-08，S3/S10 | store-ownership造成失效/带宽副作用另测；安全政策；early-consume完整dependent recovery | DEFERRED，禁止默认开启 |
+
+子卡定义/验收分别见 [S1](stage-1-scalar-control.md)、[S2](stage-2-execution-fabric.md)、[S3](stage-3-memory-system.md)、[S4](stage-4-vector-locality.md)、[S5](stage-5-multihart-aggregation.md)、[S10](stage-10-rva23-security.md)，集成顺序及负例见 [实施计划](implementation-plan.md) 与 [验证计划](validation-plan.md)。这 18 个研究子卡不新增 I/V/H 包、不自动改 239 包的完成数。领取时必须附 parent package、owned paths、contract version、passed predecessors、case IDs、feature-off trace、正负控制、artifact/hash 与状态；只有独立证据可将 PROPOSED 改为实现/验收。
+
+### 15.7 数值、安全与 Kunminghu 比较裁决
+
+SRC-04 全部百分比/倍数都是 [假设]，不相加、不作发布验收线。官方 Kunminghu V2 typical configuration 支持 decode/rename 6、ROB160、int PRF224、13-cycle mispredict penalty 等；不是本机某个 pinned V2R2 的实测。DVR 原论文是 x86 Sniper 模型：5-wide、ROB350、24 MSHR、有 L2/L3 与既有512-bit vector资源；2.4×是选定 graph/database/HPC 的 harmonic mean，1139 bytes 是 incremental metadata，不是 MosaicRV shadow engine 总面积。MPP收益需另测 relative-to-feature-off 和 relative-to-conventional-prefetcher，独立于 DVR。
+
+private Tile-L0 只能限制部分 data residency；fill、TLB/PTW、MSHR、replacement、coherence/interconnect/DRAM 仍可留下可观察痕迹。preview-only 不是“错误只有无害流量”；ownership preparation 可能失效其他核副本。安全基线允许完全关闭 MPP/helpers，并清理/分区预测状态；隔离推测直到 branch resolve 只能在全路径隔离证明后宣称。早期消费 predicted data 前须定义 poison propagation、dependent slice/branch/CSR/SQ/RVV recovery 和禁止不可逆效果；未证明时不启用。可追溯 primary 与未核实数字见 [引用账本](references.md) §5。

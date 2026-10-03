@@ -95,3 +95,25 @@
 ## 4. 新引用的维护动作
 
 新增引用时先读primary相关段落，记录author/title、URL、release/commit/document revision、检索日、支持的具体claim和限制；再为本页/所属账本加入唯一ID。移动网页须同时保留原URL与替代来源关系。更换ISA/tool/reference版本必须触发相应capability/ABI/negative-control回归，而不是只更新链接文字。source-inventory的原文hash禁止随审查意见改变；原文新增版本作为新来源留存。
+
+## 5. 2026-10-02 SRC-04 研究复核（独立补充账本）
+
+以下 `NR` 标签是本次研究补充索引，不重编号既有 62 个 AR/IR/VR/HR 来源。外部论文未在本仓库复现；检索/读取不等于 MosaicRV 实现或收益。
+
+| 标签 | Primary source / 实际读取范围 | 可支持的主张与限制 |
+|---|---|---|
+| NR-DVR | Ajeya Naithani, Jaime Roelandts, Sam Ainsworth, Timothy M. Jones, Lieven Eeckhout，*Decoupled Vector Runahead*，MICRO 2023，DOI `10.1145/3613424.3614255`；[作者公开 PDF](https://users.elis.ugent.be/~leeckhou/papers/MICRO2023.pdf)，读取 abstract、§1–6、§7–8 的提取内容，2026-10-02 | 独立 in-order speculative helper、loop discovery、nested invocation、SIMT divergence；main优先使用execution port。§4.4 的1139 bytes是额外控制结构，依赖既有 scalar/vector PRF/FU。§5基线是Sniper6/x86、5-wide、ROB350、24 L1D MSHR、512-bit vector、L2/L3，13个选定应用、代表性500M instruction ROI；§6.1的2.4×为harmonic mean，最大6.4×。不能外推RISC-V/FPGA面积、Fmax、普遍CPU speedup或Kunminghu胜率。 |
+| NR-KMH | [XiangShan 官方 Kunminghu V2 Typical Configurations](https://docs.xiangshan.cc/projects/user-guide/en/kunminghu-v2/typical-configuration/)，2026-10-02静态读取完整配置、latency与execution unit表 | decode/rename6、commit8、ROB160、IntPRF224、IntIQ24×4、13-cycle mispredict、3 LDU/2 STA/2 STD；L1I与L1D均64/128KB configurable。页面无本次固定source SHA，不与某个pinned V2R2构建混称。RAB256不是RAS，不把不同表项相减作为资源比较。实际比较仍按scalability §4锁配置/工作量/工具链。 |
+| NR-SRC04 | [用户研究原文](../New%20document%282%29.txt)，2232行、52635 bytes、SHA-256 `0139c8978b0482817171a140be4605f27dfdd010e3c0357eef75fd70cb1f83ea` | L/T、MPP/IMC/token、shadow、fusion、locality与controller的设计输入；聊天中的“Worked for”不是作者/发表时间。所有预测区间标假设；没有把原文无URL的论据补造为精确来源。 |
+
+### 5.1 仍未核实的来源与数字
+
+- **Mini-MDP 的“2026、48 entries、0.06% IPC”**：对精确名称+数字与名称+memory dependence predictor两种搜索均未找到可读的一手论文。保持 `UNVERIFIED`；不能据此冻结predictor容量或声称其性能/面积。Store Sets/小MDP的思路可保留，具体实现需自己的依赖检测与replay证明。
+- **load-value prediction 的“平均4.8%、最大71%”**、**2022 multipath 的“2.87%”**、历史 **12.7% SPECint95**：本次未取得可关联的完整primary依据，不作为设计预算。精确multipath年份+数字搜索只定位到不同年代的研究/无关结果；没有将这些结果替换为原文声称的研究。
+- **effective-address prediction / Early Address Prediction**：搜索定位 [2021 DOI 10.1145/3458883](https://dl.acm.org/doi/fullHtml/10.1145/3458883) 和 [1995 fast address calculation](https://www.computer.org/csdl/proceedings-article/isca/1995/00524576/12OmNC4wtJW)；本次仅搜索摘要，未据此核实原文列出的全部PC/context/dependence predictor或数值，不列为已读primary证据。
+- **“截至2026年9月XiangShan改进了具体模块”**：需要repo commit及对应变更逐条关联，本次没有完成，不能作为本项目的竞争性能事实。fusion/move elimination/ROB compression/fetch32B等仍须使用匹配revision的设计/源码，不从typical configuration表未列出的项目推断。
+- **Spatz/local scratchpad、MLP/ROB decoupling**：保留历史报告已列的研究方向；SRC-04未带准确paper/version，本次不增加新的利用率、storage或speedup事实。
+
+### 5.2 对性能目标的记录方法
+
+原文 general scalar `1.05–1.15×`、irregular-memory `1.15–1.5×`、mixed `1.2–1.6×`，MPP增量`5–12%/10–30%`与逐项百分比全部是待验证假设；不相加、不将“可信目标”改写为预测的 measured outcome。实验必须报告相同baseline、ISA/输入、资源与prefetcher设置、useful work、周期、memory traffic/pollution、helper占用和公平性；只有真实physical flow才能补actual frequency/area/energy。没有合格对照时不声明胜过Kunminghu。

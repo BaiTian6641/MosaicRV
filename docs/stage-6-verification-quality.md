@@ -830,3 +830,36 @@ flowchart TD
 |---|---|---|---|---|
 | 2026-09-29 | 初始团队指南由完整架构/验证/平台计划生成 | 本文件、source-inventory、references | 规划集成 | 各团队冻结输入并更新上表 |
 | 2026-09-29 | 面向较小模型/新工程师补充自然语言执行说明 | 本文件任务卡的执行者目标/须知/建议顺序/停止条件 | 规划集成 | 实施团队按卡执行并回填证据 |
+
+## 8. 2026-10-02 追加：研究子卡的验证交接与当前状态
+
+本节是对历史 `Not started` 表和早期环境描述的**追加解释**；当前交付事实读 [`implementation_status.json`](../config/status/implementation_status.json)、最新 [`PROGRESS.md`](../results/PROGRESS.md) 与相应 report，不由旧表或 `REVISION.md` 重建 snapshot 数量。MPP/IMC、L/T、criticality/locality、register cache、shadow/runahead、fusion、压缩 vector 表示、bottleneck controller 全部为新研究，初始 PROPOSED/BLOCKED，无新增 DUT PASS。原任务卡/依赖/239 I/V/H 总量不变；研究子卡定义在 Stage 1–5 的追加 §8，路线和完整矩阵分别见 [实施计划 §13](implementation-plan.md)、[验证计划 §10](validation-plan.md)。
+
+### 8.1 分工和逐步签收
+
+| 交接纵切 | 原 owner / 既有验证卡 | 必须交付的最小证据 | 初始门禁 |
+|---|---|---|---|
+| 现有缺陷与可伸缩宽度 | scalar/rename/retire + V-013/V-014/V-024/V-027/V-031；geometry/配置 owner | held lane-1 retirement 失败可重放、配置每个 width 被实际消费而非仅 schema 声明、decoder/packet/codec 宽度同源、generation/age wrap 界 | BLOCKED；不因既有单元交付否定已知集成缺陷 |
+| RVV 独立 reference | adapter owner + V-002/V-004/V-008/V-052–V-060 | 真正接入支持本次 RVV/ABI/VLEN 的外部 reference，真实 assembler 编码；进度中 NARROW、EEW/SEW、vtype 修复按最新报告判定，旧 oracle 同错不算正确 | BLOCKED；DUT 产 golden 禁止 |
+| 实际 QoS/PMU | memory/PMU owner + V-032/V-033/V-063/V-074 | 唯一 ownership mux 与 request class/age/criticality/response routing/PTW priority 合同；饱和时需求服务下界；trace-accounting 和事件 CSR 映射 | BLOCKED；unit memory scheduler/可读 CSR 不代替 core 接线 |
+| MP-01..MP-08 | memory owner + V-016/V-018/V-019/V-029–V-035/V-061–V-063 | 先 preview-only、再 token/L0、fusion hints/执行、后 ownership、最后 early-consume；每步权限/context/line-version/tag/kill/MSHR/store 负例 | MP-01 PROPOSED，其余按 Stage 3 BLOCKED；未完成模式不得启用 |
+| EF-01..EF-06 | 前端+fabric+PRF/rename owner + V-016/V-024–V-035/V-076 | 配置驱动前端、L/T 路径等价，criticality 无 starvation，locality 错误可回退，RC source-lifetime/PRF durable，fusion 每 member partial trap/retire | PROPOSED/BLOCKED；以 Stage 1/2 每卡为准 |
+| VX-01..VX-04 | vector+fabric policy owner + V-019/V-029/V-032–V-035/V-052–V-063/V-076 | helper 无 architectural effects/fault suppression 不掩盖 main fault；representation materialization/vstart/FOF；controller events/hysteresis/drain | PROPOSED/BLOCKED；以 Stage 4/5 每卡为准 |
+
+以上 owner 是责任角色，尚无个人研究签收；每项尚无研究实现验收 artifact。研究状态和原表 `Not started / Inputs locked / In progress / Blocked / Evidence complete / Accepted` 分开：设计 PROPOSED 不等于原卡 Evidence complete，原卡 delivered 也不自动关闭子卡的新要求。
+
+执行每个纵切按固定次序：锁规范/config/source/tool/reference 输入→冻结 positive/negative manifest 与 bins→接入真实 DUT 观测→uninjected 正例→真实 RTL 注入且证明路径激活/二进制不同→首差异最小化→reset replay，支持 snapshot 时再 snapshot replay→计数闭合→设计/验证双 owner 签收。缺失 ABI、实际端口、物理工具或不可达路径须明示 BLOCKED/UNSUPPORTED，不用 fake/mock echo、compile-error negative、删 case/缩 denominator 来放行。
+
+### 8.2 观测与恢复扩展
+
+复用 V-008 canonical architectural events；另加有版本的内部 debug trace：MPP drop/admit、token/waiter slot+generation、context/permission/line version、helper domain/poison/kill、RC hit/eviction/source pin、fusion member/split、representation/materialize、controller sample/decision/drain。每条内部记录链接 hart、architectural identity 和 mode；不能要求 reference 比较纯微架构 tag，也不能只在 cycle 末拍照代替逐退休槽比较。
+
+V-038/039 的 replay 必须保存所有新增 predictor/token/L0/RC/shadow/packet/representation/controller 状态及 outstanding memory、外部输入、PRNG 和 cursor；没有 savable DUT 的现状只可称 reset replay，snapshot 路径仍 BLOCKED。对权限/context/fence/reset/owner change、有限 generation/version wrap、cancel+refill+reallocate 同周期、MSHR starvation、speculative store visibility、fusion partial traps、helper faults 分别建立最小失败。早消费后置模式还需完整 descendant epoch 与 checkpoint 恢复；确认前不可退休/外显，不能只 flush 产生预测的 load。
+
+### 8.3 发布与物理证据边界
+
+第2节的“物理 timing/板级输出”以及原 V-079 卡的 V-077 前提按**实际载体 claim**解释：本阶段负责证据闭合与交接，不凭 Verilator 制造 STA/板测或外部论文复现。RTL-only claim 不新增 FPGA 前提，FPGA 收 V-077/对应 H flow，ASIC 收自己 PDK/PVT/signoff；optional DCLS 加 V-081–V-084/H-048/H-049，RVA23 mandatory 仍逐项关闭，不能靠关闭研究机制跳过已经广告的功能。
+
+所有性能结论须先 architecture 等价，再匹配资源做单开/组合/移除 ablation；报告零/负收益、额外 predictor/L0/RC/helper 存储与端口。频率、面积和功耗列无真实 H artifact 则标不可测，不能用逻辑 0/1 cycle、toggle 或文献数字补齐。private L0 不消除 cache/PTW/interconnect 侧信道；严格模式默认关闭未经证明的 MPP/helper/early-consume，Zkt/Zvkt DIEL 与 side-channel threat model 另验。
+
+追加记录（2026-10-02）：仅完成上述研究验证合同的文档整合；无研究实现证据，无本轮构建/测试/检查器/formatter 执行。后续接受变化必须追加日期、原 I/V/H、子卡、artifact hash、首差异/负控制和双 owner，不覆写历史 PASS/失败记录。

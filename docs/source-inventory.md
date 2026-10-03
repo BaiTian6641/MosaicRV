@@ -167,3 +167,63 @@ XiangShan queue/PRF/FU/ROB具体数值与版本绑定不足；PULP-C910/BOOM/RSD
 ## 7. 后续新增需求：RVA23 与商业安全包
 
 用户随后明确要求 RV64、RVA23 profile、RVV 与社区广泛接受的安全功能。该需求不改变原始报告内容：最终商业目标是 RVA23S64 Core，RVV 为 mandatory；pointer masking、CFI、vector crypto、Sv48/Zkr/Sdtrig/Ssstrict/Ssaia 等进入可选/分层的 RVA23 Secure 包；RoT/TPM/secure boot/IOPMP 属平台责任而非 core ISA。实施任务 I-092–I-098、验证任务 V-085–V-090、硬件任务 H-050/H-051 逐项覆盖。
+
+## 8. 2026-10-02 新研究输入：SRC-04 与全套文档复读
+
+本节扩大本次输入范围，前文“三份报告/102标题”仅指初始冻结库存，不把新增研究混入旧102个标题计数。第四来源：[New document(2).txt](../New%20document%282%29.txt)，2232行、52635 bytes，SHA-256 `0139c8978b0482817171a140be4605f27dfdd010e3c0357eef75fd70cb1f83ea`。原文只读，不改错字、聊天痕迹或数字。
+
+SRC-04全文已在用户提供的1–2232行输入中读取，分为第一部分双速/fabric/helpers（1–907）与第二部分30个MPP议题（908–2232）。以下连续范围覆盖全文，包含图、公式、表和结论；没有只按标题摘要采纳。细节裁决见 [architecture-review.md](architecture-review.md) §15，各阶段子卡与主计划的链接共同承担追踪。
+
+| 新源范围 | 议题 | 裁决/落点 |
+|---|---|---|
+| SRC04:1-87 | 两速L/T与关键标量链 | 接受为研究；本地IQ/bypass，延迟需实测；S1/S2 EF子卡 |
+| SRC04:88-149 | GPU资源作为vector runahead | 接受独立非提交helper；DVR数字限x86模型和选定workload；S4/S5 VX子卡 |
+| SRC04:150-203 | shadow memory window | 保留地址切片、独立身份/scratch/poison、无store/commit；128–512是sweep |
+| SRC04:204-275 | criticality控制topology | hint不越age/fairness/credit；S2 |
+| SRC04:276-332 | data-centric placement | 先合法候选再有界cost；错tile正常fallback；S2/S3 |
+| SRC04:333-386 | tile register cache | 完整PhysTag/generation、PRF backing与durable completion；S2 |
+| SRC04:387-458 | dynamic dataflow fusion | 多macro独立身份；不消失architectural intermediate；S1/S2 |
+| SRC04:459-518 | address/value speculation | preview先于early consume；arbitrary value speculation后置；S3/S10 |
+| SRC04:519-574 | uniform/affine/sparse scalarization | exact RVV表示与fallback；S4 |
+| SRC04:575-629 | selective dual path | 低优先级独立研究，无现代数字已核实声明；S5 |
+| SRC04:630-669 | frontend供给 | 配置宽度/cache/predictor研究，不默认改8-wide；S1/scalability |
+| SRC04:670-728 | idle lane personalities | 固定FU capability；helper不是新hart；S4/S5 |
+| SRC04:729-779 | bottleneck controller | PMU真实信号、hysteresis/dwell/drain、可关闭；S5 |
+| SRC04:780-866 | 优先级与性能区间 | 全是假设且不可相加；先correctness，再等资源ablation |
+| SRC04:867-919 | 整体架构与第二部分动机 | architectural ROB/LSQ仍唯一授权；MPP从fetch旁路，非mandatory stage |
+| SRC04:920-978 | MPP与不阻塞主流水线 | 接受preview-only首版；满则drop；S3 MP子卡 |
+| SRC04:979-1029 | lightweight predecode与EA | instruction boundary/code identity验证后检测；PC不是动态身份 |
+| SRC04:1030-1078 | specialist predictors | 首版last/stride；compressed affine hint保持mask；复杂预测后置 |
+| SRC04:1079-1127 | Memory Intent Cache | 保存context/code generation、validated training与hint；S3 |
+| SRC04:1128-1169 | IMC | PA/属性兼容合并、transaction代、bounded budgets、demand/PTW保留 |
+| SRC04:1170-1217 | Tile-L0 | L1-backed LLB，不能宣称无coherence义务；容量/sector/1-cycle是候选 |
+| SRC04:1218-1281 | Preview Token | occurrence+context+slot generation；real AGU/LSQ/freshness后消费 |
+| SRC04:1282-1315 | 提前resource reservation | 仅placement hint；不锁死未来WB/port，也不阻塞demand |
+| SRC04:1316-1358 | 内部compound memory operation | 内部packet不改RISC-V ISA；S1/S2 |
+| SRC04:1359-1395 | 多architectural identities | 独立ROB/PC/trap/debug/counters；不得一packet一retirement |
+| SRC04:1396-1488 | load-ALU/ALU-store/AGU-load/RMW | 独立macro和SQ授权；中间寄存器保留或证明materialization |
+| SRC04:1489-1537 | 非atomic semantics | load-modify-store不是AMO；MMIO/atomic排除，store不提前可见 |
+| SRC04:1538-1564 | dependence prediction | 真实LSQ验证不消失；Mini-MDP数字UNVERIFIED |
+| SRC04:1565-1631 | preview-only / early consume | 分为不同release gates；MemSpecEpoch dependent recovery后置 |
+| SRC04:1632-1663 | load/store非对称 | load只读prepare；store预测不写数据，不提前分配architectural SQ |
+| SRC04:1664-1697 | ownership preparation | 后置；会影响coherence/带宽/侧信道，不称无害流量 |
+| SRC04:1698-1718 | confidence/locality placement | STREAM/shared/reuse策略可关闭，错placement不squash |
+| SRC04:1719-1757 | line version | L1 authority/incarnation+version；eviction/refill/ABA/hit-invalidate race |
+| SRC04:1758-1790 | branch confidence | selector校准，不假定四种confidence统计独立 |
+| SRC04:1791-1827 | confidence层次 | budgets决定是否fill L0/L1/L2；当前无L2不伪造fallback |
+| SRC04:1828-1860 | wrong tile | 合法L1或受授权remote读取；placement不作correctness identity |
+| SRC04:1861-1893 | predecode并行MPP | intent与token关联保持动态occurrence；不得反压主frontend |
+| SRC04:1894-1947 | 两pass fusion | frontend hint，post-rename验证；S1/S2 |
+| SRC04:1948-1978 | 非相邻fusion | 更严格年龄/恢复/未来consumer证明，先保留中间值 |
+| SRC04:1979-2013 | predictor协同fusion | hint不证明same-address/单consumer；rename/AGU实际验证 |
+| SRC04:2014-2045 | ExecutionPacket内部协议 | bounded展开/attempt与多成员completion，不新增外部动态ISA |
+| SRC04:2046-2088 | MPP性能机会 | 仅实验假设；预取准确率/coverage/timeliness/污染共同报告 |
+| SRC04:2089-2138 | Kunminghu差异 | 不能说现有预取器都只从execute开始；必须对照匹配版本/配置 |
+| SRC04:2139-2172 | speculative security | private L0不消除TLB/MSHR/DRAM等痕迹；disable/隔离门；S10 |
+| SRC04:2173-2232 | 推荐结构与progressive实施 | 主LSU/LSQ验证唯一授权；MP/EF/VX子卡→实施/验证/平台gate |
+
+### 8.1 当前文档与实现状态的读取边界
+
+本轮按子系统复读19份 `docs/` 设计/实施/验证/平台/11阶段文档，以及 README、三份原始报告、SRC-04、implementation ledger、REVISION、PROGRESS与实现报告。主集成负责架构/库存/引用/scalability/verification，memory负责S3/S10和memory报告，fabric负责S1/S2/S4/S5和fabric/vector报告，计划集成负责其余阶段/主计划及验证/进度报告；各自完整范围由本轮交接回传确认。`results/unit/**/*.txt` 等程序event/signature转储是验证产物，不是设计文档，不以逐字阅读全部重复转储冒充语义验证。
+
+状态优先级：机器可检查的delivered ledger及其case/report > 最新逐项progress/report > REVISION快照 > README/初次规划叙述。文档更新不关闭已知finding、不新增advertised ISA、不改变旧I/V/H的完成条件。新增18个MP/EF/VX研究子卡保持PROPOSED/BLOCKED/DEFERRED，原239个工作包计数不变；future delivery需要独立registered case和证据，而不是本节覆盖表。

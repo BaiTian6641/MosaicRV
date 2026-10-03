@@ -314,3 +314,34 @@ flowchart TD
 |---|---|---|---|---|
 | 2026-09-29 | 用户新增optional lockstep需求；查阅VeeR EL2 DCLS、Antmicro、TI functional-safety一手资料 | architecture-review §11.1、I-087–I-091、V-081–V-084、H-048/H-049、AR-019–AR-021/HR-013/HR-014 | 规划集成 | 冻结故障模型与profile |
 | 2026-09-29 | 补充自然语言执行说明，适配较小模型/新工程师 | 本文件任务卡新增执行者目标、须知、顺序、停止条件和交付说明 | 规划集成 | 实施团队按卡执行并回填证据 |
+
+## 8. 2026-10-02 追加：推测研究与 DCLS 的故障封闭边界
+
+本节是设计追加，不声称已实现Safety处理器、故障覆盖或认证。当前accepted事实以 [`implementation_status.json`](../config/status/implementation_status.json)、最新 [`PROGRESS.md`](../results/PROGRESS.md)/reports为准，历史团队表/`REVISION.md`不是当前ledger。MP/EF/VX子卡仍PROPOSED/BLOCKED，不增加原239 I/V/H；DCLS仍optional、一个main/shadow pair只算一个logical hart，检测不等于纠错/TMR。研究路线见 [实施计划 §13](implementation-plan.md)、验证矩阵见 [验证计划 §10](validation-plan.md)。
+
+### 8.1 区分两种 shadow 与模式许可
+
+VX-01的 **shadow window/runahead helper** 是不提交的性能推测域；I-088的 **DCLS shadow replica** 是独立冗余执行同一architectural输入的检查副本，两者绝不能混名/共用一个执行结果当作冗余证明。未闭合fault model/恢复/模式配额前，DCLS默认固定资源、关闭MPP/helper/earlyconsume/arbitrary-value/dualpath；L/T/criticality/RC/fusion/表示压缩/controller逐模式独立验收后才可允许。strict-security与DCLS模式都不能被controller自动越权重开。
+
+### 8.2 架构上有后果的状态必须冗余或比较保护
+
+owner为I-087–I-090/V-081–V-084的Safety+fabric+memory/PRF负责人；个人研究尚无签收。不能以“预测不提交所以不重要”豁免能改变后续retire/store/exception/服务进展的状态。以下每项先决定独立复制并延迟对齐，或采用有故障覆盖的比较/保护后才允许影响architectural state；共享单份状态必须登记common-mode残余风险，不能由两副本输出相同推出安全。
+
+| 新研究 state / consequential decision | 独立/比较合同及实际观察点 | 故障注入与fail-closed要求 |
+|---|---|---|
+| MPP/IMC/token/context/permission/line-version | preview admission及真实AGU/LSQ消费校验；hart/ASID/VMID/root/privilege/PMP/PMA/generation/owner/data来源绑定；返回输入同步只记录一次合法external transaction，不让checker以main算出的许可直接喂shadow | 翻转地址/权限/context/token-gen/版本、晚到复活、waiter错路由；非法数据不得被两个副本共同接受，confirmed load/event不一致先阻断 |
+| L/T/criticality/locality/RC | route/grant成对公平，RC源tag+gen/value/source-pin/durable可比较；资源决策可不同但architectural事件必须对齐且shadow有有界服务，选定比较策略明确 | oldRC值、错误owner/kill、earlywake、低criticality饥饿；异常或延迟上界触发fault-controller，不允许无限等待“迟早一致” |
+| Fusion/member/representation | 每member原PC/ROB/destination/fflags/trap/retire和intermediate可观测值；vectorvl/vtype/vstart/mask/partialprogress/materialization独立保护，比较合法ISA结果集合 | 丢member、错序、counter漏增、中间值未恢复、uniform/affinemetadata错误、partialtrap错；拒绝把多个退休边界一并发布 |
+| Helpers/shadow window | helper不能架构写/CSR/store/MMIO或trap，poison/lease/MSHR/drop/kill及main资源服务保护；helper fault不压掉main真实fault | helper写memory/跨domainfill/poison地址/credit泄漏；即便尚无retire差异也检查外部事务与服务上界；无法封闭则禁用该helper模式 |
+| Bottleneck controller/config/owner-generation | 真实PMU输入、sampling/residence/hysteresis、许可mode与原STOP_ADMIT/DRAIN/ACK/PUBLISHFSM受保护；DCLS成对grant/stop/drain ack | 单副本计数/决策bit翻转、绕过strictmode、未drain换owner、取消一副本而保另一；停止新工作、保留诊断，不继续发布副作用 |
+| Late ownership/earlyconsume | coherenceownership请求作为额外外部可见事务纳入故障模型；predicteddata不得写共享状态；descendantepoch/checkpoint/validate独立或受覆盖保护 | speculative store、错误预测仍confirm、dependent slice漏kill；无完整证明不允许DCLS下该mode，也不能以事后replay纠正已外显错误 |
+
+比较必须在irreversible store/MMIO/CSR/interrupt acknowledgement和architectural retire授权**之前**达到所选合同的匹配；外部coherence/cache/预取流量虽然非retire也可能有物理/安全后果，明确哪些先比较、哪些由权限/ECC/独立监控保护、哪些被禁止。helperfault suppression只是丢性能请求，不是屏蔽Safetyerror。checker、输入同步/延迟buffer、授权gate、clock/reset/bus/sharedRAM/cache/PMU均属故障域；DCLS不能覆盖未知共享common-mode问题。
+
+### 8.3 对齐、恢复、物理证明与接受
+
+V-081–V-083逐模式冻结delay D、最大shadow服务/compare窗口、backpressure与resource公平假设，正常trace和real sitefault分开。inject地址/context/version/RCvalue/fusionmember/vectorprogress/controllerdecision/credit/kill/comparegate/shareddomain错误，必须证明命中活跃路径、namedfirstfailure、检测时限和无earlyexternal effect；DCLS本身mismatch转fault-controller安全状态，不自动把main值当正确继续，也不冒TMR恢复。reset/recover只按显式系统合同，从已知安全候选/输入重新开始，保留firstdifference。
+
+物理DCLS另需V-084/H-048/H-049，同image/netlist/candidate/mode/corner验证两个副本及checker实际存在、未综合合并、floorplan/clock/power/shareddomain保护、routedtiming与test/DFT覆盖；simulation逻辑latency不是physicaltiming。privateL0不消除cache/PTW/interconnect侧信道，DIEL不等于fault或侧信道免疫，安全/ASILSIL结论仍需独立正式评估。
+
+初始新增推测模式均BLOCKED（无DCLS研究fault/physical证据），不会阻断未广告Safety的normalp0。Accept需要原I-091所声明profile和本节每启用研究mode的normal/fault/恢复/物理适用证据双owner签收；未验模式显式关闭/NOT_CLAIMED。本次仅文档整合，未执行faultcampaign、构建、测试、检查器或formatter；原DCLS检测-only、common-mode、cohort/p3/三板/ASIC独立claim边界不变。

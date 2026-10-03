@@ -146,3 +146,45 @@ wired MSHR; and there is **no L2, no L3, no SMT, one outstanding memory transact
 non-blocking I-cache** — the four things Kunminghu's numbers rest on. Any comparison published
 before those exist would be a comparison of specifications, and this project's whole method is that
 a claim without a command behind it is not a claim.
+
+## 7. 2026-10-02 design integration: two-speed and preview geometry
+
+The historical “frozen and not edited here” statement describes the original scalability addition.
+The user has now requested integration of SRC-04 into the existing design documents; those documents
+retain their historical contracts and append dated amendments. Source research bytes remain unchanged.
+The new authoritative architecture is [architecture-review.md](architecture-review.md) §15; stage
+cards and implementation/validation plans distinguish proposals from accepted implementation.
+
+L-path/T-path are fixed implemented paths selected dynamically, not runtime synthesis of shorter
+pipelines. A local bypass is not evidence of zero-cycle execution. MPP/IMC are optional parallel
+preparation paths; disabled/full/low-confidence mode must preserve the normal architectural stream.
+Adding MPP cannot repair the held second-insert retirement defect or manufacture real parallel vector
+lanes from the existing lane attribution broker.
+
+| Proposed configuration axis | Required constraint/negative boundary | Evidence before claiming consumed |
+|---|---|---|
+| L-path local IQ/ALU/result capacity, T-path tile eligibility | physical FU capability and result credit; no zero-capacity mandatory execution class | same program fixed/local/remote, dependent-chain latency and age fairness |
+| criticality width/weights and register-cache entries/ways | full PhysTag generation; finite age override; cache miss uses PRF | misclassification, eviction, reuse and late-result controls |
+| intent table/predictor entries, confidence, stride/address widths | alias/context/code identity; validated training; no unsupported address transform | conflicting-PC/loop occurrence traces, feature-off equivalence |
+| preview queue/token capacity and identity width | zero means disabled; wrap requires drain/tombstone proof; main not backpressured | tiny-token wrap, full queue, kill/refill and independent demand waiter |
+| speculative outstanding/bytes/port budget and demand/PTW reserves | enforce finite transport and response credits; accepted responses always drain | demand flood, preview flood, blocked memory, reset/cancel accounting |
+| L0 bytes/sector/ways/version width | compatible L1 line/sector mask; incarnation and finite-version reuse | invalidation/eviction/refill race, all sector boundaries, generation wrap |
+| shadow window/template/seed/lane/reconvergence limits | bounded noncommitting scratch; demand resources cannot be exhausted | poison source, divergence overflow, permission failure, helper preemption |
+| fusion member/operand/result limits | independent macro identities and materialisable architectural intermediates | member fault/debug/interrupt, future consumer, partial packet recovery |
+| controller window/threshold/hysteresis/minimum dwell | config policies only use real PMU events and frozen capability masks | stable mode, oscillating phase, drain blocked, fixed-policy replay |
+
+These are proposed schema inputs, **not keys already consumed by RTL**. Implementers must bind exact
+schema paths, generated declarations, consumer instances and positive/negative configuration cases
+before changing a row to config-driven. Do not silently substitute a literal when a feature is enabled.
+Existing S-1…S-7 and V-060/V-063 gates retain their requirements; optional research must not block a
+feature-off p0 build. Frontend32B/6-wide, ROB160/shadow128–512, L0 1–4KiB and eight tiles are research
+sweep candidates, never defaults inferred from SRC-04.
+
+Comparison supplements §4: use a pinned Kunminghu configuration, conventional-prefetcher baseline,
+feature-off MosaicRV, and one-at-a-time L/T, criticality, MPP, L0, fusion and DVR ablations. Record
+matched resources separately from added helper/storage resources; normalised metrics do not remove
+cache/latency differences. Official typical configuration identifies **RAB256**, not a RAS capacity;
+both L1I/L1D can be64/128KB. Current uncharacterised pipeline depth/latency guesses in the old table
+are not measurements. Report instruction IPC and useful vector/memory work separately, plus traffic,
+prefetch timeliness/pollution, tail stalls and fairness. Frequency/area/energy remain unmeasured until
+the physical platform track produces them; SRC-04 percentages are hypotheses, not acceptance scores.

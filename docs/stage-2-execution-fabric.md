@@ -571,3 +571,92 @@ flowchart TD
 |---|---|---|---|---|
 | 2026-09-29 | 初始团队指南由完整架构/验证/平台计划生成 | 本文件、source-inventory、references | 规划集成 | 各团队冻结输入并更新上表 |
 | 2026-09-29 | 面向较小模型/新工程师补充自然语言执行说明 | 本文件任务卡的执行者目标/须知/建议顺序/停止条件 | 规划集成 | 实施团队按卡执行并回填证据 |
+
+## 8. 2026-10-02 权威补充：L-path / T-path 与 Dynamic Dataflow Fusion
+
+本节为追加的研究合同。历史 §4 `Not started` 不覆盖 [实现账本](../config/status/implementation_status.json)；EF 子卡是已有 I/V 卡内纵切，不增加 239 个 ID，也不降低原验收。研究状态与宿主包 delivered 分开：**当前所有 EF 研究机制均为 PROPOSED/BLOCKED，不能由现有 bypass、steering 的 PASS 推导其已实现。**
+
+### 8.1 RTL 事实与设计决策
+
+`mosaic_core.sv` 的 `fab_dyn_i` 接通 bank preference、steering 和 registered local bypass；`mosaic_cluster_bypass.sv` 是带 physical/ROB generation 的**单槽**快路径，durable PRF/WB 路径独立保存每个结果。`mosaic_steering.sv` 按 capability→locality preference→occupancy→grant-age 排序，但 [I-090 集成报告](../results/reports/I-090-fabric.md) 明确 `req_locality_en` tied low，缺 producer-cluster provenance，真实集成只用 load/age；memory 保持固定路径。报告的同 ELF dynamic 比 fixed 多 62 cycles 是该历史输入/几何的负结果，不是本轮测量，也不是通用性能结论。
+
+因此 L-path 是现有局部执行岛的**进一步研究合同**，T-path 是 elastic throughput/remote/vector 域；不是新增 architectural hart，也不是所有 ADD 都经过全球租赁网络。L-path 的本地 dependent scalar chain 优先、T-path 承接 independent/long-latency work；两者保持同一 home hart 的 RAT/ROB/LSQ/commit 和相同 completion 身份。源文“0/1-cycle”“保留本地 ALU/优先 WB/cache”只在资源与时序证据支持时启用，不能越过 terminal-credit、唯一 producer、durable value 与 fairness。
+
+### EF-02 — L-path / T-path 分层执行与进展
+
+- **Owner / Status / 宿主**：fabric/locality + completion 负责人；`PROPOSED`；I-022–I-028/I-030，验证 V-028/V-029/V-032/V-033。
+- **Depends / Inputs**：现有 IQ、PRF/WB、lease/remote-link 合同和 EF-01 实际供给；输入为 live MacroTag/uOP、source generations、capability、queue/return credits、home owner 与路径允许集。
+- **Action / 字段**：冻结 `path_class={L,T}`、`home_hart`、`local_cluster`、`route_generation`、`required_capability`、`producer identity`、`terminal reservation`。准入先检查合法性/全资源，后按 policy 选路；registered local bypass 不以 global network 为每条短链必经环节。T-path 的可变延迟不靠“第 N 拍必返回”。
+- **生命周期 / Recovery**：classify→reserve-all-or-none→launch→execution-done→durable value-visible→macro-complete→retire；kill 只撤销 younger，older slow result 保留；late return 按完整身份拒绝但 credit 恰一次结算。路径不拥有第二份 architectural commit。
+- **Outputs / Handoff**：给 EF-03 的 legal path/capacity 表、给 completion owner 的 ack/wakeup 表、给 V-028 的 fixed/L/T trace 和每跳 measured-cycle 定义，含 local chain、独立 ILP、长 FU 混合、result-full。
+- **Pass**：相同输入所有路径 defined state 一致；不可停顿 FU 先有结果槽；saturation、kill+return、full-wrap、local unavailable 时每 live oldest 在声明下游响应界内进展。必须观察真实 L/T 活动与 bypass off 的正对照；不要求 speedup。
+- **Fail / 回退**：用低延迟借身份、全局 ready 环、global route 阻塞本地链、T 永久饿死或以远程改 hart；关闭新分层 policy 回既有 fixed affinity，保留原 V obligations。
+- **来源**：新源 15–75、867–906；旧源 230–369、1735–1818。
+
+### EF-03 — 有界 criticality 与 data-centric placement
+
+- **Owner / Status / 宿主**：scheduler + rename/provenance + MP placement owner；`PROPOSED`；I-029/I-030/I-032，验证 V-027/V-028/V-033/V-076。
+- **Depends / Inputs**：EF-02、真实 producer location/generation、各 route/FU/WB 的可用空间；MPP/IMC target tile 只作可丢 hint，内存位置必须来自有有效 generation 的 token/line provenance，不以预测代替权限/顺序检查。
+- **Action / 字段**：先 bounded 2-bit `criticality`（0 background、1 independent、2 likely、3 chain-critical）与有界饱和计数，再冻结整数 `score` 的 queue/FU/WB pressure、operand/memory distance、critical-path penalty 权重/范围/确定性 tie-break；以 capability、owner、credit 为不可绕过 filter。age escape、local 最大等待界和 T-path 最小服务保留优先于性能评分；不把 critical=3 永久 pin 本地。
+- **生命周期 / Recovery**：每 physical destination 更新 `{tag, generation, producer cluster, durable location}`；reuse/flush 撤销错误代 provenance，回绕前 drain。criticality 训练采样点固定，context change reset/partition；预测错误只改变路由/等待，wrong tile 可以一次有界请求或 shared PRF/L1 fallback，不 squash 正确指令。
+- **Outputs / Handoff**：给 EF-04 的 location/refcount 合同、给 MP owner 的 soft placement hint（租约有限 TTL，不能提前夺 demand terminal credits）、给实验的 reason trace 与逐权重 off/on 矩阵。
+- **Pass**：source 多位置/无位置、两源冲突、preferred tile 满、错误 token/owner、priority 洪泛、age wrap 和持续 T-demand 均有正反例；同资源架构一致，最坏等待按合同可计算。移除 capability、关闭 escape、使用 stale producer-location 的负控制须激活并失败。
+- **Fail / 回退**：错误来源/预测成为正确性来源、空 preferred bank 永久 stall、critical 流夺所有 bandwidth、未定义溢出 score；关闭评分回确定性 baseline。原 I-030 fairness 不能被“critical 优先”削弱。
+- **来源**：新源 204–328、1282–1312、1698–1714、1828–1856；旧源 1343–1424。
+
+### EF-04 — tile register-value locality cache 与 durable completion
+
+- **Owner / Status / 宿主**：PRF、locality、writeback 负责人；`PROPOSED`；I-015/I-025/I-026/I-027，验证 V-027/V-029/V-031/V-032。
+- **Depends / Inputs**：EF-03 provenance、现有 PRF generation/free-list、result reservation 与 ack；当前单槽 bypass 不是此 cache。
+- **字段 / 生命周期**：entry 为 `{hart, physical tag+generation, producer MacroTag/uOP, owner/route generation, value, valid, durable state, consumer holds}`；fill 只接受同代 live producer；cache hit/remote packet 保留全身份；miss 走真实 PRF/collector。第一步 write-through backing PRF，replacement 永不丢唯一副本；cache fill 不是新的唯一 producer。
+- **正确性 / Recovery**：`execution-done` 不等于 durable。ready 广播/ROB complete 仍等待 PRF 写 ack 或已冻结且可读的 durable backing；单槽 best-effort bypass 可提前供已识别消费者，但每结果仍独立持久化。write-elision 只在另有 retention/refcount/flush materialization 证明后研究，不凭“only one consumer”删除 architectural value。recycle、kill、context/owner change invalidate/refuse stale；generation 回绕先排空引用。
+- **Outputs / Handoff**：cache/backing/refcount 状态表给 EF-05 和 recovery owner；V-027 逐代所有权/eviction/remote return 矩阵；实验 raw PRF reads、WB conflicts、network bytes，Fmax/功耗列无物理证据则不填数。
+- **Pass**：hit/miss/off 全 trace 相同；WB backpressure、evict-before-PRF-ack、late remote value、same-index different-gen、consumer cancel 与满 holds 的负例均拒绝且守恒；被保留值可在任何合法 trap/debug/interrupt 边界恢复。
+- **Fail / 回退**：lossy slot 成唯一 storage、cache hit 绕过 generation、提前 free、未持久化 ready；关闭 RC 回既有 PRF+registered bypass；不删除原 durable wakeup/credit 验收。
+- **来源**：新源 333–382；旧源 1273–1342。
+
+### EF-05 — 两遍 Dynamic Dataflow Fusion 与中间值恢复
+
+- **Owner / Status / 宿主**：decoder/rename + ROB/commit + tile execution 负责人；`BLOCKED`（多指令 packet 与中间值恢复合同未冻结）；I-010/I-014/I-016/I-017/I-018/I-027，验证 V-013/V-014/V-015/V-027/V-028/V-030。
+- **Depends / Inputs**：EF-01 candidate hint、EF-02/EF-04、原始各指令身份和完整 source use/lifetime；不是现有 single-macro 多 child uOP 的别名，也不是跨 hart cohort。
+- **Action / 微步骤**：Pass A rename 前从 bits/architectural register 检出 SHIFT_ADD、ALU chain、ADDI+LOAD、LOAD+ALU、ALU+STORE、相邻 loads/stores 候选；Pass B rename 后核验 physical RAW/WAW/WAR、真实 consumers、intervening branch/CSR/fence/memory/debug hazard、tile/capability/credit。有限 group size/scan window，不融合未知消费者；非相邻候选保留中间独立指令及其顺序，发现新 consumer 时取消候选或提供 durable 值。memory forms 还须 EF-06。
+- **字段 / 生命周期**：`ExecutionPacket{packet ID+generation, members[]}` 中每 member 保留独立 `{hart, PC, bits, length, sequence, MacroTag/ROB generation, new/old destination mappings, completion/fault/replay, boundary state}`；每内部 edge 保留 source tag+generation，中间结果有 recoverable value/location/holds；candidate→validated→reserved→execute children→逐 member durable/completion→逐 member retire。一个 packet 恰可关联多 ROB identities，不能合成一个 retirement identity。
+- **正确性 / Recovery**：融合可省内部 PRF traffic **不能省 architectural state**。第一条结果即使只喂后一条，也须在两条之间的 interrupt、debug single-step、后一条 fault 或非相邻 intervening fault 时可物化；不能事后用已改变 source 重算。保留 PRF 值/受保证结果槽或拒绝融合是合法方案。每 member `instret` 独立计数，最老 exception 精确；部分成员已退役时不可回滚其值，younger kill/replay 按身份切开 packet，surviving older completion 仍完成。
+- **Outputs / Handoff**：packet/member/edge 合同、中间值 materialization 表与 boundary replay 输入交 ROB/CSR/debug owner；融合 off/on 每指令 event 与 intermediate snapshots 交 V owners。
+- **Pass**：SHIFT_ADD/ALU chain 正例；两指令之间 IRQ/debug、第二指令 fault、non-adjacent intervening fault、multi-consumer、x0/同 rd/branch、flush+completion、packet slot wrap、full result queue 均有有限正负矩阵。删除 member identity/中间值、合并 counters 或 whole-packet squash older 的 mutant 须失败；复合外 execution 保持逐指令 trace。
+- **Fail / 回退**：only-one-consumer 误作“不需 architectural rd”、单 ROB/单 event、跨边界不可恢复或未证明 elision；拆回 ordinary uOP，原 I-016 completion bitmap 与 V-013/V-014 验收不变。
+- **来源**：新源 387–454、1359–1391、1894–2039。源文“intermediate never permanently written”被修正为仅在 durable/recovery 证明成立时省流量。
+
+### EF-06 — 非原子 compound memory forms
+
+- **Owner / Status / 宿主**：fusion、LSQ/memory-order、commit 负责人；`BLOCKED`（EF-05 与 MP validation/普通 LSQ 集成）；I-016/I-017/I-034/I-035/I-036，验证 V-018/V-029/V-045/V-065/V-066。
+- **Depends / Inputs**：EF-05、真实 AGU/translation/PMP/PMA、load validation/store authorization、完整 byte forwarding；MPP fusion signature/MemoryPreviewToken 只有 hint 权限。
+- **Action / 字段**：分别登记 `LOAD_ALU`、`ALU_STORE`、`AGU_LOAD`、`LOAD_MODIFY_STORE` 候选；保留各 member 的 ROB/physical generations、每 load 的 LQ、每 store 的 SQ、VA/PA/size/byte mask/order/context/fault 与 preview handle。load→ALU 内转发也需真实地址/ordering/freshness 校验；普通 base-update architectural value 不得消失。
+- **生命周期 / Recovery**：load observe→验证并形成独立 load value→ALU 独立值→store data-ready/addr-ready→SQ 等其自身退休/order permission→正常 store visibility。**普通 ld/add/sd 永远不是 AMO、atomic RMW 或一笔不可分割事务**；其他 hart 可在 load 和 store 间合法写入，compound 不锁 line、不提前更新 memory、不把 store 的 fault 回填为 load fault。
+- **排除 / 正确性**：MMIO/device/non-idempotent、AMO/LRSC、fence/aq/rl 不兼容与无法证明边界的访问不准入；相邻 loads/stores 的 transaction 合并另受原 coalescer/reads-from/byte 顺序合同，候选不即批准合并。store address/data 可独立进展，但 speculative store never visible；错误预测走普通 LSU，不改变内存模型。
+- **Outputs / Handoff**：各 form allow/reject 表、packet→member→LQ/SQ/visibility 可逆映射交 MP/LSQ owner；fault-between-members、第三方 writer 和普通/compound on/off RVWMO witness 交 V owners。
+- **Pass**：load fault、ALU 后 IRQ、store fault、older unresolved alias/部分 byte forwarding、跨页/line、MMIO/atomic 拒绝、squash store、competing writer 非原子结果均检查；early-store、atomic-upgrade、漏 SQ identity 或复用旧 preview value 的 mutant 须失败。
+- **Fail / 回退**：三指令变一个 trap/retire、预览批准 store、普通序列被增强为原子、load 校验绕过；拆回独立 LSQ/uOP。原内存/退休 acceptance 不削弱。
+- **来源**：新源 1317–1533、1979–2039；MPP 具体权限/freshness 由 Stage 3 MP 子卡冻结。
+
+### 8.2 细粒度研究 handoff 与进度
+
+每微门独立记录 input hash、产物 hash、实际激活的正/负例、架构/验证双签与阻断请求/复审日期；完成设计表不等于完成 RTL，不等于宿主卡或 capability delivered。EF-01 在 Stage 1；VX 与 helper/controller 在 Stage 4/5；arbitrary value/dual-path 不是本节默认路径。
+
+| 子卡微门 | 初始状态 | Owner | 输出 / 下游 | 阻断依据 |
+|---|---|---|---|---|
+| EF-02.a L/T 合法路径/terminal 预算 | PROPOSED | fabric/completion | capacity+ack 表 / V-032 | 无新增执行成果 |
+| EF-02.b stale/kill/escape | PROPOSED | recovery/fairness | finite replay 矩阵 / V-029、V-033 | 不能借 latency 绕过 correctness |
+| EF-03.a producer provenance | PROPOSED | rename/PRF | generation-location 表 / EF-04 | 当前 integrated locality key inactive |
+| EF-03.b bounded scoring/age quotas | PROPOSED | scheduler | integer policy+reason trace / V-033 | criticality 非现有真实路径 |
+| EF-03.c placement hint attach/drop | BLOCKED | MP+fabric | soft hint/TTL / memory owner | token/placement 合同待冻结 |
+| EF-04.a write-through RC identity | PROPOSED | locality/PRF | backing lifecycle / V-027 | 单槽 bypass 不能当 register cache |
+| EF-04.b eviction/remote/recovery | BLOCKED | completion/recovery | holds+materialization / EF-05 | durable 唯一副本证明未有 |
+| EF-05.a pre/post-rename candidate | BLOCKED | decoder/rename | bounded matcher / EF-01 | member/consumer 合同缺失 |
+| EF-05.b intermediate/boundary state | BLOCKED | ROB/commit | 逐边界值恢复 / V-013–V-015 | 中间值不能丢弃 |
+| EF-05.c execution/partial-kill | BLOCKED | tile/recovery | split-packet replay / V-028、V-030 | 前两门未签收 |
+| EF-06.a form eligibility/LSQ identity | BLOCKED | LSQ/fusion | allow/reject+mapping / V-018 | EF-05 未签收 |
+| EF-06.b non-atomic/order/store visibility | BLOCKED | memory-order/commit | writer/fault witness / V-065、V-066 | validation 与 store gate 未冻结 |
+| EF-02–EF-06 配对归因 | BLOCKED | V-076 实验 | 逐策略 off/on 含负收益 / 集成 | 每个启用微门先独立正确性 |
+
+2026-10-02：仅把新研究纳入原 stage/卡合同，未修改 RTL、原文、交付账本或历史成绩；论文收益和源文估计不相加，也不作为验收门槛。

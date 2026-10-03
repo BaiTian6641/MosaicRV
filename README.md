@@ -4,7 +4,7 @@
 
 **当前仓库已进入 RTL bring-up 阶段：包含 p0 配置、SystemVerilog RTL、C++/Verilator harness 与有限的 unit/reference smoke evidence；这不等于完整 RISC-V CPU，也不代表所有 p0 ISA 声明已验收。** 当前交付边界见 [实现状态](config/status/implementation_status.json) 与 [进度记录](results/PROGRESS.md)。XiangShan 辅助验证、GW5A/Zynq/Virtex UltraScale+ 三家族实板验证、可移植 ASIC 转换、完整 RVA23U64/S64 mandatory ISA/执行环境与逐项 ratified optional 能力仍需分别闭合。动态调度和聚合收益必须以等资源 fixed/dynamic 对照实测，不能从研究论文直接继承数字。
 
-更新：2026-10-01。p0 的 Stage 1 标量控制路径已基本闭合（decode、ALU/分支、有界取指与重定向、双宽重命名、ROB、local IQ、共享 MUL/DIV、banked PRF、退休与 committed map、M-mode CSR、中断/WFI、预测器），首个双 cluster OoO 核心正在集成；每个工作包以其注册 CASE 的 pass、失败可复现的 mutant 和报告为准，`implementation_status.json` 只记录已从干净构建重跑过的项。**能力广告仍为空**：capability ladder 要求实现任务与验证任务同时交付，目前尚无任何能力满足（`python3 tools/check_coverage.py --verbose` 会逐项列出所缺 ID）。已知的 ISA 级缺陷：decoder 把 RV64I 的 `addw/subw/sllw/srlw/sraw` 当作保留编码，正在修复——这正是“以假设代替规范”的一类检查，与已有的两个同类缺陷一并在 [进度记录](results/PROGRESS.md) 中记录。
+更新：2026-10-02。`config/status/implementation_status.json` 当前记录 **85 个已交付工作包**，对应85个evidence条目；能力广告以配置ladder和manifest生成结果为准，不能由RTL文件存在推断。仓库已有双cluster标量OoO、cache/MSHR、A/C、S/U/PMP/Sv39、FP/vector模块、LLB/coalescer及双hart路径；“全部能力为空”与“只有Stage1”已过期。最新[中期修订](results/REVISION.md)记录p0/p1注册case sweep分别90/90、94/94，但这是既有记录，非本次重跑；p2/p3尚未完整sweep。已知retire lane-1（第二insert保持撤回）、RVV NARROW/EEW限制、HPM事件接线以及V-060 lane/reference、V-063 core QoS服务模型门仍按最新[进度](results/PROGRESS.md)/reports处理；本轮文档修订不关闭finding、不升级ISA广告。
 
 
 ## 阅读顺序
@@ -17,6 +17,8 @@
 6. [平台及 ASIC 计划](docs/platform-plan.md)：51 个 H 工作包；公共 RAM/clock/reset/CDC 合同、三个独立板级 flow、物理证据与 ASIC signoff。
 7. 十一个团队执行指南：[第0阶段](docs/stage-0-contracts-bringup.md)、[第1阶段](docs/stage-1-scalar-control.md)、[第2阶段](docs/stage-2-execution-fabric.md)、[第3阶段](docs/stage-3-memory-system.md)、[第4阶段](docs/stage-4-vector-locality.md)、[第5阶段](docs/stage-5-multihart-aggregation.md)、[第6阶段](docs/stage-6-verification-quality.md)、[第7阶段](docs/stage-7-fpga-hardware.md)、[第8阶段](docs/stage-8-asic-release.md)、[第9阶段](docs/stage-9-lockstep-safety.md)、[第10阶段](docs/stage-10-rva23-security.md)。每份含设计、依赖、可交接任务卡、阻断规则与 Track Log；可选 profile 的卡片不能反向阻断 p0。
 8. [文档检查与重跑指令](docs/verification.md)：239 个任务（98 I、90 V、51 H）、11 个指南、原文 hash/覆盖、合并依赖图与引用/链接/Git 检查；不包含 CPU 功能/板测/ASIC 成绩。
+
+9. [2026-10-02 新研究覆盖](docs/source-inventory.md) §8：`New document(2).txt` 全文处置与原文hash；[架构审查](docs/architecture-review.md) §15定义L/T双速、MPP/IMC第二内存准备路径、token/LSQ/freshness、shadow/DVR、fusion、表示压缩与controller。[阶段指南](docs/stage-3-memory-system.md)及对应S1/S2/S4/S5/S10、[实施计划](docs/implementation-plan.md)、[验证计划](docs/validation-plan.md)提供18个MP/EF/VX研究子卡和分期门；它们不是新增已交付包。
 
 
 
@@ -31,6 +33,7 @@
 - clean LLB 副本仍需 freshness/invalidation 证明；same-PC cohort 仍需每 hart 独立权限、寄存器、异常与提交。
 - **Lockstep 是可选 profile，不是默认处理器行为。** 一个 main/shadow fault-containment pair 只构成一个 logical hart；DCLS 做检测与阻断，不自动纠错；TMR 投票是后续研究。共享 RAM/cache/clock/bus 必须单独保护或列为残余 common-mode 风险。
 - 先实现可测双 cluster 标量 fabric，再扩展 A/C/特权/FP/RVV/多 hart/cohort/pod/分布式 ROB。后置不是删除最终研究范围；动态性能收益必须允许被实验否定。
+- **内存准备可以从fetch旁路开始，architectural load/store仍由真实AGU/LSQ/权限/顺序/freshness验证授权。** 首版MPP仅preview-only、TLB-hit-only、幂等普通RAM、有界预算、满则drop；critical L-path不为平均FU利用率强制remote。store-ownership、early consume、value/dual-path speculation后置。Tile-L0的clean副本仍受L1授权，private L0不自动消除侧信道；所有研究speedup保持假设，见[引用复核](docs/references.md) §5。
 
 ## 如何把计划交给小模型
 

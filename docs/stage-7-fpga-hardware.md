@@ -913,3 +913,33 @@ flowchart TD
 |---|---|---|---|---|
 | 2026-09-29 | 初始团队指南由完整架构/验证/平台计划生成 | 本文件、source-inventory、references | 规划集成 | 各团队冻结输入并更新上表 |
 | 2026-09-29 | 面向较小模型/新工程师补充自然语言执行说明 | 本文件任务卡的执行者目标/须知/建议顺序/停止条件 | 规划集成 | 实施团队按卡执行并回填证据 |
+
+## 8. 2026-10-02 追加：研究子卡上板顺序与真实时序门
+
+历史团队表和 Track Log 不是当前实现清单；当前 accepted 以 [`implementation_status.json`](../config/status/implementation_status.json)、最新 [`PROGRESS.md`](../results/PROGRESS.md) / reports 为准。本节不声称已有三板、Fmax/面积/功耗或研究 RTL 证据。MP-01..08、EF-01..06、VX-01..04 为原卡内研究，唯一定义在 Stage 1–5 §8，整体路线见 [实施计划 §13](implementation-plan.md)，初始 PROPOSED/BLOCKED，原 I/V/H 和 H-001–H-035 合同不改。
+
+### 8.1 先共同 baseline，再分模式上板
+
+H-001–H-010 冻结 exact board/part/revision/tool/license、clock/reset/RAM、pins、image identity、corpus/负例/recover 后，先真实可比较 p0 baseline。新机制按 preview-only→token/L0→fusion→ownership→early-consume 递进，每一步先过当前缺陷、宽度/reference/QoS 与 [验证矩阵 §10](validation-plan.md)，再用对应 GW5A H-011–H-017、Zynq H-018–H-025、Virtex H-026–H-031 flow 独立验证；不因 Virtex fit 就宣称 GW5A/Zynq fit，不从 PS 运行软件冒充 PL 新核。
+
+每 image 固定模式 manifest（含 compile/runtime flags、预测/RC/L0 geometry、token/version widths、helper配额、fusion whitelist、表示模式、controller sampling/hysteresis、安全/DCLS）。reset 默认关闭未验收推测。基线 preview 仅 TLB-hit/check-permission、幂等cacheable ordinary RAM，不 PTW/改 A/D、不 MMIO/device/AMO，queue/MSHR不足 drop 不挡真实前端；store绝不预先更新。private L0 不证明侧信道消失，严格安全关闭预测/helper/early-consume；上板后的实际共享 cache/PTW/interconnect 仍需另列 threat model。
+
+### 8.2 物理热点与资源合同
+
+| 研究路径 / 平台负责人交接 | 必须提交的 actual physical evidence | 失败门 |
+|---|---|---|
+| EF-01 useful fetch/decode supply；EF-02 L-path local RAW | 前端 RAM/queue 推断与配宽后的 fanout；ALU→bypass/RC→consumer 最长 routed setup/hold 路径、clock/skew/uncertainty、latency寄存器实际存在 | 0/1 cycle仅逻辑目标；没有 STA 不叫快路径，不能从研究目标 32B/6–8wide 编造实际吞吐 |
+| EF-03 select/locality；EF-04 RC；EF-05/06 fusion | criticality score/age select、RC tag/gen compare/eviction/source pin、fusion multi-ALU 到 result FIFO/WB 的 routed 路径和真实端口/复制成本 | 不用 false/multicycle exception 隐藏真实单周期 path；不为 timing 破坏 durable visibility/中间值/原退休边界 |
+| MP-01..04 MPP/IMC/token/L0 | predictor/token/L0 metadata RAM collision/byte mask/enable/valid；permission→admission、MSHR/waiter matching、version invalidation+fill/hit races，所有 clock/CDC/RDC约束覆盖 | full-array-reset导致 FF复制、未知collision、过宽 CAM/crossbar 或 BRAM不fit均保存真实失败，不能改 ISA/漏检查换 green |
+| MP-05..08 memory fusion/ownership/earlyconsume | 每后置模式单独 evidence；store-authorize/fault/compare gate 实路径，coherence外部拓扑与响应/取消，checkpoint容量 | 未实现 coherence/恢复则保持关闭；不能将普通 load-modify-store变 AMO，确认前绝无 architectural effect |
+| VX-01..04 helpers/representations/controller | helper lane/MSHR配额与正常请求 bounded progress；representation materialization/VRF mask/partial restart；采样/配额/clock-enable切换与 drain ack | helper不能写CSR/store或发architectural trap；controller不绕过许可门，不能每cycle DFX动态实例化；不能改变VLEN |
+
+H-009 parser 对新增报告字段仍 fail-closed：缺路径覆盖、unknown clock、未定位 IO、missing RAM/resource 字段、负 setup/hold/critical DRC 或错误 tool/image ID 即失败，不把工具 exit 0 当 P&R成功。固定物理 pipeline加寄存器/弹性背压是可选设计修订，需重新验合同与性能；动态路线不能宣称改变实际 pipeline register 数。
+
+### 8.3 板级验证和 matched-resource 实验
+
+H-008/H-016/H-024/H-030/V-077 在原 finite corpus 上增加研究模式矩阵，不改原 denominator：feature off/on、prediction正确/错误、context/permission/fence/owner切换、generation/version wrap、cancel+refill+reset、MSHR争用、helper fault suppression、fusion每member trap和错误store visibility。每负例必须注入真实已激活 datapath，保留 image/config/ELF/input hash、首差异、失败后的已知好 image恢复；缺研究 RTL/端口或板卡只列BLOCKED，不记录mock PASS。
+
+H-033/V-076 对固定/dynamic与逐研究 ablation匹配全部 width/ROB/cache/MSHR/FU/lane/clock/bandwidth并公布新增RAM/RC/helper资源、P&R seeds。报告实际运行clock而非仅理论Fmax，useful work/IPC×clock及可测电功率，保留低ILP/随机地址/branch-heavy等负收益；toggle不等于W，DVR 1139bytes不是整套helper成本。三家族资源不能未匹配直接比绝对IPC。
+
+原 V-079 卡的 V-077 在本文件是该 FPGA 载体的条件，非所有 RTL/ASIC release 的统一前置；core wrapper行为/观测noninterference复用，ASIC另签。个人研究owner尚无签收、全部新增物理证据尚无。本次仅追加合同，未运行综合/P&R/板测/build/tests/checks/formatter；原 exact-part、安全编程/flash、DDR/boot、DFX粗粒度与cold/warm-reset要求保持不变。

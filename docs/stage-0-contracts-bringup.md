@@ -552,3 +552,31 @@ flowchart TD
 | 2026-09-30 | I-010 RV64I/M decode 与非法指令；I-011 整数 ALU、分支比较与跳转目标 | `tools/run_unit.py --case decode.rv64im_reserved`、`--case alu.boundaries`；九个变异体全部失败；`results/reports/I-010-011-decode-alu.md` | decoder/ALU | I-008 集成 |
 | 2026-09-30 | 参考模型 Spike 由源码构建成功（riscv-isa-sim commit 0bff121），可执行本项目固件并输出 commit trace | `~/mosaic-ref/install/bin/spike --log-commits` | 验证 | 与 DUT 逐事件差分 |
 | 2026-09-30 | 计划文档自带检查器 `docs/verification.md` 以唯一一处声明偏差运行（实现证据排除在规划文档清单之外），其余检查全部未修改 | `python3 tools/check_docs.py` | 规划集成 | 偏差在 `tools/check_docs.py` 中显式打印 |
+
+## 8. 2026-10-02 追加：新研究入口与合同冻结门
+
+**本节是当前状态解释的权威追加，不改写历史记录。** 第2节“无真实处理器”和第4节 `Not started` 是规划生成时的输入/分工快照，不能当作当前状态；当前接受范围以 [`implementation_status.json`](../config/status/implementation_status.json) 的逐项证据、最新 [`PROGRESS.md`](../results/PROGRESS.md) 和对应 report 为准，`REVISION.md` 也可能落后于后续修复。本节不重算交付数量、不撤销既有交付、不把研究设想加入能力广告。
+
+`New document(2).txt` 的 MPP/IMC、L-path/T-path、criticality/locality、register cache、shadow window/runahead、dataflow fusion、压缩 vector 表示和 bottleneck controller 全部是**新提案**。研究子卡使用 MP-01..MP-08、EF-01..EF-06、VX-01..VX-04，嵌在现有工作包和阶段内，不新增 I/V/H ID；原 98 I、90 V、51 H（239 包）及原卡 `Inputs/Action/Outputs/Pass/Fail/Depends` 保持不变。细粒度顺序与责任见 [实施计划 §13](implementation-plan.md)，语义验收见 [验证计划 §10](validation-plan.md)。
+
+### 8.1 先关闭实际缺陷，再锁新增协议
+
+协议负责人和验证负责人先收取当前 defect replay，而不是重新假设“只有 I-001–I-006 已实现”。有界 tag/宽度、双宽退休顺序、独立 RVV reference/adapter、实际 memory ownership/QoS 集成和 PMU 事件映射必须分别有可观察证据；原有 unit PASS 不能证明新增路径已连入 core。保留 held insert 的退休缺陷记录，未闭合不得以 fusion 扩大提交窗口。无 vector oracle 时不允许用 DUT 生成 golden signature。QoS 的 unit scheduler 与 core 的单 outstanding ownership mux 必须由唯一 memory owner 决定组合合同，不能再暗中叠一套路由/优先级模型。
+
+### 8.2 冻结字段、权威来源与生命周期
+
+| 合同增量 | 冻结字段与权威来源 | 生命周期及必须拒绝的情形 | Owner / 初始状态 |
+|---|---|---|---|
+| MPP memory intent | hart/domain、fetch sequence+generation、原 PC/原 bits/length、load/store/size、rs1/rs2/immediate、branch epoch、prediction confidence、instruction/code generation；predecode 只是提示，full decode 是合法性权威 | 检测→可丢弃预测→真实 decode 匹配；跨 fetch block/C 边界和 fault 必须保留原身份，非法/不支持编码不发请求；满队列直接 drop，不反压真实前端 | 前端+memory 协议负责人 / PROPOSED |
+| `MemoryPreviewToken` | token slot+generation、hart/security domain、fetch identity、PC、spec epoch、ASID/VMID/translation root/context generation、effective privilege/SUM/MXR/MPRV、PredVA/PA/line/offset/size、memory type/PMA/PMP、permission generation、target tile/owner generation、MSHR ID+generation、data location/ready、line/sector version、dependence hint；宽度从并发量与最大晚到寿命推导 | CREATED→ADMITTED→WAITING/READY→真实 AGU/权限/LSQ/version 校验→CONSUMED 或 INVALIDATED/DROPPED→回收；redirect/reset/fence/context/owner change 均使旧关联失效；晚到数据只能命中完整身份，不得复活旧 token；generation wrap 前 drain/ack 或有 ABA 上界证明 | memory+协议负责人 / BLOCKED（依赖宽度、权限与回收合同） |
+| IMC/共享 MSHR | request class demand/PTW/preview/helper/ownership、完整 context/permission key、line/sector、waiter ID+generation、age、reservation/credit、cancel 状态、error completion | 合并只允许语义兼容的请求，每 waiter 独立回收；取消一个不取消其他合法 waiter；需求与合法 PTW 保留服务下界，preview 饱和/低信心即 drop；error 不成为有效 cache/L0 数据 | memory owner / BLOCKED（依赖实际 QoS 接入） |
+| L/T 与 register cache | criticality/shape/locality 是 hint；source physical tag+generation、producer hart/domain、owner/route generation、value-valid、source-lifetime/read pin、PRF durable acknowledgement | L-path 保持固定短本地链，T-path 承担可容忍远程延迟的工作；hint 错误只改变性能；RC eviction/kill/reallocation 不得丢失仍活跃的值，PRF/ROB 权威不转移给 RC | fabric+rename/PRF owner / PROPOSED |
+| Fusion / compressed vector / helper | packet ID+generation、有序 member macro/ROB identities 与原 PC、每 member destination/exception/fflags/store authorization；vector descriptor snapshot/vl/vtype/vstart/mask、representation tag+payload+materialization boundary；helper domain/lease/credit/kill epoch | 多条 architectural identity 不合为一个退休边界；vector 保留 element partial progress；helper 不提交、无 architectural store/CSR/trap；资源切换 STOP_ADMIT→DRAIN→ACK→PUBLISH，取消和 credit exactly once | scalar/vector/fabric 各原 owner / BLOCKED（依赖语义与恢复证据） |
+
+基线 preview **仅限合法 TLB-hit、cacheable 且幂等的普通内存**，重新检查有效权限/PMP/PMA；TLB miss 直接 drop，不发 PTW，不修改 PTE A/D，也不提前使 store/MMIO/AMO/CSR 可见。后续 PTW/ownership/early-consume 是独立后置模式，不能从字段已经列出推断已经支持。私有 L0 不能消除共享 cache、PTW、互连或带宽侧信道；严格安全模式先关闭预测和 helper，另行验收后才允许更强策略。
+
+### 8.3 子卡交接和证据轨迹
+
+每个研究子卡逐微步骤记录：`Subcard / Parent I,V,H / Stage section / Owner role / Status / Locked inputs+hash / Required fields+lifecycle / Dependency verdict / Positive+negative cases / First divergence+replay / Artifact hash / Reviewer / Next gate`。初始只允许 `PROPOSED`（设计待冻结）或 `BLOCKED`（前提未闭合）；这两个标签不是原任务表 Accepted，也不是 delivered ledger 项。负责人角色是明确责任域，个人尚未签收必须写“尚无个人签收”；尚无实现/测试证据必须写“无研究实现证据”，不能填猜测的 PASS 或性能数字。
+
+未来冻结时保留原接口版本校验和 unknown/unsupported 的失败关闭，新增字段须同时覆盖 RTL tap、host schema、codec 和 adapter；保留被真实激活的负控制，编译失败/路径未激活不能算捕获故障。本次仅追加设计合同，未运行任何构建、测试、lint、formatter 或检查器。

@@ -1,0 +1,2232 @@
+﻿Worked for 46s
+
+Yes. I think there is a credible path to exceed Kunminghu V2R2, but the architecture has to evolve from “GPU-like resources attached to an OoO CPU” into something more asymmetric:
+
+> Keep a very short, CPU-like latency path for critical scalar dependencies, and use the GPU-like fabric as a latency-hiding/parallelism engine around it.
+
+
+
+That is the most important optimization I would make next.
+
+Kunminghu V2R2 is already a formidable baseline: 6-wide decode/rename/dispatch, 160-entry ROB, 224 integer physical registers, four 24-entry integer IQs, large vector/FP state, and a 13-cycle documented misprediction penalty. It also supports fusion, move elimination and ROB compression.  So simply making your backend “more dynamic” probably will not beat it.
+
+The opportunity is to do things its conventional OoO organization cannot do as naturally.
+
+I would evolve MEF into a two-speed architecture
+
+Right now the mental model is approximately:
+
+uOP
+ ↓
+Resource scheduler
+ ↓
+route
+ ↓
+execution tile
+ ↓
+completion network
+
+The problem is that every simple scalar ADD is now paying for flexibility.
+
+Instead build:
+
+Renamed uOP
+                       │
+             Criticality / Shape
+                  Classifier
+                 /          \
+                /            \
+        FAST LATENCY       ELASTIC FABRIC
+             │                  │
+      local IQ/bypass     distributed queues
+             │                  │
+       local ALUs          many execution tiles
+             │                  │
+       0/1-cycle path      RVV / SIMT / runahead
+                \            /
+                 Completion
+
+Call these:
+
+L-path — latency path
+
+and
+
+T-path — throughput path.
+
+A dependent scalar chain stays completely local:
+
+ADD → bypass → ADD → bypass → ADD
+
+It does not go through the global resource network.
+
+Independent work goes to:
+
+distributed fabric
+
+This changes my estimate considerably because it removes the largest weakness we identified against Kunminghu.
+
+For critical scalar code, I would target:
+
+\[
+Latency_{MEF-fast} \approx Latency_{KMH}
+\]
+
+while retaining the fabric for everything else.
+
+That could move a mature MEF from perhaps −5% to +8% versus Kunminghu scalar IPC toward roughly:
+
+\[
+\boxed{+2\%\text{ to }+12\%}
+\]
+
+if the classifier and placement mechanism are good.
+
+
+---
+
+The strongest optimization: use GPU-like lanes as speculative memory engines
+
+This is where I think you potentially get the largest real advantage.
+
+Imagine the scalar CPU is stalled on:
+
+x = A[B[i]];
+
+A normal wide OoO processor tries to discover future memory accesses using its normal instruction window.
+
+Your machine potentially has four or eight execution lanes sitting around.
+
+Instead of idling:
+
+Main OoO thread
+      │
+      │ normal execution
+      │
+      └──── memory dependence slice ────┐
+                                        ▼
+                                Helper lane group
+                                ┌───────────────┐
+                                │ load B[i+N]   │
+                                │ calc address  │
+                                │ prefetch A[]  │
+                                └───────┬───────┘
+                                        │
+                                     L0/L1
+
+In other words:
+
+> Convert spare GPU/SIMT resources into speculative runahead threads.
+
+
+
+This is not just theoretical. Decoupled Vector Runahead demonstrated a lightweight speculative vectorized helper thread for indirect memory chains and reported 2.4× performance over a large 5-wide OoO baseline on its evaluated graph/database/HPC workloads, with about 1139 bytes of additional hardware state. That is workload-specific—not a 2.4× general CPU claim—but it demonstrates just how much latent performance exists in irregular-memory workloads. 
+
+This fits your architecture extraordinarily well because you already have:
+
+vector lanes
++
+dynamic lane allocation
++
+near-lane storage
++
+memory coalescer
+
+So I would make Vector Runahead Mode a fundamental MEF personality.
+
+For memory-bound workloads, my target versus Kunminghu V2 would become approximately:
+
+\[
+\boxed{1.15-1.40\times}
+\]
+
+with selected graph/indirect workloads potentially substantially higher.
+
+And importantly, this does not require making the main ROB enormous.
+
+
+---
+
+Add a shadow memory-execution window
+
+Kunminghu has a large conventional OoO window.
+
+Instead of trying to win by going:
+
+160 ROB → 256 ROB → 384 ROB
+
+I would keep something around 160 architectural entries but create a second speculative domain:
+
+Architectural ROB
+                         ~160 entries
+                              │
+              ┌───────────────┴──────────────┐
+              │                              │
+         Normal OoO                    Slice Extractor
+                                              │
+                                       Shadow Window
+                                      128–512 µops
+                                              │
+                                      address-generation
+                                         operations only
+                                              │
+                                          prefetch
+
+The shadow window does not need full architectural state.
+
+It does not commit.
+
+Its purpose is simply:
+
+calculate future addresses
+generate prefetches
+discover page translations
+warm lane L0/L1/L2
+
+So instead of paying for:
+
+large ROB
+large rename
+precise exceptions
+full replay
+
+for 400 instructions, you can look much farther ahead using a stripped-down memory/dataflow representation.
+
+Older MLP research explicitly found that decoupling the issue window and ROB can expose additional MLP, and runahead showed large gains for memory-bound applications. 
+
+For your architecture this could be much cleaner because the “shadow window” physically runs on spare fabric lanes.
+
+I would rank this as one of the highest-potential ways to beat Kunminghu, rather than merely match it.
+
+
+---
+
+Another major improvement: instruction criticality should control topology
+
+Don't route based only on:
+
+queue occupancy
+FU availability
+bank availability
+
+Add:
+
+critical path estimate
+
+For each uOP maintain a small criticality score.
+
+For example:
+
+uOP criticality:
+
+0 = background
+1 = independent
+2 = likely critical
+3 = critical dependency chain
+
+Then:
+
+critical = 3
+→ never route remote unless mandatory
+→ reserve local ALU
+→ reserve bypass
+→ priority WB
+→ priority cache port
+
+while:
+
+critical = 0/1
+→ use remote resources
+→ tolerate network latency
+→ fill otherwise idle capacity
+
+This fixes one fundamental problem with resource-balancing schedulers.
+
+Naively:
+
+Cluster A: busy
+Cluster B: idle
+
+critical uOP → Cluster B
+
+looks efficient.
+
+But if its operands and consumers are all in A:
+
+A → network → B → network → A
+
+it can be slower.
+
+MEF should therefore optimize:
+
+\[
+\text{execution latency along the critical path}
+\]
+
+rather than:
+
+\[
+\text{average FU utilization}.
+\]
+
+That distinction may be worth more than simply adding another ALU.
+
+
+---
+
+Make data move less, rather than making the interconnect faster
+
+I would take your lane-local memory idea one step further.
+
+Currently:
+
+uOP → execution resource
+data → that resource
+
+Instead use:
+
+> data-centric instruction placement.
+
+
+
+Suppose p43 was produced in Tile 2 and its memory operand also resides in Tile 2's near-lane buffer.
+
+Then:
+
+consumer uOP
+      │
+      ▼
+Tile 2
+
+instead of:
+
+p43 Tile2 → network → Tile0
+memory     → network → Tile0
+
+Your scheduler becomes:
+
+\[
+Score(T)=
+Q_T+
+FU_T+
+WB_T+
+\lambda D_{operand}+
+\mu D_{memory}+
+\nu CriticalPathPenalty
+\]
+
+where D_operand and D_memory represent movement cost.
+
+This transforms MEF into something closer to:
+
+> dynamically placed dataflow execution.
+
+
+
+Your uploaded architecture study already arrived at the principle of logical unification with physical distribution rather than a giant centralized scheduler/network. 
+
+I think data-centric scheduling is the natural next step.
+
+
+---
+
+Register values should gain locality too
+
+Extend the lane L0 concept to registers.
+
+Instead of relying exclusively on:
+
+large global PRF
+
+have:
+
+architectural physical tag
+                          │
+                Global PRF backing
+                          │
+           ┌──────────────┼──────────────┐
+           ▼              ▼              ▼
+        Tile0 RC       Tile1 RC       Tile2 RC
+      register L0     register L0     register L0
+
+A tiny register-value cache per execution tile might keep recent producer results.
+
+Then:
+
+producer → local result cache
+consumer → local read
+
+rather than continually accessing a highly ported central RF.
+
+For values needed remotely:
+
+tag + value packet
+
+migrates once.
+
+This could reduce:
+
+PRF read-port pressure,
+
+global wire activity,
+
+bypass-network size,
+
+power,
+
+perhaps Fmax constraints.
+
+
+It may not increase IPC dramatically directly—perhaps only a few percent—but it could allow MEF to sustain its flexible topology without the 10–15% clock penalty we have been worrying about.
+
+And preserving Fmax is equivalent to gaining performance.
+
+
+---
+
+Dynamic uOP fusion could go considerably beyond decode fusion
+
+Kunminghu already supports instruction fusion, so simple macro-fusion is not an advantage. Its decode block examines adjacent pairs among the six decoded uOPs and supports fusion as part of its frontend/backend control. 
+
+MEF could instead perform runtime dataflow fusion after rename.
+
+For example:
+
+slli x5,x2,2
+add  x6,x5,x3
+
+becomes internally:
+
+SHIFT_ADD(src=x2, src=x3, shift=2)
+
+Or:
+
+add x5,x2,x3
+and x6,x5,x4
+
+could form:
+
+ALU-chain packet
+
+executed locally without writing the intermediate value to the PRF.
+
+So:
+
+traditional:
+
+ALU
+ ↓
+WB
+ ↓
+PRF
+ ↓
+read
+ ↓
+ALU
+
+becomes:
+
+fused execution
+ALU → ALU
+
+within one tile.
+
+This is particularly natural in a GPU-ish lane tile because each tile can have small local pipelines.
+
+Call it:
+
+> Dynamic Dataflow Fusion.
+
+
+
+It can reduce pressure on:
+
+IQ
+PRF
+WB
+wakeup
+result network
+
+simultaneously.
+
+I would target perhaps 3–10% general scalar improvement, with larger gains for suitable instruction sequences.
+
+It is potentially more valuable than simply making decode wider.
+
+
+---
+
+Add selective value/address speculation — but only late in the project
+
+Once the normal architecture works, another avenue is load-value/address speculation.
+
+For a load with highly predictable behavior:
+
+load x5,[A]
+ADD x6,x5,x7
+
+normal:
+
+load
+ ↓ wait
+value
+ ↓
+ADD
+
+speculative:
+
+predict address/value ─→ ADD
+        │
+ real load
+        │
+     verify
+
+This breaks a true dependence.
+
+Published work on decoupled load-value prediction reported 4.8% average performance improvement and up to 71% in individual cases, using highly accurate path-based address prediction; again, this is an external experimental result, not an expected MEF gain. 
+
+For MEF I would prefer:
+
+address prediction
++
+early cache lookup
+
+before going to arbitrary value prediction.
+
+Why?
+
+Because your lane-local L0 makes predicted-address lookup relatively cheap.
+
+A predicted load could query:
+
+lane L0
+
+early.
+
+If present:
+
+very early value
+
+If not:
+
+fall back normally
+
+That could plausibly contribute a few percent overall while particularly helping critical loads.
+
+
+---
+
+GPU-like scalarization can help even in vector mode
+
+Another way to exceed Kunminghu on mixed code is to avoid doing vector work when it's unnecessary.
+
+Suppose all eight vector elements contain:
+
+42
+
+Instead of:
+
+8 × operation
+
+do:
+
+1 × scalar operation
++
+broadcast
+
+Likewise:
+
+base + lane × stride
+
+can remain encoded as:
+
+{base,stride}
+
+instead of eight full 64-bit values.
+
+So internally values can have representations:
+
+FULL_VECTOR
+UNIFORM
+AFFINE
+SPARSE
+
+This saves:
+
+VRF bandwidth
+execution slots
+operand traffic
+register storage
+
+and frees lanes for scalar work.
+
+This probably won't beat Kunminghu on a perfectly utilized long-vector benchmark.
+
+But on workloads containing substantial uniform/affine behavior, it can let MEF do:
+
+scalar work + vector work
+
+at the same time.
+
+That is exactly the kind of workload where the unconventional architecture has an advantage.
+
+
+---
+
+Selective dual-path branch execution is possible, but I would rank it lower
+
+Your fabric makes another unusual optimization possible.
+
+Kunminghu V2 documents a 13-cycle misprediction penalty. 
+
+For a low-confidence branch, if spare tiles exist:
+
+branch
+                    /      \
+             predicted      alternate
+                │              │
+              Tile0          Tile2
+
+Execute both temporarily.
+
+Once the branch resolves:
+
+correct path → retain
+wrong path → discard
+
+Old multipath CMP research reported around 12.7% SPECint95 improvement in one setup, with larger benefits on poorly predicted components. 
+
+But modern re-evaluations are much less optimistic: a 2022 study found only about 2.87% best-case performance gain with significant overhead using modern predictor assumptions. 
+
+So I would not make this a core feature.
+
+But MEF has one advantage those architectures did not necessarily have:
+
+> spare throughput tiles already exist for other reasons.
+
+
+
+Therefore selective dual-path execution could be enabled only when:
+
+branch confidence low
+AND
+idle tile exists
+AND
+fetch bandwidth available
+
+making it essentially opportunistic.
+
+Potential:
+
+\[
+0-3\%
+\]
+
+general improvement, perhaps more on difficult branch-heavy workloads.
+
+Useful, but not the highest priority.
+
+
+---
+
+The frontend must still get stronger
+
+There is no point creating a 10-uOP/cycle backend if it starves.
+
+Kunminghu already fetches up to 32 bytes/cycle and uses ICache, FDIP and a sophisticated BPU path. 
+
+And importantly, XiangShan isn't standing still: as of September 2026, development has been improving BPU lookahead, I-cache behavior, prefetchers, memory dependence handling and queue policies. 
+
+So for MEF-K I would target:
+
+32 B/cycle frontend
+6-wide decode minimum
+8-wide rename possibility later
+decoded-uOP cache / loop buffer
+very strong TAGE-class predictor
+multiple predicted branches per fetch block
+
+But I would not make fetch/decode permanently 8-wide just because the backend can consume eight.
+
+Instead, your resource manager could vary frontend aggressiveness:
+
+ROB starving
+→ high fetch bandwidth
+
+SIMT/vector macro-uOP running
+→ lower scalar frontend bandwidth
+
+BPU confidence poor
+→ reduce speculation depth
+
+high ILP
+→ aggressive mode
+
+Another morphable resource.
+
+
+---
+
+A particularly interesting optimization: turn idle lanes into branch/memory/control helpers
+
+This might become the defining trick.
+
+Don't think:
+
+lane = ALU lane
+
+Think:
+
+lane = compute resource
+
+An idle tile can temporarily become:
+
+normal ALU
+vector lane
+SIMT lane
+address generator
+runahead engine
+prefetch engine
+branch alternate-path engine
+memory coalescer helper
+
+Imagine runtime allocation:
+
+8 tiles
+
+compute-heavy:
+6 execution
+2 memory
+
+memory-bound:
+3 execution
+4 runahead/AGU
+1 branch
+
+vector:
+8 vector
+
+branch-heavy:
+5 execution
+2 alternate-path
+1 memory helper
+
+Now the architecture isn't merely CPU/GPU morphable.
+
+It becomes:
+
+> latency-source morphable.
+
+
+
+It allocates physical resources to whatever currently prevents forward progress.
+
+That is a much deeper architecture.
+
+
+---
+
+I would add a hardware "bottleneck controller"
+
+This controller would monitor PMU-style signals:
+
+frontend starvation
+branch recovery cycles
+critical-load stalls
+L1/L2 misses
+MSHR occupancy
+IQ pressure
+remote operand traffic
+WB congestion
+vector lane utilization
+
+Then classify the current phase:
+
+FRONTEND_BOUND
+BRANCH_BOUND
+DEPENDENCY_BOUND
+MEMORY_BOUND
+COMPUTE_BOUND
+VECTOR_BOUND
+THROUGHPUT_BOUND
+
+And reconfigure accordingly.
+
+For example:
+
+MEMORY_BOUND
+
+Execution tiles   = 3
+Runahead tiles    = 2
+AGU/coalesce      = 2
+General spare     = 1
+
+versus:
+
+COMPUTE_BOUND
+
+Execution tiles   = 7
+Memory helper     = 1
+
+This is where the architecture starts to differ fundamentally from Kunminghu.
+
+Kunminghu dynamically schedules instructions onto a largely fixed resource topology.
+
+MEF would dynamically schedule the topology's purpose itself.
+
+
+---
+
+My priority order has changed
+
+If the goal is explicitly:
+
+> beat Kunminghu V2R2 rather than merely create an interesting CPU/GPU hybrid
+
+
+
+then I would prioritize the features approximately like this:
+
+Optimization	Expected opportunity vs MEF baseline	Importance for beating KMH	Risk
+
+Local critical fast path	+5–15% on dependency-heavy code	Essential	Medium
+Criticality/data-locality scheduling	+3–12%	Very high	Medium
+Vector/decoupled runahead	+10–100%+ memory-specific	Very high	Medium-high
+Shadow memory window	+5–30% memory workloads	Very high	Medium-high
+Universal memory coalescing	+5–40% memory-specific	Very high	Medium
+Dynamic dataflow fusion	+3–10% general	High	Medium
+Near-lane register/L0 hierarchy	+2–10%, plus Fmax/power	High	Medium
+Dynamic vector-width grouping	+5–30% mixed/vector	High	Medium
+Uniform/affine scalarization	0–20% vector/SIMT dependent	Medium-high	Medium
+Address/value speculation	~2–8% expected general opportunity	Medium	High
+Selective dual-path execution	~0–3% likely general	Low-medium	High
+More ALUs	often ~0–5%	Low	Low
+Larger conventional ROB alone	diminishing returns	Low	Medium
+
+
+These percentages are not additive. Many of them attack the same stall cycles.
+
+
+---
+
+What could the final performance look like?
+
+Suppose normalized Kunminghu V2 performance is:
+
+\[
+1.00
+\]
+
+My earlier estimate for a straightforward MEF-K was roughly:
+
+\[
+0.95-1.08
+\]
+
+on scalar/general workloads.
+
+With the architecture I've described here, my target would become something closer to:
+
+\[
+\boxed{1.05-1.15\times}
+\]
+
+on a broad scalar/general workload if the Fmax penalty can be held below roughly 5–8%.
+
+For high-MLP/irregular-memory workloads:
+
+\[
+\boxed{1.15-1.5\times}
+\]
+
+is a credible research target.
+
+For workloads that strongly benefit from decoupled vector runahead, there could be outliers well above that; the published DVR result shows that multi-x gains against a large OoO baseline are possible on selected indirect-memory workloads. 
+
+For long, perfectly regular RVV:
+
+\[
+\boxed{0.95-1.1\times}
+\]
+
+is more realistic because Kunminghu already has proper vector hardware.
+
+For mixed scalar/vector/SIMT workloads:
+
+\[
+\boxed{1.2-1.6\times}
+\]
+
+is where I would hope the architecture becomes clearly superior.
+
+Those are targets, not predictions of measured silicon.
+
+
+---
+
+The architecture I would now aim for
+
+The most compelling version is no longer simply:
+
+CPU ↔ GPU morphable processor
+
+It is:
+
+Architectural RISC-V
+                              │
+                     Rename / precise ROB
+                              │
+                  Criticality + shape analysis
+                              │
+          ┌───────────────────┼────────────────────┐
+          ▼                   ▼                    ▼
+   Critical Fast Path   Elastic Compute       Shadow Engine
+    low latency OoO       Fabric             runahead/prefetch
+          │                   │                    │
+    local bypass        scalar/RVV/SIMT      speculative only
+          │                   │                    │
+          └───────────┬───────┴───────────┬────────┘
+                      │                   │
+              Data-locality router   Universal memory
+                      │                   │
+               distributed RF       lane L0/coalescer
+                      │                   │
+                      └────────┬──────────┘
+                               ▼
+                       Completion Fabric
+                               │
+                         Precise Commit
+
+The critical insight is that GPU-style parallel hardware should not replace the high-performance OoO CPU machinery.
+
+It should surround it and attack the things a conventional OoO core is bad at:
+
+looking far beyond the ROB, tolerating irregular memory latency, dynamically exploiting excess parallel resources, vectorizing speculative work, changing granularity, and moving computation toward data.
+
+That is the version where I think exceeding Kunminghu V2R2 becomes a serious architectural possibility rather than just an optimistic goal.
+
+Worked for 1m 56s
+
+Yes. I think this is one of the stronger extensions to the architecture, and it attacks an important weakness that remains even after making the execution fabric dynamic:
+
+> The normal OoO machine does not start doing useful memory work until an instruction has traveled surprisingly far into the machine.
+
+
+
+Your proposal is essentially to create a second speculative memory pipeline running alongside the frontend, so the memory subsystem can start working on an instruction before that instruction has finished decode → rename → dispatch → issue.
+
+I would keep this idea, but make it considerably more structured.
+
+1. Add a Speculative Memory Preview Pipeline
+
+I would call it the Memory Preview Pipeline — MPP.
+
+The main processor becomes:
+
+FETCH
+                              │
+                         PREDECODE
+                       ┌──────┴──────┐
+                       │             │
+                       ▼             ▼
+                Normal pipeline     MPP
+                       │             │
+                    Decode      Memory Intent
+                       │         Detection
+                    Rename           │
+                       │        Address Prediction
+                    Dispatch         │
+                       │        Dependence Prediction
+                      IQ             │
+                       │        Placement Prediction
+                    Execute          │
+                       │             ▼
+                       │       Inbound Memory
+                       │         Controller
+                       │        /      |      \
+                       │       /       |       \
+                       │   Tile-L0     L1       L2
+                       │       \       |       /
+                       │        \      |      /
+                       │         Preview Data
+                       │              │
+                       └──── Actual Memory uOP
+                                      │
+                                  VALIDATE
+                                      │
+                       ┌──────────────┴─────────────┐
+                       │                            │
+                    prediction                   mismatch
+                     correct                        │
+                       │                          normal
+                   fast consume                    LSU
+
+Importantly, MPP must not stall the real pipeline.
+
+If it runs out of queue entries, bandwidth, MSHRs, or predictor confidence:
+
+drop prediction
+↓
+normal execution continues
+
+That property is extremely important.
+
+The memory-prediction system should be a performance accelerator, not another mandatory pipeline stage.
+
+
+---
+
+2. You actually know quite a lot before full decode
+
+RISC-V helps here.
+
+Once the frontend has instruction boundaries and raw instruction bits, a lightweight memory predecoder can identify many properties without waiting for full backend decode.
+
+For a normal load/store it can know things such as:
+
+instruction PC
+load vs store
+access width
+immediate
+rs1 architectural number
+rs2 architectural number
+compressed/non-compressed
+likely next PC
+
+It doesn't yet know the current rs1 value, which is the important difficulty.
+
+But it can predict the effective address independently.
+
+For example, maintain:
+
+Memory Prediction Table
+
+PC        LastAddr       Stride     Conf
+----------------------------------------
+0x1020    0x8A1040       +8          7
+0x1024    0x330000       0           7
+0x1048    0x51C080       +64         6
+0x1110    unpredictable              0
+
+Then:
+
+\[
+EA_{predicted}=EA_{previous}+stride
+\]
+
+This isn't speculative science fiction. Effective-address-prediction research explicitly examined initiating cache access early by predicting load addresses before ordinary effective-address generation, including PC-indexed last-address, stride, context, and dependence-based predictors. 
+
+So conceptually you are proposing:
+
+> branch prediction for memory addresses.
+
+
+
+And I think that is a useful way to think about it.
+
+
+---
+
+3. It should actually have several predictors
+
+I would not make one giant "memory predictor."
+
+Use small specialist predictors with a confidence selector:
+
+Memory instruction PC
+                                  │
+             ┌────────────────────┼─────────────────────┐
+             ▼                    ▼                     ▼
+       Last-address           Stride             Load-dependence
+        predictor            predictor              predictor
+             │                    │                     │
+             └────────────────────┼─────────────────────┘
+                                  ▼
+                          Prediction chooser
+                                  │
+                             confidence
+                                  │
+                                  ▼
+                           predicted address
+
+Then eventually add:
+
+region predictor
+pointer-chain predictor
+affine/vector predictor
+same-base predictor
+page predictor
+
+For RVV/SIMT, you often don't even need to predict every individual address.
+
+For:
+
+base = A
+stride = 8
+lanes = 8
+
+the prediction can remain compressed as:
+
+{base, stride, lane-mask}
+
+until it reaches the memory coalescer.
+
+That combines beautifully with the execution-shape idea from earlier.
+
+
+---
+
+4. I would add a Memory Intent Cache
+
+One particularly useful structure would be a small PC-indexed table:
+
+Memory Intent Cache
+───────────────────────────────────────────────────────
+PC
+type
+last address
+stride
+confidence
+usual target level
+usual target tile
+reuse class
+memory dependence ID
+coalescing class
+fusion signature
+
+Something like:
+
+PC 0x1020
+
+type           = LOAD
+address        = stride
+stride         = +8
+confidence     = 7/7
+locality       = STREAM
+placement      = TILE2
+target         = L1 + Tile2 stream buffer
+store-set      = 13
+fusion-pattern = LOAD_ADD
+
+Now the frontend doesn't merely predict:
+
+> "there will be a load."
+
+
+
+It predicts:
+
+> "this is probably a sequential 64-bit load from line X, it normally executes on Tile 2, its result immediately feeds an ADD, and it rarely conflicts with earlier stores."
+
+
+
+That's considerably more powerful.
+
+
+---
+
+5. Your "Inbound Memory Controller" is the right idea
+
+I would implement the component you described between prediction and the physical memory hierarchy.
+
+Call it IMC — Inbound Memory Controller.
+
+Its job isn't normal architectural LSU ordering.
+
+Its job is:
+
+predicted request
+      │
+      ▼
+ translation probe
+      │
+      ▼
+ already present?
+ ┌────┴────┐
+yes        no
+ │          │
+record      existing MSHR?
+location       │
+          ┌────┴────┐
+         yes        no
+          │          │
+       merge      allocate
+          │          │
+          └────┬─────┘
+               ▼
+         fetch cache line
+               │
+        placement decision
+          /          \
+        L1         Tile-L0
+
+This becomes effectively a memory ingress scheduler.
+
+It can see future traffic earlier than the ordinary LSU.
+
+
+---
+
+6. But your per-tile memory should remain an L0/local buffer
+
+I still would not make each tile an independent normal coherent cache.
+
+I'd use:
+
+Tile 0 L0     Tile 1 L0     Tile 2 L0
+    \             |             /
+     \            |            /
+         Shared coherent L1
+                  │
+                  L2
+
+The Tile-L0 can be perhaps:
+
+1–4 KiB
+16–32 B sectors
+low associativity
+1-cycle
+
+and operate as:
+
+locality cache
+stream buffer
+prefetch staging area
+scratchpad
+
+depending on workload.
+
+The key rule remains:
+
+\[
+\boxed{\text{L1 is the primary coherence/order point}}
+\]
+
+rather than:
+
+\[
+\text{every tile L0 participates fully in coherence}.
+\]
+
+Spatz is useful evidence for the underlying locality idea: its cores use small local vector register structures while sharing a highly banked tightly coupled L1 scratchpad, and its published cluster reaches near-ideal FPU utilization on suitable workloads. 
+
+Your organization would be more speculative and cache-oriented, but the principle of putting low-latency storage close to execution is sound.
+
+
+---
+
+7. The really clever part is attaching a Preview Token to the later uOP
+
+When MPP predicts something, create:
+
+MemoryPreviewToken {
+    FetchSeq
+    PC
+    SpecEpoch
+
+    PredVA
+    PredLine
+    PredOffset
+
+    TargetTile
+
+    MSHR_ID
+
+    Confidence
+
+    DataReady
+    DataLocation
+
+    DependencePrediction
+}
+
+Suppose fetch sees:
+
+ld x7, 0(x10)
+
+and predicts:
+
+address = 0x82001080
+
+The IMC starts fetching it.
+
+Several cycles later the real instruction is decoded and renamed:
+
+ld p71, 0(p42)
+
+Rename attaches:
+
+PreviewToken = #37
+
+to the memory uOP.
+
+Eventually the true AGU computes:
+
+actual = 0x82001080
+
+Now:
+
+predicted == actual
+
+and if memory ordering also validates:
+
+Tile2 L0 already contains data
+
+so the normal cache latency has largely disappeared.
+
+This is much more powerful than a conventional prefetcher because the prefetch transaction remains associated with the future instruction.
+
+
+---
+
+8. It could even reserve resources before dispatch
+
+This is another unusual possibility.
+
+MPP could predict:
+
+Load PC X
+→ expected Tile 3
+→ expected bank 1
+→ expected data at cycle N+5
+
+The resource scheduler can use this information later:
+
+dependent operation
+→ prefer Tile 3
+
+because its source value is already going there.
+
+So memory prediction starts influencing instruction placement.
+
+Instead of:
+
+instruction scheduled
+→ data moved to instruction
+
+you increasingly get:
+
+data predicted
+→ instruction scheduled near data
+
+That is a very important inversion.
+
+
+---
+
+9. This also leads naturally to your "x86-like operation" idea
+
+Yes — internally.
+
+But I would make an important distinction:
+
+> Do not make the RISC-V architectural ISA x86-like. Make the internal macro-uOP representation x86-like where doing so reduces traffic.
+
+
+
+For example:
+
+ld   x5, 0(x10)
+addi x5, x5, 1
+sd   x5, 0(x10)
+
+architecturally remains three RISC-V instructions.
+
+But internally you could recognize:
+
+LOAD
+ ↓
+ADD +1
+ ↓
+STORE same address
+
+and create:
+
+Memory Compound Operation
+
+LOAD_MODIFY_STORE {
+    base      = p10
+    offset    = 0
+    operation = ADD
+    immediate = 1
+}
+
+This is very similar conceptually to a complex memory operand.
+
+
+---
+
+10. But it must still have multiple architectural identities
+
+Do not turn those three RISC-V instructions into one ROB identity.
+
+Instead:
+
+Compound execution packet
+                              │
+          ┌───────────────────┼──────────────────┐
+          │                   │                  │
+     MacroInst #51       MacroInst #52      MacroInst #53
+         LOAD                ADD                STORE
+          │                   │                  │
+       ROB51               ROB52               ROB53
+
+Internally:
+
+one efficient execution flow
+
+Architecturally:
+
+three retirement boundaries
+
+This retains:
+
+precise exceptions
+debugging
+interrupt semantics
+architectural counters
+branch recovery
+memory ordering
+
+Your earlier uOP design already moved in exactly this direction by separating architectural-instruction identity from internal execution uOPs. 
+
+
+---
+
+11. There are several valuable compound forms
+
+This is where I think the architecture can become substantially more efficient.
+
+Load + ALU
+
+ld  x5, 0(x10)
+add x6, x5, x7
+
+normally:
+
+LOAD
+ ↓
+PRF write
+ ↓
+wakeup
+ ↓
+PRF/bypass
+ ↓
+ADD
+
+could become:
+
+Memory → Tile L0 → ALU
+
+with the intermediate value never permanently written if unnecessary.
+
+
+---
+
+ALU + store
+
+add x5, x6, x7
+sd  x5, 0(x10)
+
+could become:
+
+ALU → Store Queue
+
+rather than:
+
+ALU → PRF → RF read → store data
+
+BOOM already demonstrates the importance of flexibly handling store address and store data: its store can occupy one issue-window entry while allowing address or data portions to progress independently as operands become ready. 
+
+You can generalize this much further.
+
+
+---
+
+Address generation + load
+
+addi x5,x10,64
+ld   x6,0(x5)
+
+becomes:
+
+LD x6,64(x10)
+
+internally.
+
+No intermediate register traffic.
+
+
+---
+
+Load + modify + store
+
+Your example:
+
+ld   x5,0(x10)
+addi x5,x5,1
+sd   x5,0(x10)
+
+can become:
+
+L0/L1 load
+    ↓
+ALU
+    ↓
+StoreQueue
+
+without:
+
+PRF write
+PRF read
+global result route
+
+That is exactly the kind of data-movement reduction that suits MEF.
+
+
+---
+
+12. But do not accidentally turn ordinary RISC-V code into an atomic instruction
+
+This point matters greatly.
+
+The sequence:
+
+ld
+add
+sd
+
+is normally not an atomic RMW.
+
+Therefore even if internally represented as:
+
+LOAD_MODIFY_STORE
+
+the store portion cannot simply update memory immediately.
+
+You need:
+
+load
+ ↓
+compute result
+ ↓
+Store Queue entry
+ ↓
+wait for architectural retirement/order permission
+ ↓
+memory update
+
+So the compound packet means:
+
+> fused execution
+
+
+
+not:
+
+> new atomic semantics.
+
+
+
+For actual atomicity, use RISC-V AMOs/LR-SC semantics.
+
+And MMIO / strongly ordered memory should generally be excluded entirely from this aggressive path.
+
+
+---
+
+13. Memory dependence prediction becomes crucial
+
+Once you become more aggressive, you need to answer:
+
+Can this load safely pass older unresolved stores?
+
+This is where a memory-dependence predictor becomes part of MPP.
+
+The classic Store Sets approach predicts the older store(s) a load is likely to depend on, allowing independent loads to issue aggressively while delaying likely aliases. 
+
+Interestingly, recent 2026 work suggests this doesn't necessarily require a giant predictor: Mini-MDP reports a 48-entry design that gets within 0.06% IPC of a much more complex predictor on its SPEC CPU2017 evaluation while using a small fraction of the comparator design's area and power. 
+
+That fits MEF nicely.
+
+MPP can have:
+
+Memory Intent Cache
++
+Address Predictor
++
+Small Dependence Predictor
+
+rather than creating another huge scheduler.
+
+
+---
+
+14. I would actually create two levels of aggressiveness
+
+This gives you a clean research path.
+
+Level 1 — Preview-only
+
+Prediction can:
+
+translate
+prefetch
+allocate MSHR
+fill L1
+fill Tile-L0
+choose probable tile
+
+but the actual load must compute its real address and validate ordering before consuming the value.
+
+Wrong prediction:
+
+extra cache traffic only
+
+This is relatively safe.
+
+
+---
+
+Level 2 — Early consume
+
+High-confidence prediction:
+
+predicted address
+       ↓
+Tile-L0 already contains value
+       ↓
+dependent ALU executes
+
+before actual AGU validation has completed.
+
+Now all resulting operations carry something like:
+
+MemSpecEpoch = 17
+
+When real address/order validation arrives:
+
+correct
+   ↓
+confirm epoch
+
+or:
+
+wrong
+   ↓
+replay/squash dependent slice
+
+That is considerably more aggressive.
+
+Essentially:
+
+> address prediction becomes value-availability speculation.
+
+
+
+I would absolutely not start there, but it is a very interesting second-generation feature.
+
+
+---
+
+15. Stores should be asymmetric
+
+I would let the preview pipeline be extremely aggressive about loads and conservative about stores.
+
+Predicted store:
+
+store likely to address X
+
+can safely be used to prepare:
+
+TLB translation
+cache-line ownership request
+L1 write permission
+Store Queue allocation hint
+tile placement
+
+but never write predicted data to the architectural cache/memory hierarchy before the ordinary store has been validated and committed.
+
+So:
+
+Predicted LOAD:
+may fetch data
+
+Predicted STORE:
+may prepare destination
+must not update destination
+
+This asymmetry greatly simplifies correctness.
+
+
+---
+
+16. "Store prefetch" could nevertheless be extremely powerful
+
+Imagine the system predicts:
+
+sd x5, 0(x10)
+
+will soon write line A.
+
+Instead of waiting until store commit:
+
+IMC:
+request line ownership early
+
+In a coherent multiprocessor this means conceptually:
+
+Shared/Read state
+   ↓
+prefetch-for-write / ownership request
+   ↓
+exclusive/writeable line ready
+
+Then when the real store reaches commit:
+
+no coherence acquisition latency
+
+That's potentially valuable for producer-heavy code.
+
+Again, you haven't made the store visible early.
+
+You've just prepared everything needed for it.
+
+
+---
+
+17. Prediction should also decide L1 vs Tile-L0
+
+Your IMC can use a locality classification:
+
+Predicted behavior	Placement
+
+one-time streaming	L1 or stream buffer, not Tile-L0
+repeated same-tile use	Tile-L0
+cross-tile shared	shared L1
+RVV contiguous stream	coalescer + stream buffer
+gather with clustered lines	shared L1 + selective Tile-L0
+random	minimize pollution
+load→ALU fused chain	destination tile L0
+load→store same line	tile near store execution
+
+
+Now your "tightly coupled cache" becomes active placement memory.
+
+
+---
+
+18. I would add line versioning to the Tile-L0
+
+Because you're speculatively placing data near tiles, validation has to be cheap.
+
+Something like:
+
+Tile L0 entry:
+
+LineTag
+SectorValid
+Version
+Speculative
+SourceL1Bank
+
+Shared L1 maintains:
+
+line version / invalidation epoch
+
+When a store modifies that line:
+
+version++
+
+The previewed load can validate:
+
+predicted line version == current L1 version?
+
+If yes:
+
+data still valid
+
+If no:
+
+re-fetch / replay
+
+This could make speculative near-tile copies considerably cheaper than full per-tile coherence.
+
+
+---
+
+19. The prediction path should receive branch confidence too
+
+Otherwise you'll prefetch huge amounts of wrong-path data.
+
+MPP request priority should look something like:
+
+confidence =
+    address confidence
+  × branch-path confidence
+  × memory-dependence confidence
+  × locality confidence
+
+Then:
+
+very high confidence:
+    → Tile-L0 fill
+
+medium:
+    → L1 prefetch
+
+low:
+    → L2-only prefetch
+
+very low:
+    → nothing
+
+That's a particularly elegant mechanism.
+
+The more speculative something is, the farther away from the scarce low-latency structures it stays.
+
+
+---
+
+20. Think of the hierarchy as confidence levels
+
+This is perhaps the cleanest formulation of your idea:
+
+Prediction confidence
+                          increases
+                              ↑
+
+                  Tile tightly coupled L0
+                    very high confidence
+                              ↑
+                            L1D
+                       high confidence
+                              ↑
+                             L2
+                      medium confidence
+                              ↑
+                          prefetch queue
+                       low confidence
+
+So instead of asking:
+
+> "where is this memory address?"
+
+
+
+you ask:
+
+> "How much hardware should I commit to this prediction?"
+
+
+
+That's a very MEF-like way of thinking.
+
+
+---
+
+21. A miss prediction does not have to be wasted
+
+Suppose MPP predicted:
+
+Load A → Tile 2
+
+but the uOP eventually goes to Tile 3.
+
+Don't copy it immediately.
+
+Tile 3 can request:
+
+Tile2 L0 → Tile3
+
+or simply access shared L1.
+
+The placement predictor is therefore just an optimization.
+
+Wrong tile:
+
++1 hop
+
+not:
+
+pipeline squash
+
+Only a wrong address used for early dependent execution should require recovery.
+
+This is another reason to initially implement preview-only mode.
+
+
+---
+
+22. The MPP can operate before full instruction conversion
+
+So your resulting front-end would look approximately like this:
+
+Fetch Block
+                           │
+                   Lightweight Predecode
+                    /                \
+                   /                  \
+                  ▼                    ▼
+       instruction frontend      MEMORY PREVIEW
+                  │                    │
+             Full Decode        memory classifier
+                  │                    │
+              uOP build        PC/address predictor
+                  │                    │
+               Rename          dependence predictor
+                  │                    │
+                  │              translation predictor
+                  │                    │
+                  │               inbound controller
+                  │                  /     \
+                  │                L1     Tile-L0
+                  │                  \     /
+                  │               preview token
+                  │                    │
+                Dispatch ◄─────────────┘
+
+This is genuinely different from a conventional prefetcher.
+
+
+---
+
+23. It also lets decode participate in fusion before rename
+
+You suggested doing x86-like conversion around:
+
+decode
+rename
+reorder
+dispatch
+
+I agree, but I would split fusion into two passes.
+
+Frontend Fusion
+
+Before rename:
+
+instruction bit patterns
++
+architectural registers
+
+detect simple patterns:
+
+ADDI + LOAD
+LOAD + ALU
+ALU + STORE
+adjacent LOADs
+adjacent STOREs
+
+Kunminghu already performs decode-stage instruction fusion on candidate adjacent instruction pairs, so simple fusion alone isn't a differentiator. 
+
+Then add something Kunminghu's documented frontend doesn't describe:
+
+Post-Rename Dataflow Fusion
+
+After physical registers are known:
+
+producer
+  │
+only one consumer?
+  │
+same tile candidate?
+  │
+no intervening architectural hazard?
+  │
+   YES
+  │
+create compound packet
+
+This lets you fuse based on actual dataflow, rather than merely adjacent instruction encodings.
+
+That's considerably more interesting.
+
+
+---
+
+24. You could even fuse non-adjacent instructions
+
+For example:
+
+ld   x5,0(x10)
+add  x7,x8,x9
+addi x6,x5,1
+
+Decode fusion can't trivially fuse instruction 1 and 3.
+
+Rename reveals:
+
+p5 → only consumed by ADDI
+
+So the resource scheduler might create:
+
+Load → ADDI
+
+compound execution while the unrelated ADD proceeds separately.
+
+That's a real advantage of doing fusion after rename.
+
+I would call this:
+
+> Dynamic Dataflow Fusion.
+
+
+
+
+---
+
+25. The memory predictor can actually help identify fusion
+
+Suppose the prediction table remembers:
+
+PC 0x1000 LOAD
+PC 0x1004 ADDI
+PC 0x1008 STORE
+
+same address stream
+confidence high
+
+Before the instructions even reach rename, MPP can tell the backend:
+
+FusionHint = probable RMW chain
+
+Decode then prepares:
+
+MacroGroupID
+
+and rename verifies it.
+
+So:
+
+memory prediction
++
+instruction fusion
++
+resource placement
+
+start cooperating.
+
+That is unusually powerful.
+
+
+---
+
+26. This starts resembling an internal dynamic ISA
+
+Architecturally:
+
+RV64GC + RVV
+
+Internally:
+
+Scalar uOP
+Vector Macro-uOP
+SIMT packet
+Load-ALU packet
+ALU-Store packet
+Load-Modify-Store packet
+Affine Memory packet
+Coalesced Memory packet
+Runahead packet
+
+In other words:
+
+> RISC-V becomes the external ISA; ExecutionPacket becomes the internal dynamic ISA.
+
+
+
+That is consistent with the earlier architectural principle that the uOP should function as a transaction protocol rather than merely decoded instruction bits. 
+
+I think this is one of the most interesting directions for the project.
+
+
+---
+
+27. Performance potential
+
+I would expect the mechanisms to contribute approximately this much relative to the MEF architecture without the new preview pipeline:
+
+Feature	General scalar	Memory-sensitive
+
+early address/line prediction	+1–5%	+5–15%
+early L1 prefetch	+1–4%	+5–20%
+Tile-L0 placement	+1–5%	+3–12%
+store destination preparation	0–3%	+2–8%
+load→ALU fusion	+2–5%	+2–8%
+ALU→store fusion	+1–4%	+2–7%
+RMW/dataflow fusion	+1–5%	+3–10%
+early-consume speculation	+0–5%	+3–12%
+
+
+These cannot be added together.
+
+They eliminate many of the same stall cycles.
+
+My combined mature target would be approximately:
+
+\[
+\boxed{+5\%-12\%}
+\]
+
+additional general scalar performance over the prior MEF design, and perhaps:
+
+\[
+\boxed{+10\%-30\%}
+\]
+
+on memory-sensitive workloads where prediction works well.
+
+On completely unpredictable pointer chasing:
+
+address predictor accuracy ↓
+
+the improvement may approach zero, at which point runahead/helper execution becomes more useful.
+
+
+---
+
+28. This materially improves the chance of beating Kunminghu V2R2
+
+Kunminghu already has an aggressive memory system: its documented core can issue up to three scalar loads, two scalar stores and two vector-memory microinstructions per cycle, with a nonblocking D-cache and hardware prefetching. 
+
+Its LoadUnit also already feeds prefetchers and accepts high/low-confidence hardware prefetch traffic. 
+
+So your advantage cannot simply be:
+
+> "MEF has a prefetcher."
+
+
+
+It must be:
+
+> MEF starts memory prediction substantially earlier and carries the prediction all the way into execution placement and uOP formation.
+
+
+
+That distinction is much stronger.
+
+Conceptually:
+
+Kunminghu-like:
+
+execute memory instruction
+        ↓
+observe address/access
+        ↓
+train/prefetch future memory
+
+
+Proposed MEF:
+
+fetch future memory instruction
+        ↓
+predict its address
+        ↓
+prepare translation/cache/data placement
+        ↓
+decode/rename/fuse instruction
+        ↓
+route execution toward predicted data
+        ↓
+validate prediction
+
+That's a fundamentally different pipeline organization.
+
+
+---
+
+29. There is one security issue we should design in from day one
+
+A wrong-path load prediction can change cache state.
+
+That's a potential speculative side channel.
+
+Therefore MPP should never simply be:
+
+any predicted address → cache
+
+The request must carry:
+
+ASID
+privilege
+speculation epoch
+branch confidence
+translation status
+memory type
+
+and MPP must never speculatively touch MMIO/device memory.
+
+High-security mode could also restrict:
+
+wrong-path preview → private Tile-L0 only
+
+until branch resolution.
+
+Only afterward promote the data into shared L1.
+
+That's a very appealing solution because you already have private near-tile storage.
+
+
+---
+
+30. My recommended version
+
+I would now explicitly add the following subsystem to MEF:
+
+┌───────────────────────────────────────┐
+              │       MEMORY PREVIEW ENGINE           │
+              │                                       │
+ Fetch ──────►│ Predecode Memory Detector             │
+              │ PC-indexed Memory Intent Cache        │
+              │ Effective Address Predictor           │
+              │ Memory Dependence Predictor           │
+              │ Locality/Placement Predictor          │
+              │ Translation Preview                   │
+              └─────────────────┬─────────────────────┘
+                                │
+                                ▼
+                       INBOUND MEMORY CONTROLLER
+                                │
+                 ┌──────────────┼───────────────┐
+                 │              │               │
+              Tile-L0       Shared L1         L2
+                 │              │               │
+                 └──────────────┼───────────────┘
+                                │
+                         Memory Preview Token
+                                │
+                                ▼
+Decode → Fusion → Rename → Dynamic Dataflow Fusion
+                                │
+                                ▼
+                         ExecutionPacket
+                                │
+                    ┌───────────┴───────────┐
+                    │                       │
+              Critical Fast Path        Fabric
+                    │                       │
+                    └───────────┬───────────┘
+                                ▼
+                         Validation / LSQ
+                                │
+                         Precise Commit
+
+I would implement it progressively: first memory-intent detection and L1 prefetch; then Preview Tokens and Tile-L0 placement; then pre-rename fusion hints; then post-rename dataflow fusion; then store-ownership preparation; and only after all of that is stable, high-confidence early consumption of predicted load data.
+
+The most important conceptual shift is that this no longer treats memory as something that happens after execution scheduling.
+
+In this architecture:
+
+\[
+\boxed{\text{memory preparation begins at fetch}}
+\]
+
+while:
+
+\[
+\boxed{\text{architectural memory execution remains validated at the LSU/LSQ}}
+\]
+
+That separation lets you be extremely aggressive in performance optimization while preserving precise RISC-V behavior. Combined with your per-tile near-memory and dynamic execution placement, I think this Memory Preview Pipeline + Dynamic Dataflow Fusion is one of the best remaining opportunities for creating a genuine single-thread performance advantage over a conventional Kunminghu-style OoO backend, rather than merely getting higher GPU/vector throughput.
+

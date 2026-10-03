@@ -891,3 +891,121 @@ flowchart TD
 |---|---|---|---|---|
 | 2026-09-29 | 初始团队指南由完整架构/验证/平台计划生成 | 本文件、source-inventory、references | 规划集成 | 各团队冻结输入并更新上表 |
 | 2026-09-29 | 面向较小模型/新工程师补充自然语言执行说明 | 本文件任务卡的执行者目标/须知/建议顺序/停止条件 | 规划集成 | 实施团队按卡执行并回填证据 |
+
+## 8. 2026-10-02 研究增补：MPP / IMC 与 preview-only 内存准备
+
+<a id="memory-preview-contract"></a>
+
+本节为原有 §3–§7 的**增量研究合同**，不重写已交付 I/V 卡、既有 ledger 或其验收定义。来源：[New document(2).txt](../New%20document%282%29.txt) 全文（特别是 88–199、459–514、910–2232 行）、[deep-research-report.md](../deep-research-report.md) 的 LSQ/资源调度分层。MPP（Memory Preview Pipeline）和 IMC（Inbound Memory Controller）均为 **PROPOSED、未实现**；它们不是现有 prefetcher 的别名。安全配套见[第10阶段 §8](stage-10-rva23-security.md)，验证交接见[validation-plan.md](validation-plan.md)，全局研究卡与依赖见[implementation-plan.md](implementation-plan.md)。本节 MP-01..MP-08 是原卡内的具名研究子交付，不增加 I/V/H ID，也不增加能力广告。
+
+### 8.1 实装边界：模块、core 路径、研究提案分别记账
+
+状态事实取自 [implementation_status.json](../config/status/implementation_status.json)、[PROGRESS.md](../results/PROGRESS.md) 和下表报告；[REVISION.md](../results/REVISION.md) 是历史快照，不能覆盖较新报告/RTL。原 §4 的 `Not started` 是规划生成时的记录，**不是当前已交付状态**；本节不据此撤销或新增任何 delivered task。
+
+| 层次 | 读取到的实现/证据 | 能说明什么 / 不能说明什么 |
+|---|---|---|
+| demand LSU / LSQ | `mosaic_core.sv` §14 接入 `mosaic_load_queue`、`mosaic_store_queue`、`mosaic_lsu_endpoint`；[I-033](../results/reports/I-033-lsu.md)、[I-034](../results/reports/I-034-sq.md)、[I-035](../results/reports/I-035-lq.md)、[I-023 memory](../results/reports/I-023-memory.md) | 有 byte forwarding、授权 drain、访问 fault 路径；I-036 不在当前 delivered ledger，不能把 LQ unit 的 replay 场景提升成完整 speculative-load/dependent-slice 恢复签收 |
+| 翻译/权限 | core 接入 `mosaic_tlb` 包装 PTW，store 翻译在退休前、PA 供授权 drain；[Sv39](../results/reports/I-045-sv39.md)、[TLB](../results/reports/I-046-tlb.md)、[privilege](../results/reports/I-044-privilege.md) | demand 路径存在；没有 frontend preview probe、只读 probe 权限票据或 MPP TLB-hit-only 接口证据 |
+| L1 / MSHR | `mosaic_l1_cache_path.sv`：I-side 接 `mosaic_mshr`，D-side 接 `mosaic_cache`，外围 wrapper 只保存一个 CPU transaction、line bridge 单 outstanding；[I-043](../results/reports/I-043-mshr.md)、[cache path](../results/reports/I-042-cache-path.md)、[scale](../results/reports/memory-subsystem-scale.md) | MSHR unit 有合并/取消/乱序返回合同；最新 wrapper 已接 core，早期 I-043 “未接 core”记录不是当前事实；内部几何/表项数不等于 core 端到端 MLP，更不是有 L2/L3 |
+| locality / prefetch | `mosaic_l1_cache_path` 在 line port 接 `mosaic_locality_path`，core 传 PC/ASID/VPN、store/snoop/fence/context 失效；[integration](../results/reports/I-060-locality-integration.md)、[LLB](../results/reports/I-060-llb.md)、[prefetch](../results/reports/I-063-prefetch.md)、[freshness](../results/reports/llb.freshness_and_ownership.md) | 现有 demand-observed stride / clean-copy LLB，不是 fetch-time intent cache、per-tile preview hierarchy 或 MemoryPreviewToken |
+| memory service / QoS | core `mem_owner_q` 单 outstanding，PTW > vector > D-cache 的 ownership mux；`mosaic_mem_qos.sv` 为独立 window/quota/age unit，[I-062](../results/reports/I-062-memory-qos.md) | QoS unit 并未接 core，V-063 未交付；MPP 不能隐式替换 ownership/response routing/PTW 优先级，也不能把 V-063 改成 unit PASS |
+
+**已知边界不被研究掩盖**：[I-045/I-046](../results/reports/I-045-sv39.md) 记录 demand walker 使用 hardware A/D update、非 Svade，且隐式 PTE 的 PMP 检查、真正原子的 A/D compare-and-set 和 fetch-side translation 未在那些交付中闭合；本节不据此修订原交付，也不宣称这些后续义务已完成。MPP 基线不得调用这种会 walk/update 的 demand 接口来冒充只读 probe；必须建立明确 hit-only/no-update 接口并给独立负例。现有 LLB 采用 conservative invalidation/refuse，没有 MP-04 所提 line version / tile-owner 字段；[V-061 报告](../results/reports/llb.freshness_and_ownership.md) 的 lane reassignment/version 负例缺口仍需按新接口实际闭合，不能借历史 unit 签收继承。
+
+### 8.2 两条流水线与不可跨越的授权边界
+
+普通路径仍为 `fetch → decode → rename/ROB → issue → real AGU → translation/PMA/PMP → LSQ/order/forwarding → demand access → precise retire`。旁路为 `accepted fetch occurrence → lightweight memory detector → intent/predictor chooser → read-only translation probe → IMC → permitted read prefetch/location hint → MemoryPreviewToken`。MPP 队列满、confidence 低、翻译缺失、budget 用完都**丢 hint 并计原因**；不把旁路 backpressure 接回 fetch/decode/rename，不挤占 ROB/LSQ/destination tag 必需项。
+
+- **preview-only 基线**：准备 normal、cacheable、idempotent RAM 的 clean read；不写 PRF/VRF、不 wakeup 实际 dependent、不完成 ROB、不创建 architecture load event、不向软件抛 preview fault。真实 load 仍走全部检查，preview fault/mismatch 仅使 hint 失效，真正异常由 demand 路径按原优先级产生。
+- **翻译基线**：仅允许已存在、同上下文且权限有效的 TLB hit（Bare 也需显式当前上下文/PA 权限与 PMA 检查）；miss、A/D 不满足、canonical/页边界不确定均放弃。禁止启动 preview PTW、写 A/D 位、制造页表更新。将来 translation discovery / page predictor / shadow-window PTW 若提出，需单独扩展 MP-01 安全/预算/取消合同，不是本基线默许。
+- **placement 是建议而非资源承诺**：target tile/bank/level、预计 ready time 可以供 L-path/T-path steering 使用；没有实际 lease/credit 前不能 reserve FU/WB/cache port，也不能因错误 tile squash。可读共享 L1，或在权限/freshness 合法时按既有 route 转送；不强制复制。
+- **stores 非对称**：只可给出地址/位置或只读 line 准备 hint；不预测 store data、不提前写 dirty byte、不提前 SQ commit、不改变 reservation。MP-07 之前不发 ownership/RFO；普通 `load→ALU→store` 复合包仍非 AMO，store 仍在原 SQ 授权后外显。
+- **shadow window / helpers**：更远的 address-only dataflow 和 pointer-chain helper 使用同一 preview-only 边界；独立影子寄存器/poison/取消域，不借 architectural rename map 当 committed state，不自行 commit。shadow window 128–512 µops、L0 1–4 KiB/16–32B sector/1-cycle 均只是待测研究点，不是冻结参数或成绩；helpers 的具体执行合同交[第4阶段](stage-4-vector-locality.md) VX 子卡。
+
+### 8.3 Intent cache 与预测训练合同
+
+Memory Intent Cache 是**静态/历史描述**，按 `{hart/security-domain, address-space-generation, code-generation, PC, instruction bits/length}` 核对；它不能作为动态请求身份。记录 `type/width/sign, rs1/rs2/immediate, last validated VA, stride, confidence, reuse/coalescing class, dependence/store-set hint, target level/tile, fusion signature`；压缩/跨 fetch-line/page 指令只有 boundary 与原 bits 确认后才识别，illegal/partial/fault fetch 不生成 intent。
+
+| 专项预测器 | 输入 / 输出 | 训练与失效 / 失败动作 |
+|---|---|---|
+| last-address / stride chooser | 同 PC 的已验证真实 EA、stride delta、置信度 → PredVA / predicted line | 仅真实且合法的 demand 结果训练；preview 不递归训练或触发自扩张；wrong-path 不污染 committed-history 基线；stride 改变降信心，表冲突替换不影响 demand |
+| dependence / store-set | load/store 历史 alias → 可能等待的 older store / confidence | 只能建议，不替代 per-hart age、older unresolved-store 检查；真实 late alias 才训练；I-036 未闭合时仍保守等待 |
+| locality / placement | hit/useful/late/pollution、消费者 locality、branch confidence → level/tile | branch/address/dependence/locality confidence 分开记录；high confidence 可建议 L0、medium L1、low 放弃；不存在 L2 时禁止伪装成 L2-only 请求 |
+| region / page / same-base / pointer-chain | 历史 region/页、真实 base/依赖 slice → candidate | 初期关闭；page/region 命中不是 translation/permission 证明，pointer-chain 使用 helper 返回也需有效数据版本与 poison 检查 |
+| affine/vector intent | `{base,stride,lane-mask,EEW,element/segment range}` → compressed candidate | 到 coalescer 才展开，逐 element 做权限/页/region 边界；mask/FOF/vstart 不能由 intent 改写，helper uniform/affine 不是 ISA V 验收 |
+
+code 修改/FENCE.I 使旧 bits/fusion 签名失效；satp/ASID 复用、PMP/PMA/privilege 变化、guest 切换和 security-domain 变化阻止历史跨域复用。训练更新 owner 与取消同周期优先级在 MP-02 冻结，禁止“表已命中所以当前地址合法”。Mini-MDP 的 48-entry / 0.06% 数字尚无已核主源，不能作为 predictor 尺寸或验收依据。
+
+### 8.4 MemoryPreviewToken：动态 occurrence、有限身份与生命周期
+
+| 字段组 / Owner | 必须冻结的内容 | 生命周期规则 |
+|---|---|---|
+| fetch 身份 / frontend | `{hart, context/security-domain, FetchSeq + fetch generation, fetch-block byte slot, PC, bits/length, branch/spec epoch}` | 只为已接受 occurrence 生成；循环同 PC 是不同实例，重新 fetch/redirect 后不得按 PC 重新认领旧 token |
+| token owner / MPP | `{token slot, token generation, live/state, creation/deadline, cancel reason}` | 有界表；slot 不能在仍可能回来的 response 生命周期内别名复用；generation wrap 要有 drain/quarantine 或由最大迟到界证明，不能仅“位数够大” |
+| 预测/权限 / MMU+IMC | `PredVA, PredPA/line/offset/byte mask, size/type, ASID, satp/root/context generation, privilege/MPRV/SUM/MXR, PMP/PMA generations, memory type, permission verdict, translation generation` | VA 只作候选；权限先核对且保持有效才准发 PA 请求；跨页/line/region 分片各有检查，任何未验证片段不发 |
+| transport / IMC | `{transaction slot+generation, MSHR slot+generation, physical merge key, per-consumer waiter ID, demand/preview class, credit owner}` | token 身份与 transport 身份分开，避免取消一个 token 抹掉共同 demand；late response 先核 transport owner 再核 token live/generation |
+| 数据 / L1+locality | `DataReady, DataLocation, SectorValid, source L1 bank, line instance/generation, Version/invalidation generation, Speculative, freshness verdict` | DataReady 不是 load 完成；evict/refill/写入/invalidate 使旧 location/version 失效；version wrap 同样需要 ABA 规则 |
+| attach / rename+LSQ | `{macro/ROB generation, uop/element ID, load attempt/replay generation, actual EA/PA/context, validation bits}` | decode/rename 只按同 fetch occurrence 绑定；attach 失败安全丢 hint；replay 产生新 attempt，不能让旧 response 对新 attempt 写回 |
+
+建议有限状态：`CREATED → GATED → QUEUED/MERGED → IN_FLIGHT → READY → ATTACHED → VALIDATED → CONSUMED → RELEASED`；drop/cancel/fault/timeout/evict 可转 `INVALID → RELEASED`，但 transport 中已 accepted 的义务仍先进入 drain/absorb，不因 token 释放而丢 response。READY 与 ATTACHED 可先后交错；每个事件处理必须按 owner/generation，不靠状态排列推测是否 live。按域记录 `created = live + consumed + dropped/cancelled`，另记录 transport `accepted = inflight + completed/absorbed`；merged waiter 独立守恒，credit 恰好一次返还。
+
+### 8.5 IMC 物理合并、demand 优先与有限损害
+
+1. 先验证候选的 translation/PMA/PMP 和整个 line/sector 发出的 byte 范围。normal/cacheable/idempotent 且允许 read 才可 lookup；device、MMIO、非幂等、未映射、AMO/LRSC、SS/受保护特殊访问和权限不明一律不 preview。
+2. 在合法的 coherence/security domain 内以 `{physical line, memory type/cacheability, request kind, coherence domain}` 找 already-present / existing MSHR；**不得按 VA/PC 合并**。每个 consumer 保留其独立 permission/context/epoch/offset/size/byte mask；同 VA 不同 PA 不合并，不同 VA 同 PA 只有各自权限通过才可共用 transport。
+3. demand 加入已发 preview 时可以提升 service class 并成为合法 waiter，但不能复制 transaction 或免除 demand 检查；preview cancel 只删它的 waiter，保留 demand/其他 token。所有 consumer 都取消时，尚未发出可撤回；已发必须 drain/absorb，按配置决定可否安装 clean line，禁止回填已失效 private copy。
+4. 冻结 `preview queue depth, outstanding limit, per-hart/security-domain quota, per-window byte/request budget, L0 capacity/pollution budget, maximum lookahead/lifetime`，所有项为配置并可设零；demand 保留 admission/response slots、MSHR/bridge/return credit，preview 只能花剩余额度。没资源就 drop，不等资源卡住正常路径。
+5. 不可撤回的已发预取可能占用一个 beat/line 服务，所以“demand priority”不是零延迟保证；需计算在现有 bridge 和环境响应上界下的最大额外等待，检查 eligible oldest demand 的实际进展。持续 preview、bulk/hot-bank、PTW 下同时保留原 V-063 的混合流量/age/no-starvation 义务；永久不响应为环境 timeout，不是公平性 PASS。
+6. **现阶段硬 blocker**：core ownership mux 没有 MPP producer/class/age/transaction generation 接口。任何 preview 接 core 前，架构 owner 必须显式冻结单一服务模型、PTW 优先规则、所有 response routing/错误/reset 处理及 fairness 证明；不得偷偷叠 QoS 第二模型或改写 V-063 来“解阻”。在该决定和证据闭合前，只能 off/观测，不允许新 core 内存流量。
+
+### 8.6 real AGU / LSQ 兑现与 freshness
+
+实际 load 按当前 operands 重新算 EA、pointer transform（若所选能力已实现）、alignment/size/sign、translation、PMA/PMP、fault priority；核对 token 所属 occurrence/attempt、actual PA+完整 byte range、permissions/context generations、line/sector 版本和 location 仍 live。单纯 `PredVA == actual VA` 或 `line version == version` **均不够**。
+
+- I-035 逐 byte 从最近合法 older store 转发；older store 地址未知或数据未 ready 仍按保守规则阻塞，不让 preview copy 掩盖 SQ 中更新的 byte。load 使用 SQ forwarding + 已验证 memory byte 的合并，跨 line/page 按既有异常合同处理。
+- preview 数据过期、权限变更、错地址/错 size、只有部分 sector valid 时走原 demand LSU；preview-only 下没有 dependent 已执行，不需额外 architecture squash。真实 load-speculation violation 若存在则按 I-036 污染边界撤销所有 younger dependent/未经授权 store，不能只重发 load。
+- L0 只存 clean 副本，以 L1/实际 coherence point 为主；不得宣称独立 writeback cache。真实 store/AMO、external coherent write/snoop、invalidate、replacement、refill race、fence/context switch 必须使副本失效或更新可证明版本。当前 invalidation 输入仅是既有协议证据，不能据此宣称完整 cross-hart coherence 已验。
+- freshness 与 use 同周期发生时，invalidate/写入优先于旧数据消费；refill/install 与 cancel、permission revoke、eviction 同周期时拒绝旧 install。line version 必须连同 line instance/generation；相同地址 eviction 后重新装入不能误判旧副本新鲜。
+
+### 8.7 恢复、fence、context 与安全 disable
+
+| 事件 | preview/token 动作 | 必须保留的普通路径义务 / 负例 |
+|---|---|---|
+| branch redirect / exception / interrupt / replay | 停止新 hint、按受污染 occurrence/epoch 取消；拒绝旧 attach/late install | 已授权 store 继续恰好一次 drain；旧 token 返回新 slot 不得 writeback/wakeup |
+| FENCE | 保守取消受限制 younger preview、按 predecessor/successor 与原 drain 合同处理 | 不把 cache fill 当 architectural load、不让取消延迟 fence 必需 demand；FENCE 不等于 cache flush |
+| FENCE.I / code 修改 | 取消旧 fetch/code-generation 的 intent、fusion hint/token，防晚到旧 bits 重新绑定 | 原 instruction-cache/frontend 同步照常；不暗示跨 hart 自动 I coherence |
+| SFENCE.VMA / Svinval / satp、ASID 或 root 改变 | 失效相应 translation generation 与 token；先全量保守后考虑选择性 | 旧 PTW/preview 回应不插入新域；global/ASID scope 仍由原规范，SFENCE 不当 data fence |
+| PMP/PMA、privilege/PMM、security domain、guest VMID 切换 | 停发、revoke 权限票据；清或代隔离 predictor/token/locality；有限 generation 回绕前 drain | 同 VA/PA 不代表同权限；未来 H/两阶段 VM 必须含完整 guest/root generation，未实现时禁该配置 preview |
+| reset / runtime disable / tile lease 回收 | 拒绝新请求、撤 pending hint、使 token/location 失效；accepted transport drain/absorb 后才复用身份/资源 | reset 不能假定外部 RAM/bus 已清；lease 迁移不把 speculative 数据当 architecture result |
+
+高安全/不支持配置的可靠回退是 **MPP/IMC/helper/early-consume 全关**，普通 demand ISA 不变；可选择在新 security domain 前 drain/清状态。private L0 只能限制安装/可见面，**不消除**共享 cache、TLB/PTW（将来启用时）、interconnect、replacement/queue/timing、功耗侧信道；详见第10阶段 §8。禁止把“wrong prediction 只有 cache traffic”写成安全无影响。
+
+### 8.8 MP-01..MP-08 进度表与小批门禁
+
+每卡回填 `owner（角色及认领者）/输入hash/接口版本/实际case与负控制/产物hash/评审签字/下一动作/最小blocker`。研究状态先取 `PROPOSED / BLOCKED`，只有真实证据才转实现/验收状态；它们不反向改动原 delivered ledger。G0..G7 是启用顺序，不是已通过的 gate。
+
+| 子卡 / 顺序 | 对应原卡与依赖 | Owner / 当前状态 | 小批输出与交接 | 正例 / 必须会失败的负例 / 放行条件 |
+|---|---|---|---|---|
+| MP-01：G0 intent 与只读权限 gate | I-041/I-044/I-045/I-046/I-002；V-018/V-019/V-047–049 | frontend+MMU，认领待定；PROPOSED | 原 bits/length、occurrence 与权限/translation/PMA/PMP 字段版本交 MP-02/03；先 off 观测 | 合法 TLB hit normal RAM 才 eligible；MMIO、miss、A/D 清、PMP 拒绝、非 canonical、跨页/region、partial/illegal fetch 必须零 preview 请求、零 A/D/PTW 写；无这些负例不放 G0 |
+| MP-02：G1 specialist predictors + 有界 L1 preview | MP-01；I-043/I-047/I-062/I-063 与服务模型显式决定；V-033/V-063 | predictor+IMC+memory service，待认领；BLOCKED（core service/QoS 未闭合） | chooser/intents、训练/flush、budget/response routing、drop 原因与 off/on trace 交 MP-03 | stride/重复/不可预测流、wrong path/pollution、queue/MSHR/bridge full、bulk/PTW 同时竞争；preview 不递归训练，不抢 demand 保留 credit；普通值/fault/visible byte 一致且原 V-063 完整闭合才放 G1 |
+| MP-03：G2 动态 token 与真实验证 | MP-02；I-002/I-018/I-034/I-035；I-036 speculative 模式闭合前保持保守；V-018 | frontend+rename+LSQ，待认领；BLOCKED（G1） | occurrence→token→ROB/uop/attempt 映射、守恒、有限 ABA 界与 AGU/forwarding validation trace 交 MP-04 | 同 PC 多 loop、redirect+attach、cancel+response、错 offset/size、partial forwarding、旧 generation 返回新 slot、wrap/drain；任何错值/新 owner 接受旧 token 阻断 G2 |
+| MP-04：G3 clean L0/sector placement 与 versioning | MP-03；I-060/I-061；V-061/V-065/V-067（仅所声明跨 hart 范围） | locality+cache+steering，待认领；BLOCKED（G2） | source-bank/sector/version/line-instance、所有 invalidation source、wrong-tile fallback，交 EF placement/VX helpers | store/AMO/snoop/evict/version wrap、fill 与 invalidate 同周期、权限撤销、ASID 复用；freshness+SQ+权限全部检查后才消费，不具备 coherence 输入的配置禁 L0；G3 不宣称无侧信道 |
+| MP-05：G4 pre-rename fusion hints | MP-04；EF fusion 的多 architectural identity 合同；I-017/I-018 | frontend+packet owner，待认领；BLOCKED（G3/EF） | `ADDI+LOAD / LOAD+ALU / ALU+STORE / adjacent accesses` 的候选签名与 occurrence list，交 EF post-rename 验证 | 原 instruction bits/PC/length/每个 ROB 与 trap/counter 保存；hint 错误或被取消回退拆包，MMIO/atomic/fence 禁候选；不得按意图把普通序列变 AMO |
+| MP-06：G5 post-rename memory dataflow fusion | MP-05；EF post-rename fusion；I-034/I-035/I-036 恢复门禁 | rename+LSQ+completion，待认领；BLOCKED（G4/恢复） | `load→ALU, ALU→SQ, AGU→load, load→modify→SQ` 的 producer generation、消费者与 child-completion 列表 | 真实 tag/age/权限/forwarding 验证、external/intervening consumer、非相邻中间 trap/debug/IRQ、load fault 后 store 零外显；每 child 独立退休，不删除仍活跃中间值；完整污染恢复后才放 G5 |
+| MP-07：G6 可选 store ownership preparation | MP-06；I-034/I-039/I-040/I-062 与实际 coherence 协议、V-065/V-067 | coherence+store+security，待认领；BLOCKED（G5/ownership 协议） | 单独选择 RFO/permission 准备、ownership/cancel/false-sharing/预算账本 | wrong-path RFO 可能失效其他 hart，须计流量/进展/侧信道；始终零 speculative store byte、零提前 AMO/LRSC effect；无完整 ownership/recovery/公平性证据维持关闭，只读准备可继续 |
+| MP-08：G7 early consume / value-availability speculation | MP-07；I-036、完整 dependent-slice poison/replay、EF completion 和安全审查 | recovery+LSQ+security，待认领；BLOCKED（明确后置，默认关闭） | 独立 `MemSpecEpoch/attempt`、每个 dependent/child/store poison、确认/撤销协议 | 地址相同但 stale data、late alias、权限改变、错预测+IRQ/exception、dependent store 与 flush 同周期、无限 replay；真正 AGU/LSQ 未确认前不得退休/外显；全污染恢复与必需 demand 进展证明前不放行 |
+
+不得跳过 G0/G1 用现有 LLB unit PASS 开 G3，也不得把 MP-07/08 未选当失败从而阻断 preview-only；其 **BLOCKED** 表示研究/前提未闭合，不是必须启用。每个启用配置另交 “MPP off / preview-only / 本次新增一级”的固定工作量、相同资源和同一参考比较，记录 useful/late/useless/cancel、额外 bytes/MSHR/queue 压力、demand 最大等待、energy/area/Fmax 未测列为未测。源中的百分比/倍数是不相加的研究目标，不是 MosaicRV 成绩；DVR 的 1139 bytes 仅是复用大量向量/PRF 资源后的增量控制元数据，不能当完整 helper 成本。
+
+### 8.9 研究发布阻塞与本次交接记录
+
+- **正确性 gate**：任何 speculative store 外显、token/transport/version ABA、late response 新 owner 接受、漏权限/MMIO gate、stale copy 消费、丢 demand/error completion、credit 泄漏，立即关闭新增 preview，保留 ordinary drain obligation，交最小 replay；不能用“仅预取”豁免。
+- **服务 gate**：G1 起必须实证现有 core 路径的有限进展和 V-063 原义务；QoS 独立 unit、观测 counters 或重新定义卡片不能代签。未冻结唯一 service model 时 MP-02 及后续保持 BLOCKED。
+- **安全 gate**：采用第10阶段 §8 threat/disable/negative-case 交接；未审风险不广告 secure preview，未闭合 RVA23 mandatory 不广告 Core。
+- **证据 gate**：原 I/V task 的注册 case、mutation、profile/排除 ledger 不变；新增研究 evidence 挂 MP 子卡，不改原通过分母。源码研究不能继承外部论文性能，测量不足不发布收益。
+
+**可选门禁的依赖含义**：MP-07 的前置指该卡作出“启用并验收”或“明确不选、保持关闭”的决策闭合，不要求为研究 MP-08 强行启用 ownership。MP-08 若不选则不影响 preview-only；若选择，仍独立要求 I-036 全污染恢复与安全审查，不可从 MP-07 不选推导这些要求被豁免。G1 仅发有界 read hint、保留 transport 身份，不附会真实 load 已验证；G2 才增加 occurrence 到实际 uOP/attempt 的 token 绑定和数据兑现。
+
+| 日期 | 事件 | 证据范围 | Owner | 下一动作 |
+|---|---|---|---|---|
+| 2026-10-02 | 将新研究落入 memory 阶段：MPP/IMC、token/ABA、只读翻译、physical merge、demand budget、LSQ/freshness、恢复与 MP 小批门禁 | 原研究、当前 status/报告及上述 RTL 读取；**文档设计，不是运行证据** | memory 研究集成 | 认领 MP-01；由架构 owner 冻结 core 单一 service model/V-063 路径，未闭合前 preview 全关 |

@@ -475,3 +475,58 @@ V-085 内部验证批次（不增 ID；每行 owner=V-085 RVA23 验证负责人�
 | 日期 | 事件 | 证据 | 负责人 | 下一步 |
 |---|---|---|---|---|
 | 2026-09-29 | 用户新增RVA23/RVV/安全商业目标；读取RVA23 ratified source、pointer masking、CFI、vector crypto、server-platform主源 | architecture-review §1.2、I-092–I-098、V-085–V-090、H-050/H-051、AR-022–AR-027/HR-015/HR-016 | 规划集成 | 冻结RVA23 compliance matrix |
+
+## 8. 2026-10-02 研究增补：memory preview 的权限与侧信道边界
+
+<a id="memory-preview-security"></a>
+
+本节为原 I-092–I-098/V-085–V-090/H-050/H-051 合同的**增量安全交接**，不改原任务、mandatory 分母、所选选项或 delivered 状态。来源：[New document(2).txt](../New%20document%282%29.txt) 2139–2168 行的 wrong-path/cache 风险，修订其“private Tile-L0 即安全解决方案”的过强暗示；具体实现设计以[第3阶段 §8](stage-3-memory-system.md) 为单一 MPP/IMC/MemoryPreviewToken 合同。MPP、IMC、shadow window/helper、early consume 都是研究提案，不因当前 LLB、prefetch、权限 unit 有报告就算已实现或已通过安全验证。
+
+### 8.1 威胁模型和不能宣传的性质
+
+需分别登记攻击者能否控制 branch/地址流、同 hart 不同 privilege/context、同 tile 后继租用者、同 pod/其他 hart、共享 cache/TLB/interconnect、设备/DMA，以及可观测 cycle/PMU/功耗/电磁信号。把 architectural 权限正确与 microarchitectural information leakage 分开：preview 不退休、不写 architectural register、wrong-path store 零外显，是必要条件，不是 speculative non-interference 的证明。
+
+- **private L0 不等于安全隔离**：fill 数据依然可能经过共享 L1/L2（若将来实现）、translation/cache lookup、return fabric、bank/queue/MSHR、replacement/coherence 和 interconnect；wrong-path 流量、timing、ownership 失效、功耗仍可能泄露。branch resolve 后才 promote 只能限制部分共享安装，不能抹掉已经产生的共享请求或竞争。
+- **TLB-hit-only 也不是零侧信道**：lookup/替换策略/端口竞争可能可见。基线禁止 preview PTW 和 A/D 更新降低了攻击面，但不能宣称 TLB 不泄露；将来 preview walk 必须重新评估 page-table cache/PTW/共享总线和两阶段 VM 风险。
+- **confidence 不是权限或安全证明**：高 branch/address confidence 不能越过 PMP/PMA/PTE/security-domain gate。`DataReady`、PC 一致、VA 一致、L0 hit、相同物理 line 均不能替代同动态 occurrence/context/attempt 的合法性和 freshness。
+- **DIEL 范围不扩大**：Zkt/Zvkt 与所选 crypto 仍按原卡的指令/operand-data 范围验收，不能将 preview/route/controller 的行为写成整机 constant-time。若新增策略使受保障指令的 operand data 决定 latency/route/replay，仍阻断相应 mandatory/所选选项 gate；loads/stores 不在 Zkt 保证内也不意味着其泄露风险可以忽略。
+
+### 8.2 必需字段、生命周期与权限负例
+
+接口 owner（frontend/MMU/LSQ/IMC/locality/security）使用第3阶段 MP-01..MP-08 的同一字段版本，不另起安全 token 或第二 memory service model。
+
+| 边界 / Owner | 输入字段与策略 | 可观察验收 / 必需负例 |
+|---|---|---|
+| occurrence 与预测表域 / frontend+security | hart、security/context generation、fetch sequence/generation、block slot、PC/bits/length、branch/spec epoch；predictor domain/code generation | 同 PC loop 与跨 context 不能重认领 token；FENCE.I 后旧签名/旧 fetch 取消；刻意注入 PC-only attach、ASID 复用、generation wrap 必须被拒绝 |
+| preview 发起 / MMU+IMC | 当前 privilege/MPRV/SUM/MXR、ASID/root/translation generation、PMP/PMA generation、PredVA→PA、memory type/byte范围/permission verdict | TLB miss、A/D 清、非法 PTE、PMP 拒绝、跨 region/page、device/MMIO/非幂等必须零 preview bus 请求；preview 零 PTW/零 A/D 写、零软件 trap；真实 fault 仍按 demand 报告 |
+| physical merge / IMC+LSQ | PA line 与 memory/coherence/security domain key、每 consumer 独立 permissions/context/token generation/offset/size | 同 VA 不同 PA 不合并；同 PA 不同权限的拒绝 consumer 不搭便车；取消 wrong-path waiter 不抹掉合法 demand，也不向被取消 token 交数据 |
+| clean copy 与消费 / locality+LSQ | sector valid、line instance/generation、version/invalidation generation、source bank、actual AGU/PA/byte range、older SQ forwarding 与权限再检查 | store/AMO/snoop/evict/permission revoke 与 fill/use race 阻断旧 copy；地址预测正确但 stale byte 仍失败；wrong tile 只能合法路由/normal fallback，不能复用前租户敏感值 |
+| speculative stores / store+coherence | baseline 只读准备；store authorization 与 accepted drain obligation；MP-07 ownership 独立选择 | 零 predicted store data/dirty byte/提前 SQ commit；MP-07 RFO 虽不写数据仍产生失效与侧信道，未证实协议/公平性前关闭；普通 fused load-modify-store 不升级成 AMO |
+| cancel/disable / recovery+security | token/transport/lease generation、inflight refs、domain切换、fence/reset/disable | 先停发/撤 pending，再 drain/absorb accepted response，拒旧 install/attach/wakeup；不能清表后立即复用 ID、丢 demand error 或删除已授权 store |
+
+权限检查不仅在真正 AGU 上进行，也必须在 preview traffic **发出前**进行；以后 demand 再检查不能追溯撤回已经触碰 MMIO、越权 cache line 或引起 coherence 的副作用。未实现 guest/两阶段 VM/pointer transform 的配置，不支持其 preview，而不是猜一个 tag。未来所选 Supm/Ssnpm 地址变换遵守 I-094/V-087：CPU 显式地址统一 transform，PTW/DMA/设备源不误 transform；MMIO 即使 transform 合法也不允许 preview。
+
+### 8.3 可部署 disable 模式与选择边界
+
+安全基线为 `MPP off + IMC preview admission off + helper/shadow memory traffic off + ownership preparation off + early consume off`；普通 demand ISA/LSQ/权限/设备语义不变。控制 owner 必须给出 reset 默认、适用 privilege/软件发现、运行时切换的 stop/drain/clear 语义，不凭空增加未定义 CSR。安全域切换先拒新 preview、取消 token、drain/absorb 旧 transport，再清或代隔离 intent/predictor/L0 与 lease；不宣称只翻一个 enable bit 能抹掉已有 cache 痕迹。
+
+允许将 private clean L0、只读 TLB-hit-only、低 preview budget 作为**风险缩减策略**分别测量，但不能命名为已证明 secure isolation。没有明确 threat model/隔离或 non-interference 证据时，安全敏感工作负载使用关闭模式；若宣称高安全模式，必须另给 threat/assumption/观测面与残余风险，不从 private L0 推导认证。
+
+### 8.4 安全 handoff、状态与 release gate
+
+下表是既有卡内的小批交接，不增加研究 ID，也不把可选性能机制变成 RVA23 mandatory。所有研究行当前为 PROPOSED/BLOCKED；验收证据必须来自未来实际路径，不能复制外部研究百分比或当前 unit PASS。
+
+| 小批交接 / 接收原卡 | 依赖 | Owner / 当前状态 | 必交证据与放行条件 |
+|---|---|---|---|
+| preview 权限/地址表 → I-093/I-094、V-086/V-087 | MP-01/03；已选 profile 的当前 MMU/PMA/PMP 与 pointer 规范 | MMU+Memory验证，待认领；PROPOSED | 同一 occurrence 的 preview/demand trace、权限/类型/byte范围、TLB hit/miss/A-D/PMP/MMIO 负例；mandatory 功能不因 preview 关闭或错预测而改变 |
+| cancel/context/有限身份 → I-097、V-090 | MP-03/04；reset/fence/ASID/domain/lease 合同 | recovery+平台安全验证，待认领；BLOCKED（接口未实装） | cancel+late response、fill+revoke、旧 token→新 slot、domain切换/有限 generation wrap 的真实负控制；任何跨域数据消费阻断 preview 启用 |
+| mixed-traffic 与 disable → I-062/V-063、V-090 | MP-02 与唯一 core service model 决定；原 age/fairness 义务 | memory service+security，待认领；BLOCKED（core QoS 未接） | off/on 相同架构输出/设备副作用、demand最大等待与有限预算；bulk/preview/PTW 压力、永久不响应诊断；保持 V-063 原验收，unit 结果不得替代 core |
+| fusion/ownership/early consume → I-097/V-090 | MP-05..08 与 EF fusion/完整 I-036 污染恢复 | LSQ+coherence+security，待认领；BLOCKED（明确后置） | 各 child 精确异常/退休、零 speculative store；错地址/late alias/stale value 的全 dependent poison 与恢复；ownership 额外失效/流量/侧信道单列；早消费未证明则维持关闭 |
+| 安全声明审查 → I-098 | 上述适用行、I-092 全 mandatory、每项所选 option ledger | RVA23验收+安全评审，待认领；PROPOSED | preview 是否启用、threat/assumption/disable/残余风险写入 acceptance bundle；不能把 p0/p1/LLB 报告或私有缓存称为 RVA23 Secure 证明 |
+| FPGA/ASIC 物理声称 → H-050/H-051 | 同候选 I-098、实际配置/物理前置；仅所选声明 | 各板/ASIC安全负责人，待认领；BLOCKED（无新物理证据） | 每目标真实 timing/side-channel/功耗观测与仪器限制；H-050 DIEL 仍受原范围约束；无正式评估不宣称物理免疫/相关认证 |
+
+**发布否决**：漏 pre-issue 权限 gate、speculative MMIO 或 store 外显、跨域 stale copy/token 接受、取消后新 owner 接受旧回应、未知 source 的数据消费、无法关闭/无法 drain、研究改写 V-063 缩小测试分母，均阻断相应 preview/安全声明并回退 off。原 Core mandatory 有缺口仍阻断 Core；单纯未选择 MP-07/08 不反向阻断已证明 preview-only，更不能用“preview off”绕开普通 Core 的权限、CMO、VM、DIEL 或已承诺能力验收。
+
+| 日期 | 事件 | 证据范围 | Owner | 下一动作 |
+|---|---|---|---|---|
+| 2026-10-02 | 将 memory preview 安全风险/disable/权限/取消/物理声明边界纳入原安全阶段 | 原研究与第3阶段 MP 合同；仅文档设计、未运行或认证 | 安全研究集成 | MP-01 冻结 threat/权限负例；core service 决定前所有新增 preview 保持关闭 |
