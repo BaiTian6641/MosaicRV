@@ -117,8 +117,14 @@ should treat "the test passes" as a weaker statement than it looks.
 * **`Zihpm` is advertised while its counters read zero.** The HPM CSRs exist and are readable, but nothing
   drives them, so the advertisement currently rests on CSR existence rather than on a working mapping.
   I-076 produced the schema and the events; the wiring is not done.
-* **`decode.rv64im_reserved` did not build** after the vector widening took `decode_ctl_t` to 299 bits
-  while the decoder testbench still broke out 143 (being fixed at the time of writing).
+* ~~**`decode.rv64im_reserved` did not build** after the vector widening took `decode_ctl_t` to 299 bits
+  while the decoder testbench still broke out 143.~~ **Fixed**: the testbench now carries the whole
+  299-bit struct and the driver's derived layout gained all **36** new fields (the privilege, FP and
+  vector fields) in declaration order, with the word unpacking corrected on both sides. `RESULT PASS
+  decode.rv64im_reserved 166734 instructions (82915 legal, 83819 illegal), 0 mismatches, 1442 named
+  reserved checks`, and the break-out check was shown to still bite (a temporary perturbation made it fail
+  with a named mismatch, then reverted). This is also the sixth instance of §4's shape: a struct widening
+  broke a *test* that had encoded the old width, and nothing but running it would have said so.
 
 **Blockers that are decisions, not unfinished work:**
 

@@ -79,11 +79,20 @@ module mosaic_decoder_tb (
     // ports above carry exactly the bits of decode_ctl_t and that none of the
     // break-out assignments was fat-fingered. Field order is the declaration
     // order of mosaic_pkg::decode_ctl_t, with `valid` at the MSB. The width is
-    // taken from the package's declaration order, field by field: 143 bits
+    // taken from the package's declaration order, field by field: 299 bits
     // (135 before the A extension's amo_op/amo_aq/amo_rl, 141 before I-040's
-    // is_lr/is_sc). tb_decoder.cpp derives the same layout from the same order
-    // and fails if the two disagree.
-    output logic [142:0] o_ctl_bits
+    // is_lr/is_sc, and 143 when this wrapper was last widened). The struct grew
+    // by 156 bits after that 143: the I-044 privilege fields (is_sret,
+    // is_fetch_fault, is_sfence_vma, sfence_has_va, sfence_has_asid -- 5), the
+    // I-050 F/D fields (16), and the I-059 vector block (135). The vector block
+    // is the struct's least-significant 135 bits, with `vec_imm` at [63:0] on a
+    // 64-bit boundary, so it is the widened tail of this vector the driver's
+    // word unpacking must now carry. The decoder itself drives none of the new
+    // fields (SRET, SFENCE.VMA, WFI, OP-FP and OP-V are all recognised by the
+    // core's front end, not here), so they are zero in every comparison; only
+    // the vector's width adds work. tb_decoder.cpp derives the same layout from
+    // the same order, field by field, and fails if the two disagree.
+    output logic [298:0] o_ctl_bits
 );
   mosaic_pkg::decode_ctl_t ctl;
 

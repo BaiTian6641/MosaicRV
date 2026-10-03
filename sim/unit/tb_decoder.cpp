@@ -1413,14 +1413,19 @@ class Bench {
   // Without this, a typo in one of the break-out assignments would either hide
   // a decoder bug or invent one.
   bool CheckBreakout(const Ref& r, const std::string& where) {
-    // 141 bits. The first
+    // 299 bits. The first
     // field pushed lands at the most significant end, because that is how a
-    // packed struct is laid out. `is_wfi` is one of the five system bits: the
+    // packed struct is laid out. `is_wfi` is one of the system bits: the
     // decoder leaves it 0 for every encoding (the core's front end recognises
     // WFI), and it is carried here so the break-out accounting covers every
-    // field the package declares.
-    const int kTotalBits = 143;
-    uint64_t chunk[3] = {0, 0, 0};
+    // field the package declares. The fields the decoder never drives -- the A
+    // extension's, and the I-044/I-046/I-050/I-059 fields added after the old
+    // 143-bit layout -- are pushed as explicit constants at the illegal
+    // constant's values, because the DUT drives its whole struct to
+    // CTL_ILLEGAL for a reserved word and to a defined value otherwise, and
+    // this check is about the break-out matching that struct bit for bit.
+    const int kTotalBits = 299;
+    uint64_t chunk[5] = {0, 0, 0, 0, 0};
     int nbits = 0;
     // Fields are laid out MSB first, and inside a field the value's bit 0 sits
     // at the field's lowest struct bit.
@@ -1451,28 +1456,61 @@ class Bench {
     push(r.is_muldiv, 1);   push(r.md_op, 3);      push(r.md_signed, 1);
     push(r.md_w, 1);
     push(r.is_system, 1);   push(r.is_ecall, 1);   push(r.is_ebreak, 1);
-    push(r.is_mret, 1);     push(r.is_wfi, 1);
+    push(r.is_mret, 1);
+    // I-044. SRET and the instruction-access-fault macro (and, below, the
+    // I-046 SFENCE.VMA pair) are recognised by the core's front end rather
+    // than by mosaic_decoder, for the same ownership reason WFI is: this case
+    // owns the decoder's illegal set. They are always the illegal constant.
+    push(0, 1);             push(0, 1);
+    push(r.is_wfi, 1);
+    push(0, 1);             push(0, 1);            push(0, 1);
     push(r.csr_op, 2);      push(r.csr_addr, 12);
     push(r.csr_writes, 1);  push(r.csr_reads, 1); push(r.csr_imm_form, 1);
+    // I-050 F/D. The decoder rejects OP-FP (it is outside RV64IM), so every FP
+    // field stays at the illegal constant, `fp_op` included (CTL_ILLEGAL names
+    // it FP_ADD, whose encoding is zero).
+    push(0, 1);             push(0, 5);            push(0, 1);
+    push(0, 3);             push(0, 1);            push(0, 1);
+    push(0, 1);             push(0, 1);            push(0, 1);
+    push(0, 1);
+    // I-059 vector. The decoder rejects OP-V for the same reason, so the whole
+    // block is the illegal constant's zero. `vec_imm` is 64 bits and lands at
+    // the struct's least-significant end, bits [63:0].
+    push(0, 1);             push(0, 5);            push(0, 3);
+    push(0, 2);             push(0, 5);            push(0, 11);
+    push(0, 5);             push(0, 5);            push(0, 5);
+    push(0, 1);             push(0, 5);            push(0, 4);
+    push(0, 2);             push(0, 4);            push(0, 1);
+    push(0, 1);             push(0, 1);            push(0, 4);
+    push(0, 3);             push(0, 3);            push(0, 64);
     rep_.Check(nbits == kTotalBits,
                "decode_ctl_t is " + std::to_string(kTotalBits) +
                    " bits wide and every one is accounted for");
 
-    // 143 bits is five 32-bit Verilator words, not three 64-bit ones.
+    // 299 bits is ten 32-bit Verilator words, grouped here as five 64-bit
+    // halves. The top half carries only the struct's top 43 bits ([298:256]),
+    // so it is masked to them.
     const uint64_t w0 = top_->o_ctl_bits[0], w1 = top_->o_ctl_bits[1];
     const uint64_t w2 = top_->o_ctl_bits[2], w3 = top_->o_ctl_bits[3];
-    const uint64_t w4 = top_->o_ctl_bits[4];
+    const uint64_t w4 = top_->o_ctl_bits[4], w5 = top_->o_ctl_bits[5];
+    const uint64_t w6 = top_->o_ctl_bits[6], w7 = top_->o_ctl_bits[7];
+    const uint64_t w8 = top_->o_ctl_bits[8], w9 = top_->o_ctl_bits[9];
     const uint64_t dut_lo = w0 | (w1 << 32);
-    const uint64_t dut_mid = w2 | (w3 << 32);
-    const uint64_t dut_top = w4 & 0x7FFFull;
-    const uint64_t my_lo = chunk[0];
-    const uint64_t my_mid = chunk[1];
-    const uint64_t my_top = chunk[2] & 0x7FFFull;
-    if (my_lo == dut_lo && my_mid == dut_mid && my_top == dut_top) return true;
+    const uint64_t dut_m0 = w2 | (w3 << 32);
+    const uint64_t dut_m1 = w4 | (w5 << 32);
+    const uint64_t dut_m2 = w6 | (w7 << 32);
+    const uint64_t dut_top = (w8 | (w9 << 32)) & 0x7FFFFFFFFFFull;
+    const uint64_t my_lo = chunk[0], my_m0 = chunk[1], my_m1 = chunk[2];
+    const uint64_t my_m2 = chunk[3], my_top = chunk[4] & 0x7FFFFFFFFFFull;
+    if (my_lo == dut_lo && my_m0 == dut_m0 && my_m1 == dut_m1 &&
+        my_m2 == dut_m2 && my_top == dut_top)
+      return true;
     rep_.Mismatch(where + " (testbench break-out vs decode_ctl_t)",
-                  mosaic::Hex(my_lo) + "|" + mosaic::Hex(my_mid) + "|" +
+                  mosaic::Hex(my_lo) + "|" + mosaic::Hex(my_m0) + "|" +
+                      mosaic::Hex(my_m1) + "|" + mosaic::Hex(my_m2) + "|" +
                       mosaic::Hex(my_top),
-                  mosaic::Hex(dut_lo) + "|" + mosaic::Hex(dut_mid) + "|" +
+                  mosaic::Hex(dut_lo) + "|" + mosaic::Hex(dut_m0) + "|" +
+                      mosaic::Hex(dut_m1) + "|" + mosaic::Hex(dut_m2) + "|" +
                       mosaic::Hex(dut_top));
     rep_.Check(false, "testbench break-out does not match decode_ctl_t");
     aborted_ = true;
