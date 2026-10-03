@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "case": "vec.mask_prefix_at_core",
+  "verdict": "PASS",
+  "detail": "checks=112 phases=4 seed=1 plain_cycles=7723 masked_cycles=27063 masklog_cycles=5287 vstart_cycles=446 plain_retire=57 masked_retire=226 masklog_retire=37",
+  "seed": 1,
+  "max_cycles": 4000000,
+  "checks": 113,
+  "failures": 0,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-03T00:04:13Z",
+  "first_mismatch": ""
+}

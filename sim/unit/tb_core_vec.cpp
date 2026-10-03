@@ -78,6 +78,7 @@
 #include <vector>
 
 #include "Vmosaic_core_tb.h"
+#include "mask_prefix_ref.h"
 #include "mem_ref.h"
 #include "memory_model.h"
 #include "mosaic_platform.h"
@@ -237,6 +238,25 @@ class Asm {
   void VaddVv(uint32_t vd, uint32_t vs2, uint32_t vs1) {
     Emit((1u << 25) | (vs2 << 20) | (vs1 << 15) | (0u << 12) | (vd << 7) | 0x57);
   }
+  // vle8.v / vse8.v -- EEW = 8, the width a mask register is transferred at.
+  void Vle8(uint32_t vd, uint32_t rs1) {
+    Emit((1u << 25) | (rs1 << 15) | (0u << 12) | (vd << 7) | 0x07);
+  }
+  void Vse8(uint32_t vs3, uint32_t rs1) {
+    Emit((1u << 25) | (rs1 << 15) | (0u << 12) | (vs3 << 7) | 0x27);
+  }
+  // The three mask-prefix ops: OPMVV, funct6 010100, funct3 010. `rs1_op`
+  // names the operation in the rs1 field (1 = vmsbf, 2 = vmsof, 3 = vmsif);
+  // the field is not a GPR operand. `masked` selects the v0.t form (vm = 0).
+  void VmaskPrefix(uint32_t vd, uint32_t vs2, uint32_t rs1_op, bool masked) {
+    Emit((0x14u << 26) | ((masked ? 0u : 1u) << 25) | (vs2 << 20) |
+         (rs1_op << 15) | (2u << 12) | (vd << 7) | 0x57);
+  }
+  // Mask-register logical: OPMVV, funct6 011xxx, always unmasked (vm = 1).
+  void VmaskLog(uint32_t vd, uint32_t vs2, uint32_t vs1, uint32_t funct6) {
+    Emit((funct6 << 26) | (1u << 25) | (vs2 << 20) | (vs1 << 15) |
+         (2u << 12) | (vd << 7) | 0x57);
+  }
 
   // The exit protocol: `sd 1, 0(tohost)`, then spin.
   void Exit() {
@@ -384,6 +404,11 @@ struct RunResult {
     uint64_t v = 0;
     mem.Read(addr, 4, &v);
     return static_cast<uint32_t>(v);
+  }
+  uint32_t At16(uint64_t addr) {
+    uint64_t v = 0;
+    mem.Read(addr, 2, &v);
+    return static_cast<uint32_t>(v & 0xFFFFull);
   }
 };
 
@@ -1414,6 +1439,371 @@ ResizeRun PhaseLaneBoundary(Vmosaic_core_tb* dut, mosaic::Reporter* reporter,
   return rr;
 }
 
+// ============================================================================
+// CASE=vec.mask_prefix_at_core (task I-054).
+//
+// The unit-level evidence for the mask families is delivered; the core's ALU
+// capability word is what decides whether the machine dispatches them. This
+// case drives the operations through fetch, decode, rename, issue and the
+// vector engine -- it never pokes the ALU -- and reads the results back as
+// architectural state: the destination mask register is stored to memory with
+// `vse8.v` and compared against the shared host model in
+// sim/unit/mask_prefix_ref.h, the same model `rvv.integer_mask_permute`,
+// `rvv.mask_prefix_semantics`, `rvv.mask_prefix_masked` and
+// `rvv.mask_prefix_vstart` use.
+//
+// Phases, each a fresh reset and a fresh program:
+//
+//   1. plain    vmsbf/vmsif/vmsof (unmasked) over eight source patterns, the
+//               result against the shared model
+//   2. masked   the v0.t forms, including the 45 cells where a masked-off set
+//               bit precedes an active one -- the cells the unit-level masked
+//               evidence calls interesting
+//   3. masklog  the eight mask-register logical ops, so the MASKLOG family's
+//               advertisement is proven at the core level too
+//   4. vstart   a non-zero vstart makes the mask-prefix instruction an illegal
+//               instruction: mcause = 2, the trap is not an element fault, the
+//               destination is untouched, and vstart is not modified (the
+//               architectural rule: "vstart is not modified by vector
+//               instructions that raise illegal-instruction exceptions")
+// ============================================================================
+
+// The CSRs a vector trap can report through.
+constexpr uint32_t kCsrMstatus = 0x300, kCsrMtvec = 0x305, kCsrMepc = 0x341,
+                   kCsrMcause = 0x342, kCsrMtval = 0x343, kCsrVstart = 0x008;
+
+// Emit a trap handler: record mcause/mepc/mtval/vstart into four slots, then
+// return to mepc + 4. Every phase installs one, so an unexpected trap is
+// recorded and the phase names it rather than wandering off.
+void EmitTrapHandler(Asm* a, uint64_t slot_base) {
+  a->Csrr(5, kCsrMcause);
+  a->LaAbs(6, slot_base);
+  a->Sd(5, 6, 0);
+  a->Csrr(5, kCsrMepc);
+  a->Sd(5, 6, 8);
+  a->Csrr(5, kCsrMtval);
+  a->Sd(5, 6, 16);
+  a->Csrr(5, kCsrVstart);
+  a->Sd(5, 6, 24);
+  a->Csrr(5, kCsrMepc);
+  a->Addi(5, 5, 4);
+  a->Csrrw(0, kCsrMepc, 5);
+  // Software's own rule after an illegal vector instruction: clear vstart so
+  // the resumed code is not restarted from the value that made the instruction
+  // illegal. The value the core left is recorded above, before this write.
+  a->Csrrw(0, kCsrVstart, 0);
+  a->Mret();
+}
+
+// Patch the word-0 entry jump of an `Asm` to `main_at`, and copy the words
+// into the scenario image.
+void PlaceProgram(Asm* a, Scenario* sc, const Geometry& g, size_t main_at) {
+  const int64_t delta = static_cast<int64_t>(a->AddrOf(main_at) - a->AddrOf(0));
+  std::vector<uint32_t> words = a->words();
+  const uint32_t u = static_cast<uint32_t>(delta);
+  words[0] = (((u >> 20) & 1u) << 31) | (((u >> 1) & 0x3FFu) << 21) |
+             (((u >> 11) & 1u) << 20) | (((u >> 12) & 0xFFu) << 12) | 0x6f;
+  for (size_t i = 0; i < words.size(); i++) {
+    sc->image.Put(g.reset_vector + 4ull * i, words[i]);
+  }
+}
+
+// Enable vector state and set e8/m1 (VLMAX = 16), then install the handler.
+void VecPrologue(Asm* a, size_t handler_at) {
+  a->LaAbs(5, a->AddrOf(handler_at));
+  a->Csrrw(0, kCsrMtvec, 5);
+  a->Csrr(5, kCsrMstatus);
+  a->Ori(5, 5, 0x200);            // mstatus.VS = Initial
+  a->Csrrw(0, kCsrMstatus, 5);
+  a->Vsetvli(7, 0, 0x18);         // vtypei e8/m1 -> vl = VLMAX = 16
+}
+
+// The eight unmasked source patterns: a first set bit at 0, 1, 7, 8 and 15,
+// the all-zero boundary, and two dense patterns.
+constexpr uint64_t kPfxSrc[8] = {0x0001ull, 0x0002ull, 0x0080ull, 0x0100ull,
+                                 0x8000ull, 0x0000ull, 0xAAAAull, 0x00FFull};
+
+// Phase 1: unmasked vmsbf/vmsif/vmsof over the eight patterns.
+RunResult PhaseMaskPrefixPlain(Vmosaic_core_tb* dut, mosaic::Reporter* reporter,
+                               const Geometry& g, const std::string& name) {
+  Asm asm_(g.reset_vector);
+  Scenario sc;
+  const int kPatterns = 8;
+  const uint64_t src_base = kDataBase + 0;
+  const uint64_t out_base = kDataBase + 256;
+  for (int p = 0; p < kPatterns; ++p) {
+    sc.Put16(static_cast<uint64_t>(16 * p), static_cast<uint16_t>(kPfxSrc[p]));
+  }
+
+  asm_.JalX0(0, 0);
+  const size_t handler_at = asm_.Here();
+  EmitTrapHandler(&asm_, kSlotBase);
+  const size_t main_at = asm_.Here();
+  VecPrologue(&asm_, handler_at);
+  asm_.LaAbs(6, kSlotBase);
+  asm_.Sd(7, 6, 32);              // vl
+  for (int p = 0; p < kPatterns; ++p) {
+    asm_.LaAbs(10, src_base + 16ull * static_cast<uint64_t>(p));
+    asm_.Vle8(16, 10);            // v16 = the source mask
+    for (int op = 0; op < 3; ++op) {
+      const uint32_t rs1 = (op == 0) ? 1u : (op == 1) ? 3u : 2u;
+      asm_.VmaskPrefix(8, 16, rs1, false);
+      asm_.LaAbs(11, out_base + 16ull * static_cast<uint64_t>(p * 3 + op));
+      asm_.Vse8(8, 11);           // store the destination mask register
+    }
+  }
+  asm_.Exit();
+  PlaceProgram(&asm_, &sc, g, main_at);
+
+  RunResult run = Execute(dut, reporter, g, name, sc);
+  Check(reporter, run.traps.empty(), name + ": no trap is taken");
+  Check(reporter, run.Slot(4) == 16,
+        name + ": vl after vsetvli e8/m1 is VLMAX=16, got " + Dec(run.Slot(4)));
+  int cells = 0;
+  for (int p = 0; p < kPatterns; ++p) {
+    for (int op = 0; op < 3; ++op) {
+      const uint32_t want = static_cast<uint32_t>(
+          mosaic_maskpfx::ExpectedBits(op, kPfxSrc[p], 16));
+      const uint32_t got = run.At16(out_base + 16ull * static_cast<uint64_t>(p * 3 + op));
+      Check(reporter, got == want,
+            name + ": " + std::string(op == 0 ? "vmsbf" : op == 1 ? "vmsif" : "vmsof") +
+                " pattern" + std::to_string(p) + " mask=" + Dec(want) + " got " + Dec(got));
+      ++cells;
+    }
+  }
+  // Positive evidence the vector path was taken, not assumed.
+  Check(reporter, run.vec_retire == 57,
+        name + ": 57 vector macros retired (vset + 8 loads + 24 ops + 24 stores), got " +
+            Dec(run.vec_retire));
+  Check(reporter, run.vec_desc_alloc == 56 && run.vec_desc_release == 56,
+        name + ": every vector descriptor was allocated and released (the vset "
+               "does not allocate one), got alloc=" +
+            Dec(run.vec_desc_alloc) + " release=" + Dec(run.vec_desc_release));
+  Check(reporter, run.vec_alu_elems == 16,
+        name + ": the last mask-prefix op wrote 16 elements, got " +
+            Dec(run.vec_alu_elems));
+  Check(reporter, run.vec_vrf_bad == 0,
+        name + ": the VRF refused no read, got " + Dec(run.vec_vrf_bad));
+  Check(reporter, cells == 24, name + ": 24 plain cells ran, got " + Dec(cells));
+  return run;
+}
+
+// Phase 2: the masked (v0.t) forms. The 45 masked-off-before-active cells are
+// the unit-level masked case's interesting cells: the source has a set bit at
+// element 0, which the mask turns off, and the first ACTIVE set bit is k. A
+// search over all elements would find 0; the rule finds k.
+RunResult PhaseMaskPrefixMasked(Vmosaic_core_tb* dut, mosaic::Reporter* reporter,
+                                const Geometry& g, const std::string& name) {
+  Asm asm_(g.reset_vector);
+  Scenario sc;
+  const uint64_t src_base = kDataBase + 0;       // 45 x 16 bytes
+  const uint64_t out_base = kDataBase + 768;     // 45 x 16 bytes
+  const uint64_t mask_addr = kDataBase + 1536;   // one 16-byte v0 operand
+  const uint64_t seed_addr = kDataBase + 1552;   // one 16-byte destination seed
+  const uint64_t kSeed = 0x5555ull;
+  const uint64_t kMask = 0xFFFEull;              // element 0 masked off
+  sc.Put16(mask_addr - kDataBase, static_cast<uint16_t>(kMask));
+  sc.Put16(seed_addr - kDataBase, static_cast<uint16_t>(kSeed));
+
+  int cell = 0;
+  for (int op = 0; op < 3; ++op) {
+    for (int k = 1; k < 16; ++k) {
+      const uint64_t src = 1ull | (1ull << k);   // set at 0 (off) and at k (on)
+      sc.Put16(static_cast<uint64_t>(16 * cell), static_cast<uint16_t>(src));
+      ++cell;
+    }
+  }
+
+  asm_.JalX0(0, 0);
+  const size_t handler_at = asm_.Here();
+  EmitTrapHandler(&asm_, kSlotBase);
+  const size_t main_at = asm_.Here();
+  VecPrologue(&asm_, handler_at);
+
+  cell = 0;
+  for (int op = 0; op < 3; ++op) {
+    const uint32_t rs1 = (op == 0) ? 1u : (op == 1) ? 3u : 2u;
+    for (int k = 1; k < 16; ++k) {
+      asm_.LaAbs(10, src_base + 16ull * static_cast<uint64_t>(cell));
+      asm_.Vle8(16, 10);                       // v16 = source
+      asm_.LaAbs(11, mask_addr);
+      asm_.Vle8(0, 11);                        // v0 = the mask operand
+      asm_.LaAbs(12, seed_addr);
+      asm_.Vle8(8, 12);                        // v8 = the destination seed
+      asm_.VmaskPrefix(8, 16, rs1, true);      // vmsbf.m v8, v16, v0.t
+      asm_.LaAbs(13, out_base + 16ull * static_cast<uint64_t>(cell));
+      asm_.Vse8(8, 13);
+      ++cell;
+    }
+  }
+  asm_.Exit();
+  PlaceProgram(&asm_, &sc, g, main_at);
+
+  RunResult run = Execute(dut, reporter, g, name, sc);
+  Check(reporter, run.traps.empty(), name + ": no trap is taken");
+  cell = 0;
+  int masked_before = 0;
+  for (int op = 0; op < 3; ++op) {
+    for (int k = 1; k < 16; ++k) {
+      const uint64_t src = 1ull | (1ull << k);
+      const uint32_t want = static_cast<uint32_t>(mosaic_maskpfx::MaskedExpectedBits(
+          op, src, kMask, kSeed, 16, 0, 0));
+      const uint32_t got =
+          run.At16(out_base + 16ull * static_cast<uint64_t>(cell));
+      Check(reporter, got == want,
+            name + ": masked-off-before-active k=" + std::to_string(k) + " " +
+                std::string(op == 0 ? "vmsbf" : op == 1 ? "vmsif" : "vmsof") +
+                " mask=" + Dec(want) + " got " + Dec(got));
+      ++cell;
+      ++masked_before;
+    }
+  }
+  Check(reporter, masked_before == 45,
+        name + ": 45 masked-off-before-active cells ran, got " + Dec(masked_before));
+  Check(reporter, run.vec_retire == 1 + 45 * 5,
+        name + ": 226 vector macros retired (vset + 45 x (source load + mask load "
+               "+ seed load + op + store)), got " +
+            Dec(run.vec_retire));
+  Check(reporter, run.vec_desc_release == run.vec_desc_alloc,
+        name + ": every vector descriptor was released, got alloc=" +
+            Dec(run.vec_desc_alloc) + " release=" + Dec(run.vec_desc_release));
+  Check(reporter, run.vec_alu_elems == 15,
+        name + ": the last masked op wrote 15 elements (element 0 is masked "
+               "off), got " +
+            Dec(run.vec_alu_elems));
+  Check(reporter, run.vec_vrf_bad == 0,
+        name + ": the VRF refused no read, got " + Dec(run.vec_vrf_bad));
+  return run;
+}
+
+// Phase 3: the eight mask-register logical ops, over two source-mask pairs.
+RunResult PhaseMaskLog(Vmosaic_core_tb* dut, mosaic::Reporter* reporter,
+                       const Geometry& g, const std::string& name) {
+  Asm asm_(g.reset_vector);
+  Scenario sc;
+  const uint64_t a_base = kDataBase + 0;
+  const uint64_t b_base = kDataBase + 64;
+  const uint64_t out_base = kDataBase + 128;
+  // funct6 per ALU op: 0 vmand, 1 vmnand, 2 vmor, 3 vmnor, 4 vmxor, 5 vmxnor,
+  // 6 vmandn, 7 vmorn.
+  const uint32_t kFunct6[8] = {0x19u, 0x1du, 0x1au, 0x1eu,
+                               0x1bu, 0x1fu, 0x18u, 0x1cu};
+  const uint64_t kMaskA[2] = {0xAAAAull, 0x8001ull};
+  const uint64_t kMaskB[2] = {0x00FFull, 0xFFFFull};
+  for (int p = 0; p < 2; ++p) {
+    sc.Put16(static_cast<uint64_t>(16 * p), static_cast<uint16_t>(kMaskA[p]));
+    sc.Put16(64 + static_cast<uint64_t>(16 * p), static_cast<uint16_t>(kMaskB[p]));
+  }
+
+  asm_.JalX0(0, 0);
+  const size_t handler_at = asm_.Here();
+  EmitTrapHandler(&asm_, kSlotBase);
+  const size_t main_at = asm_.Here();
+  VecPrologue(&asm_, handler_at);
+  for (int p = 0; p < 2; ++p) {
+    asm_.LaAbs(10, a_base + 16ull * static_cast<uint64_t>(p));
+    asm_.Vle8(16, 10);            // v16 = vs2
+    asm_.LaAbs(11, b_base + 16ull * static_cast<uint64_t>(p));
+    asm_.Vle8(24, 11);            // v24 = vs1
+    for (int op = 0; op < 8; ++op) {
+      asm_.VmaskLog(8, 16, 24, kFunct6[op]);
+      asm_.LaAbs(12, out_base + 16ull * static_cast<uint64_t>(p * 8 + op));
+      asm_.Vse8(8, 12);
+    }
+  }
+  asm_.Exit();
+  PlaceProgram(&asm_, &sc, g, main_at);
+
+  RunResult run = Execute(dut, reporter, g, name, sc);
+  Check(reporter, run.traps.empty(), name + ": no trap is taken");
+  int cells = 0;
+  for (int p = 0; p < 2; ++p) {
+    for (int op = 0; op < 8; ++op) {
+      const uint32_t want = static_cast<uint32_t>(
+          mosaic_maskpfx::MaskLogExpectedBits(op, kMaskA[p], kMaskB[p], 16));
+      const uint32_t got = run.At16(out_base + 16ull * static_cast<uint64_t>(p * 8 + op));
+      Check(reporter, got == want,
+            name + ": masklog op" + std::to_string(op) + " pair" + std::to_string(p) +
+                " mask=" + Dec(want) + " got " + Dec(got));
+      ++cells;
+    }
+  }
+  Check(reporter, cells == 16, name + ": 16 masklog cells ran, got " + Dec(cells));
+  Check(reporter, run.vec_retire == 1 + 2 * (2 + 8 + 8),
+        name + ": 37 vector macros retired, got " + Dec(run.vec_retire));
+  Check(reporter, run.vec_alu_elems == 16,
+        name + ": the last masklog op wrote 16 elements, got " + Dec(run.vec_alu_elems));
+  Check(reporter, run.vec_vrf_bad == 0,
+        name + ": the VRF refused no read, got " + Dec(run.vec_vrf_bad));
+  return run;
+}
+
+// Phase 4: the vstart illegal routing. With a non-zero vstart the mask-prefix
+// instruction is refused as an illegal instruction (the unit rule
+// `rvv.mask_prefix_vstart` states); at the core level the refusal must route to
+// an illegal-instruction trap -- mcause = 2, the PC of the instruction, no
+// element fault -- and, because the architectural rule is that vstart is not
+// modified by a vector instruction that raises an illegal-instruction
+// exception, the vstart the handler reads is the value software wrote.
+RunResult PhaseMaskPrefixVstart(Vmosaic_core_tb* dut, mosaic::Reporter* reporter,
+                                const Geometry& g, const std::string& name) {
+  Asm asm_(g.reset_vector);
+  Scenario sc;
+  const uint64_t src_addr = kDataBase + 0;
+  const uint64_t seed_addr = kDataBase + 16;
+  const uint64_t out_addr = kDataBase + 32;
+  const uint64_t kSeed = 0x5A5Aull;
+  const uint64_t kSrc = 0x8001ull;
+  sc.Put16(src_addr - kDataBase, static_cast<uint16_t>(kSrc));
+  sc.Put16(seed_addr - kDataBase, static_cast<uint16_t>(kSeed));
+
+  asm_.JalX0(0, 0);
+  const size_t handler_at = asm_.Here();
+  EmitTrapHandler(&asm_, kSlotBase);
+  const size_t main_at = asm_.Here();
+  VecPrologue(&asm_, handler_at);
+  asm_.LaAbs(10, src_addr);
+  asm_.Vle8(16, 10);                 // v16 = source
+  asm_.LaAbs(11, seed_addr);
+  asm_.Vle8(8, 11);                  // v8 = destination seed
+  asm_.Addi(5, 0, 2);
+  asm_.Csrrw(0, kCsrVstart, 5);      // vstart = 2 (after the load that clears it)
+  const uint64_t prefix_pc = asm_.AddrOf(asm_.Here());
+  asm_.VmaskPrefix(8, 16, 1, false); // vmsbf.m v8, v16 -- illegal at vstart=2
+  asm_.LaAbs(12, out_addr);
+  asm_.Vse8(8, 12);                  // store the destination (must be unchanged)
+  asm_.Exit();
+  PlaceProgram(&asm_, &sc, g, main_at);
+
+  RunResult run = Execute(dut, reporter, g, name, sc);
+  Check(reporter, run.traps.size() == 1,
+        name + ": exactly one trap is taken, got " +
+            Dec(static_cast<uint64_t>(run.traps.size())));
+  Check(reporter, run.Slot(0) == 2,
+        name + ": the refusal is an illegal instruction (mcause=2), got " +
+            Dec(run.Slot(0)));
+  Check(reporter, run.Slot(1) == prefix_pc,
+        name + ": the trap reports the instruction's own PC " + Dec(prefix_pc) +
+            ", got " + Dec(run.Slot(1)));
+  Check(reporter, run.Slot(2) == 0,
+        name + ": mtval is 0 (no element address), got " + Dec(run.Slot(2)));
+  Check(reporter, run.Slot(3) == 2,
+        name + ": vstart is not modified by the illegal-instruction exception, got " +
+            Dec(run.Slot(3)));
+  Check(reporter, run.At16(out_addr) == static_cast<uint32_t>(kSeed),
+        name + ": the refused instruction left the destination unchanged, expected " +
+            Dec(kSeed) + " got " + Dec(run.At16(out_addr)));
+  Check(reporter, run.vec_trap == 1,
+        name + ": the vector engine counted exactly one trap, got " + Dec(run.vec_trap));
+  Check(reporter, run.vec_fault == 0,
+        name + ": no element fault was reported, got " + Dec(run.vec_fault));
+  Check(reporter, run.vec_retire == 4,
+        name + ": four vector macros retired (vset + 2 loads + the store; the "
+               "refused op did not), got " +
+            Dec(run.vec_retire));
+  return run;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -1442,6 +1832,21 @@ int main(int argc, char** argv) {
     }
     if (geometry.xlen != 64) Fail("geometry", "the profile is not 64-bit");
 
+    if (options.case_id == "vec.mask_prefix_at_core") {
+      RunResult plain = PhaseMaskPrefixPlain(&dut, &reporter, geometry, "prefix-plain");
+      RunResult masked = PhaseMaskPrefixMasked(&dut, &reporter, geometry, "prefix-masked");
+      RunResult masklog = PhaseMaskLog(&dut, &reporter, geometry, "masklog");
+      RunResult vstart = PhaseMaskPrefixVstart(&dut, &reporter, geometry, "vstart");
+      detail = "checks=" + Dec(static_cast<uint64_t>(reporter.checks())) +
+               " phases=4 seed=" + Dec(options.seed) +
+               " plain_cycles=" + Dec(plain.cycles) +
+               " masked_cycles=" + Dec(masked.cycles) +
+               " masklog_cycles=" + Dec(masklog.cycles) +
+               " vstart_cycles=" + Dec(vstart.cycles) +
+               " plain_retire=" + Dec(plain.vec_retire) +
+               " masked_retire=" + Dec(masked.vec_retire) +
+               " masklog_retire=" + Dec(masklog.vec_retire);
+    } else {
     PhaseVsOff(&dut, &reporter, geometry, "vs-off");
     RunResult vec = PhaseArith(&dut, &reporter, geometry, "arith");
     PhaseRestart(&dut, &reporter, geometry, "restart");
@@ -1498,6 +1903,7 @@ int main(int argc, char** argv) {
              " resize_quota=" + Dec(lane_resize.run.lane_quota) +
              " resizes=" + Dec(lane_resize.run.lane_publish_ctr) +
              " acks=" + Dec(lane_resize.run.lane_ack_ctr);
+    }
   } catch (const Failure& f) {
     reporter.Mismatch(f.what, "every vector-integration claim holds on this machine",
                       "contract violated");

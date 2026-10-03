@@ -1635,7 +1635,35 @@ module mosaic_core #(
   logic [15:0]                vec_desc_alloc_ctr, vec_desc_release_ctr;
 
   // mosaic_vec_alu: the integer/mask/permute lane.
-  localparam logic [16:0]     VEC_ALU_CAPS = 17'b0000000_0100_0001;  // ADDSUB + LOGIC
+  //
+  // The advertised family set, one bit per family (bit 0 ADDSUB, 6 LOGIC,
+  // 10 MASKLOG, 11 MASKPFX; the numbering is mosaic_vec_alu's). Only families
+  // with delivered unit-level evidence are advertised, and the ALU refuses any
+  // family whose bit is clear (o_illegal, no VRF transaction):
+  //
+  //   ADDSUB (0), LOGIC (6)  the families the integrated core dispatched first.
+  //   MASKLOG (10)           the eight mask-register logical ops. CASE=
+  //                          rvv.integer_mask_permute drives all eight against
+  //                          the host oracle (PhaseMaskLane), so the family is
+  //                          proven at unit level.
+  //   MASKPFX (11)           vmsbf/vmsif/vmsof. CASE=rvv.integer_mask_permute
+  //                          drives all three, and rvv.mask_prefix_semantics /
+  //                          _masked / _vstart cover the boundaries, the masked
+  //                          forms and the vstart rule.
+  //
+  // CASE=vec.mask_prefix_at_core proves MASKPFX and MASKLOG through fetch,
+  // decode, rename, issue and the vector engine. No other family is advertised:
+  // the remaining thirteen are neither decoded by this core nor proven, so
+  // advertising them would be a claim with no evidence.
+`ifdef MOSAIC_CORE_MUTANT_VEC_CAPS_NO_MASKPFX
+  // NEGATIVE CONTROL: the mask-prefix family's capability bit is cleared, so
+  // the ALU refuses vmsbf/vmsif/vmsof again. CASE=vec.mask_prefix_at_core must
+  // fail at the first plain mask-prefix cell; that failure is what proves the
+  // case tests the advertisement rather than merely running.
+  localparam logic [16:0]     VEC_ALU_CAPS = 17'b0000100_0100_0001;  // ADDSUB + LOGIC + MASKLOG
+`else
+  localparam logic [16:0]     VEC_ALU_CAPS = 17'b0001100_0100_0001;  // ADDSUB + LOGIC + MASKLOG + MASKPFX
+`endif
   logic                       vec_alu_exec_valid;
   logic [4:0]                 vec_alu_family;
   logic [3:0]                 vec_alu_op;
@@ -2616,6 +2644,49 @@ module mosaic_core #(
               // The immediate form's scalar operand is the sign-extended 5-bit
               // `imm` field.
               vec_imm_c = {{59{fetch_out_bits[19]}}, fetch_out_bits[19:15]};
+            end
+          end else if (vec_f3_c == 3'b010) begin
+            // --------------------------------------------------- OPMVV (mask)
+            // The mask-register families this integration wires: the three
+            // mask-prefix ops (funct6 010100, the operation named by the rs1
+            // field -- not a GPR operand) and the eight mask-register logical
+            // ops (funct6 011000..011111). Both take their operands from mask
+            // registers, so the descriptor class is the mask class and not
+            // VOP_IVV. The ALU's capability word is the second gate: a family
+            // that is not advertised there is refused at execution rather than
+            // here, which is exactly the gate CASE=vec.mask_prefix_at_core
+            // exercises.
+            vec_kind_c    = 3'd1;
+            vec_form_c    = 2'd0;              // mask operands are vector-vector
+            vec_mask_en_c = !fetch_out_bits[25];
+            if (vec_f6_c == 6'b010100) begin
+              // vmsbf.m / vmsof.m / vmsif.m. rs1 = 1/2/3 names the operation;
+              // vm selects the masked form (v0.t).
+              vec_class_c = 5'd8;              // VOP_VMASKMV
+              case (fetch_out_bits[19:15])
+                5'd1: begin vec_family_c = 5'd11; vec_op_c = 4'd0; vec_legal_c = 1'b1; end  // vmsbf
+                5'd2: begin vec_family_c = 5'd11; vec_op_c = 4'd2; vec_legal_c = 1'b1; end  // vmsof
+                5'd3: begin vec_family_c = 5'd11; vec_op_c = 4'd1; vec_legal_c = 1'b1; end  // vmsif
+                default: ;
+              endcase
+            end else if ((vec_f6_c >= 6'b011000) && (vec_f6_c <= 6'b011111) &&
+                         fetch_out_bits[25]) begin
+              // vmand/vmnand/vmandn/vmxor/vmor/vmnor/vmorn/vmxnor. Mask-register
+              // logical ops are always unmasked: the vm=0 encodings are
+              // reserved, so only vm=1 decodes.
+              vec_class_c  = 5'd7;             // VOP_VMASK
+              vec_family_c = 5'd10;
+              vec_legal_c  = 1'b1;
+              case (vec_f6_c)
+                6'b011000: vec_op_c = 4'd6;    // vmandn
+                6'b011001: vec_op_c = 4'd0;    // vmand
+                6'b011010: vec_op_c = 4'd2;    // vmor
+                6'b011011: vec_op_c = 4'd4;    // vmxor
+                6'b011100: vec_op_c = 4'd7;    // vmorn
+                6'b011101: vec_op_c = 4'd1;    // vmnand
+                6'b011110: vec_op_c = 4'd3;    // vmnor
+                default:   vec_op_c = 4'd5;    // vmxnor
+              endcase
             end
           end
         end
@@ -4593,9 +4664,21 @@ module mosaic_core #(
                 vec_fault_ctr    <= vec_fault_ctr + 32'd1;
                 vec_state_q      <= VEC_TRAP;
               end else if (vec_unit_illegal) begin
+`ifdef MOSAIC_CORE_MUTANT_VEC_ILLEGAL_AS_FAULT
+                // NEGATIVE CONTROL: the refused vector instruction is reported
+                // as a resumable element fault at its own `vstart` instead of an
+                // illegal instruction. CASE=vec.mask_prefix_at_core's vstart
+                // phase requires mcause=2 (illegal) and no element report, so
+                // this routing defect is caught at that check.
+                vec_trap_cause_q <= mosaic_pkg::EXC_LOAD_ACCESS;
+                vec_trap_tval_q  <= {CORE_XLEN{1'b0}};
+                vec_vstart_q     <= vec_vstart[6:0];
+                vec_state_q      <= VEC_TRAP;
+`else
                 vec_trap_cause_q <= mosaic_pkg::EXC_ILLEGAL_INSN;
                 vec_trap_tval_q  <= {CORE_XLEN{1'b0}};
                 vec_state_q      <= VEC_TRAP;
+`endif
               end else begin
                 vec_done_q  <= 1'b1;
                 vec_state_q <= VEC_DONE;
