@@ -3,37 +3,37 @@
     {
       "case": "fifo.backpressure",
       "exit_code": 0,
-      "seconds": 0.133,
+      "seconds": 0.119,
       "verdict": "PASS"
     },
     {
       "case": "ram.collision_matrix",
       "exit_code": 0,
-      "seconds": 0.125,
+      "seconds": 0.118,
       "verdict": "PASS"
     },
     {
       "case": "harness.reset_load_exit",
       "exit_code": 0,
-      "seconds": 0.13,
+      "seconds": 1.0,
       "verdict": "PASS"
     },
     {
       "case": "harness.bad_image",
       "exit_code": 0,
-      "seconds": 0.132,
+      "seconds": 1.01,
       "verdict": "PASS"
     },
     {
       "case": "harness.timeout",
       "exit_code": 0,
-      "seconds": 0.125,
+      "seconds": 1.009,
       "verdict": "PASS"
     },
     {
       "case": "harness.injected_mismatch",
       "exit_code": 0,
-      "seconds": 0.124,
+      "seconds": 1.008,
       "verdict": "PASS"
     }
   ],

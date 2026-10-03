@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "case": "p0.prototype_gate",
+  "verdict": "FAIL",
+  "detail": "programs=4 both_clusters_alive=cycle 11 both_clusters_iq=cycle 310 remote_route=program position 1 (pc 0x0000000080000004) granted at cycle 9: fixed cluster 1 -> dynamic cluster 0 wb_collision=never ooo_completion=cycle 200 in_order_retires=292",
+  "seed": 1,
+  "max_cycles": 4000000,
+  "checks": 53,
+  "failures": 17,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-03T02:26:18Z",
+  "first_mismatch": "",
+  "failed_checks": ["the dynamic p0 configuration retires the oracle's architecture (p01_addsub.i0): signature 0x0000000000000001 0x02468acf13579bdd 0x0000000000000000 0x00000000000000ec got 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000", "the fixed and dynamic p0 configurations retire the same architecture (p01_addsub.i0, 73 events)", "dynamic configuration (p01_addsub): the ROB and the descriptor store drain at the exit protocol", "dynamic configuration (p01_addsub): the program's own exit protocol declares success", "the dynamic p0 configuration retires the oracle's architecture (p06_shiftlogic.i0): signature 0x0000000000000002 0x4000000000000000 0xc000000000000000 0x0000000000000000 got 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000", "the fixed and dynamic p0 configurations retire the same architecture (p06_shiftlogic.i0, 73 events)", "dynamic configuration (p06_shiftlogic): the ROB and the descriptor store drain at the exit protocol", "dynamic configuration (p06_shiftlogic): the program's own exit protocol declares success", "the dynamic p0 configuration retires the oracle's architecture (p11_bigmuldiv.i0): signature 0xf11331177113311e 0xfffffffffffffffe 0x0000000000000000 0x000000000000000e got 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000", "the fixed and dynamic p0 configurations retire the same architecture (p11_bigmuldiv.i0, 73 events)", "dynamic configuration (p11_bigmuldiv): the ROB and the descriptor store drain at the exit protocol", "dynamic configuration (p11_bigmuldiv): the program's own exit protocol declares success", "the dynamic p0 configuration retires the oracle's architecture (p12_memwalk.i0): signature 0x438587e9cc0e086c 0x23456789abcdea0f 0x0000000000000008 0x01234567a39081b7 got 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000", "the fixed and dynamic p0 configurations retire the same architecture (p12_memwalk.i0, 73 events)", "dynamic configuration (p12_memwalk): the ROB and the descriptor store drain at the exit protocol", "dynamic configuration (p12_memwalk): the program's own exit protocol declares success", "a writeback collision occurred: the arbiter delayed a same-bank completion -- never"]
+}

@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "case": "recovery.nested_branch_full_queues",
+  "verdict": "PASS",
+  "detail": "recovery contract holds: 419511 shadow comparisons over 6810 cycles; directed: 216 restores, 947 stale redirects, 15 killed redirects, 798 stale responses, 552 duplicate responses, 798 credits returned, 1702 journal-bound refusals; soak: 245 checkpoints, seed 0",
+  "seed": 0,
+  "max_cycles": 200000,
+  "checks": 1,
+  "failures": 0,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-03T02:24:12Z",
+  "first_mismatch": ""
+}

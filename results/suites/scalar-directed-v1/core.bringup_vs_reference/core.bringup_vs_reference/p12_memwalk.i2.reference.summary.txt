@@ -1,0 +1,11 @@
+outcome tohost
+events 71233
+steps 71233
+cycles 249245
+minstret 71233
+tohost 0000000000000001
+uart_writes 0
+sig0 7ffffffffffffb2e
+sig1 5555555555555166
+sig2 0000000000000000
+sig3 800000005555555d

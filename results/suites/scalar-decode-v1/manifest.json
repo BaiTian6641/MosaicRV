@@ -2,14 +2,14 @@
   "cases": [
     {
       "case": "decode.rv64im_reserved",
-      "exit_code": 0,
-      "seconds": 0.19,
-      "verdict": "PASS"
+      "exit_code": 1,
+      "seconds": 0.132,
+      "verdict": "FAIL"
     },
     {
       "case": "alu.boundaries",
       "exit_code": 0,
-      "seconds": 0.237,
+      "seconds": 0.227,
       "verdict": "PASS"
     }
   ],
@@ -22,5 +22,5 @@
     "python": "3.14.7",
     "verilator": "Verilator 5.052 2026-09-05 rev vUNKNOWN-built20260905"
   },
-  "verdict": "PASS"
+  "verdict": "FAIL"
 }

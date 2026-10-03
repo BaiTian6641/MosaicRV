@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "case": "interrupt.boundary_replay",
+  "verdict": "PASS",
+  "detail": "interrupt contract holds: 17769 comparisons over 5961 cycles, 1548 offered traps (MEI 278 / MSI 765 / MTI 505), 97 legal wakes, seed 0",
+  "seed": 0,
+  "max_cycles": 200000,
+  "checks": 1,
+  "failures": 0,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-03T02:24:15Z",
+  "first_mismatch": ""
+}

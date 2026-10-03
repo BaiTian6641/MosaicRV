@@ -1,0 +1,116 @@
+{
+  "cases": [
+    {
+      "case": "decode.rv64im_reserved",
+      "exit_code": 1,
+      "seconds": 0.133,
+      "verdict": "FAIL"
+    },
+    {
+      "case": "alu.boundaries",
+      "exit_code": 0,
+      "seconds": 0.225,
+      "verdict": "PASS"
+    },
+    {
+      "case": "fetch.redirect_late_response",
+      "exit_code": 0,
+      "seconds": 0.123,
+      "verdict": "PASS"
+    },
+    {
+      "case": "predictor.btb_aliasing",
+      "exit_code": 0,
+      "seconds": 0.125,
+      "verdict": "PASS"
+    },
+    {
+      "case": "rename.single_width_ownership",
+      "exit_code": 0,
+      "seconds": 0.308,
+      "verdict": "PASS"
+    },
+    {
+      "case": "rename.same_cycle_chain",
+      "exit_code": 0,
+      "seconds": 0.461,
+      "verdict": "PASS"
+    },
+    {
+      "case": "rob.out_of_order_children",
+      "exit_code": 0,
+      "seconds": 0.291,
+      "verdict": "PASS"
+    },
+    {
+      "case": "iq.wakeup_insert_select",
+      "exit_code": 0,
+      "seconds": 2.831,
+      "verdict": "PASS"
+    },
+    {
+      "case": "muldiv.kill_and_edges",
+      "exit_code": 0,
+      "seconds": 0.255,
+      "verdict": "PASS"
+    },
+    {
+      "case": "prf.read_bank_collision",
+      "exit_code": 0,
+      "seconds": 0.418,
+      "verdict": "PASS"
+    },
+    {
+      "case": "retire.head_block_and_dual",
+      "exit_code": 0,
+      "seconds": 0.133,
+      "verdict": "PASS"
+    },
+    {
+      "case": "commit.head_block_and_dual",
+      "exit_code": 0,
+      "seconds": 0.129,
+      "verdict": "PASS"
+    },
+    {
+      "case": "recovery.checkpoint_exact_restore",
+      "exit_code": 0,
+      "seconds": 0.26,
+      "verdict": "PASS"
+    },
+    {
+      "case": "recovery.nested_branch_full_queues",
+      "exit_code": 0,
+      "seconds": 0.262,
+      "verdict": "PASS"
+    },
+    {
+      "case": "csr.precise_trap_mret",
+      "exit_code": 0,
+      "seconds": 1.32,
+      "verdict": "PASS"
+    },
+    {
+      "case": "interrupt.boundary_replay",
+      "exit_code": 0,
+      "seconds": 1.226,
+      "verdict": "PASS"
+    },
+    {
+      "case": "core.bringup_vs_reference",
+      "exit_code": 0,
+      "seconds": 18.299,
+      "verdict": "PASS"
+    }
+  ],
+  "command": "python3 tools/verify.py --profile p0 --suite scalar-directed-v1",
+  "profile": "p0",
+  "schema_version": 1,
+  "seed": 0,
+  "suite": "scalar-directed-v1",
+  "tool_versions": {
+    "python": "3.14.7",
+    "verilator": "Verilator 5.052 2026-09-05 rev vUNKNOWN-built20260905"
+  },
+  "verdict": "FAIL"
+}

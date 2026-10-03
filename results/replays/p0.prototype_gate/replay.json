@@ -1,0 +1,27 @@
+{
+  "case": "p0.prototype_gate",
+  "first_divergence": {
+    "event_index": 17,
+    "injected": "hart=0 seq=0000000000000011 pc=000000008000011c next_pc=0000000000000000 insn=ff858393 rd=x7 val=fffffffffffffff8",
+    "positive": "hart=0 seq=0000000000000011 pc=000000008000011c next_pc=0000000000000000 insn=ff858393 rd=x7 val=0000000080001120",
+    "program": "p01_addsub"
+  },
+  "injected": {
+    "binary_sha256": "49553acfaa2321bd1876eb38db26b20d47d7f4da394285c6610b45410a93065c",
+    "build_command": "build/p0/p0_gate_replay/injected/build_command.txt",
+    "differs_from_shipping": true
+  },
+  "injection": "MOSAIC_FAB_MUTANT_DYN_SWAP_SRC",
+  "reproducible": true,
+  "reset_replays": 3,
+  "schema_version": 1,
+  "shipping": {
+    "binary_sha256": "1f74053753668264482790be30f93774688426d12227e7b96d6dbdae893a379f",
+    "build_command": "build/p0/p0_gate_replay/shipping/build_command.txt",
+    "result": "PASS"
+  },
+  "snapshot_path": {
+    "delivered": false,
+    "reason": "no saveable/restorable DUT state exists (Verilator is not built --savable and V-039 is not started); only the reset path is delivered"
+  }
+}
