@@ -1499,7 +1499,10 @@
     "sim/common/event_tap.cpp"
    ],
    "max_cycles": 4000000,
-   "seed": 1
+   "seed": 1,
+   "profiles": [
+    "p0"
+   ]
   },
   "cache.refill_evict_fault": {
    "task": "I-042",
@@ -1787,7 +1790,10 @@
     "sim/common/event_tap.cpp"
    ],
    "max_cycles": 4000000,
-   "seed": 1
+   "seed": 1,
+   "profiles": [
+    "p0"
+   ]
   },
   "cache.mshr_nonblocking": {
    "task": "I-043",

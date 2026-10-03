@@ -33,6 +33,14 @@ machine implements in RTL (F/D in `mosaic_fp_unit`, V's 16 families, the crypto 
 absent because their *verification* packages are undelivered, which is the ladder's rule working as
 intended rather than a gap in the manifest.
 
+## 0a. Full-suite verification (the strongest claim available)
+
+Beyond `make check`, every registered case was run per profile: **p0 90/90, p1 94/94** (0 failures each,
+exit 0). The sweep found three stale profile claims and no defect: `core.act_dut` (a p1 case run at p0),
+`csr.rule_ledger` and `fp.precise_flags_and_boxing` (both p0 cases run at p1). All three now declare their
+profile, and an audit for further instances found none. **p2 and p3 were not swept** — the suspension came
+first, so they are recorded as not-yet-run rather than implied green.
+
 ## 1. What this repository is, in one paragraph
 
 A scalable RISC-V out-of-order core in SystemVerilog, verified with Verilator 5.052 on macOS arm64,

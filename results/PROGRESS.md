@@ -3138,3 +3138,33 @@ recorded as a non-PASS in the p0 gate's own report without anyone asking *why* p
 configuration. The rule that falls out: **a registered case's profile claim is part of its evidence**, and
 `--all` per profile is the check that catches a wrong one, because `make check` runs the suites the
 Makefile names and would never have run it at p0 at all.
+
+---
+
+## 2026-10-02 — the full-suite sweep, and a class of stale profile claims
+
+Running **every registered case per profile** — a stronger claim than `make check`, which runs the suites
+the Makefile names — is the check that found the only red items left in the tree, and every one of them
+turned out to be a **stale profile claim in the registry rather than a defect in the machine**:
+
+| case | ran at | failed with | truth |
+|---|---|---|---|
+| `core.act_dut` | p0 | 0/127 | its harness runs `tests/act4/mosaic-p1/test_config.yaml`; it is a **p1** case |
+| `csr.rule_ledger` | p1 | "the rule ledger is empty; `config/csr/rule_ledger.json` does not cover profile p0" | delivered as a **p0** case (`--profile p0` in the ledger) |
+| `fp.precise_flags_and_boxing` | p1 | `mstatus.FS` never becomes Dirty | delivered as a **p0** case; F/D are not part of p1's advertised contract |
+
+All three entries declared no profile, so a sweep at any profile ran them outside their own contract. After
+the claims were corrected: **p0 runs 90 cases with 0 failures, and p1 runs 94 with 0 failures** (the two
+p1-inapplicable cases are now excluded by profile rather than failing). An audit for further instances —
+every registered case whose harness names a profile-specific configuration while the registry claims a
+different or absent profile — found none, so this is a small class of stale claims and not a pattern.
+
+**The two lessons, both about what a green board can hide.** First, a case that fails *by construction* is
+indistinguishable in a summary line from one that fails for a real reason, and one of these had already
+been recorded as a non-PASS in the p0 gate's report without anyone asking why p0 was running a p1
+configuration. Second, `csr.rule_ledger`'s message names **p0** while the sweep was running **p1** — a
+reporting oddity in that harness worth fixing, because a diagnostic that names the wrong profile is the
+same species as the diagnostic that named a plausible line, which this project has already paid for once.
+
+**Still not swept**: p2 and p3 (the user asked for a suspension before those runs, so they are recorded as
+not-yet-run rather than implied green — p2 and p3 are where the vector cases live and they are the slowest).
