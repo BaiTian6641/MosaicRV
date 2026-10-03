@@ -55,3 +55,7 @@
 原始报告位于根目录，保持原名与内容。Git 已初始化；原文与规划文档均需由最终跟踪检查纳入 index。首次提交尝试因本机没有 Git author identity 失败；未伪造姓名/邮箱、未修改全局或本地 author 配置。**Git-tracked/staged 不等于已产生 commit**。仓库作者配置由用户自行设置后，可正常提交已审核文档；本轮没有 push。
 
 更新：2026-09-30，修正文档中过期的“仅规划、无 RTL”项目状态，并锁定与 Sail 0.14.1 配对的 ACT4 revision；本次文档与本机外部工具验证边界见 [验证记录](docs/verification.md)。原始报告保持原样；后续实现仍需同步检查 source/task/reference coverage 并重跑 [文档检查](docs/verification.md)。
+
+### 生成日志与证据跟踪
+
+`results/**/*.log` 是可重跑的原始运行转录，保留在本地但不纳入 Git；根目录 `tmp*_out/` 为临时实验输出，同样不跟踪。报告中的历史日志路径仍用于定位相应运行，不代表 fresh checkout 自带这些 raw logs。正式 `results/reports/`、PROGRESS/REVISION、结构化 result/manifest JSON、replay/event trace 与测试输入保持跟踪；本规则不清空验证证据、不改变 delivered/capability 判定。需要复核完整 stdout/stderr 时按报告命令重跑并保存本地日志，或将不可替代的原始证据归档到明确版本化的 artifact 存储。

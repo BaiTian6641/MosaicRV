@@ -2,3 +2,7 @@
 build/
 obj_dir/
 __pycache__/
+
+# Generated run transcripts stay local; structured evidence remains tracked.
+/results/**/*.log
+/tmp*_out/
