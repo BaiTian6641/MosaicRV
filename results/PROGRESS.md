@@ -3116,3 +3116,25 @@ textual — it establishes that each package's record names a control and a fail
 was rebuilt in the state the tree is in *today*. The per-package re-runs the goal asks for are the
 stronger claim, and they are what each lane's report and my own re-runs record; this audit closes the
 *coverage* question (does every package have one?) and leaves the *freshness* question where it was.
+
+---
+
+## 2026-10-02 — full-suite audit: p0 runs 90/90, and one registry claim was wrong
+
+Running **every registered case for a profile** — the strongest verification available, and not the same
+claim as `make check`, which runs the suites the Makefile names — found one red: `core.act_dut` **fails at
+p0 with 0/127** while passing at p1 with 127/127. The cause is not the DUT: its harness runs
+`tests/act4/mosaic-p1/test_config.yaml`, a **p1** configuration, and its registry entry declared
+**no profile**, so `--all` at p0 ran it and it failed by construction. The entry now declares `["p1"]`,
+which is what its harness has always meant. **p0 then runs 90 cases with 0 failures, exit 0.**
+
+An audit for the same class elsewhere — every registered case whose harness names a profile-specific
+configuration while the registry claims a different or absent profile — found **no other instance**, so
+this was a single stale claim rather than a pattern.
+
+**What the episode is worth keeping**: a case that fails "by construction" is not harmless, because it is
+indistinguishable in a summary line from a case that fails for a real reason — and this one had been
+recorded as a non-PASS in the p0 gate's own report without anyone asking *why* p0 was running a p1
+configuration. The rule that falls out: **a registered case's profile claim is part of its evidence**, and
+`--all` per profile is the check that catches a wrong one, because `make check` runs the suites the
+Makefile names and would never have run it at p0 at all.

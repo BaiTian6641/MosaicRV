@@ -1739,7 +1739,10 @@
     "sim/common/memory_model.cpp"
    ],
    "max_cycles": 4000000,
-   "seed": 1
+   "seed": 1,
+   "profiles": [
+    "p1"
+   ]
   },
   "fp.precise_flags_and_boxing": {
    "task": "I-050",
