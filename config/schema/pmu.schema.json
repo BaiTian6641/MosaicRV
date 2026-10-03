@@ -1,0 +1,138 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://mosaicrv.invalid/schema/pmu.schema.json",
+  "title": "MosaicRV PMU counter measurement schema (I-076)",
+  "description": "The PMU mapping: one entry per event counter, naming its width, its scope, whether it is architectural (reachable by a program through a CSR) and whether an ISA reference can reproduce it. A counter that is not CSR-visible must say so here rather than be presented as architectural evidence; CASE=pmu.trace_accounting reconciles every entry against a hand-computable trace and prints this same visibility classification.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "profile",
+    "source",
+    "counters",
+    "not_covered"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "profile": {
+      "description": "The profile this mapping was measured on.",
+      "type": "string",
+      "enum": [
+        "p0",
+        "p1",
+        "p2",
+        "p3"
+      ]
+    },
+    "source": {
+      "type": "string",
+      "minLength": 1
+    },
+    "counters": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "event",
+          "width_bits",
+          "scope",
+          "unit",
+          "csr_visible",
+          "reference_comparable",
+          "rtl_port",
+          "description"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]*$"
+          },
+          "event": {
+            "description": "The observation point: the event or state the counter advances on.",
+            "type": "string",
+            "minLength": 1
+          },
+          "width_bits": {
+            "description": "The RTL port width. One aggregate may pack several counters (for example o_lane_elem_ctr packs eight 32-bit per-lane counts), so this is the packed width.",
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 512
+          },
+          "scope": {
+            "description": "What the counter is scoped to. per-hart and per-core mean one instance per hart/core; per-cluster and per-link mean one per cluster or per fabric link, summed by the reader when a core-wide number is wanted.",
+            "type": "string",
+            "enum": [
+              "per-hart",
+              "per-core",
+              "per-cluster",
+              "per-link"
+            ]
+          },
+          "unit": {
+            "type": "string",
+            "enum": [
+              "instructions",
+              "uops",
+              "elements",
+              "cycles",
+              "occupancy-cycles",
+              "requests",
+              "transactions",
+              "lines",
+              "bytes",
+              "writes",
+              "conflicts",
+              "replays",
+              "redirects",
+              "events"
+            ]
+          },
+          "csr_visible": {
+            "description": "True only if a program can read this counter through a CSR. Debug-only counters are false.",
+            "type": "boolean"
+          },
+          "csr": {
+            "description": "The CSR address, present exactly when csr_visible is true.",
+            "type": "string",
+            "pattern": "^0x[0-9a-f]{3}$"
+          },
+          "reference_comparable": {
+            "description": "True only if an independent ISA reference (a functional model or the architectural event trace) can reproduce this value. Implementation-only counters are false.",
+            "type": "boolean"
+          },
+          "rtl_port": {
+            "description": "The RTL output that publishes the counter, or \"none\" for a value carried in the architectural event stream.",
+            "type": "string",
+            "minLength": 1
+          },
+          "reconciled_by": {
+            "description": "The check in CASE=pmu.trace_accounting that ties this counter to the hand trace or to a conservation identity.",
+            "type": "string"
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "not_covered": {
+      "description": "Observation points the card names that this mapping does not carry, each with the reason.",
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "comment": {
+      "type": "string"
+    }
+  }
+}

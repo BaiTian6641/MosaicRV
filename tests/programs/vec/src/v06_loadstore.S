@@ -5,7 +5,7 @@
  * VLEN = 128.
  *
  * Configuration: one `vsetvli` per width, each with the matching vtypei
- * (0x18/0x20/0x28/0x30 for e8/e16/e32/e64, m1), because the core requires the
+ * (0x00/0x08/0x10/0x18 for e8/e16/e32/e64, m1), because the core requires the
  * load/store EEW to equal the current SEW.  VL is VLMAX at each width:
  * 16 / 8 / 4 / 2 elements.
  *

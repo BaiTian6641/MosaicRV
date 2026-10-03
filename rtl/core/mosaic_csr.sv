@@ -76,9 +76,13 @@
 //
 // ------------------------------------------------- counters and their writes
 //
-// mcycle and minstret are free-running: cnt_cycle_i / cnt_instret_i advance them
-// by one on every rising edge, by definition ("The mcycle CSR counts the number
-// of clock cycles executed by the processor core", L1650-L1655). A software write
+// mcycle and minstret are free-running: cnt_cycle_i advances mcycle by one on
+// every rising edge, by definition ("The mcycle CSR counts the number of clock
+// cycles executed by the processor core", L1650-L1655), and cnt_instret_i
+// advances minstret by however many instructions retired at that edge -- a
+// two-wide machine can retire two in one cycle, and the ISA counter must count
+// both, not one (I-076: a minstret wired to a single retire lane under-counts
+// every dual-retire cycle). A software write
 // (the counters are MRW and the spec says they "can be written with a given
 // value", L1657-L1659) therefore supplies the value the counter has *at that
 // edge*, and the same edge's tick is added on top:
@@ -179,7 +183,8 @@ module mosaic_csr #(
 
     // counters
     input  logic                   cnt_cycle_i,
-    input  logic                   cnt_instret_i,
+    // How many instructions retired at this edge: 0, 1 or 2 (retire width 2).
+    input  logic [1:0]             cnt_instret_i,
 
     // trap entry / return at the architectural boundary
     input  logic                   trap_valid_i,
@@ -1250,7 +1255,7 @@ module mosaic_csr #(
       // A write supplies the value at this edge and the edge's own tick is added
       // on top, so a counter never loses a cycle to an instruction.
       mcycle_q   <= mcycle_d + {63'b0, cnt_cycle_i};
-      minstret_q <= minstret_d + {63'b0, cnt_instret_i};
+      minstret_q <= minstret_d + {62'b0, cnt_instret_i};
 
       if (wr_accept)        o_wr_ctr         <= o_wr_ctr + 32'd1;
       if (csr_wr_illegal_o) o_illegal_wr_ctr <= o_illegal_wr_ctr + 32'd1;

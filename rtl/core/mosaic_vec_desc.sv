@@ -45,9 +45,10 @@
 //
 // The V spec (v1.0, tag 3570f998, src/v-spec.adoc) fixes the pieces:
 //
-//   * vsew[2:0] in vtype selects SEW = 2^vsew. Implementations support a
-//     contiguous range; this profile supports SEW 8/16/32/64, i.e. vsew 3..6.
-//     vsew 0/1/2/7 are not supported (L309-L314, L326-L327).
+//   * vsew[2:0] in vtype selects SEW = 2^(vsew+3) -- RVV 1.0 encodes the field
+//     as log2(SEW) - 3. Implementations support a contiguous range; this profile
+//     supports SEW 8/16/32/64, i.e. vsew 0..3. vsew 4..7 are reserved and not
+//     supported (L309-L314, L326-L327).
 //   * vlmul[2:0] selects LMUL: 000=1, 001=2, 010=4, 011=8, 101=1/8, 110=1/4,
 //     111=1/2; encoding 100 is reserved (L348-L361). All seven non-reserved
 //     settings are supported, which satisfies the mandatory fractional-LMUL
@@ -74,7 +75,7 @@
 //   bits 62:8     reserved (WARL; must be written zero and reads zero)
 //   bit 7         vma   (mask-agnostic)
 //   bit 6         vta   (tail-agnostic)
-//   bits 5:3      vsew[2:0]   (SEW = 2^vsew)
+//   bits 5:3      vsew[2:0]   (SEW = 2^(vsew+3); the field is log2(SEW) - 3)
 //   bits 2:0      vlmul[2:0]
 //
 // `vsew` at 5:3 is the position a program decodes after reading `vtype` back,
@@ -287,7 +288,7 @@ module mosaic_vec_desc #(
   localparam logic [3:0] RSN_OVERLAP_SRC     = 4'd4;  // destination/source group overlap forbidden
   localparam logic [3:0] RSN_MASK_DST_OVER   = 4'd5;  // masked destination group includes v0
   localparam logic [3:0] RSN_RESERVED_VLMUL  = 4'd6;  // vlmul == 100
-  localparam logic [3:0] RSN_RESERVED_VSEW   = 4'd7;  // vsew outside 3..6
+  localparam logic [3:0] RSN_RESERVED_VSEW   = 4'd7;  // vsew outside 0..3
   localparam logic [3:0] RSN_CLASS_INVALID   = 4'd8;  // op_class names no family
 
   // Class descriptor fields, decoded from op_class_i.
@@ -535,7 +536,9 @@ module mosaic_vec_desc #(
 `endif
     lmul_raw    = vtype_i[2:0];
     vill        = vtype_i[63];
-    vsew_valid  = (sew_raw >= 3'd3) && (sew_raw <= 3'd6);
+    // RVV 1.0: vsew[2:0] = log2(SEW) - 3, so the implemented SEW set
+    // 8/16/32/64 is vsew 0..3 and 4..7 are reserved.
+    vsew_valid  = (sew_raw <= 3'd3);
     vlmul_valid = (lmul_raw != 3'b100);
     case (lmul_raw)
       3'b000:  lmul_e = 5'sd0;
@@ -547,7 +550,8 @@ module mosaic_vec_desc #(
       3'b111:  lmul_e = -5'sd1;
       default: lmul_e = 5'sd0;   // reserved encoding; caught by vlmul_valid
     endcase
-    sew_l    = $signed({2'b0, sew_raw});
+    // The width exponent the field denotes: log2(SEW) = vsew + 3.
+    sew_l    = $signed({2'b0, sew_raw}) + 5'sd3;
     lmul_e5  = lmul_e;
 
     vtype_legal_c = (!vill) && vsew_valid && vlmul_valid &&
@@ -664,7 +668,7 @@ module mosaic_vec_desc #(
     o_cfg_legal_o   = cfg_legal_c;
     o_illegal_o     = !cfg_legal_c;
     o_reason_o      = reason_c;
-    o_sew_log2_o    = sew_raw;
+    o_sew_log2_o    = sew_l[2:0];
     o_lmul_exp_o    = lmul_e[3:0];
     o_emul_src_exp_o = src_emul_e[3:0];
     o_emul_dst_exp_o = dst_emul_e[3:0];

@@ -4,9 +4,9 @@
  * operations vmand, vmnand, vmor, vmnor, vmxor, vmxnor, vmandn, vmorn -- at
  * SEW = 8, LMUL = m1, VLEN = 128.
  *
- * Configuration: vtypei = 0x18 (this core's encoding: vsew = 3 -> SEW = 8,
+ * Configuration: vtypei = 0x00 (RVV 1.0 SMALLEST_SEW: vsew = 0 -> SEW = 8,
  * vlmul = 0 -> m1, vta = vma = 0).  VLMAX = VLEN/SEW = 16; `vsetvli t0, x0,
- * 0x18` requests VL = VLMAX = 16.
+ * 0x00` requests VL = VLMAX = 16.
  *
  * Mask-register logical instructions are always unmasked (vm = 1 is the only
  * legal encoding) and operate on the mask bits 0..vl-1.  A mask register is

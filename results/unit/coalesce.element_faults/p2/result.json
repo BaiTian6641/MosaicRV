@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "case": "coalesce.element_faults",
+  "verdict": "PASS",
+  "detail": "checks=692 cells=44 merged=12 req_on=28 req_off=94 cycles=4840",
+  "seed": 1,
+  "max_cycles": 200000,
+  "checks": 692,
+  "failures": 0,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-03T01:50:17Z",
+  "first_mismatch": ""
+}

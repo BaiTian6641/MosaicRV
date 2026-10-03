@@ -38,9 +38,12 @@ LDFLAGS  := $(ARCHFLAGS) -nostdlib -nostartfiles \
 SRCDIR   := src
 BUILDDIR := build
 
-# The seven programs the registered case runs: every one must reach its PASS trap.
+# The programs the registered case runs: every one must reach its PASS trap.
 PROGRAMS := v01_addsub_e64 v02_addsub_e32 v03_logic_e16 \
-            v04_masklog_e8 v05_maskpfx_e8 v06_loadstore v08_masked_addsub_e32
+            v04_masklog_e8 v05_maskpfx_e8 v06_loadstore v08_masked_addsub_e32 \
+            v10_wide_e32 v11_mul_e32 v12_mulw_e16 v13_shift_e32 \
+            v15_minmax_e32 v16_cmp_e32 v17_sat_e32 v18_slide_e32 \
+            v19_gather_e32 v20_compress_e8 v21_reduce_e32 v22_redwide_e16
 
 # The negative control: a copy of v01 with one expected constant deliberately
 # wrong.  It is built here but is NOT in PROGRAMS, so the registered run never

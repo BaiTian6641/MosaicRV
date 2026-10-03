@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "case": "cache.coalescer_boundaries",
+  "verdict": "PASS",
+  "detail": "coalescer: miss=18 coalesce=9 refill=8 fault=1 wb=1 reads=9 writes=1 cycles=108 | cancel-keeps-others",
+  "seed": 1,
+  "max_cycles": 200000,
+  "checks": 85,
+  "failures": 0,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-03T00:29:07Z",
+  "first_mismatch": ""
+}

@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "case": "llb.freshness_and_ownership",
+  "verdict": "FAIL",
+  "detail": "first failure: local-writer-freshness: expected the store removed the clean copy, got the clean copy survived the store",
+  "seed": 1,
+  "max_cycles": 200000,
+  "checks": 1,
+  "failures": 1,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-02T23:46:15Z",
+  "first_mismatch": "local-writer-freshness: expected the store removed the clean copy, got the clean copy survived the store",
+  "failed_checks": ["no rule of the invalidation protocol was violated"]
+}

@@ -84,7 +84,8 @@
     "I-064",
     "V-061",
     "V-062",
-    "V-064"
+    "V-064",
+    "I-076"
   ],
   "evidence": {
     "I-001": {
@@ -1048,6 +1049,18 @@
       "verdict": "PASS",
       "notes": "Lead re-ran the case: RESULT PASS multihart.context_isolation h0=157 h1=12100 retires, fcsr=0x0000000000000010/0x0000000000000028 vl=1/3 seed=1 (41 checks, p3, seven Pass clauses covered). A REAL DEFECT WAS FOUND AND FIXED, not worked around: mosaic_csr read mhartid from the single generated constant MOSAIC_CSR_RESET_MHARTID and mosaic_core never wired HART_ID into it, so BOTH harts read 0 -- architecturally wrong for any multi-hart machine, since mhartid is a hart's own identifier. Fix: mosaic_csr gains a MHARTID_VALUE parameter whose default is the generated constant (single-hart builds stay bit-identical) and mosaic_core passes CORE_XLEN'(HART_ID); the shared-id behaviour survives only inside the MOSAIC_MUTANT_MHARTID_SHARED control branch. Three controls, each from a deleted build directory with a hash distinct from the shipping 26486c13bea91c5921c886b97239f97418076fbc4473ee52a582f9b08eb61015 and exit 1 with a named first failure: MOSAIC_MUTANT_MHARTID_SHARED 520c54d2cd4a9b27... ('hart 0 reads mhartid 0 and hart 1 reads mhartid 1'), MOSAIC_MH_CTX_MUTANT_HALT_ALL 487e9b16a4efedcc... ('hart 1 retired its program and parked'), and a driver-level --control-share-ref which compares hart 1 against hart 0's reference -- the card's own named failure mode, one shared reference state -- exit 1 with 'MISMATCH stream/h1'. The change was re-verified against every case it can move, each from a deleted build directory: core.act_dut (p1) PASS, core.corpus_sweep (p1) PASS, csr.precise_trap_mret (p0) PASS, core.trap_csr_program (p0) PASS, multihart.isolation (p3) PASS, lint_rtl 65/65 on both profiles. No ACT4 or corpus program reads mhartid, so no golden moved. NOT COVERED, with reasons: no 4-hart configuration (the wrapper hardcodes two harts and p3 declares two), no interrupt-controller topology (the IRQ is a self-raised mip/mie software interrupt, not CLINT/PLIC routing), instruction fetch is not translated in this core so 'the same PC' is a physical PC, no cross-hart memory ordering or coherence (disjoint pages; V-065..V-067 own it), vector register state is observed only through a vector store (vmv.x.s is not wired), and halt causes other than WFI plus park.",
       "report": "results/reports/multihart.context_isolation.md"
+    },
+    "I-076": {
+      "cases": [
+        "pmu.trace_accounting"
+      ],
+      "commands": [
+        "python3 tools/run_unit.py --profile p1 --case pmu.trace_accounting",
+        "python3 tools/run_pmu_controls.py"
+      ],
+      "verdict": "PASS",
+      "notes": "Lead re-ran the case: RESULT PASS pmu.trace_accounting counters reconcile with the hand trace (48 checks, 0 failures, from a deleted build directory). 30 counters reconciled, 4 CSR-visible; the measurement schema is config/schema/pmu.schema.json with the instance config/pmu/p1.json. TWO CONTROLS, each from a deleted build directory, each exit 1 with a named first failure and a hash distinct from the shipping 40b418bc9f9c6f3506c95fb8efbfadf33d24edc9282cc3b814bc5c0638fdd4a6: MOSAIC_PMU_MUTANT_DOUBLE_COMMIT (22ad66ca5d987784..., 'cache_off: retired counter 54 == hand 48') and MOSAIC_PMU_MUTANT_SKIP_CLASS (8bf2b37102a09369..., 'cache_off: class sum 42 == retired 48 (no under/double count)') -- the card's two named failure modes, over- and under-counting. A REAL ARCHITECTURAL DEFECT WAS FOUND AND FIXED: minstret under-counted every dual-retire cycle, because mosaic_core drove the CSR increment with `rob_retire_ack | rob_retire_ack_next` (a one-bit OR) instead of a count -- mosaic_csr's cnt_instret_i is now logic[1:0] and the core drives the 2-bit sum, so the retired-instruction counter is correct on the two-wide commit path. Nine observation points were added (per-cluster IQ conservation, L1D transaction/hit/miss/refill/writeback, I-cache miss) and are named-unconnected in both mosaic_multihart core instances so the lint gate stays 65/65. NOT COVERED, with reasons: no vector-IPC-versus-scalar-IPC speed judgement and no toggle count presented as power (the card's two anti-patterns, both deliberately absent); no true remote or coherence traffic (this is a single-hart core, and o_fab_grant_ctr is explicitly local cross-cluster steering); the vector and FP element counters exist but the p1 program is scalar; the case runs p1 because p0 claims no cache. RECORDED AS AN OPEN FINDING, not covered by this package: **Zihpm is advertised while its counters read zero and are not a mapping of these events** -- the HPM CSRs exist and are readable, but nothing drives them, so the advertisement currently rests on CSR existence rather than on a working mapping.",
+      "report": "results/reports/pmu.trace_accounting.md"
     }
   },
   "blocked_tasks": {},

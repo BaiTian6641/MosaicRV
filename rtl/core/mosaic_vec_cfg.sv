@@ -35,18 +35,26 @@
 // The `vtype` fields are at the ratified v1.0 positions (`vtype-format.adoc` of
 // the pinned tag, included at L190 of `src/v-spec.adoc`): bits 2:0 `vlmul`, bits
 // 5:3 `vsew`, bit 6 `vta`, bit 7 `vma`, bit 63 `vill`, bits 62:8 reserved (must
-// be written zero and reads zero). This is the same encoding `mosaic_vec_desc`
-// now decodes and the one `config/csr/vector.json` records, so the configuration
-// snapshot this unit hands the descriptor is understood by it, and -- the point
-// of the layout -- a program that reads `vtype` back and decodes `vsew` at 5:3
-// computes the SEW the specification defines.
+// be written zero and reads zero). The *value* of `vsew[2:0]` is also the
+// specification's: it is log2(SEW) - 3, so 0 = e8, 1 = e16, 2 = e32, 3 = e64
+// (vsew-format.adoc of the pinned tag; "the vsew field encodes the value of SEW
+// as a power of 2 minus 3"). The profile implements SEW 8/16/32/64, i.e. vsew
+// 0..3; 4..7 are reserved and set vill. This is the same encoding
+// `mosaic_vec_desc` decodes and the one `config/csr/vector.json` records, so
+// the configuration snapshot this unit hands the descriptor is understood by
+// it, and -- the point of the layout -- a program that reads `vtype` back and
+// decodes `vsew` at 5:3 computes the SEW the specification defines. Widths are
+// derived from the field by `sew_log2_of` (= vsew + 3); a reader that wants a
+// width must convert, and one that wants the architectural value must not.
 //
 // The pre-ratification revision of this family placed `vsew` at 7:5 with
-// `vta`/`vma` at 4/3; `CASE=rvv.vtype_layout` and the MOSAIC_VEC_MUTANT_VTYPE_
-// LEGACY_75 / MOSAIC_VEC_MUTANT_VTYPE_SEW_WRONG controls keep that divergence
-// from returning silently. The `vset` seam holds the argument word verbatim
-// (all of bits 7:0), so the position is fixed at the decode points, not at
-// storage.
+// `vta`/`vma` at 4/3, and an earlier revision of this module additionally
+// accepted the field as log2(SEW) (3..6) -- an encoding no compiler emits.
+// `CASE=rvv.vtype_layout` and the MOSAIC_VEC_MUTANT_VTYPE_LEGACY_75 /
+// MOSAIC_VEC_MUTANT_VTYPE_SEW_WRONG / MOSAIC_VEC_MUTANT_VTYPE_SEW_UNSHIFTED
+// controls keep either divergence from returning silently. The `vset` seam
+// holds the argument word verbatim (all of bits 7:0), so the value is fixed at
+// the decode points, not at storage.
 //
 // `vset{i}vl{i}`'s immediate `vtypei[10:0]` carries the same field positions as
 // `vtype[10:0]`, and bits 10:8 of it are reserved-zero for the same reason bits
@@ -99,7 +107,11 @@
 //                                       mosaic_vec_desc)
 //   MOSAIC_VEC_MUTANT_VTYPE_SW_WRITE   (a software CSR write to vtype is
 //                                       accepted, so software can write vill)
-//   -- both proven to fail CASE=rvv.vtype_layout.
+//   MOSAIC_VEC_MUTANT_VTYPE_SEW_UNSHIFTED (the field is interpreted as
+//                                       log2(SEW) unshifted again -- the
+//                                       pre-fix encoding -- so a spec-legal e32
+//                                       sets vill)
+//   -- all proven to fail CASE=rvv.vtype_layout.
 // Each is off unless its `-D` is passed; see results/reports/I-052-vset.md and
 // results/reports/rvv-vtype-layout.md.
 // ============================================================================
@@ -218,9 +230,35 @@ module mosaic_vec_cfg #(
     end
   endfunction
 
+  // RVV 1.0 encodes `vtype.vsew[2:0]` as log2(SEW) - 3: 0 = e8, 1 = e16,
+  // 2 = e32, 3 = e64. The field is architecturally visible and this is the value
+  // software reads back; the profile implements SEW 8/16/32/64, which is
+  // exactly vsew 0..3. Encodings 4..7 are reserved and must set vill.
   function automatic logic vsew_ok (input logic [2:0] vsew);
     begin
+`ifdef MOSAIC_VEC_MUTANT_VTYPE_SEW_UNSHIFTED
+      // NEGATIVE CONTROL: the pre-fix interpretation -- the field is accepted
+      // as log2(SEW), so only 3..6 are "supported" and a spec-legal e32
+      // (vsew = 2) sets vill. Paired with sew_log2_of below.
       vsew_ok = (vsew >= 3'd3) && (vsew <= 3'd6);
+`else
+      vsew_ok = (vsew <= 3'd3);
+`endif
+    end
+  endfunction
+
+  // The width exponent a vsew field denotes: log2(SEW) = vsew + 3. Every
+  // computation that needs a width (VLMAX, the EMUL floor) goes through here;
+  // the architectural field itself stays the spec encoding.
+  function automatic int sew_log2_of (input logic [2:0] vsew);
+    begin
+`ifdef MOSAIC_VEC_MUTANT_VTYPE_SEW_UNSHIFTED
+      // NEGATIVE CONTROL: the field is read as log2(SEW) unshifted, so a
+      // spec-encoded e32 (vsew = 2) is sized as SEW = 4 and VLMAX is off.
+      sew_log2_of = int'(vsew);
+`else
+      sew_log2_of = int'(vsew) + 3;
+`endif
     end
   endfunction
 
@@ -230,13 +268,14 @@ module mosaic_vec_cfg #(
     end
   endfunction
 
-  // VLMAX = VLEN * LMUL / SEW = 2^(log2(VLEN) + lmul_exp - vsew). Returns 0 for
-  // a vtype the profile does not support, so callers get a defined value.
+  // VLMAX = VLEN * LMUL / SEW = 2^(log2(VLEN) + lmul_exp - log2(SEW)), and
+  // log2(SEW) = vsew + 3 for the spec-encoded field. Returns 0 for a vtype the
+  // profile does not support, so callers get a defined value.
   function automatic logic [7:0] vlmax_of (input logic [2:0] vsew,
                                            input logic [2:0] vlmul);
     int exp;
     begin
-      exp = int'(VLEN_LOG2) + lmul_exp_of(vlmul) - int'(vsew);
+      exp = int'(VLEN_LOG2) + lmul_exp_of(vlmul) - sew_log2_of(vsew);
       if (!vsew_ok(vsew) || !vlmul_ok(vlmul) || (exp < 0) || (exp > 7)) begin
         vlmax_of = 8'd0;
       end else begin
@@ -245,10 +284,10 @@ module mosaic_vec_cfg #(
     end
   endfunction
 
-  // The EMUL floor: SEW <= LMUL*ELEN, i.e. lmul_exp + log2(ELEN) >= vsew.
+  // The EMUL floor: SEW <= LMUL*ELEN, i.e. lmul_exp + log2(ELEN) >= log2(SEW).
   function automatic logic emul_ok (input logic [2:0] vsew, input logic [2:0] vlmul);
     begin
-      emul_ok = (lmul_exp_of(vlmul) + int'(ELEN_LOG2)) >= int'(vsew);
+      emul_ok = (lmul_exp_of(vlmul) + int'(ELEN_LOG2)) >= sew_log2_of(vsew);
     end
   endfunction
 
@@ -335,9 +374,9 @@ module mosaic_vec_cfg #(
 `ifdef MOSAIC_VEC_MUTANT_SILENT_M1
     // NEGATIVE CONTROL: an unsupported SEW/LMUL encoding is silently accepted as
     // SEW=8, LMUL=1 instead of setting vill -- the spec's "unsupported config
-    // silently becomes m1" fail mode.
+    // silently becomes m1" fail mode. vsew = 0 is the RVV 1.0 encoding of e8.
     if (!arg[63] && !supported) begin
-      arg_vsew  = 3'd3;
+      arg_vsew  = 3'd0;
       arg_vlmul = 3'd0;
       vtype_field = {arg[7:6], arg_vsew, arg_vlmul};
       supported = 1'b1;

@@ -720,7 +720,42 @@ module mosaic_core #(
     output logic [31:0]                 o_fab_bp_captured_ctr,
     output logic [31:0]                 o_fab_bp_hit_ctr,
     output logic [31:0]                 o_fab_bp_unauth_ctr,
-    output logic [31:0]                 o_fab_bp_flush_ctr
+    output logic [31:0]                 o_fab_bp_flush_ctr,
+
+    // ------------------------------------------------------------------ PMU
+    // I-076. The event-consistency counters CASE=pmu.trace_accounting
+    // reconciles against a hand-computable trace. They are *implementation*
+    // observability: none is architectural, none is readable through a CSR, and
+    // no ISA reference can reproduce one. The case states exactly that, so a
+    // debug counter is never presented as architectural evidence.
+    //
+    //   o_pmu_uop_insert_ctr  uops inserted into the two issue queues (a macro
+    //                         may produce more than one uop; the ROB counts
+    //                         macros, this counts uops). The IQ's exactly-once
+    //                         invariant, stated in mosaic_iq.sv, is
+    //                         insert == issue + kill + live occupancy, so these
+    //                         three counters plus o_c0_count/o_c1_count are a
+    //                         closed account of every issued uop.
+    //   o_pmu_uop_issue_ctr   uops granted (issued to an FU).
+    //   o_pmu_uop_kill_ctr    uops killed in the IQ by a redirect.
+    //   o_pmu_dcache_txn_ctr  CPU requests accepted by the L1D (loads + stores).
+    //   o_pmu_dcache_hit_ctr  of those, served from a line present.
+    //   o_pmu_dcache_miss_ctr of those, that missed (a refill starts).
+    //   o_pmu_dcache_refill_ctr line fills the L1D requested from memory.
+    //   o_pmu_dcache_wb_ctr   dirty-line writebacks the L1D issued.
+    //   o_pmu_icache_miss_ctr instruction-side misses; the I-cache evidence
+    //                         lives in the fetch path, not in the LSU.
+    // hit + miss == txn for cacheable accesses, and refill == miss for a demand
+    // fill: those are the no-under/double-count identities the case asserts.
+    output logic [31:0]                 o_pmu_uop_insert_ctr,
+    output logic [31:0]                 o_pmu_uop_issue_ctr,
+    output logic [31:0]                 o_pmu_uop_kill_ctr,
+    output logic [31:0]                 o_pmu_dcache_txn_ctr,
+    output logic [31:0]                 o_pmu_dcache_hit_ctr,
+    output logic [31:0]                 o_pmu_dcache_miss_ctr,
+    output logic [31:0]                 o_pmu_dcache_refill_ctr,
+    output logic [31:0]                 o_pmu_dcache_wb_ctr,
+    output logic [31:0]                 o_pmu_icache_miss_ctr
 );
 
   // I-064: the hart identity as a 2-bit field, from the parameter. Declared
@@ -1017,6 +1052,17 @@ module mosaic_core #(
   logic                      c0_grant_valid, c1_grant_valid;
   logic [CORE_UOP_ID_W-1:0]  c0_grant_uop, c1_grant_uop;
   logic [31:0]               c0_alu_ctr, c1_alu_ctr, c0_br_ctr, c1_br_ctr, md_ctr;
+  // I-076: the per-cluster IQ conservation counters (uops in, issued, killed).
+  logic [31:0]               c0_ins_total, c1_ins_total;
+  logic [31:0]               c0_grant_total, c1_grant_total;
+  logic [31:0]               c0_kill_total, c1_kill_total;
+  // I-076: the cache demand-event pulses, counted into the PMU registers below.
+  logic                      ic_miss_p;
+  logic                      dc_hit_p, dc_miss_p, dc_refill_p, dc_wb_p;
+  logic [31:0]               dc_cpu_txn;
+  logic [31:0]               pmu_dcache_hit_ctr, pmu_dcache_miss_ctr;
+  logic [31:0]               pmu_dcache_refill_ctr, pmu_dcache_wb_ctr;
+  logic [31:0]               pmu_icache_miss_ctr;
 
   // wakeup / PRF / arbiter
   logic                      wu_valid;
@@ -1636,33 +1682,58 @@ module mosaic_core #(
 
   // mosaic_vec_alu: the integer/mask/permute lane.
   //
-  // The advertised family set, one bit per family (bit 0 ADDSUB, 6 LOGIC,
-  // 10 MASKLOG, 11 MASKPFX; the numbering is mosaic_vec_alu's). Only families
-  // with delivered unit-level evidence are advertised, and the ALU refuses any
-  // family whose bit is clear (o_illegal, no VRF transaction):
+  // The advertised family set, one bit per family (the numbering is
+  // mosaic_vec_alu's). Only families with delivered unit-level evidence are
+  // advertised, and each newly advertised family is added together with the
+  // decode arm and the core-level case that reaches it, so the word always
+  // matches what the core can dispatch. The ALU refuses any family whose bit is
+  // clear (o_illegal, no VRF transaction):
   //
-  //   ADDSUB (0), LOGIC (6)  the families the integrated core dispatched first.
-  //   MASKLOG (10)           the eight mask-register logical ops. CASE=
-  //                          rvv.integer_mask_permute drives all eight against
-  //                          the host oracle (PhaseMaskLane), so the family is
-  //                          proven at unit level.
-  //   MASKPFX (11)           vmsbf/vmsif/vmsof. CASE=rvv.integer_mask_permute
-  //                          drives all three, and rvv.mask_prefix_semantics /
-  //                          _masked / _vstart cover the boundaries, the masked
-  //                          forms and the vstart rule.
+  //   0  ADDSUB    vadd / vsub / vrsub                        vec.integrated
+  //   1  WIDE      vwaddu / vwadd / vwsubu / vwsub            rvv.integer_mask_permute
+  //   2  MUL       vmul / vmulh / vmulhu / vmulhsu            rvv.integer_mask_permute
+  //   3  MULW      vwmulu / vwmulsu / vwmul                   rvv.integer_mask_permute
+  //   4  SHIFT     vsll / vsrl / vsra                         rvv.integer_mask_permute
+  //   (5 NARROW is NOT advertised: the delivered stimulus and the ALU both
+  //       mask the 2*SEW source to SEW -- mosaic_vec_alu.sv's
+  //       `bb = ef_vs2 & width_mask(sew)` -- so vnsrl/vnsra/vnclip never
+  //       consume a wide source and the family's defining behavior is
+  //       unproven.  See results/reports/vector-family-advertisement.md.)
+  //   6  LOGIC     vand / vor / vxor / vnot                   vec.integrated
+  //   7  MINMAX    vminu / vmin / vmaxu / vmax                rvv.integer_mask_permute
+  //   8  CMP       vmseq .. vmsgt                             rvv.integer_mask_permute
+  //   9  SAT       vsadd*, vssub*, vaadd*, vasub*             rvv.integer_mask_permute
+  //  10  MASKLOG   the eight mask-register logical ops        rvv.integer_mask_permute
+  //  11  MASKPFX   vmsbf / vmsif / vmsof                      rvv.mask_prefix_*
+  //  12  SLIDE     vslideup.vx / vslidedown.vx                rvv.integer_mask_permute
+  //  13  GATHER    vrgather.vv                                rvv.integer_mask_permute
+  //  14  COMPRESS  vcompress.vm                               rvv.integer_mask_permute
+  //  15  REDUCE    vredsum .. vredxor                         rvv.integer_mask_permute
+  //  16  REDWIDE   vwredsumu / vwredsum                       rvv.integer_mask_permute
   //
-  // CASE=vec.mask_prefix_at_core proves MASKPFX and MASKLOG through fetch,
-  // decode, rename, issue and the vector engine. No other family is advertised:
-  // the remaining thirteen are neither decoded by this core nor proven, so
-  // advertising them would be a claim with no evidence.
+  // The evidence column is the *stimulus*, read rather than trusted by name:
+  // PhaseElementLane / PhaseReduceLane / PhasePermuteLane / PhaseCoverage in
+  // sim/unit/tb_vec.cpp drive each operation against the host oracle.
+  // CASE=vec.selfcheck_corpus then proves every family above through fetch,
+  // decode, rename, issue and the vector engine on the integrated core.
+  // Families the ALU does not implement (divide, multiply-accumulate, scaling
+  // shifts, vsmul, extension, viota/vid, the moves, vector FP and every other
+  // memory class) have no bit and no decode arm.
 `ifdef MOSAIC_CORE_MUTANT_VEC_CAPS_NO_MASKPFX
-  // NEGATIVE CONTROL: the mask-prefix family's capability bit is cleared, so
-  // the ALU refuses vmsbf/vmsif/vmsof again. CASE=vec.mask_prefix_at_core must
-  // fail at the first plain mask-prefix cell; that failure is what proves the
-  // case tests the advertisement rather than merely running.
-  localparam logic [16:0]     VEC_ALU_CAPS = 17'b0000100_0100_0001;  // ADDSUB + LOGIC + MASKLOG
+  // NEGATIVE CONTROL: only the mask-prefix family's capability bit is cleared,
+  // so the ALU refuses vmsbf/vmsif/vmsof again. CASE=vec.mask_prefix_at_core
+  // must fail at the first plain mask-prefix cell; that failure is what proves
+  // the case tests the advertisement rather than merely running.
+  localparam logic [16:0]     VEC_ALU_CAPS = 17'h1F7DF;   // all but MASKPFX (bit 11)
+`elsif MOSAIC_CORE_MUTANT_VEC_CAPS_NEW_OFF
+  // NEGATIVE CONTROL: the twelve families advertised for the ALU (bits 1-4,
+  // 7-9 and 12-16) are cleared together, leaving only the four the core
+  // shipped before. Each self-checking program in tests/programs/vec/src/ uses
+  // exactly one of the cleared families, so running it alone against this
+  // mutant isolates that family's capability bit.
+  localparam logic [16:0]     VEC_ALU_CAPS = 17'b00000_1100_0100_0001;
 `else
-  localparam logic [16:0]     VEC_ALU_CAPS = 17'b0001100_0100_0001;  // ADDSUB + LOGIC + MASKLOG + MASKPFX
+  localparam logic [16:0]     VEC_ALU_CAPS = 17'h1FFDF;   // all but NARROW (bit 5)
 `endif
   logic                       vec_alu_exec_valid;
   logic [4:0]                 vec_alu_family;
@@ -2128,7 +2199,7 @@ module mosaic_core #(
       .mem_rsp_epoch_i (imem_rsp_epoch),
       .mem_rsp_len_i   (imem_rsp_len),
       .o_hit           (),
-      .o_miss          (),
+      .o_miss          (ic_miss_p),
       .o_refill        (),
       .o_writeback     (),
       .o_fault         (),
@@ -2619,10 +2690,17 @@ module mosaic_core #(
             end
           end else if ((vec_f3_c == 3'b000) || (vec_f3_c == 3'b100) ||
                        (vec_f3_c == 3'b011)) begin
-            // ------------------------------------------------- integer arith
-            // OPIVV (000), OPIVX (100), OPIVI (011). The OPFVV/OPMVV/OPFVF/
-            // OPMVX forms are vector FP and mask-to-mask, which this
-            // integration does not wire.
+            // -------------------------------------- OPIVV / OPIVX / OPIVI
+            // The integer families whose encodings live in OPIVV (000),
+            // OPIVX (100) and OPIVI (011), from riscv-opcodes' `rv_v`
+            // extension: add/sub, logic, min/max, the mask-producing compares,
+            // the saturating adds/subs, the shifts, the narrowing forms,
+            // vrgather.vv, vslideup.vx / vslidedown.vx and the widening
+            // reductions. Only the operations and forms that have delivered
+            // unit-level evidence are decoded here; every other encoding in
+            // these funct3 classes (vrsub, the carry/merge/move forms, the
+            // `.vi` forms, vrgatherei16.vv) falls through to `default` and is
+            // refused rather than mapped to something plausible.
             vec_kind_c   = 3'd1;
             vec_class_c  = 5'd0;   // VOP_IVV
             vec_mask_en_c = !fetch_out_bits[25];
@@ -2635,9 +2713,42 @@ module mosaic_core #(
                   vec_family_c = 5'd0; vec_op_c = 4'd1; vec_legal_c = 1'b1;
                 end
               end
+              6'b000100: if (vec_form_c != 2'd2) begin vec_family_c = 5'd7; vec_op_c = 4'd0; vec_legal_c = 1'b1; end  // vminu
+              6'b000101: if (vec_form_c != 2'd2) begin vec_family_c = 5'd7; vec_op_c = 4'd1; vec_legal_c = 1'b1; end  // vmin
+              6'b000110: if (vec_form_c != 2'd2) begin vec_family_c = 5'd7; vec_op_c = 4'd2; vec_legal_c = 1'b1; end  // vmaxu
+              6'b000111: if (vec_form_c != 2'd2) begin vec_family_c = 5'd7; vec_op_c = 4'd3; vec_legal_c = 1'b1; end  // vmax
               6'b001001: begin vec_family_c = 5'd6; vec_op_c = 4'd0; vec_legal_c = 1'b1; end  // vand
               6'b001010: begin vec_family_c = 5'd6; vec_op_c = 4'd1; vec_legal_c = 1'b1; end  // vor
               6'b001011: begin vec_family_c = 5'd6; vec_op_c = 4'd2; vec_legal_c = 1'b1; end  // vxor
+              6'b001100: if (vec_form_c == 2'd0) begin                                          // vrgather.vv
+                vec_family_c = 5'd13; vec_op_c = 4'd0; vec_class_c = 5'd9; vec_legal_c = 1'b1;
+              end
+              6'b001110: if (vec_form_c == 2'd1) begin                                          // vslideup.vx
+                vec_family_c = 5'd12; vec_op_c = 4'd0; vec_class_c = 5'd9; vec_legal_c = 1'b1;
+              end
+              6'b001111: if (vec_form_c == 2'd1) begin                                          // vslidedown.vx
+                vec_family_c = 5'd12; vec_op_c = 4'd1; vec_class_c = 5'd9; vec_legal_c = 1'b1;
+              end
+              6'b011000, 6'b011001, 6'b011010, 6'b011011,
+              6'b011100, 6'b011101, 6'b011110, 6'b011111: begin                                // vmseq..vmsgt
+                if (vec_form_c != 2'd2) begin
+                  vec_family_c = 5'd8; vec_op_c = {1'b0, vec_f6_c[2:0]}; vec_class_c = 5'd7;
+                  vec_legal_c  = 1'b1;
+                end
+              end
+              6'b100000: if (vec_form_c != 2'd2) begin vec_family_c = 5'd9; vec_op_c = 4'd0; vec_legal_c = 1'b1; end  // vsaddu
+              6'b100001: if (vec_form_c != 2'd2) begin vec_family_c = 5'd9; vec_op_c = 4'd1; vec_legal_c = 1'b1; end  // vsadd
+              6'b100010: if (vec_form_c != 2'd2) begin vec_family_c = 5'd9; vec_op_c = 4'd2; vec_legal_c = 1'b1; end  // vssubu
+              6'b100011: if (vec_form_c != 2'd2) begin vec_family_c = 5'd9; vec_op_c = 4'd3; vec_legal_c = 1'b1; end  // vssub
+              6'b100101: if (vec_form_c != 2'd2) begin vec_family_c = 5'd4; vec_op_c = 4'd0; vec_legal_c = 1'b1; end  // vsll
+              6'b101000: if (vec_form_c != 2'd2) begin vec_family_c = 5'd4; vec_op_c = 4'd1; vec_legal_c = 1'b1; end  // vsrl
+              6'b101001: if (vec_form_c != 2'd2) begin vec_family_c = 5'd4; vec_op_c = 4'd2; vec_legal_c = 1'b1; end  // vsra
+              6'b110000: if (vec_form_c == 2'd0) begin                                          // vwredsumu.vs
+                vec_family_c = 5'd16; vec_op_c = 4'd0; vec_class_c = 5'd6; vec_legal_c = 1'b1;
+              end
+              6'b110001: if (vec_form_c == 2'd0) begin                                          // vwredsum.vs
+                vec_family_c = 5'd16; vec_op_c = 4'd1; vec_class_c = 5'd6; vec_legal_c = 1'b1;
+              end
               default: ;
             endcase
             if (vec_form_c == 2'd2) begin
@@ -2645,49 +2756,97 @@ module mosaic_core #(
               // `imm` field.
               vec_imm_c = {{59{fetch_out_bits[19]}}, fetch_out_bits[19:15]};
             end
-          end else if (vec_f3_c == 3'b010) begin
-            // --------------------------------------------------- OPMVV (mask)
-            // The mask-register families this integration wires: the three
-            // mask-prefix ops (funct6 010100, the operation named by the rs1
-            // field -- not a GPR operand) and the eight mask-register logical
-            // ops (funct6 011000..011111). Both take their operands from mask
-            // registers, so the descriptor class is the mask class and not
-            // VOP_IVV. The ALU's capability word is the second gate: a family
-            // that is not advertised there is refused at execution rather than
-            // here, which is exactly the gate CASE=vec.mask_prefix_at_core
-            // exercises.
+          end else if ((vec_f3_c == 3'b010) || (vec_f3_c == 3'b110)) begin
+            // ------------------------------------------------ OPMVV / OPMVX
+            // The families whose encodings live in OPMVV (010, vector-vector)
+            // and OPMVX (110, vector-scalar), from riscv-opcodes' `rv_v`
+            // extension: the integer multiply and its widening forms, the
+            // widening integer add/sub, the fractional saturating add/sub, the
+            // integer reductions, vcompress.vm, and the two mask families. Only
+            // the operations and forms with delivered unit-level evidence are
+            // decoded; everything else (divide/remainder, the
+            // multiply-accumulate forms, the `.wv`/`.wx` mixtures, viota/vid,
+            // vzext/vsext, vmv.x.s, the mask-logical vm=0 encodings) falls
+            // through to `default` and is refused rather than mapped to
+            // something plausible.
             vec_kind_c    = 3'd1;
-            vec_form_c    = 2'd0;              // mask operands are vector-vector
+            vec_form_c    = (vec_f3_c == 3'b010) ? 2'd0 : 2'd1;  // .vv / .vx
             vec_mask_en_c = !fetch_out_bits[25];
-            if (vec_f6_c == 6'b010100) begin
-              // vmsbf.m / vmsof.m / vmsif.m. rs1 = 1/2/3 names the operation;
-              // vm selects the masked form (v0.t).
-              vec_class_c = 5'd8;              // VOP_VMASKMV
-              case (fetch_out_bits[19:15])
-                5'd1: begin vec_family_c = 5'd11; vec_op_c = 4'd0; vec_legal_c = 1'b1; end  // vmsbf
-                5'd2: begin vec_family_c = 5'd11; vec_op_c = 4'd2; vec_legal_c = 1'b1; end  // vmsof
-                5'd3: begin vec_family_c = 5'd11; vec_op_c = 4'd1; vec_legal_c = 1'b1; end  // vmsif
-                default: ;
-              endcase
-            end else if ((vec_f6_c >= 6'b011000) && (vec_f6_c <= 6'b011111) &&
-                         fetch_out_bits[25]) begin
-              // vmand/vmnand/vmandn/vmxor/vmor/vmnor/vmorn/vmxnor. Mask-register
-              // logical ops are always unmasked: the vm=0 encodings are
-              // reserved, so only vm=1 decodes.
-              vec_class_c  = 5'd7;             // VOP_VMASK
-              vec_family_c = 5'd10;
-              vec_legal_c  = 1'b1;
-              case (vec_f6_c)
-                6'b011000: vec_op_c = 4'd6;    // vmandn
-                6'b011001: vec_op_c = 4'd0;    // vmand
-                6'b011010: vec_op_c = 4'd2;    // vmor
-                6'b011011: vec_op_c = 4'd4;    // vmxor
-                6'b011100: vec_op_c = 4'd7;    // vmorn
-                6'b011101: vec_op_c = 4'd1;    // vmnand
-                6'b011110: vec_op_c = 4'd3;    // vmnor
-                default:   vec_op_c = 4'd5;    // vmxnor
-              endcase
+            if (vec_f3_c == 3'b010) begin
+              if (vec_f6_c == 6'b010100) begin
+                // vmsbf.m / vmsof.m / vmsif.m. rs1 = 1/2/3 names the operation;
+                // vm selects the masked form (v0.t).
+                vec_class_c = 5'd8;              // VOP_VMASKMV
+                case (fetch_out_bits[19:15])
+                  5'd1: begin vec_family_c = 5'd11; vec_op_c = 4'd0; vec_legal_c = 1'b1; end  // vmsbf
+                  5'd2: begin vec_family_c = 5'd11; vec_op_c = 4'd2; vec_legal_c = 1'b1; end  // vmsof
+                  5'd3: begin vec_family_c = 5'd11; vec_op_c = 4'd1; vec_legal_c = 1'b1; end  // vmsif
+                  default: ;
+                endcase
+              end else if ((vec_f6_c >= 6'b011000) && (vec_f6_c <= 6'b011111) &&
+                           fetch_out_bits[25]) begin
+                // vmand/vmnand/vmandn/vmxor/vmor/vmnor/vmorn/vmxnor. Mask-register
+                // logical ops are always unmasked: the vm=0 encodings are
+                // reserved, so only vm=1 decodes.
+                vec_class_c  = 5'd7;             // VOP_VMASK
+                vec_family_c = 5'd10;
+                vec_legal_c  = 1'b1;
+                case (vec_f6_c)
+                  6'b011000: vec_op_c = 4'd6;    // vmandn
+                  6'b011001: vec_op_c = 4'd0;    // vmand
+                  6'b011010: vec_op_c = 4'd2;    // vmor
+                  6'b011011: vec_op_c = 4'd4;    // vmxor
+                  6'b011100: vec_op_c = 4'd7;    // vmorn
+                  6'b011101: vec_op_c = 4'd1;    // vmnand
+                  6'b011110: vec_op_c = 4'd3;    // vmnor
+                  default:   vec_op_c = 4'd5;    // vmxnor
+                endcase
+              end else if (vec_f6_c <= 6'b000111) begin
+                // The integer reductions (funct6 000000..000111). The result
+                // lands in vd[0]; the descriptor's VOP_VRED forbids any overlap
+                // with a source group.
+                vec_class_c  = 5'd6;             // VOP_VRED
+                vec_family_c = 5'd15;
+                vec_legal_c  = 1'b1;
+                case (vec_f6_c)
+                  6'b000000: vec_op_c = 4'd0;    // vredsum
+                  6'b000001: vec_op_c = 4'd5;    // vredand
+                  6'b000010: vec_op_c = 4'd6;    // vredor
+                  6'b000011: vec_op_c = 4'd7;    // vredxor
+                  6'b000100: vec_op_c = 4'd3;    // vredminu
+                  6'b000101: vec_op_c = 4'd4;    // vredmin
+                  6'b000110: vec_op_c = 4'd1;    // vredmaxu
+                  default:   vec_op_c = 4'd2;    // vredmax
+                endcase
+              end else if ((vec_f6_c == 6'b010111) && fetch_out_bits[25]) begin
+                // vcompress.vm (always unmasked; the vm=0 encoding is reserved).
+                vec_class_c  = 5'd9;             // VOP_VSLIDE
+                vec_family_c = 5'd14;
+                vec_op_c     = 4'd0;
+                vec_legal_c  = 1'b1;
+              end
             end
+            // The multiply, widening and fractional families are encoded in
+            // both OPMVV (.vv) and OPMVX (.vx); their operation mapping is the
+            // same for either form.
+            case (vec_f6_c)
+              6'b001000: begin vec_family_c = 5'd9; vec_op_c = 4'd4; vec_legal_c = 1'b1; end  // vaaddu
+              6'b001001: begin vec_family_c = 5'd9; vec_op_c = 4'd5; vec_legal_c = 1'b1; end  // vaadd
+              6'b001010: begin vec_family_c = 5'd9; vec_op_c = 4'd6; vec_legal_c = 1'b1; end  // vasubu
+              6'b001011: begin vec_family_c = 5'd9; vec_op_c = 4'd7; vec_legal_c = 1'b1; end  // vasub
+              6'b100100: begin vec_family_c = 5'd2; vec_op_c = 4'd2; vec_class_c = 5'd1; vec_legal_c = 1'b1; end  // vmulhu
+              6'b100101: begin vec_family_c = 5'd2; vec_op_c = 4'd0; vec_class_c = 5'd1; vec_legal_c = 1'b1; end  // vmul
+              6'b100110: begin vec_family_c = 5'd2; vec_op_c = 4'd3; vec_class_c = 5'd1; vec_legal_c = 1'b1; end  // vmulhsu
+              6'b100111: begin vec_family_c = 5'd2; vec_op_c = 4'd1; vec_class_c = 5'd1; vec_legal_c = 1'b1; end  // vmulh
+              6'b110000: begin vec_family_c = 5'd1; vec_op_c = 4'd0; vec_class_c = 5'd3; vec_legal_c = 1'b1; end  // vwaddu
+              6'b110001: begin vec_family_c = 5'd1; vec_op_c = 4'd1; vec_class_c = 5'd3; vec_legal_c = 1'b1; end  // vwadd
+              6'b110010: begin vec_family_c = 5'd1; vec_op_c = 4'd2; vec_class_c = 5'd3; vec_legal_c = 1'b1; end  // vwsubu
+              6'b110011: begin vec_family_c = 5'd1; vec_op_c = 4'd3; vec_class_c = 5'd3; vec_legal_c = 1'b1; end  // vwsub
+              6'b111000: begin vec_family_c = 5'd3; vec_op_c = 4'd0; vec_class_c = 5'd3; vec_legal_c = 1'b1; end  // vwmulu
+              6'b111010: begin vec_family_c = 5'd3; vec_op_c = 4'd1; vec_class_c = 5'd3; vec_legal_c = 1'b1; end  // vwmulsu
+              6'b111011: begin vec_family_c = 5'd3; vec_op_c = 4'd2; vec_class_c = 5'd3; vec_legal_c = 1'b1; end  // vwmul
+              default: ;
+            endcase
           end
         end
         mosaic_pkg::OP_LOAD_FP: begin
@@ -3350,9 +3509,9 @@ module mosaic_core #(
       .o_count         (c0_count),
       .o_full          (),
       .o_dst_conflict  (),
-      .o_ins_total     (),
-      .o_grant_total   (),
-      .o_kill_total    (),
+      .o_ins_total     (c0_ins_total),
+      .o_grant_total   (c0_grant_total),
+      .o_kill_total    (c0_kill_total),
       .o_grant_valid   (c0_grant_valid),
       .o_grant_uop     (c0_grant_uop),
       .o_alu_ctr       (c0_alu_ctr),
@@ -3438,9 +3597,9 @@ module mosaic_core #(
       .o_count         (c1_count),
       .o_full          (),
       .o_dst_conflict  (),
-      .o_ins_total     (),
-      .o_grant_total   (),
-      .o_kill_total    (),
+      .o_ins_total     (c1_ins_total),
+      .o_grant_total   (c1_grant_total),
+      .o_kill_total    (c1_kill_total),
       .o_grant_valid   (c1_grant_valid),
       .o_grant_uop     (c1_grant_uop),
       .o_alu_ctr       (c1_alu_ctr),
@@ -4436,8 +4595,13 @@ module mosaic_core #(
   // instruction's width suffix. A suffix that disagrees is therefore refused
   // rather than mis-addressed; the report names the widths that remain
   // unreachable because of it.
+  //
+  // `eew_sew` is log2(EEW) (3..6, the packetizer's own width encoding, used for
+  // the vstart byte offset below and by mosaic_vec_lsu). `vec_vtype[5:3]` is
+  // the RVV 1.0 architectural vsew field (0..3), so the comparison converts the
+  // field to a width exponent with +3.
   assign vec_eew_mismatch = ((vec_pay_q.kind == 3'd2) || (vec_pay_q.kind == 3'd3)) &&
-                            (vec_pay_q.eew_sew != vec_vtype[5:3]);
+                            ({1'b0, vec_pay_q.eew_sew} != ({1'b0, vec_vtype[5:3]} + 4'd3));
   assign vec_illegal_launch = vec_vset_vs_off || vec_eew_mismatch ||
                               ((vec_pay_q.kind != 3'd0) && vec_desc_illegal);
 
@@ -5293,10 +5457,12 @@ module mosaic_core #(
       .csr_op_i           (sys_csr_op_q),
       .csr_wdata_i        (sys_src1_q),
       .csr_wr_illegal_o   (csr_wr_illegal),
-      // mcycle counts every core cycle; minstret counts retired instructions,
-      // which is what the retire acknowledgement says.
+      // mcycle counts every core cycle; minstret counts retired instructions.
+      // Both retire lanes are counted: a dual-retire cycle advances minstret by
+      // two, not one. Wiring this to a single lane is the under-count the PMU
+      // case's control restores (I-076).
       .cnt_cycle_i        (1'b1),
-      .cnt_instret_i      (rob_retire_ack | rob_retire_ack_next),
+      .cnt_instret_i      ({1'b0, rob_retire_ack} + {1'b0, rob_retire_ack_next}),
       .trap_valid_i       (csr_trap_valid),
       .trap_cause_i       (trap_cause),
       .trap_tval_i        (trap_tval),
@@ -6898,12 +7064,12 @@ module mosaic_core #(
       .mem_rsp_id_i    (1'b0),
       .mem_rsp_epoch_i (1'b0),
       .mem_rsp_len_i   (3'b0),
-      .o_hit           (),
-      .o_miss          (),
-      .o_refill        (),
-      .o_writeback     (),
+      .o_hit           (dc_hit_p),
+      .o_miss          (dc_miss_p),
+      .o_refill        (dc_refill_p),
+      .o_writeback     (dc_wb_p),
       .o_fault         (),
-      .o_cpu_txn       (),
+      .o_cpu_txn       (dc_cpu_txn),
       .o_mem_beat      (),
       .o_line_txn      (),
       .o_bypass_txn    (),
@@ -8355,12 +8521,60 @@ module mosaic_core #(
   assign o_dbg_fetch_req_ctr  = fetch_req_ctr;
   assign o_dbg_recover_ctr    = recover_ctr;
   assign o_dbg_ins_ctr       = disp_ins_ctr;
+
+  // ---------------------------------------------------------------- PMU (I-076)
+  // The uop conservation triple, summed over the two clusters. Each cluster's
+  // own IQ exports `ins_total == grant_total + kill_total + count`; summing the
+  // two clusters preserves it, so `o_pmu_uop_insert_ctr` equals issue + kill +
+  // (o_c0_count + o_c1_count) at every instant. The counter is a register in
+  // mosaic_iq, not a pulse count re-derived here, so it cannot be one value
+  // behind the state it names.
+  assign o_pmu_uop_insert_ctr = c0_ins_total + c1_ins_total;
+  assign o_pmu_uop_issue_ctr  = c0_grant_total + c1_grant_total;
+  assign o_pmu_uop_kill_ctr   = c0_kill_total + c1_kill_total;
+
+  always_ff @(posedge clk) begin
+    if (rst) begin
+      pmu_dcache_hit_ctr    <= 32'd0;
+      pmu_dcache_miss_ctr   <= 32'd0;
+      pmu_dcache_refill_ctr <= 32'd0;
+      pmu_dcache_wb_ctr     <= 32'd0;
+      pmu_icache_miss_ctr   <= 32'd0;
+    end else begin
+      pmu_dcache_hit_ctr    <= pmu_dcache_hit_ctr    + {31'd0, dc_hit_p};
+      pmu_dcache_miss_ctr   <= pmu_dcache_miss_ctr   + {31'd0, dc_miss_p};
+      pmu_dcache_refill_ctr <= pmu_dcache_refill_ctr + {31'd0, dc_refill_p};
+      pmu_dcache_wb_ctr     <= pmu_dcache_wb_ctr     + {31'd0, dc_wb_p};
+      pmu_icache_miss_ctr   <= pmu_icache_miss_ctr   + {31'd0, ic_miss_p};
+    end
+  end
+
+  `ifdef MOSAIC_PMU_MUTANT_DOUBLE_COMMIT
+    // NEGATIVE CONTROL for CASE=pmu.trace_accounting: a squashed/replayed uop is
+    // counted as though it retired. Every redirect adds one to the committed
+    // count, so the counter no longer equals the retired-instruction trace the
+    // case derives by hand. tools/run_pmu_controls.py builds this from an empty
+    // directory and requires exit 1 with a named first failure.
+    logic [31:0] pmu_commit_mutant_ctr;
+    always_ff @(posedge clk) begin
+      if (rst) pmu_commit_mutant_ctr <= 32'd0;
+      else pmu_commit_mutant_ctr <= commit_ctr + redirect_ctr;
+    end
+    assign o_commit_ctr = pmu_commit_mutant_ctr;
+  `else
+    assign o_commit_ctr = commit_ctr;
+  `endif
+  assign o_pmu_dcache_txn_ctr    = dc_cpu_txn;
+  assign o_pmu_dcache_hit_ctr    = pmu_dcache_hit_ctr;
+  assign o_pmu_dcache_miss_ctr   = pmu_dcache_miss_ctr;
+  assign o_pmu_dcache_refill_ctr = pmu_dcache_refill_ctr;
+  assign o_pmu_dcache_wb_ctr     = pmu_dcache_wb_ctr;
+  assign o_pmu_icache_miss_ctr   = pmu_icache_miss_ctr;
   // The readiness state the stall diagnosis reads: rename's map, its per-tag
   // allocation validity (the same vector dispatch folds from) and its per-tag
   // writeback-done bits.
   assign o_dbg_gen_valid     = ren_gen_valid;
 
-  assign o_commit_ctr    = commit_ctr;
   assign o_redirect_ctr  = redirect_ctr;
   assign o_recovering_ctr= recovering_ctr;
   assign o_stop_ctr      = stop_ctr;

@@ -3,9 +3,9 @@
  * Capability: the mask-enable path of ADDSUB -- vadd.vv / vsub.vv with the
  * `v0.t` masked form -- at SEW = 32, LMUL = m1, VLEN = 128.
  *
- * Configuration: the mask register is loaded first under vtypei = 0x18
+ * Configuration: the mask register is loaded first under vtypei = 0x00
  * (SEW = 8, so a `vle8.v` matches the SEW), then the arithmetic runs under
- * vtypei = 0x28 (SEW = 32, LMUL = m1, VL = VLMAX = 4, vta = vma = 0).  vma = 0
+ * vtypei = 0x10 (SEW = 32, LMUL = m1, VL = VLMAX = 4, vta = vma = 0).  vma = 0
  * means a masked-off destination element is *undisturbed*: it keeps whatever
  * the destination register held before the instruction, which this program
  * makes deterministic by seeding v4.

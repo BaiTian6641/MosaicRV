@@ -3,8 +3,9 @@
  * Capability: MASKPFX (family 11) -- vmsbf.m, vmsif.m, vmsof.m -- at SEW = 8,
  * LMUL = m1, VLEN = 128.
  *
- * Configuration: vtypei = 0x18 (vsew = 3 -> SEW = 8, vlmul = 0 -> m1,
- * vta = vma = 0).  VLMAX = 16; `vsetvli t0, x0, 0x18` requests VL = VLMAX = 16.
+ * Configuration: vtypei = 0x00 (RVV 1.0 SMALLEST_SEW: vsew = 0 -> SEW = 8,
+ * vlmul = 0 -> m1, vta = vma = 0).  VLMAX = 16; `vsetvli t0, x0, 0x00`
+ * requests VL = VLMAX = 16.
  * vstart is 0 (vsetvli clears it), which the mask-prefix family requires.
  *
  * A mask register is stored one bit per element packed 8 bits to a byte, LSB =

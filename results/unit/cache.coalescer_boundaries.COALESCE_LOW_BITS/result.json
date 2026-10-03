@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "case": "cache.coalescer_boundaries",
+  "verdict": "FAIL",
+  "detail": "coalescer: miss=18 coalesce=11 refill=6 fault=1 wb=1 reads=7 writes=1 cycles=102 | cancel-keeps-others",
+  "seed": 1,
+  "max_cycles": 200000,
+  "checks": 85,
+  "failures": 9,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-03T00:29:09Z",
+  "first_mismatch": "",
+  "failed_checks": ["cross-line-same-set: two different lines are two entries", "cross-line-same-set: nothing coalesced across the two lines", "cross-line-same-set: two lines, two memory reads", "cross-line-same-set: second line returns its own word", "cross-page: two pages are two entries", "cross-page: nothing coalesced across the page boundary", "cross-page: two pages, two memory reads", "cross-page: second page returns its own word", "coverage: the coalescer exercised merge, separation, byte merge and fault"]
+}

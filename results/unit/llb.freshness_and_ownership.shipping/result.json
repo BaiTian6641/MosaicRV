@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "case": "llb.freshness_and_ownership",
+  "verdict": "PASS",
+  "detail": "llb-fresh: hit=31 miss=17 bypass=6 fill=31 fill_refused=12 inv=14 race_refuse=1 checks=0 cycles=107",
+  "seed": 1,
+  "max_cycles": 200000,
+  "checks": 1,
+  "failures": 0,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-02T23:46:13Z",
+  "first_mismatch": ""
+}

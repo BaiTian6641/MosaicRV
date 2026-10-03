@@ -17,21 +17,17 @@
  *
  * ----------------------------------------------------------- the vtype word
  *
- * THIS CORE ENCODES THE `vsew` FIELD AS log2(SEW), NOT AS RVV 1.0's
- * SMALLEST_SEW CODE.  In RVV 1.0 the field bits [5:3] are 0/1/2/3 for
- * e8/e16/e32/e64; this core's mosaic_vec_cfg.sv accepts 3..6 and computes
- * `sew = 1 << vsew`, and its own unit case rvv.vtype_layout fixes exactly that
- * (VsewValid = 3..6, sew_log2 == vsew).  A `vsetvli rd, rs1, e32, m1` written
- * with the GAS mnemonic therefore encodes field 2, which this core treats as an
- * unsupported vtype (vill = 1, vl = 0), and every following vector instruction
- * is refused.  So these programs pass the raw 11-bit vtypei, with the field
- * value this core defines.  This is a machine assumption, not a derivation from
- * the spec, and it is called out again in README.md and in the report.
+ * The `vsew` field bits [5:3] use the RVV 1.0 SMALLEST_SEW encoding:
+ * 0/1/2/3 for e8/e16/e32/e64.  (This core previously used a pre-ratification
+ * log2(SEW) encoding in the same field; that was fixed to the ratified
+ * encoding, and these programs carry the spec values.)  A plain GAS
+ * `vsetvli rd, rs1, e32, m1` therefore encodes exactly the value below, and
+ * the programs pass the raw 11-bit vtypei anyway so the assumption is explicit.
  *
- *   VTYPE_E8_M1  = (3 << 3) | 0  = 0x18   vsew=3 -> SEW=8,  vlmul=m1
- *   VTYPE_E16_M1 = (4 << 3) | 0  = 0x20   vsew=4 -> SEW=16, vlmul=m1
- *   VTYPE_E32_M1 = (5 << 3) | 0  = 0x28   vsew=5 -> SEW=32, vlmul=m1
- *   VTYPE_E64_M1 = (6 << 3) | 0  = 0x30   vsew=6 -> SEW=64, vlmul=m1
+ *   VTYPE_E8_M1  = (0 << 3) | 0  = 0x00   vsew=0 -> SEW=8,  vlmul=m1
+ *   VTYPE_E16_M1 = (1 << 3) | 0  = 0x08   vsew=1 -> SEW=16, vlmul=m1
+ *   VTYPE_E32_M1 = (2 << 3) | 0  = 0x10   vsew=2 -> SEW=32, vlmul=m1
+ *   VTYPE_E64_M1 = (3 << 3) | 0  = 0x18   vsew=3 -> SEW=64, vlmul=m1
  *
  * vta = vma = 0 (tail and mask undisturbed), so a masked-off destination
  * element keeps its previous value and every expected value below is the one
@@ -59,10 +55,10 @@
 #define MOSAIC_VEC_VLEN        128
 #define MOSAIC_VEC_VLENB       16
 
-#define VTYPE_E8_M1            0x18
-#define VTYPE_E16_M1           0x20
-#define VTYPE_E32_M1           0x28
-#define VTYPE_E64_M1           0x30
+#define VTYPE_E8_M1            0x00
+#define VTYPE_E16_M1           0x08
+#define VTYPE_E32_M1           0x10
+#define VTYPE_E64_M1           0x18
 
 /* mstatus.VS (bits [10:9]) = 1 (Initial), so vector state is usable.  Reset
  * leaves VS = Off and a `vsetvli` before this write is refused. */

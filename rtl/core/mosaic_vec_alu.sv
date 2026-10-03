@@ -362,7 +362,9 @@ module mosaic_vec_alu #(
   localparam int unsigned ELEN_HALF = ELEN / 2;
 
   always_comb begin
-    sew_l = cfg_vtype_i[5:3];
+    // cfg_vtype_i[5:3] is the RVV 1.0 vsew field (0..3); the width exponent is
+    // log2(SEW) = vsew + 3, which is what this lane computes with.
+    sew_l = cfg_vtype_i[5:3] + 3'd3;
     case (cfg_vtype_i[2:0])
       3'd0:    lmul = 4'sd0;
       3'd1:    lmul = 4'sd1;

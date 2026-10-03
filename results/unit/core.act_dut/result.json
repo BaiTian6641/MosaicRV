@@ -1,30 +1,16 @@
 {
-  "act_commit": "96493a91448ca50780013fd892daec2c204487ba",
-  "case": "core.act_dut",
-  "checks": 127,
-  "controls": [],
-  "detail": "",
-  "dut_sha256": "dceb3de8ad57351997cc05d3d8639f708dcd44d1bd0afa965aa151037b261ca4",
-  "expect": "",
-  "failures": 0,
-  "image": "",
-  "max_cycles": 4000000,
-  "planes": {
-    "exclusions": 47,
-    "n": 127,
-    "suites": [
-      "I",
-      "M",
-      "Zaamo",
-      "Zalrsc",
-      "Zca",
-      "Zicsr",
-      "Zifencei",
-      "Zihpm"
-    ]
-  },
   "schema_version": 1,
+  "case": "core.act_dut",
+  "verdict": "FAIL",
+  "detail": "applicable=127 generated=127 run=127 passed=0 failed=127 act_commit=96493a91448ca50780013fd892daec2c204487ba config=tests/act4/mosaic-p1/test_config.yaml first_fail=/Users/flare/mosaic-ref/act4-mosaic-p1-work/mosaic-p1/elfs/rv64i/I/I-add-00.elf",
   "seed": 1,
-  "tool": "tools/run_act_dut.py over CASE=core.act_dut",
-  "verdict": "PASS"
+  "max_cycles": 4000000,
+  "checks": 130,
+  "failures": 128,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-03T02:02:48Z",
+  "first_mismatch": "",
+  "failed_checks": ["ELF I/I-add-00.elf passed its own self-check (status FAIL)", "ELF I/I-addi-00.elf passed its own self-check (status FAIL)", "ELF I/I-addiw-00.elf passed its own self-check (status FAIL)", "ELF I/I-addw-00.elf passed its own self-check (status FAIL)", "ELF I/I-and-00.elf passed its own self-check (status FAIL)", "ELF I/I-andi-00.elf passed its own self-check (status FAIL)", "ELF I/I-auipc-00.elf passed its own self-check (status FAIL)", "ELF I/I-beq-00.elf passed its own self-check (status FAIL)", "ELF I/I-bge-00.elf passed its own self-check (status FAIL)", "ELF I/I-bgeu-00.elf passed its own self-check (status FAIL)", "ELF I/I-blt-00.elf passed its own self-check (status FAIL)", "ELF I/I-bltu-00.elf passed its own self-check (status FAIL)", "ELF I/I-bne-00.elf passed its own self-check (status FAIL)", "ELF I/I-fence-00.elf passed its own self-check (status FAIL)", "ELF I/I-jal-00.elf passed its own self-check (status FAIL)", "ELF I/I-jalr-00.elf passed its own self-check (status FAIL)", "ELF I/I-lb-00.elf passed its own self-check (status FAIL)", "ELF I/I-lbu-00.elf passed its own self-check (status FAIL)", "ELF I/I-ld-00.elf passed its own self-check (status FAIL)", "ELF I/I-lh-00.elf passed its own self-check (status FAIL)", "ELF I/I-lhu-00.elf passed its own self-check (status FAIL)", "ELF I/I-lui-00.elf passed its own self-check (status FAIL)", "ELF I/I-lw-00.elf passed its own self-check (status FAIL)", "ELF I/I-lwu-00.elf passed its own self-check (status FAIL)", "ELF I/I-nop-00.elf passed its own self-check (status FAIL)", "ELF I/I-or-00.elf passed its own self-check (status FAIL)", "ELF I/I-ori-00.elf passed its own self-check (status FAIL)", "ELF I/I-sb-00.elf passed its own self-check (status FAIL)", "ELF I/I-sd-00.elf passed its own self-check (status FAIL)", "ELF I/I-sh-00.elf passed its own self-check (status FAIL)", "ELF I/I-sll-00.elf passed its own self-check (status FAIL)", "ELF I/I-slli-00.elf passed its own self-check (status FAIL)"]
 }

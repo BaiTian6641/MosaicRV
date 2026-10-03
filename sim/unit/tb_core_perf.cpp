@@ -582,7 +582,7 @@ Workload BuildVecStream() {
   a.Csrr(t0, 0x300);
   a.Ori(t0, t0, 0x200);                 // mstatus.VS = Initial
   a.Csrrw(x0, 0x300, t0);
-  a.Vsetvli(t1, x0, 0x20);              // e16, m1 -> vl = 8
+  a.Vsetvli(t1, x0, 0x08);              // e16, m1 -> vl = 8
   a.Vle16(0, a0);
   a.Vle16(1, a1);
   a.VaddVv(2, 0, 1);

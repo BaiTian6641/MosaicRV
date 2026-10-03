@@ -30,7 +30,7 @@ module mosaic_csr_tb (
     input  logic [63:0] csr_wdata_i,
 
     input  logic        cnt_cycle_i,
-    input  logic        cnt_instret_i,
+    input  logic [1:0]  cnt_instret_i,
 
     input  logic        trap_valid_i,
     input  logic [63:0] trap_cause_i,

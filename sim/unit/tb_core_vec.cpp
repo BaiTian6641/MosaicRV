@@ -877,13 +877,13 @@ void PhaseVsOff(Vmosaic_core_tb* dut, mosaic::Reporter* reporter,
   asm_.LaAbs(5, asm_.AddrOf(handler_at));
   asm_.Csrrw(0, csr_mtvec, 5);
   // VS is Off at reset: a vsetvli must trap with an illegal instruction.
-  asm_.Vsetvli(7, 0, 0x28);   // e32, m1
+  asm_.Vsetvli(7, 0, 0x10);   // e32, m1
   // Software enables vector state (VS = Initial, 1 << 9).
   asm_.Csrr(5, csr_mstatus);
   asm_.Ori(5, 5, 0x200);
   asm_.Csrrw(0, csr_mstatus, 5);
   // The same instruction now commits; rd (x7) receives vl.
-  asm_.Vsetvli(7, 0, 0x28);
+  asm_.Vsetvli(7, 0, 0x10);
   asm_.LaAbs(6, kSlotBase);
   asm_.Sd(7, 6, 24);           // vl
   asm_.Csrr(5, 0xC21);         // vtype
@@ -920,7 +920,7 @@ void PhaseVsOff(Vmosaic_core_tb* dut, mosaic::Reporter* reporter,
         name + ": no element was executed by a vset, got " + Dec(run.vec_elem));
   Check(reporter, run.Slot(3) == 4,
         name + ": vl after vsetvli e32,m1 is VLMAX=4, got " + Dec(run.Slot(3)));
-  Check(reporter, (run.Slot(4) & 0xFFull) == 0x28,
+  Check(reporter, (run.Slot(4) & 0xFFull) == 0x10,
         name + ": vtype low byte is the committed argument, got " + Dec(run.Slot(4)));
   Check(reporter, run.Slot(5) == 16,
         name + ": vlenb is 16, got " + Dec(run.Slot(5)));
@@ -954,7 +954,7 @@ RunResult PhaseArith(Vmosaic_core_tb* dut, mosaic::Reporter* reporter,
   asm_.Csrr(5, csr_mstatus);
   asm_.Ori(5, 5, 0x200);
   asm_.Csrrw(0, csr_mstatus, 5);
-  asm_.Vsetvli(7, 0, 0x28);    // e32, m1 -> vl = 4
+  asm_.Vsetvli(7, 0, 0x10);    // e32, m1 -> vl = 4
   asm_.Vle32(0, 10);           // v0 = A
   asm_.Vle32(1, 11);           // v1 = B
   asm_.VaddVv(2, 0, 1);        // v2 = v0 + v1
@@ -1049,7 +1049,7 @@ void PhaseRestart(Vmosaic_core_tb* dut, mosaic::Reporter* reporter,
   asm_.Csrr(5, csr_mstatus);
   asm_.Ori(5, 5, 0x200);
   asm_.Csrrw(0, csr_mstatus, 5);
-  asm_.Vsetvli(7, 0, 0x28);     // e32, m1 -> vl = 4
+  asm_.Vsetvli(7, 0, 0x10);     // e32, m1 -> vl = 4
   asm_.LaAbs(10, kRamEdge);     // elements 0,1 in RAM; element 2 out of it
   asm_.LaAbs(15, restart_buf);  // the handler repoints the base here
   asm_.LaAbs(12, c2_addr);
@@ -1189,7 +1189,7 @@ RunResult PhaseLaneOne8(Vmosaic_core_tb* dut, mosaic::Reporter* reporter,
   a.Csrr(5, 0x300);
   a.Ori(5, 5, 0x200);
   a.Csrrw(0, 0x300, 5);
-  a.Vsetvli(7, 0, 0x20);          // e16, m1, AVL=x0 -> VLMAX = 8
+  a.Vsetvli(7, 0, 0x08);          // e16, m1, AVL=x0 -> VLMAX = 8
   a.LaAbs(10, kDataBase + 0);
   a.LaAbs(11, kDataBase + 32);
   a.LaAbs(12, kDataBase + 64);
@@ -1254,7 +1254,7 @@ ResizeRun PhaseLaneTwo4(Vmosaic_core_tb* dut, mosaic::Reporter* reporter,
   a.Ori(5, 5, 0x200);
   a.Csrrw(0, 0x300, 5);
   a.Addi(5, 0, 4);
-  a.Vsetvli(7, 5, 0x20);          // AVL=4 -> vl=4
+  a.Vsetvli(7, 5, 0x08);          // AVL=4 -> vl=4
   a.LaAbs(10, kDataBase + 0);     // A[0..3]
   a.LaAbs(13, kDataBase + 8);     // A[4..7]
   a.LaAbs(11, kDataBase + 32);    // B[0..3]
@@ -1341,7 +1341,7 @@ ResizeRun PhaseLaneBoundary(Vmosaic_core_tb* dut, mosaic::Reporter* reporter,
   a.Csrr(5, 0x300);
   a.Ori(5, 5, 0x200);
   a.Csrrw(0, 0x300, 5);
-  a.Vsetvli(7, 0, 0x20);          // e16, m1, AVL=x0 -> vl=8
+  a.Vsetvli(7, 0, 0x08);          // e16, m1, AVL=x0 -> vl=8
   a.LaAbs(10, kDataBase + 0);
   a.LaAbs(11, kDataBase + 32);
   a.LaAbs(12, kDataBase + 64);    // C1
@@ -1515,7 +1515,7 @@ void VecPrologue(Asm* a, size_t handler_at) {
   a->Csrr(5, kCsrMstatus);
   a->Ori(5, 5, 0x200);            // mstatus.VS = Initial
   a->Csrrw(0, kCsrMstatus, 5);
-  a->Vsetvli(7, 0, 0x18);         // vtypei e8/m1 -> vl = VLMAX = 16
+  a->Vsetvli(7, 0, 0x00);         // vtypei e8/m1 -> vl = VLMAX = 16
 }
 
 // The eight unmasked source patterns: a first set bit at 0, 1, 7, 8 and 15,

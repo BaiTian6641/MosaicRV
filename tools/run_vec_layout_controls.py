@@ -21,7 +21,9 @@ nothing if the case does not pass in the first place.
 The three mutants are the fail modes the layout card names: the field put back
 at the pre-ratification 7:5 position (so the round-trip fails); SEW decoded from
 the wrong bits (so a legal configuration is misread); and a software CSR write
-to `vtype` accepted (so software can write `vill`, breaking the URO rule).
+to `vtype` accepted (so software can write `vill`, breaking the URO rule). A
+fourth restores the pre-fix *value* encoding -- the field read as log2(SEW)
+unshifted -- so a spec-legal `e32` sets vill again.
 
 Usage: run_vec_layout_controls.py [--only SUBSTRING] [--profile p2]
 """
@@ -66,6 +68,14 @@ MUTANTS = [
         "a software CSR write to vtype is accepted, so software can write vill "
         "instead of the URO rule's illegal-instruction",
         "software set vill",
+    ),
+    (
+        "MOSAIC_VEC_MUTANT_VTYPE_SEW_UNSHIFTED",
+        ["rtl/core/mosaic_vec_cfg.sv"],
+        "the pre-fix encoding restored -- the vsew field is interpreted as "
+        "log2(SEW) unshifted (accepted 3..6) and sized by that raw value, so a "
+        "spec-legal e32 (vsew = 2) sets vill",
+        "a legal configuration was not accepted",
     ),
 ]
 

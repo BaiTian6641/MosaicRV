@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "case": "cache.coalescer_boundaries",
+  "verdict": "FAIL",
+  "detail": "coalescer: miss=16 coalesce=8 refill=8 fault=0 wb=1 reads=8 writes=1 cycles=4104 | cancel-keeps-others",
+  "seed": 1,
+  "max_cycles": 200000,
+  "checks": 83,
+  "failures": 5,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-03T00:29:16Z",
+  "first_mismatch": "",
+  "failed_checks": ["coalesced-fault-per-request: every consumer is faulted, not just the first", "coalesced-fault-per-request: one refill fault", "coalesced-fault-per-request: a faulted refill never installs the line", "coalesced-fault-per-request: the retry answers both consumers", "coverage: the coalescer exercised merge, separation, byte merge and fault"]
+}

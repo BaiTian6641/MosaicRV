@@ -528,7 +528,7 @@ module mosaic_vec_lsu #(
   endfunction
 
   // ------------------------------------------------------------ derived config
-  logic [2:0]        cfg_vsew;
+  logic [3:0]        cfg_vsew;
   logic [2:0]        cfg_vlmul;
   logic              cfg_vma;
   logic              cfg_vta;
@@ -536,7 +536,10 @@ module mosaic_vec_lsu #(
   int                cfg_vlmax;
 
   always_comb begin
-    cfg_vsew     = cfg_vtype_i[5:3];
+    // cfg_vtype_i[5:3] is the RVV 1.0 vsew field (0..3); the width exponent is
+    // log2(SEW) = vsew + 3. Kept four bits wide so a reserved field (4..7 maps
+    // to 7..10) is still caught by the 3..6 range check below, not wrapped.
+    cfg_vsew     = {1'b0, cfg_vtype_i[5:3]} + 4'd3;
     cfg_vlmul    = cfg_vtype_i[2:0];
     cfg_vma      = cfg_vtype_i[7];
     cfg_vta      = cfg_vtype_i[6];
@@ -1446,7 +1449,7 @@ module mosaic_vec_lsu #(
                             (exec_mode_i == LM_MASK)) ? exec_data_i : exec_vd_i);
             index_q    <= exec_index_i;
             idx_log2_q <= exec_idx_sew_i;
-            eew_log2_q <= cfg_vsew;
+            eew_log2_q <= cfg_vsew[2:0];
             lmul_exp_q <= nm_e4(cfg_lmul_exp);
             base_q     <= exec_base_i;
             stride_q   <= exec_stride_i;

@@ -48,6 +48,7 @@
 #include <vector>
 
 #include "sim_common.h"
+#include "mask_prefix_ref.h"
 #include "Vmosaic_vec_tb.h"
 
 namespace {
@@ -113,12 +114,23 @@ const char* ReasonName(int r) {
 
 std::string Dec(uint64_t v) { return std::to_string(v); }
 
+// `vsew` in this file is the RVV 1.0 *field* value: log2(SEW) - 3, i.e. 0=e8,
+// 1=e16, 2=e32, 3=e64. Widths are derived with `+ kSewLog2Base`. This is the
+// specification's encoding, so the oracle can disagree with a DUT that stored
+// the old log2(SEW) encoding.
+constexpr int kSewLog2Base = 3;   // log2(SEW) = vsew_field + kSewLog2Base
+
+// `vsew` is the RVV 1.0 vtype.vsew field value: log2(SEW) - 3 (0=e8 .. 3=e64).
 uint64_t Vtype(int vsew, int vlmul, bool vill) {
   // Ratified v1.0 positions: vlmul[2:0], vsew[5:3], vill[63].
   uint64_t v = (static_cast<uint64_t>(vsew & 7) << 3) | static_cast<uint64_t>(vlmul & 7);
   if (vill) v |= (1ull << 63);
   return v;
 }
+
+// The field value for a width exponent: vsew = log2(SEW) - 3. Used at the few
+// call sites that carry a width (sew_l) rather than an already-encoded field.
+int SewField(int sew_l) { return sew_l - kSewLog2Base; }
 
 // ---------------------------------------------------------------- spec oracle
 // The class table, transcribed from the V-spec rules quoted in the RTL header.
@@ -169,14 +181,17 @@ int LmulExp(int vlmul) {
   }
 }
 
-bool VsewValid(int vsew) { return vsew >= 3 && vsew <= 6; }
+// `vsew` here and everywhere below is the RVV 1.0 *field* value: log2(SEW) - 3,
+// i.e. 0=e8, 1=e16, 2=e32, 3=e64. Widths are derived with `+ 3`.
+
+bool VsewValid(int vsew) { return vsew >= 0 && vsew <= 3; }
 bool VlmulValid(int vlmul) { return vlmul != 4; }
 
 int VtypeReason(int vsew, int vlmul, bool vill) {
   if (vill) return RSN_VTYPE_UNSUPP;
   if (!VsewValid(vsew)) return RSN_RESERVED_VSEW;
   if (!VlmulValid(vlmul)) return RSN_RESERVED_VLMUL;
-  if (LmulExp(vlmul) + 6 < vsew) return RSN_EMUL_RANGE;
+  if (LmulExp(vlmul) + 6 < vsew + kSewLog2Base) return RSN_EMUL_RANGE;
   return RSN_OK;
 }
 
@@ -203,7 +218,7 @@ int OracleReason(int op, int vsew, int vlmul, bool vill, int vd, int vs1, int vs
   if (c.vtype_free) return RSN_OK;
   int vr = VtypeReason(vsew, vlmul, vill);
   if (vr != RSN_OK) return vr;
-  int sew_l = vsew;
+  int sew_l = vsew + kSewLog2Base;   // field -> width exponent
   if (sew_l < c.min_sew) return RSN_EEW_RANGE;
   int lmul_e = LmulExp(vlmul);
   int dst_eew = sew_l + c.dst_sew_off;
@@ -232,7 +247,7 @@ int OracleReason(int op, int vsew, int vlmul, bool vill, int vd, int vs1, int vs
 }
 
 int OracleElemCount(int vsew, int vlmul) {
-  int e = 7 + LmulExp(vlmul) - vsew;  // VLEN=128 -> log2 = 7
+  int e = 7 + LmulExp(vlmul) - (vsew + kSewLog2Base);  // VLEN=128 -> log2 = 7
   if (e < 0) return 0;
   return 1 << e;
 }
@@ -450,7 +465,7 @@ void PhaseGeometry(Dut* d, Reporter* rep) {
   // VLEN itself is checked in PhaseLaneInvariance, where it is checked against
   // the lane quota that must not affect it; here the profile constants that are
   // not a function of lanes are established.
-  const QueryObs q = d->Query(Vtype(5, 0, false), VOP_IVV, 1, 2, 3, 4, false, 2);
+  const QueryObs q = d->Query(Vtype(2, 0, false), VOP_IVV, 1, 2, 3, 4, false, 2);
   rep->Check(q.vlenb == 16, "geometry: vlenb read back as " + Dec(q.vlenb) + ", expected 16");
   rep->Check(q.class_count == VOP_COUNT,
              "geometry: class count " + Dec(q.class_count) + ", expected " + Dec(VOP_COUNT));
@@ -459,10 +474,10 @@ void PhaseGeometry(Dut* d, Reporter* rep) {
   // The effective-width arithmetic that the matrix is built on, stated as
   // direct examples: a widening operation doubles both EEW and EMUL, a
   // narrowing source doubles its EMUL.
-  const QueryObs wide = d->Query(Vtype(3, 0, false), VOP_VWIDE, 1, 2, 3, 4, false, 2);
+  const QueryObs wide = d->Query(Vtype(0, 0, false), VOP_VWIDE, 1, 2, 3, 4, false, 2);
   rep->Check(wide.cfg_legal && wide.emul_dst_exp == 1 && wide.emul_src_exp == 0,
              "geometry: vwadd at LMUL=1 has destination EMUL 2 and source EMUL 1");
-  const QueryObs narrow = d->Query(Vtype(3, 0, false), VOP_VNARROW, 1, 2, 3, 4, false, 2);
+  const QueryObs narrow = d->Query(Vtype(0, 0, false), VOP_VNARROW, 1, 2, 3, 4, false, 2);
   rep->Check(narrow.cfg_legal && narrow.emul_src_exp == 1 && narrow.emul_dst_exp == 0,
              "geometry: vnclip at LMUL=1 has source EMUL 2 and destination EMUL 1");
 }
@@ -490,7 +505,7 @@ void PhaseVtypeMatrix(Dut* d, Reporter* rep, int* reason_hist) {
       } else {
         rep->Check(q.cfg_legal && q.reason == RSN_OK,
                    name + ": a legal vtype with VOP_IVV is legal");
-        rep->Check(q.sew_log2 == vsew, name + ": sew_log2");
+        rep->Check(q.sew_log2 == vsew + kSewLog2Base, name + ": sew_log2");
         rep->Check(q.lmul_exp == LmulExp(vlmul), name + ": lmul_exp");
         rep->Check(q.elem_count == OracleElemCount(vsew, vlmul), name + ": elem_count");
         ++reason_hist[RSN_OK];
@@ -554,7 +569,7 @@ void PhaseOpMatrix(Dut* d, Reporter* rep, int* reason_hist, bool* class_seen) {
 
 // A configuration that is legal in every dimension, used to watch VLEN.
 void PhaseLaneInvariance(Dut* d, Reporter* rep) {
-  const uint64_t vt = Vtype(3, 0, false);  // SEW=8, LMUL=1
+  const uint64_t vt = Vtype(0, 0, false);  // SEW=8, LMUL=1
   int vlen_seen[3] = {0, 0, 0};
   const int lanes[3] = {2, 4, 8};
   for (int i = 0; i < 3; ++i) {
@@ -587,7 +602,7 @@ void PhaseDescriptorProgress(Dut* d, Reporter* rep) {
   // Allocate identity A.
   s = Stim{};
   s.alloc_valid = true;
-  s.alloc_vtype = Vtype(5, 0, false);  // SEW=32, LMUL=1 -> 4 elements
+  s.alloc_vtype = Vtype(2, 0, false);  // SEW=32, LMUL=1 -> 4 elements
   s.alloc_vl = 5;
   s.alloc_vd = 4;
   s.alloc_mask_ver = 2;
@@ -606,7 +621,7 @@ void PhaseDescriptorProgress(Dut* d, Reporter* rep) {
   // A second allocate while busy is refused and must not disturb identity A.
   Stim busy;
   busy.alloc_valid = true;
-  busy.alloc_vtype = Vtype(6, 3, false);
+  busy.alloc_vtype = Vtype(3, 3, false);
   busy.rob_index = 9;
   busy.rob_gen = 9;
   busy.uop_index = 9;
@@ -653,7 +668,7 @@ void PhaseDescriptorProgress(Dut* d, Reporter* rep) {
              "descriptor-progress: release left progress behind");
   Stim reuse;
   reuse.alloc_valid = true;
-  reuse.alloc_vtype = Vtype(4, 1, false);
+  reuse.alloc_vtype = Vtype(1, 1, false);
   reuse.rob_index = 11;
   reuse.rob_gen = 2;
   reuse.uop_index = 0;
@@ -668,7 +683,7 @@ void PhaseDescriptorProgress(Dut* d, Reporter* rep) {
 void PhaseFaultProgress(Dut* d, Reporter* rep) {
   Stim s;
   s.alloc_valid = true;
-  s.alloc_vtype = Vtype(3, 3, false);  // SEW=8, LMUL=8 -> 128 elements
+  s.alloc_vtype = Vtype(0, 3, false);  // SEW=8, LMUL=8 -> 128 elements
   s.alloc_vl = 8;
   s.rob_index = 5;
   s.rob_gen = 5;
@@ -717,7 +732,7 @@ void PhaseFaultProgress(Dut* d, Reporter* rep) {
 void PhaseResetInFlight(Dut* d, Reporter* rep) {
   Stim s;
   s.alloc_valid = true;
-  s.alloc_vtype = Vtype(5, 0, false);
+  s.alloc_vtype = Vtype(2, 0, false);
   s.rob_index = 3;
   s.rob_gen = 3;
   s.uop_index = 3;
@@ -743,7 +758,7 @@ void PhaseResetInFlight(Dut* d, Reporter* rep) {
     Stim r;
     r.rst = true;
     r.alloc_valid = true;
-    r.alloc_vtype = Vtype(6, 3, false);
+    r.alloc_vtype = Vtype(3, 3, false);
     r.rob_index = 15;
     r.rob_gen = 15;
     r.uop_index = 7;
@@ -768,7 +783,7 @@ void PhaseResetInFlight(Dut* d, Reporter* rep) {
   rep->Check(!after.valid && after.alloc_ready, "reset-in-flight: unusable after reset");
   Stim a;
   a.alloc_valid = true;
-  a.alloc_vtype = Vtype(5, 0, false);
+  a.alloc_vtype = Vtype(2, 0, false);
   a.rob_index = 1;
   o = d->Cycle(a);
   rep->Check(o.valid && o.rob_index == 1, "reset-in-flight: unusable after reset");
@@ -781,11 +796,11 @@ void PhaseResetInFlight(Dut* d, Reporter* rep) {
 void PhaseReasonCoverage(Dut* d, Reporter* rep, int* reason_hist, bool* class_seen) {
   // Two reason classes need inputs the sweep does not generate: vill (an
   // unsupported vtype argument) and an unknown operation family.
-  const QueryObs vill = d->Query(Vtype(3, 0, true), VOP_IVV, 1, 2, 3, 4, false, 2);
+  const QueryObs vill = d->Query(Vtype(0, 0, true), VOP_IVV, 1, 2, 3, 4, false, 2);
   ++reason_hist[vill.reason];
   rep->Check(vill.reason == RSN_VTYPE_UNSUPP,
              "reason-coverage: vill reports VTYPE_UNSUPPORTED");
-  const QueryObs unknown = d->Query(Vtype(3, 0, false), VOP_COUNT, 1, 2, 3, 4, false, 2);
+  const QueryObs unknown = d->Query(Vtype(0, 0, false), VOP_COUNT, 1, 2, 3, 4, false, 2);
   ++reason_hist[unknown.reason];
   rep->Check(unknown.reason == RSN_CLASS_INVALID,
              "reason-coverage: an unknown operation family reports CLASS_INVALID");
@@ -839,7 +854,7 @@ uint64_t Vtypei(int vsew, int vlmul, int ta = 0, int ma = 0) {
 
 int VlmaxOf(int vsew, int vlmul) {
   if (!VsewValid(vsew) || !VlmulValid(vlmul)) return 0;
-  const int e = 7 + LmulExp(vlmul) - vsew;
+  const int e = 7 + LmulExp(vlmul) - (vsew + kSewLog2Base);
   if (e < 0 || e > 7) return 0;
   return 1 << e;
 }
@@ -849,7 +864,7 @@ bool WordSupported(uint64_t v) {
   if (((v >> 8) & ((1ull << 55) - 1ull)) != 0ull) return false;
   const int vsew = static_cast<int>((v >> 3) & 7ull);
   const int vlmul = static_cast<int>(v & 7ull);
-  return VsewValid(vsew) && VlmulValid(vlmul) && (LmulExp(vlmul) + 6 >= vsew);
+  return VsewValid(vsew) && VlmulValid(vlmul) && (LmulExp(vlmul) + 6 >= vsew + kSewLog2Base);
 }
 
 // The spec's AVL bands as bounds, not one blessed value.
@@ -1071,13 +1086,13 @@ void PhaseVtypeSupport(Cfg* cfg, Reporter* rep, VsetCounts* counts) {
   // Reserved immediate bits set vill.
   for (int bit : {8, 9, 10}) {
     const CfgObs r = RunVset(cfg, VSETVLI, 5, 6, kAvlMax,
-                             Vtypei(3, 0) | (1ull << bit));
+                             Vtypei(0, 0) | (1ull << bit));
     rep->Check(r.vill && r.vtype == kVill,
                "vtype-support: reserved vtypei bit " + Dec(bit) + " did not set vill");
   }
 
   // A full vtype word from vsetvl with a reserved bit set is unsupported too.
-  const CfgObs r = RunVset(cfg, VSETVL, 5, 6, kAvlMax, Vtypei(3, 0) | (1ull << 40));
+  const CfgObs r = RunVset(cfg, VSETVL, 5, 6, kAvlMax, Vtypei(0, 0) | (1ull << 40));
   rep->Check(r.vill && r.vtype == kVill, "vtype-support: reserved vtype bit 40 did not set vill");
 }
 
@@ -1085,7 +1100,7 @@ void PhaseVtypeSupport(Cfg* cfg, Reporter* rep, VsetCounts* counts) {
 // hard-coding one VLMAX. The shipped policy is vl = min(AVL, VLMAX); the driver
 // asserts the spec bounds and determinism, not that exact value.
 void PhaseAvlBands(Cfg* cfg, Reporter* rep, VsetCounts* counts) {
-  const int configs[4][2] = {{3, 0}, {3, 3}, {6, 3}, {5, 1}};
+  const int configs[4][2] = {{0, 0}, {0, 3}, {3, 3}, {2, 1}};
   for (const auto& c : configs) {
     const int vsew = c[0], vlmul = c[1];
     const uint64_t vlmax = static_cast<uint64_t>(VlmaxOf(vsew, vlmul));
@@ -1114,7 +1129,7 @@ void PhaseAvlBands(Cfg* cfg, Reporter* rep, VsetCounts* counts) {
 // (VLMAX); rs1 = x0 with rd = x0 keeps the current vl (and is reserved -- our
 // deterministic answer is vill -- when the new ratio changes VLMAX).
 void PhaseRdRs1(Cfg* cfg, Reporter* rep) {
-  const uint64_t word = Vtypei(3, 0);  // e8, m1 -> VLMAX 16
+  const uint64_t word = Vtypei(0, 0);  // e8, m1 -> VLMAX 16
   const uint64_t vlmax = 16;
 
   CfgObs o = RunVset(cfg, VSETVLI, 5, 6, 7, word);
@@ -1135,7 +1150,7 @@ void PhaseRdRs1(Cfg* cfg, Reporter* rep) {
              "rd-rs1: rs1=x0, rd=x0 keeps the current vl");
 
   // Same form with a VLMAX-changing ratio is reserved: the unit sets vill.
-  o = RunVset(cfg, VSETVLI, 0, 0, 0, Vtypei(5, 0));  // e32,m1 -> VLMAX 4
+  o = RunVset(cfg, VSETVLI, 0, 0, 0, Vtypei(2, 0));  // e32,m1 -> VLMAX 4
   rep->Check(o.vill && o.vl == 0, "rd-rs1: the reserved x0/x0 form sets vill");
 
   // vsetivli: the AVL is the zero-extended 5-bit immediate.
@@ -1145,15 +1160,15 @@ void PhaseRdRs1(Cfg* cfg, Reporter* rep) {
   rep->Check(o.vl == vlmax, "rd-rs1: vsetivli uimm=31 clamps to VLMAX");
 
   // vsetvl takes the vtype from rs2.
-  o = RunVset(cfg, VSETVL, 4, 7, 9, Vtypei(4, 1));
-  rep->Check(!o.vill && o.vtype == Vtypei(4, 1) && o.vl == 9 && o.vset_rd_val == 9,
+  o = RunVset(cfg, VSETVL, 4, 7, 9, Vtypei(1, 1));
+  rep->Check(!o.vill && o.vtype == Vtypei(1, 1) && o.vl == 9 && o.vset_rd_val == 9,
              "rd-rs1: vsetvl uses rs2 as vtype and x[rs1] as AVL");
 }
 
 // vstart is reset to zero by every committed vector instruction, is writable
 // through its CSR, and is *not* modified by the illegal-instruction path.
 void PhaseVstart(Cfg* cfg, Reporter* rep) {
-  CfgObs o = RunVset(cfg, VSETVLI, 5, 6, 4, Vtypei(3, 0));
+  CfgObs o = RunVset(cfg, VSETVLI, 5, 6, 4, Vtypei(0, 0));
   rep->Check(o.vstart == 0, "vstart: a committed vset resets vstart");
 
   o = CsrWrite(cfg, kCsrVstart, 5);
@@ -1166,23 +1181,23 @@ void PhaseVstart(Cfg* cfg, Reporter* rep) {
   rep->Check(o.csr_rdata == 0x7F, "vstart: upper bits are not writable (" + mosaic::Hex(o.csr_rdata) + ")");
 
   o = CsrWrite(cfg, kCsrVstart, 5);
-  o = RunVset(cfg, VSETVLI, 5, 6, 4, Vtypei(3, 0), 0, /*vs_off*/ true);
+  o = RunVset(cfg, VSETVLI, 5, 6, 4, Vtypei(0, 0), 0, /*vs_off*/ true);
   rep->Check(o.vset_illegal && !o.vset_commit, "vstart: VS=Off raises illegal instruction");
   o = CsrRead(cfg, kCsrVstart);
   rep->Check(o.csr_rdata == 5, "vstart: an illegal instruction does not modify vstart");
 
-  o = RunVset(cfg, VSETVLI, 5, 6, 4, Vtypei(3, 0));
+  o = RunVset(cfg, VSETVLI, 5, 6, 4, Vtypei(0, 0));
   rep->Check(o.vstart == 0, "vstart: a following committed vset resets vstart");
 
   o = CsrWrite(cfg, kCsrVstart, 9);
-  o = RunVset(cfg, VSETVLI, 5, 6, 4, Vtypei(0, 0));  // unsupported -> vill
+  o = RunVset(cfg, VSETVLI, 5, 6, 4, Vtypei(4, 0));  // reserved vsew -> vill
   rep->Check(o.vill && o.vstart == 0, "vstart: an unsupported vtype still resets vstart");
 }
 
 // The permissions and the field layout of the seven unprivileged vector CSRs.
 void PhaseCsrPermissions(Cfg* cfg, Reporter* rep) {
   // Configure a known state: e32,m1 with vl = 3.
-  RunVset(cfg, VSETVLI, 5, 6, 3, Vtypei(5, 0));
+  RunVset(cfg, VSETVLI, 5, 6, 3, Vtypei(2, 0));
 
   struct Entry {
     uint64_t addr;
@@ -1213,7 +1228,7 @@ void PhaseCsrPermissions(Cfg* cfg, Reporter* rep) {
   o = CsrRead(cfg, kCsrVl);
   rep->Check(o.csr_rdata == 3, "csr: vl reads the configured length");
   o = CsrRead(cfg, kCsrVtype);
-  rep->Check(o.csr_rdata == Vtypei(5, 0), "csr: vtype reads the configured type");
+  rep->Check(o.csr_rdata == Vtypei(2, 0), "csr: vtype reads the configured type");
 
   CsrWrite(cfg, kCsrVxsat, 0);
   CsrWrite(cfg, kCsrVxrm, 0xFF);
@@ -1250,11 +1265,11 @@ void PhaseSnapshotReplay(Cfg* cfg, Dut* desc, Reporter* rep) {
   CfgStim idle;
   cfg->Cycle(idle);
 
-  CfgObs o = RunVset(cfg, VSETVLI, 5, 6, 7, Vtypei(3, 0));
+  CfgObs o = RunVset(cfg, VSETVLI, 5, 6, 7, Vtypei(0, 0));
   const uint64_t v1 = o.vtype;
   const uint64_t vl1 = o.vl;
   const int g1 = o.gen;
-  rep->Check(!o.vill && v1 == Vtypei(3, 0) && vl1 == 7, "snapshot: V1 configured");
+  rep->Check(!o.vill && v1 == Vtypei(0, 0) && vl1 == 7, "snapshot: V1 configured");
 
   CfgStim cap;
   cap.snap_capture = true;
@@ -1265,8 +1280,8 @@ void PhaseSnapshotReplay(Cfg* cfg, Dut* desc, Reporter* rep) {
                  mosaic::Hex(c1.snap_vtype) + " vl=" + Dec(c1.snap_vl) + " vs=" +
                  Dec(c1.snap_vstart) + " gen=" + Dec(c1.snap_gen) + "]");
 
-  o = RunVset(cfg, VSETVLI, 5, 6, 3, Vtypei(5, 0));
-  rep->Check(!o.vill && o.vtype == Vtypei(5, 0) && o.vl == 3, "snapshot: V2 configured");
+  o = RunVset(cfg, VSETVLI, 5, 6, 3, Vtypei(2, 0));
+  rep->Check(!o.vill && o.vtype == Vtypei(2, 0) && o.vl == 3, "snapshot: V2 configured");
   rep->Check(o.gen == g1 + 1, "snapshot: the generation did not advance");
 
   CfgStim r;
@@ -1309,7 +1324,7 @@ void PhaseSnapshotReplay(Cfg* cfg, Dut* desc, Reporter* rep) {
 // While vill is set a vtype-dependent instruction is illegal; a vtype-free one
 // is not. Reset leaves vill set.
 void PhaseVillBlocks(Cfg* cfg, Reporter* rep) {
-  CfgObs o = RunVset(cfg, VSETVLI, 5, 6, 4, Vtypei(3, 0));
+  CfgObs o = RunVset(cfg, VSETVLI, 5, 6, 4, Vtypei(0, 0));
   rep->Check(!o.vill, "vill-blocks: a supported vtype clears vill");
   CfgStim e;
   e.exec_valid = true;
@@ -1317,7 +1332,7 @@ void PhaseVillBlocks(Cfg* cfg, Reporter* rep) {
   CfgObs x = cfg->Cycle(e);
   rep->Check(!x.exec_illegal, "vill-blocks: a vtype-dependent instruction blocked while vill is clear");
 
-  o = RunVset(cfg, VSETVLI, 5, 6, 4, Vtypei(0, 0));  // SEW=1, unsupported
+  o = RunVset(cfg, VSETVLI, 5, 6, 4, Vtypei(4, 0));  // reserved vsew, unsupported
   rep->Check(o.vill && o.vl == 0, "vill-blocks: an unsupported vtype sets vill and vl=0");
   x = cfg->Cycle(e);
   rep->Check(x.exec_illegal, "vill-blocks: a vtype-dependent instruction is not blocked by vill");
@@ -1339,7 +1354,7 @@ void PhaseVillBlocks(Cfg* cfg, Reporter* rep) {
 
 // No configuration action may change VLEN / vlenb.
 void PhaseVlenInvariance(Cfg* cfg, Reporter* rep) {
-  for (int vsew = 3; vsew <= 6; ++vsew) {
+  for (int vsew = 0; vsew <= 3; ++vsew) {
     for (int vlmul = 0; vlmul < 8; ++vlmul) {
       const uint64_t word = Vtypei(vsew, vlmul);
       if (!WordSupported(word)) continue;
@@ -1407,9 +1422,9 @@ bool SpecVma(uint64_t v) { return ((v >> kVmaPos) & 1ull) != 0; }
 // VLMAX = VLEN*LMUL/SEW and through the CSR read path, so the check fails if the
 // field is read from anywhere but 5:3 and 2:0.
 void PhaseLayoutRoundTrip(Cfg* cfg, Reporter* rep, LayoutCounts* counts) {
-  for (int vsew = 3; vsew <= 6; ++vsew) {
+  for (int vsew = 0; vsew <= 3; ++vsew) {
     for (int vlmul = 0; vlmul < 8; ++vlmul) {
-      if (!VlmulValid(vlmul) || (LmulExp(vlmul) + 6 < vsew)) continue;
+      if (!VlmulValid(vlmul) || (LmulExp(vlmul) + 6 < vsew + kSewLog2Base)) continue;
       for (int ta = 0; ta < 2; ++ta) {
         for (int ma = 0; ma < 2; ++ma) {
           const uint64_t word = Vtypei(vsew, vlmul, ta, ma);
@@ -1449,9 +1464,9 @@ void PhaseLayoutRoundTrip(Cfg* cfg, Reporter* rep, LayoutCounts* counts) {
 // The descriptor decodes the same fields for its legality query: a spec-encoded
 // word must be decoded as the SEW/LMUL it encodes, and a legal one accepted.
 void PhaseLayoutDescriptor(Dut* desc, Reporter* rep, LayoutCounts* counts) {
-  for (int vsew = 3; vsew <= 6; ++vsew) {
+  for (int vsew = 0; vsew <= 3; ++vsew) {
     for (int vlmul = 0; vlmul < 8; ++vlmul) {
-      if (!VlmulValid(vlmul) || (LmulExp(vlmul) + 6 < vsew)) continue;
+      if (!VlmulValid(vlmul) || (LmulExp(vlmul) + 6 < vsew + kSewLog2Base)) continue;
       for (int ta = 0; ta < 2; ++ta) {
         for (int ma = 0; ma < 2; ++ma) {
           const uint64_t word = Vtypei(vsew, vlmul, ta, ma);
@@ -1461,7 +1476,7 @@ void PhaseLayoutDescriptor(Dut* desc, Reporter* rep, LayoutCounts* counts) {
                                    " vlmul=" + Dec(vlmul) + " ta=" + Dec(ta) +
                                    " ma=" + Dec(ma);
           rep->Check(q.vtype_legal, name + ": a legal configuration was rejected");
-          rep->Check(q.sew_log2 == vsew, name + ": sew_log2 decoded from the wrong bits");
+          rep->Check(q.sew_log2 == vsew + kSewLog2Base, name + ": sew_log2 decoded from the wrong bits");
           rep->Check(q.lmul_exp == LmulExp(vlmul),
                      name + ": lmul_exp decoded from the wrong bits");
           rep->Check(q.elem_count == VlmaxOf(vsew, vlmul),
@@ -1477,8 +1492,9 @@ void PhaseLayoutDescriptor(Dut* desc, Reporter* rep, LayoutCounts* counts) {
 // rule -- a software CSR write to vtype is illegal, so software cannot write
 // `vill` (or anything else) into the register.
 void PhaseLayoutVill(Cfg* cfg, Reporter* rep, LayoutCounts* counts) {
-  // SEW = 1 (vsew = 0) is not supported: vill set, vtype[62:0] zero, vl = 0.
-  const CfgObs bad = RunVset(cfg, VSETVLI, 5, 6, kAvlMax, Vtypei(0, 0, 1, 1));
+  // vsew = 4 is a reserved encoding (the implemented field values are 0..3):
+  // vill set, vtype[62:0] zero, vl = 0.
+  const CfgObs bad = RunVset(cfg, VSETVLI, 5, 6, kAvlMax, Vtypei(4, 0, 1, 1));
   rep->Check(bad.vill, "vtype-layout vill: an unsupported vtype did not set vill");
   rep->Check(bad.vtype == kVill,
              "vtype-layout vill: vtype[62:0] not zeroed (" + mosaic::Hex(bad.vtype) + ")");
@@ -1487,15 +1503,15 @@ void PhaseLayoutVill(Cfg* cfg, Reporter* rep, LayoutCounts* counts) {
   // A reserved bit of the vtype argument makes the value unsupported: "all bits
   // of the vtype argument must be considered".
   for (int bit : {8, 30, 62}) {
-    const CfgObs r = RunVset(cfg, VSETVL, 5, 6, kAvlMax, Vtypei(3, 0) | (1ull << bit));
+    const CfgObs r = RunVset(cfg, VSETVL, 5, 6, kAvlMax, Vtypei(0, 0) | (1ull << bit));
     rep->Check(r.vill && r.vtype == kVill,
                "vtype-layout reserved: vsetvl vtype bit " + Dec(bit) + " did not set vill");
   }
 
   // URO: a software CSR write to vtype is illegal and the register is unchanged.
-  const CfgObs good = RunVset(cfg, VSETVLI, 5, 6, 4, Vtypei(5, 1, 1, 0));
+  const CfgObs good = RunVset(cfg, VSETVLI, 5, 6, 4, Vtypei(2, 1, 1, 0));
   const uint64_t held = good.vtype;
-  rep->Check(!good.vill && held == Vtypei(5, 1, 1, 0), "vtype-layout uro: V1 not configured");
+  rep->Check(!good.vill && held == Vtypei(2, 1, 1, 0), "vtype-layout uro: V1 not configured");
   const CfgObs w = CsrWrite(cfg, kCsrVtype, kVill);
   rep->Check(w.csr_illegal && !w.csr_commit,
              "vtype-layout uro: software set vill through a vtype CSR write");
@@ -1515,7 +1531,7 @@ void PhaseLayoutVill(Cfg* cfg, Reporter* rep, LayoutCounts* counts) {
              "vtype-layout reserved: bits 62:8 do not read zero (" +
                  mosaic::Hex(rres.csr_rdata) + ")");
   // While vill is set, software still cannot clear it.
-  RunVset(cfg, VSETVLI, 5, 6, 4, Vtypei(0, 0));
+  RunVset(cfg, VSETVLI, 5, 6, 4, Vtypei(4, 0));
   const CfgObs w3 = CsrWrite(cfg, kCsrVtype, 0);
   const CfgObs r2 = CsrRead(cfg, kCsrVtype);
   rep->Check(w3.csr_illegal && r2.csr_rdata == kVill,
@@ -1788,33 +1804,25 @@ ElemVal OracleElem(int fam, int op, int sew, int form, uint64_t vs2, uint64_t vs
       break;
     }
     case VF_MASKLOG: {
-      bool bb = ((vs2 >> (index & 7)) & 1u) != 0;
-      bool aa = ((vs1 >> (index & 7)) & 1u) != 0;
-      switch (op) {
-        case 0: o.mres = bb && aa; break;
-        case 1: o.mres = !(bb && aa); break;
-        case 2: o.mres = bb || aa; break;
-        case 3: o.mres = !(bb || aa); break;
-        case 4: o.mres = bb != aa; break;
-        case 5: o.mres = !(bb != aa); break;
-        case 6: o.mres = bb && !aa; break;
-        default: o.mres = bb || !aa; break;
-      }
+      // The shared model (sim/unit/mask_prefix_ref.h): one statement of the
+      // eight mask-register logical rules, used by the unit lane and by the
+      // core-level case alike.
+      const bool bb = ((vs2 >> (index & 7)) & 1u) != 0;
+      const bool aa = ((vs1 >> (index & 7)) & 1u) != 0;
+      o.mres = mosaic_maskpfx::MaskLogElem(op, bb, aa);
       break;
     }
     case VF_MASKPFX: {
-      // The specification's three rules, stated once (v-spec.adoc 6.x).  With
-      // `pfx_in` the OR of the source bits strictly before element `index`:
+      // The specification's three rules, stated once in the shared model
+      // (sim/unit/mask_prefix_ref.h).  With `pfx_in` the OR of the source bits
+      // strictly before element `index`:
       //   vmsbf[i] = 1 iff no set bit at or before i  (all-ones if none)
       //   vmsif[i] = 1 iff no set bit strictly before i (all-ones if none)
       //   vmsof[i] = 1 iff source bit i is the first set bit
       // An all-zero active source is therefore all-ones for vmsbf and vmsif,
       // and all-zeros for vmsof -- the asymmetry this case encodes.
-      bool bb = ((vs2 >> (index & 7)) & 1u) != 0;
-      if (op == 0) o.mres = !(pfx_in || bb);         // vmsbf: before the first
-      else if (op == 1) o.mres = !pfx_in;            // vmsif: through the first
-      else o.mres = bb && !pfx_in;                   // vmsof: only the first
-      o.pfx = pfx_in || bb;
+      const bool bb = ((vs2 >> (index & 7)) & 1u) != 0;
+      o.mres = mosaic_maskpfx::Elem(op, bb, pfx_in, &o.pfx);
       break;
     }
     case VF_REDUCE: {
@@ -2234,7 +2242,7 @@ void PhaseElementLane(Cfg* cfg, Vec* vec, Reporter* rep) {
     for (int sew_l = 3; sew_l <= 6; ++sew_l) {
       int sew = 1 << sew_l;
       if (!FamilySupportsSew(fam, sew)) continue;
-      ConfigureVec(cfg, sew_l, 0, 0, 0, 64);
+      ConfigureVec(cfg, SewField(sew_l), 0, 0, 0, 64);
       (void)CsrWrite(cfg, kCsrVxrm, 2);
       std::vector<uint64_t> vals;
       BoundaryValues(sew, &vals);
@@ -2292,7 +2300,7 @@ void PhaseElementLane(Cfg* cfg, Vec* vec, Reporter* rep) {
 // mask logical and mask prefix, which take their operands from mask registers
 void PhaseMaskLane(Cfg* cfg, Vec* vec, Reporter* rep) {
   for (int sew_l = 3; sew_l <= 6; ++sew_l) {
-    ConfigureVec(cfg, sew_l, 0, 0, 0, 64);
+    ConfigureVec(cfg, SewField(sew_l), 0, 0, 0, 64);
     for (int idx = 0; idx < 8; ++idx) {
       for (int a = 0; a < 4; ++a) {
         for (int b = 0; b < 4; ++b) {
@@ -2359,7 +2367,7 @@ void PhasePermuteLane(Cfg* cfg, Vec* vec, Reporter* rep) {
     for (int sew_l = 3; sew_l <= 6; ++sew_l) {
       int vlmax = VlmaxOf2(sew_l, lmul_e);
       if (vlmax == 0) continue;
-      ConfigureVec(cfg, sew_l, VlmulOfExp(lmul_e), 0, 0, vlmax);
+      ConfigureVec(cfg, SewField(sew_l), VlmulOfExp(lmul_e), 0, 0, vlmax);
       int n = vlmax < 12 ? vlmax : 12;
       // vslideup / vslidedown with an offset
       for (int off = 0; off <= 3; ++off) {
@@ -2459,7 +2467,7 @@ void PhasePermuteLane(Cfg* cfg, Vec* vec, Reporter* rep) {
 void PhaseReduceLane(Cfg* cfg, Vec* vec, Reporter* rep) {
   for (int sew_l = 3; sew_l <= 6; ++sew_l) {
     int sew = 1 << sew_l;
-    ConfigureVec(cfg, sew_l, 0, 0, 0, 64);
+    ConfigureVec(cfg, SewField(sew_l), 0, 0, 0, 64);
     std::vector<uint64_t> vals;
     BoundaryValues(sew, &vals);
     for (int op = 0; op < 8; ++op) {
@@ -2522,7 +2530,7 @@ void PhaseReduceLane(Cfg* cfg, Vec* vec, Reporter* rep) {
 
 // ------------------------------------------------------- capability gating
 void PhaseCapabilityGate(Cfg* cfg, Vec* vec, Reporter* rep) {
-  ConfigureVec(cfg, 3, 0, 0, 0, 4);
+  ConfigureVec(cfg, 0, 0, 0, 0, 4);
   for (int fam = 0; fam < VF_COUNT; ++fam) {
     // with the family declared, it must execute
     int before_rd = vec->RdGnt();
@@ -2755,7 +2763,7 @@ void PhaseCoverage(Cfg* cfg, Vec* vec, Reporter* rep, Coverage* cov) {
         bool want_mask = !(fam == VF_MASKLOG || fam == VF_MASKPFX || fam == VF_COMPRESS);
         Layout L = PlanLayout(fam, lmul_e, want_mask);
         bool mask_en = L.mask;
-        ConfigureVec(cfg, sew_l, VlmulOfExp(lmul_e), 0, 0, static_cast<uint64_t>(vl));
+        ConfigureVec(cfg, SewField(sew_l), VlmulOfExp(lmul_e), 0, 0, static_cast<uint64_t>(vl));
         (void)CsrWrite(cfg, kCsrVxrm, 2);
         HostVrf vf;
         // a permute may read a source element anywhere below VLMAX (and a
@@ -2826,7 +2834,7 @@ void PhaseCoverage(Cfg* cfg, Vec* vec, Reporter* rep, Coverage* cov) {
 // computed the address before consulting the mask would issue a bad demand.
 void PhaseMaskedOff(Cfg* cfg, Vec* vec, Reporter* rep) {
   for (int vma = 0; vma < 2; ++vma) {
-    ConfigureVec(cfg, 3, 0, 0, vma, 8);
+    ConfigureVec(cfg, 0, 0, 0, vma, 8);
     HostVrf vf;
     Layout L;
     L.vd = 8; L.vs1 = 24; L.vs2 = 16; L.mask = true;
@@ -2876,7 +2884,7 @@ void PhaseMaskedOff(Cfg* cfg, Vec* vec, Reporter* rep) {
 
   // An *active* element whose gather index leaves the group reads nothing and
   // its result is zero: the range check, not a fault.
-  ConfigureVec(cfg, 3, 0, 0, 0, 4);
+  ConfigureVec(cfg, 0, 0, 0, 0, 4);
   {
     HostVrf vf;
     Layout L;
@@ -2901,7 +2909,7 @@ void PhaseMaskedOff(Cfg* cfg, Vec* vec, Reporter* rep) {
 // The reduction's order, observed through the engine's element trace: the
 // declared order is ascending from vstart, with no reassociation.
 void PhaseReductionOrder(Cfg* cfg, Vec* vec, Reporter* rep) {
-  ConfigureVec(cfg, 3, 0, 0, 0, 8);
+  ConfigureVec(cfg, 0, 0, 0, 0, 8);
   HostVrf vf;
   Layout L;
   L.vd = 8; L.vs1 = 24; L.vs2 = 16; L.mask = false;
@@ -3556,7 +3564,7 @@ class Lsu {
 
 // configure I-052 and capture the snapshot the packetizer executes from
 void LsuConfig(Cfg* cfg, int sew_l, int vlmul, uint64_t avl, int vstart, int vta, int vma) {
-  (void)RunVset(cfg, VSETVLI, 5, 6, avl, Vtypei(sew_l, vlmul, vta, vma));
+  (void)RunVset(cfg, VSETVLI, 5, 6, avl, Vtypei(SewField(sew_l), vlmul, vta, vma));
   if (vstart != 0) (void)CsrWrite(cfg, kCsrVstart, static_cast<uint64_t>(vstart));
   CfgStim cap;
   cap.snap_capture = true;
@@ -4823,7 +4831,7 @@ struct FpCov {
 
 // Configure the I-052 unit and capture the snapshot the FP unit executes from.
 void FpConfig(Cfg* cfg, int sew_l, int vlmul, int vta, int vma, uint64_t avl) {
-  ConfigureVec(cfg, sew_l, vlmul, vta, vma, avl);
+  ConfigureVec(cfg, SewField(sew_l), vlmul, vta, vma, avl);
 }
 
 // Interesting operands for a width: numbers, zeros, infinities and the two NaN
@@ -5831,7 +5839,7 @@ void PhaseRstRetireGate(Cfg* cfg, Vec* vec, Lsu* lsu, LsuMem* mem, Reporter* rep
   RstCfg R;
   R.mode = LS_UNIT; R.we = false; R.vl = vl; R.base = 0x8000;
   lsu->ClearReqs();
-  RstAlloc(lsu, vl, 0, Vtypei(R.sew_l, R.lmul));
+  RstAlloc(lsu, vl, 0, Vtypei(SewField(R.sew_l), R.lmul));
   HostVrf vf;
   for (int i = 0; i < vl; ++i) vec->Prime(vf, R.vd, i, R.sew_l, R.lmul, Pat(31 * i + 11) & 0xFFull);
   RstResult res = RstRunMacro(cfg, vec, lsu, mem, R, 0, -1, RC_NONE, -1);
@@ -5866,7 +5874,7 @@ void PhaseRstFaultBoundaries(Cfg* cfg, Vec* vec, Lsu* lsu, LsuMem* mem, Reporter
         R.mode = F.mode; R.we = F.we; R.stride = F.stride; R.vl = vl;
         R.base = 0x8000 + 0x100 * f + 0x10 * pos + ci;
         lsu->ClearReqs();
-        RstAlloc(lsu, vl, 0, Vtypei(R.sew_l, R.lmul));
+        RstAlloc(lsu, vl, 0, Vtypei(SewField(R.sew_l), R.lmul));
         HostVrf vf;
         const int grp = R.we ? R.data : R.vd;
         std::vector<uint64_t> val(static_cast<size_t>(vl), 0);
@@ -5945,7 +5953,7 @@ void PhaseRstInterrupt(Cfg* cfg, Vec* vec, Lsu* lsu, LsuMem* mem, Reporter* rep,
     RstCfg R;
     R.mode = LS_UNIT; R.we = false; R.vl = vl; R.base = 0x9000;
     lsu->ClearReqs();
-    RstAlloc(lsu, vl, 0, Vtypei(R.sew_l, R.lmul));
+    RstAlloc(lsu, vl, 0, Vtypei(SewField(R.sew_l), R.lmul));
     HostVrf vf;
     std::vector<uint64_t> val(static_cast<size_t>(vl), 0);
     for (int i = 0; i < vl; ++i) {
@@ -5994,7 +6002,7 @@ void PhaseRstFof(Cfg* cfg, Vec* vec, Lsu* lsu, LsuMem* mem, Reporter* rep,
     RstCfg R;
     R.mode = LS_UNIT; R.we = false; R.fof = true; R.vl = vl; R.base = 0xA000 + 0x20 * ci;
     lsu->ClearReqs();
-    RstAlloc(lsu, vl, 0, Vtypei(R.sew_l, R.lmul));
+    RstAlloc(lsu, vl, 0, Vtypei(SewField(R.sew_l), R.lmul));
     HostVrf vf;
     std::vector<uint64_t> val(static_cast<size_t>(vl), 0);
     for (int i = 0; i < vl; ++i) {
@@ -6024,7 +6032,7 @@ void PhaseRstFof(Cfg* cfg, Vec* vec, Lsu* lsu, LsuMem* mem, Reporter* rep,
       R.mode = LS_UNIT; R.we = false; R.fof = true; R.vl = vl;
       R.base = 0xB000 + 0x40 * k + 0x10 * ci;
       lsu->ClearReqs();
-      RstAlloc(lsu, vl, 0, Vtypei(R.sew_l, R.lmul));
+      RstAlloc(lsu, vl, 0, Vtypei(SewField(R.sew_l), R.lmul));
       HostVrf vf;
       std::vector<uint64_t> val(static_cast<size_t>(vl), 0);
       for (int i = 0; i < vl; ++i) {
@@ -6073,7 +6081,7 @@ void PhaseRstFof(Cfg* cfg, Vec* vec, Lsu* lsu, LsuMem* mem, Reporter* rep,
     R.mode = negs[n].mode; R.we = negs[n].we; R.fof = true; R.vl = vl;
     R.base = 0xC000 + 0x100 * n; R.stride = 8;
     lsu->ClearReqs();
-    RstAlloc(lsu, vl, 0, Vtypei(R.sew_l, R.lmul));
+    RstAlloc(lsu, vl, 0, Vtypei(SewField(R.sew_l), R.lmul));
     HostVrf vf;
     const int grp = R.we ? R.data : R.vd;
     for (int i = 0; i < vl; ++i) vec->Prime(vf, grp, i, R.sew_l, R.lmul, Pat(17 * i + 1) & 0xFFull);
@@ -6099,7 +6107,7 @@ void PhaseRstRestart(Cfg* cfg, Vec* vec, Lsu* lsu, LsuMem* mem, Reporter* rep,
     RstCfg R;
     R.mode = LS_UNIT; R.we = true; R.vl = vl; R.base = 0xD000;
     lsu->ClearReqs();
-    RstAlloc(lsu, vl, 0, Vtypei(R.sew_l, R.lmul));
+    RstAlloc(lsu, vl, 0, Vtypei(SewField(R.sew_l), R.lmul));
     HostVrf vf;
     std::vector<uint64_t> src(static_cast<size_t>(vl), 0);
     for (int i = 0; i < vl; ++i) {
@@ -6286,7 +6294,7 @@ StopRun StopRunMacro(Cfg* cfg, Vec* vec, Lsu* lsu, LsuMem* mem, const RstCfg& R,
     mem->fault_elem = fault_elem;
     mem->fault_field = 0;
   }
-  RstAlloc(lsu, R.vl, vstart, Vtypei(R.sew_l, R.lmul));
+  RstAlloc(lsu, R.vl, vstart, Vtypei(SewField(R.sew_l), R.lmul));
 
   LsuStim s;
   RstFillStim(&s, R, true);
@@ -6610,7 +6618,7 @@ void PhaseStopDrain(Cfg* cfg, Vec* vec, Lsu* lsu, LsuMem* mem, Reporter* rep,
     // a longer latency plus a paced memory keeps two requests in flight, so the
     // drain really is waiting on a busy macro rather than an empty pipeline
     mem->latency = 4;
-    RstAlloc(lsu, R.vl, 0, Vtypei(R.sew_l, R.lmul));
+    RstAlloc(lsu, R.vl, 0, Vtypei(SewField(R.sew_l), R.lmul));
 
     // pace the memory so the pipeline is genuinely occupied; the broker's drain
     // never asserts `stop_i`, it waits for exactly this macro to finish
@@ -6823,7 +6831,7 @@ class Chain {
     // everything else in the wrapper is quiescent: no other vector unit runs,
     // and the driver owns the descriptor unless the chain is bound.
     d_->alloc_valid = s.desc_alloc ? 1 : 0;
-    d_->alloc_vtype = Vtype(6, 0, false);
+    d_->alloc_vtype = Vtype(3, 0, false);
     d_->alloc_vl = static_cast<uint8_t>(s.desc_vl & 0xFF);
     d_->alloc_vstart = 0;
     d_->alloc_vd = static_cast<uint8_t>(s.desc_vd & 0x1F);
@@ -7486,7 +7494,7 @@ void RunMaskPrefixVstartCase(Vmosaic_vec_tb* dut, ClockDriver* clk, Reporter* re
     const std::string tag = kName[op];
 
     // ------------------------------------------------ vstart == 0: executes
-    ConfigureVecVstart(&cfg, kSewL, 0, 0, 0, kVl, 0);
+    ConfigureVecVstart(&cfg, SewField(kSewL), 0, 0, 0, kVl, 0);
     HostVrf vf;
     PrimeMaskReg(&vec, &vf, L.vs2, kVl, 40 + op);
     PrimeMaskReg(&vec, &vf, L.vs1, kVl, 70 + op);
@@ -7516,7 +7524,7 @@ void RunMaskPrefixVstartCase(Vmosaic_vec_tb* dut, ClockDriver* clk, Reporter* re
     const int vstarts[2] = {1, 3};
     for (int vi = 0; vi < 2; ++vi) {
       const int vs = vstarts[vi];
-      ConfigureVecVstart(&cfg, kSewL, 0, 0, 0, kVl, static_cast<uint64_t>(vs));
+      ConfigureVecVstart(&cfg, SewField(kSewL), 0, 0, 0, kVl, static_cast<uint64_t>(vs));
       HostVrf vf2;
       PrimeMaskReg(&vec, &vf2, L.vs2, kVl, 40 + op);
       PrimeMaskReg(&vec, &vf2, L.vd, kVl, 100 + op);
@@ -7550,11 +7558,11 @@ void RunMaskPrefixVstartCase(Vmosaic_vec_tb* dut, ClockDriver* clk, Reporter* re
     s.el_index = 0;
     s.el_mask = true;
 
-    ConfigureVecVstart(&cfg, kSewL, 0, 0, 0, kVl, 0);
+    ConfigureVecVstart(&cfg, SewField(kSewL), 0, 0, 0, kVl, 0);
     VecObs a = vec.Cycle(s);
     rep->Check(!a.el_illegal, tag + " lane vstart=0: the element was refused as illegal");
 
-    ConfigureVecVstart(&cfg, kSewL, 0, 0, 0, kVl, 2);
+    ConfigureVecVstart(&cfg, SewField(kSewL), 0, 0, 0, kVl, 2);
     VecObs b = vec.Cycle(s);
     rep->Check(b.el_illegal, tag + " lane vstart=2: the element was not refused as illegal");
   }
@@ -7635,7 +7643,7 @@ void RunMaskPrefixSemanticsCase(Vmosaic_vec_tb* dut, ClockDriver* clk, Reporter*
     };
     for (int ai = 0; ai < 3; ++ai) {
       for (int op = 0; op < 3; ++op) {
-        ConfigureVec(&cfg, kSewL, 0, 0, 0, 8);
+        ConfigureVec(&cfg, SewField(kSewL), 0, 0, 0, 8);
         HostVrf vf;
         prime(&vf, L.vs2, kAnchors[ai].src);
         prime(&vf, L.vd, 0);
@@ -7662,7 +7670,7 @@ void RunMaskPrefixSemanticsCase(Vmosaic_vec_tb* dut, ClockDriver* clk, Reporter*
   // model (which is the rule set stated at the top of this function).
   for (int op = 0; op < 3; ++op) {
     for (int k = 0; k < kVlmax; ++k) {
-      ConfigureVec(&cfg, kSewL, 0, 0, 0, kVlmax);
+      ConfigureVec(&cfg, SewField(kSewL), 0, 0, 0, kVlmax);
       HostVrf vf;
       prime(&vf, L.vs2, 1ull << k);
       prime(&vf, L.vd, 0xFFFFull);
@@ -7691,7 +7699,7 @@ void RunMaskPrefixSemanticsCase(Vmosaic_vec_tb* dut, ClockDriver* clk, Reporter*
   // stated directly (vmsbf/vmsif all-ones, vmsof all-zeros) rather than through
   // the shared oracle, so this row cannot be satisfied by a shared mistake.
   for (int op = 0; op < 3; ++op) {
-    ConfigureVec(&cfg, kSewL, 0, 0, 0, kVlmax);
+    ConfigureVec(&cfg, SewField(kSewL), 0, 0, 0, kVlmax);
     HostVrf vf;
     prime(&vf, L.vs2, 0);
     prime(&vf, L.vd, 0xFFFFull);
@@ -7713,7 +7721,7 @@ void RunMaskPrefixSemanticsCase(Vmosaic_vec_tb* dut, ClockDriver* clk, Reporter*
   // whose only set bit is at position 12, the active slice is all-zero, so the
   // rule applies over [0, 8) and the tail [8, 16) stays undisturbed (vta = 0).
   for (int op = 0; op < 3; ++op) {
-    ConfigureVec(&cfg, kSewL, 0, 0, 0, 8);
+    ConfigureVec(&cfg, SewField(kSewL), 0, 0, 0, 8);
     HostVrf vf;
     prime(&vf, L.vs2, 1ull << 12);
     prime(&vf, L.vd, 0x55AAull);
@@ -7739,7 +7747,7 @@ void RunMaskPrefixSemanticsCase(Vmosaic_vec_tb* dut, ClockDriver* clk, Reporter*
   // ... and a set bit below vl wins over one above it: the search is bounded by
   // the active region, so k = 5, not 12.
   for (int op = 0; op < 3; ++op) {
-    ConfigureVec(&cfg, kSewL, 0, 0, 0, 8);
+    ConfigureVec(&cfg, SewField(kSewL), 0, 0, 0, 8);
     HostVrf vf;
     prime(&vf, L.vs2, (1ull << 5) | (1ull << 12));
     prime(&vf, L.vd, 0x55AAull);
@@ -7771,7 +7779,7 @@ void RunMaskPrefixSemanticsCase(Vmosaic_vec_tb* dut, ClockDriver* clk, Reporter*
   // still follow the rule. With vta = 0 they are left undisturbed, which the
   // above-vl cells just checked.
   for (int op = 0; op < 3; ++op) {
-    ConfigureVec(&cfg, kSewL, 0, /*vta=*/1, 0, 8);
+    ConfigureVec(&cfg, SewField(kSewL), 0, /*vta=*/1, 0, 8);
     HostVrf vf;
     prime(&vf, L.vs2, 0);          // active slice all-zero
     prime(&vf, L.vd, 0);           // destination clear, so a write of 1 shows
@@ -7839,38 +7847,16 @@ void RunMaskPrefixSemanticsCase(Vmosaic_vec_tb* dut, ClockDriver* clk, Reporter*
 // specification's printed examples show `x` for the masked-off elements, i.e.
 // vma = 0.
 //
-// The host oracle is `MaskedPrefixExpectedBits`, which states the rules
-// directly and is computed on the host from the source and mask patterns; it is
-// never read back from the RTL. The specification's own printed masked examples
-// are checked separately, as spec-anchor cells, so the oracle itself is under
-// test.
+// The host oracle is the shared `mosaic_maskpfx::MaskedExpectedBits`
+// (sim/unit/mask_prefix_ref.h), which states the rules directly and is computed
+// on the host from the source and mask patterns; it is never read back from the
+// RTL. The specification's own printed masked examples are checked separately,
+// as spec-anchor cells, so the oracle itself is under test. CASE=
+// vec.mask_prefix_at_core calls the same function, so the core-level masked
+// cells cannot drift from this case's.
 uint64_t MaskedPrefixExpectedBits(int op, uint64_t src, uint64_t mask, uint64_t old,
                                   int vl, int vma, int vta) {
-  // k = the first ACTIVE element whose source bit is set. A masked-off source
-  // element is not part of the search at all.
-  int k = -1;
-  for (int i = 0; i < vl; ++i) {
-    if (((mask >> i) & 1u) != 0 && ((src >> i) & 1u) != 0) { k = i; break; }
-  }
-  uint64_t out = old;
-  for (int i = 0; i < 16; ++i) {
-    bool bit;
-    if (i >= vl) {
-      if (!vta) continue;                       // tail, undisturbed
-      bit = true;                               // tail, mask-agnostic all-ones
-    } else if (((mask >> i) & 1u) == 0) {
-      if (!vma) continue;                       // masked off, undisturbed
-      bit = true;                               // masked off, all-ones
-    } else if (op == 0) {
-      bit = (k < 0) || (i < k);                 // vmsbf: before the first
-    } else if (op == 1) {
-      bit = (k < 0) || (i <= k);                // vmsif: through the first
-    } else {
-      bit = (k >= 0) && (i == k);               // vmsof: only the first
-    }
-    out = (out & ~(1ull << i)) | (bit ? (1ull << i) : 0ull);
-  }
-  return out;
+  return mosaic_maskpfx::MaskedExpectedBits(op, src, mask, old, vl, vma, vta);
 }
 
 void RunMaskPrefixMaskedCase(Vmosaic_vec_tb* dut, ClockDriver* clk, Reporter* rep) {
@@ -7902,7 +7888,7 @@ void RunMaskPrefixMaskedCase(Vmosaic_vec_tb* dut, ClockDriver* clk, Reporter* re
   auto run_cell = [&](const std::string& what, int op, uint64_t src, uint64_t mask_bits,
                       uint64_t dst_seed, int vl, int vma, int vta,
                       const uint64_t* want_override) {
-    ConfigureVec(&cfg, kSewL, 0, vta, vma, static_cast<uint64_t>(vl));
+    ConfigureVec(&cfg, SewField(kSewL), 0, vta, vma, static_cast<uint64_t>(vl));
     HostVrf vf;
     prime(&vf, L.vs2, src);
     prime(&vf, 0, mask_bits);
@@ -8549,7 +8535,7 @@ void PhaseCoalStop(Cfg* cfg, Vec* vec, Lsu* lsu, LsuMem* mem, Reporter* rep,
       R.base = kCoalRamBase;
 
       lsu->ClearReqs();
-      RstAlloc(lsu, vl, 0, Vtypei(sew_l, lmul));
+      RstAlloc(lsu, vl, 0, Vtypei(SewField(sew_l), lmul));
 
       LsuStim s;
       RstFillStim(&s, R, true);

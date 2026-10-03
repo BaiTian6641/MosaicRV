@@ -3,9 +3,9 @@
  * Capability: ADDSUB (family 0) -- vadd.vv, vsub.vv, vadd.vx, vsub.vx --
  * at SEW = 64, LMUL = m1, VLEN = 128.
  *
- * Configuration: vsetvli with vtypei = 0x30 (this core's encoding: vsew = 6 ->
+ * Configuration: vsetvli with vtypei = 0x18 (RVV 1.0 SMALLEST_SEW: vsew = 3 ->
  * SEW = 64, vlmul = 0 -> m1, vta = vma = 0).  VLMAX = VLEN/SEW = 2, and the
- * program requests VL = VLMAX with `vsetvli t0, x0, 0x30`.
+ * program requests VL = VLMAX with `vsetvli t0, x0, 0x18`.
  *
  * ------------------------------------------------------------------ inputs
  *

@@ -61,8 +61,8 @@ vector load/store whose instruction EEW differs from `vtype.SEW` (§"Finding 2")
 | `v07_control_wrong_addsub` | **control** | e64 / 2 / m1 | copy of `v01` with one wrong constant; not in the registered run |
 
 Each program configures `vsetvli` explicitly and states its VLEN/SEW assumption.
-The core's `vtype` SEW encoding is a machine assumption, not the spec's — see
-§"Finding 1".
+The `vsew` field uses the RVV 1.0 `SMALLEST_SEW` encoding (`0x00`/`0x08`/`0x10`/
+`0x18` for e8/e16/e32/e64); see §"Finding 1" for the history of that encoding.
 
 ## The hand derivations (the oracle)
 
@@ -113,13 +113,14 @@ CASE vec.selfcheck_corpus -- self-checking RVV programs on the out-of-order core
 RESULT PASS vec.selfcheck_corpus 7/7 self-checking RVV programs reached the pass trap
 ```
 
-exit 0. The same 7/7 PASS was observed on profiles **p0**, **p1** and **p3**
-(the vector engine is present in every profile because `CORE_VEC_VLEN = 128` is
-hardcoded in `mosaic_core.sv`; p2/p3 are the profiles whose *geometry* declares
-it). **p2 is the registered profile**: it is the lowest profile whose
-`config/geometry/p2.json` carries the `"vector"` block (`vlen 128`, `elen 64`,
-32 VRF banks), so the case is registered where the vector configuration is
-declared rather than merely present.
+exit 0. The same 7/7 PASS was re-observed with the spec `vsew` encoding against
+the fixed RTL on **p0**, **p1**, **p2** and **p3** (manual builds; `run_unit.py`
+runs the case only on its registered profile). The vector engine is present in
+every profile because `CORE_VEC_VLEN = 128` is hardcoded in `mosaic_core.sv`;
+p2/p3 are the profiles whose *geometry* declares it. **p2 is the registered
+profile**: it is the lowest profile whose `config/geometry/p2.json` carries the
+`"vector"` block (`vlen 128`, `elen 64`, 32 VRF banks), so the case is registered
+where the vector configuration is declared rather than merely present.
 
 The driver also requires, per program: at least one vector macro retired (so a
 run that silently took a scalar path cannot pass), zero vector traps, zero
@@ -139,7 +140,7 @@ shipping case first):
 
 ```
 baseline exit=0 RESULT PASS vec.selfcheck_corpus 7/7 self-checking RVV programs reached the pass trap
-control program sha256:  8255fe506ef8801c7895f96bb69c34c8844fa5a459e010631108a9e1c9cab3ba
+control program sha256:  b38db7e3f77f23e064d2f2c04dddf46c24d4a555d2cbfb0793cc9e89e802fca3
   exit=1 RESULT FAIL vec.selfcheck_corpus 0/1 self-checking RVV programs reached the pass trap
   first failure: CHECK FAILED: v07_control_wrong_addsub: wrote TOHOST=0x0000000000000002 (FAIL); check 1 failed at byte offset 24
 ```
@@ -147,29 +148,31 @@ control program sha256:  8255fe506ef8801c7895f96bb69c34c8844fa5a459e010631108a9e
 The named first failure (`check 1`, byte offset 24 = `op1` element 1) is exactly
 the perturbed constant, and the driver exits 1. That is what proves the
 self-checks bite rather than the programs merely not trapping. The control
-program's ELF sha256 is stable across rebuilds (`8255fe50…cab3ba`); the driver
+program's ELF sha256 is stable across rebuilds (`b38db7e3…02fca3`); the driver
 binary's hash is not (Verilator's generated sources make it build-dependent), so
 only the ELF hash is quoted as a stable identifier.
 
 ## Findings
 
-### Finding 1 — the core's `vtype` SEW encoding is pre-ratification (a machine assumption)
+### Finding 1 — the `vtype` SEW encoding was pre-ratification; fixed to RVV 1.0
 
-`rtl/core/mosaic_vec_cfg.sv` treats the `vsew` field as **log2(SEW)**
-(`vsew_ok = 3..6`, `sew = 1 << vsew`, `vlmax = 2^(log2(VLEN)+lmul-vsew)`), and
-its own unit case `rvv.vtype_layout` fixes that (`VsewValid = 3..6`,
-`sew_log2 == vsew`). RVV 1.0 encodes `vsew` as 0/1/2/3 for e8/e16/e32/e64. So:
+The delivered engine originally treated the `vsew` field as **log2(SEW)**
+(`vsew_ok = 3..6`, `sew = 1 << vsew`), which is the pre-ratification encoding:
+RVV 1.0 encodes `vsew` as 0/1/2/3 for e8/e16/e32/e64. Under that encoding a
+GAS `vsetvli rd, rs1, e32, m1` (field 2) was read as an unsupported vtype
+(`vill=1`, `vl=0`) and every following vector instruction was refused, so the
+first revision of these programs passed raw `vtypei` with the field values this
+core defined (0x18/0x20/0x28/0x30).
 
-* GAS's `vsetvli rd, rs1, e32, m1` encodes field 2 → this core reads it as an
-  **unsupported** vtype (`vill=1`, `vl=0`), after which every vector instruction
-  is refused; and
-* these programs must pass the raw `vtypei` with the field this core defines
-  (`0x18`/`0x20`/`0x28`/`0x30` for e8/e16/e32/e64).
-
-This is stated in `vec.h` and every program header. **It means the `vsetvli`
-encodings in this corpus are not RVV-1.0-conformant even though the arithmetic
-they check is** — another reason these programs are evidence of execution and
-arithmetic, not of conformance.
+That divergence is **fixed** (lane `FixVsewEncoding`): `mosaic_vec_cfg.sv` now
+accepts `vsew <= 3` and derives the width exponent as `vsew + 3`, and the
+load/store EEW comparison is adjusted so a spec-legal `e32` load still matches
+the decoder's `e32` EEW. **These programs were updated to the spec encoding** — `vsetvli` with
+`vtypei = 0x00/0x08/0x10/0x18` for e8/e16/e32/e64 — and the GAS mnemonics in
+`vec.h` now encode exactly those values. A negative-control mutant
+(`MOSAIC_VEC_MUTANT_VTYPE_SEW_UNSHIFTED`) preserves the old interpretation.
+**Re-verified against the fixed RTL: 7/7 PASS and the control still fails as
+below.** The arithmetic the programs check is unchanged by the encoding.
 
 ### Finding 2 — a vector load's EEW must equal `vtype.SEW` (documented limitation)
 
@@ -177,7 +180,7 @@ The first `v08` draft loaded its mask with `vle8.v v0, (t0)` while `vtype.SEW`
 was 32. The core refused it:
 
 ```
-instruction: vle8.v v0, (t0)      vtypei = 0x28 (SEW=32)
+instruction: vle8.v v0, (t0)      vtypei = 0x10 (SEW=32)
 observed:    illegal instruction, mcause = 2 (vec_status = 0x80000002)
 ```
 
@@ -202,9 +205,12 @@ least one program. What is *not* covered:
     `rvv.mask_prefix_masked`; and
   * `vrsub` and `vnot`, which the ALU's family table lists but the core decoder
     does not decode (so they are not advertised at the core and cannot be run).
-* **The thirteen families the ALU implements but the core does not advertise**,
-  hence unreachable and untested here: WIDE, MUL, MULW, SHIFT, NARROW, MINMAX,
-  CMP, SAT, SLIDE, GATHER, COMPRESS, REDUCE, REDWIDE.
+* **Twelve of the thirteen families this report listed as unreachable were
+  advertised afterwards** (WIDE, MUL, MULW, SHIFT, MINMAX, CMP, SAT, SLIDE,
+  GATHER, COMPRESS, REDUCE, REDWIDE) together with their decoder arms and the
+  twelve programs now in this corpus; `NARROW` remains unadvertised because the
+  delivered ALU and its unit model both truncate its `2*SEW` source. See
+  `results/reports/vector-family-advertisement.md`.
 * **Everything the ALU/decoder does not implement at all**: integer divide and
   remainder, multiply-accumulate, scaling shifts (`vssrl/vssra`), `vsmul`,
   integer extension (`vzext/vsext`), `viota`/`vid`, `vrgatherei16`, the
@@ -235,20 +241,18 @@ least one program. What is *not* covered:
 | `core.corpus_sweep`, `core.act_dut`, `rvv.descriptor_legality` | share no source with this work (no RTL, no corpus, no registry edit); this work adds only `sim/unit/tb_core_vecselfcheck.cpp`, `tests/programs/vec/`, `tools/run_vector_selfcheck_controls.py` and this report |
 | `tests/programs/src/`, `corpus.json`, `golden.json`, `tools/host_oracle.py` | unchanged |
 
-## The registry entry (for the integration lead)
+## The registry entry
 
-The case id is **`vec.selfcheck_corpus`**, the profile is **`p2`**. The entry
-below is exactly what
-`tools/run_vector_selfcheck_controls.py` builds against when the registry has no
-entry yet (it derives the same sources from `vec.mask_prefix_at_core`). Set
-`"task"` to whichever work package records this case; `V-060` is the closest
-vector verification package and is currently *not* delivered, so
-`check_records.py` stays green with it. No suite entry is needed (`run_unit.py
---all` runs every registered case).
+The case id is **`vec.selfcheck_corpus`**, the profile is **`p2`**. It is now
+registered in `tests/unit/registry.json` as **task `I-054`**, `profiles: ["p2"]`,
+`max_cycles: 500000`, with the driver `sim/unit/tb_core_vecselfcheck.cpp` and the
+`vec.mask_prefix_at_core` RTL/SV list. `python3 tools/check_records.py` reports
+101 registered cases and agrees. No suite entry is needed (`run_unit.py --all`
+runs every registered case). The entry, for reference:
 
 ```json
 "vec.selfcheck_corpus": {
-  "task": "V-060",
+  "task": "I-054",
   "top": "mosaic_core_tb",
   "rtl": [
     "rtl/core/mosaic_pkg.sv", "rtl/core/mosaic_uop_pkg.sv", "rtl/core/mosaic_alu.sv",

@@ -242,7 +242,8 @@ module mosaic_vec_restart #(
   int unsigned be;
   logic [7:0]  elem_end_c;
   always_comb begin
-    sew_l = int'(cfg_vtype_i[5:3]);
+    // cfg_vtype_i[5:3] is the RVV 1.0 vsew field (0..3); log2(SEW) = vsew + 3.
+    sew_l = int'(cfg_vtype_i[5:3]) + 3;
     be    = ((sew_l >= 3) && (sew_l <= 6) && ((1 << sew_l) <= int'(ELEN)))
                 ? (1 << sew_l) : 1;
     case (run_mode_q)

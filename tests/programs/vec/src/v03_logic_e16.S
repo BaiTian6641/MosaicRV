@@ -3,9 +3,9 @@
  * Capability: LOGIC (family 6) -- vand.vv, vor.vv, vxor.vv, vand.vx, vor.vi,
  * vxor.vi -- at SEW = 16, LMUL = m1, VLEN = 128.
  *
- * Configuration: vtypei = 0x20 (this core's encoding: vsew = 4 -> SEW = 16,
+ * Configuration: vtypei = 0x08 (RVV 1.0 SMALLEST_SEW: vsew = 1 -> SEW = 16,
  * vlmul = 0 -> m1, vta = vma = 0).  VLMAX = VLEN/SEW = 8; `vsetvli t0, x0,
- * 0x20` requests VL = VLMAX = 8.
+ * 0x08` requests VL = VLMAX = 8.
  *
  * ------------------------------------------------------------------ inputs
  *

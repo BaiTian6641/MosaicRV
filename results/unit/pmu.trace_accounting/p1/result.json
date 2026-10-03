@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "case": "pmu.trace_accounting",
+  "verdict": "PASS",
+  "detail": "counters reconcile with the hand trace",
+  "seed": 1,
+  "max_cycles": 400000,
+  "checks": 48,
+  "failures": 0,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-03T01:57:11Z",
+  "first_mismatch": ""
+}

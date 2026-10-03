@@ -643,7 +643,20 @@ module mosaic_multihart #(
       .o_fab_bp_captured_ctr(),
       .o_fab_bp_hit_ctr     (),
       .o_fab_bp_unauth_ctr  (),
-      .o_fab_bp_flush_ctr   ()
+      .o_fab_bp_flush_ctr   (),
+      // I-076 PMU counters are per-core implementation observability: this
+      // wrapper does not surface them, and the single-core testbench taps them
+      // (CASE=pmu.trace_accounting). Left explicitly unconnected so the pins are
+      // named and lint cannot report PINMISSING.
+      .o_pmu_uop_insert_ctr     (),
+      .o_pmu_uop_issue_ctr      (),
+      .o_pmu_uop_kill_ctr       (),
+      .o_pmu_dcache_txn_ctr     (),
+      .o_pmu_dcache_hit_ctr     (),
+      .o_pmu_dcache_miss_ctr    (),
+      .o_pmu_dcache_refill_ctr  (),
+      .o_pmu_dcache_wb_ctr      (),
+      .o_pmu_icache_miss_ctr    ()
   );
 
   assign h0_redirect_valid = h0_redirect_valid_w;
@@ -976,7 +989,20 @@ module mosaic_multihart #(
       .o_fab_bp_captured_ctr(),
       .o_fab_bp_hit_ctr     (),
       .o_fab_bp_unauth_ctr  (),
-      .o_fab_bp_flush_ctr   ()
+      .o_fab_bp_flush_ctr   (),
+      // I-076 PMU counters are per-core implementation observability: this
+      // wrapper does not surface them, and the single-core testbench taps them
+      // (CASE=pmu.trace_accounting). Left explicitly unconnected so the pins are
+      // named and lint cannot report PINMISSING.
+      .o_pmu_uop_insert_ctr     (),
+      .o_pmu_uop_issue_ctr      (),
+      .o_pmu_uop_kill_ctr       (),
+      .o_pmu_dcache_txn_ctr     (),
+      .o_pmu_dcache_hit_ctr     (),
+      .o_pmu_dcache_miss_ctr    (),
+      .o_pmu_dcache_refill_ctr  (),
+      .o_pmu_dcache_wb_ctr      (),
+      .o_pmu_icache_miss_ctr    ()
   );
 
   assign h1_redirect_valid = h1_redirect_valid_w;

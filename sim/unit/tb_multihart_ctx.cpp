@@ -400,7 +400,7 @@ Program BuildProgram() {
     e.W(Sd(10, 5, 0));                                // store the FP result
     // ------------------------------------------------- vector cell (M-mode)
     e.W(Add(5, 9, 9)); e.W(Addi(5, 5, 1));            // avl = 2*hart + 1
-    e.W(Vsetvli(6, 5, 0x28));                         // e32, m1
+    e.W(Vsetvli(6, 5, 0x10));                         // e32, m1
     e.Li(7, kVecABase); e.W(Slli(6, 9, 12)); e.W(Add(7, 7, 6));
     e.W(Vle32(1, 7));                                 // v1 = source
     e.W(VaddVv(2, 1, 1));                             // v2 = v1 + v1

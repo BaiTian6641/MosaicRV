@@ -505,6 +505,21 @@ module mosaic_core_tb (
     output logic [31:0] o_dbg_recover_ctr_o,
     output logic [31:0] o_dbg_ins_ctr_o,
 
+    // ------------------------------------------------------------------ PMU
+    // I-076. The core's per-core event counters, flattened for
+    // CASE=pmu.trace_accounting. They are implementation observability only: the
+    // case labels each one debug-only, and none of them is readable through a
+    // CSR.
+    output logic [31:0] o_pmu_uop_insert_ctr_o,
+    output logic [31:0] o_pmu_uop_issue_ctr_o,
+    output logic [31:0] o_pmu_uop_kill_ctr_o,
+    output logic [31:0] o_pmu_dcache_txn_ctr_o,
+    output logic [31:0] o_pmu_dcache_hit_ctr_o,
+    output logic [31:0] o_pmu_dcache_miss_ctr_o,
+    output logic [31:0] o_pmu_dcache_refill_ctr_o,
+    output logic [31:0] o_pmu_dcache_wb_ctr_o,
+    output logic [31:0] o_pmu_icache_miss_ctr_o,
+
     // ---------------------------------------------------------- fabric (I-090)
     output logic [4*32-1:0] o_fab_unit_issues_o,
     output logic [6*32-1:0] o_fab_reason_ctr_o,
@@ -1012,6 +1027,16 @@ module mosaic_core_tb (
       .o_dbg_fetch_req_ctr (o_dbg_fetch_req_ctr_o),
       .o_dbg_recover_ctr (o_dbg_recover_ctr_o),
       .o_dbg_ins_ctr    (o_dbg_ins_ctr_o),
+      // I-076 PMU counters, flattened for CASE=pmu.trace_accounting.
+      .o_pmu_uop_insert_ctr    (o_pmu_uop_insert_ctr_o),
+      .o_pmu_uop_issue_ctr     (o_pmu_uop_issue_ctr_o),
+      .o_pmu_uop_kill_ctr      (o_pmu_uop_kill_ctr_o),
+      .o_pmu_dcache_txn_ctr    (o_pmu_dcache_txn_ctr_o),
+      .o_pmu_dcache_hit_ctr    (o_pmu_dcache_hit_ctr_o),
+      .o_pmu_dcache_miss_ctr   (o_pmu_dcache_miss_ctr_o),
+      .o_pmu_dcache_refill_ctr (o_pmu_dcache_refill_ctr_o),
+      .o_pmu_dcache_wb_ctr     (o_pmu_dcache_wb_ctr_o),
+      .o_pmu_icache_miss_ctr   (o_pmu_icache_miss_ctr_o),
       .o_dbg_spec_map   (o_dbg_spec_map_o),
       .o_dbg_gen_valid  (o_dbg_gen_valid_o),
       .o_dbg_wb_done    (o_dbg_wb_done_o),

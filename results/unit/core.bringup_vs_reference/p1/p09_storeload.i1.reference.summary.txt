@@ -1,0 +1,11 @@
+outcome tohost
+events 71072
+steps 71072
+cycles 248742
+minstret 71072
+tohost 0000000000000001
+uart_writes 0
+sig0 deadbeefcafebabe
+sig1 ffffffffcafebabe
+sig2 0000000000004500
+sig3 0000000000000000

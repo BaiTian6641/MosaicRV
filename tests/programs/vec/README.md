@@ -34,13 +34,18 @@ derivation against an independent model of RVV.
 ## The machine these programs target
 
 The delivered vector engine is the one `rtl/core/mosaic_core.sv` wires today.
-Its capability word `VEC_ALU_CAPS` advertises **four** families —
-`ADDSUB` (0), `LOGIC` (6), `MASKLOG` (10), `MASKPFX` (11) — and the vector
-load/store unit advertises unit-stride only (`VEC_LSU_CAPS = 8'b0000_0001`).
-Only those are exercised here. The ALU *implements* seventeen families, but a
-family the core does not advertise is refused at execution, so a program for one
-would trap and a trapping program is not evidence. See the report's
-"not covered" list.
+Its capability word `VEC_ALU_CAPS` advertises **sixteen** of the seventeen ALU
+families — `ADDSUB` (0), `WIDE` (1), `MUL` (2), `MULW` (3), `SHIFT` (4),
+`LOGIC` (6), `MINMAX` (7), `CMP` (8), `SAT` (9), `MASKLOG` (10), `MASKPFX` (11),
+`SLIDE` (12), `GATHER` (13), `COMPRESS` (14), `REDUCE` (15) and `REDWIDE` (16)
+— and the vector load/store unit advertises unit-stride only
+(`VEC_LSU_CAPS = 8'b0000_0001`). Only those are exercised here. The seventeenth,
+`NARROW` (5), is deliberately **not** advertised: the delivered ALU and its
+unit-level model both truncate the narrowing source to SEW, so the family's
+defining `2*SEW` behavior is not proven (see
+`results/reports/vector-family-advertisement.md`). A family the core does not
+advertise is refused at execution, so a program for one would trap and a
+trapping program is not evidence.
 
 * VLEN = 128 bits, ELEN = 64 bits (the value `CORE_VEC_VLEN` hardcodes and
   `config/geometry/p2.json` declares).
@@ -50,23 +55,19 @@ would trap and a trapping program is not evidence. See the report's
   mismatch as an illegal instruction. A mask register is therefore loaded under
   SEW = 8 (the packed 8-bit mask layout) and the `vsetvli` is changed afterwards.
 
-### The vtype SEW encoding (a machine assumption, not the spec's)
+### The vtype SEW encoding
 
-This core's `vsew` field value is **log2(SEW)**, not RVV 1.0's `SMALLEST_SEW`
-code. `rtl/core/mosaic_vec_cfg.sv` accepts `vsew` in 3..6 and computes
-`sew = 1 << vsew`; its own unit case `rvv.vtype_layout` fixes exactly that
-(`VsewValid = 3..6`, `sew_log2 == vsew`). Consequently:
+The `vsew` field bits [5:3] use the RVV 1.0 `SMALLEST_SEW` encoding: 0/1/2/3 for
+e8/e16/e32/e64, so a plain GAS `vsetvli rd, rs1, e32, m1` encodes exactly the
+value the programs pass. The programs still pass the raw 11-bit `vtypei` so the
+assumption is explicit:
 
-* the GAS mnemonics `vsetvli rd, rs1, e8/e16/e32, m1` encode field values
-  0/1/2, which this core treats as an **unsupported** vtype (`vill = 1`,
-  `vl = 0`), and every following vector instruction is refused; and
-* the programs here pass the raw 11-bit `vtypei` with the value this core
-  defines: `0x18` (e8), `0x20` (e16), `0x28` (e32), `0x30` (e64), all with
-  `vlmul = m1`, `vta = vma = 0`.
+* `0x00` (e8), `0x08` (e16), `0x10` (e32), `0x18` (e64), all with `vlmul = m1`,
+  `vta = vma = 0`.
 
-This is called out in `vec.h`, in every program header, and in the report. It
-is a divergence from RVV 1.0 and it means the `vsetvli` encodings in these
-programs are **not** spec-conformant even though the arithmetic they check is.
+(An earlier revision of the core encoded the field as log2(SEW), 3..6; that was
+fixed to the ratified encoding, and these programs were updated to match. See
+`results/reports/vector-selfcheck-corpus.md` for the history.)
 
 ## The programs
 
@@ -79,6 +80,18 @@ programs are **not** spec-conformant even though the arithmetic they check is.
 | `v05_maskpfx_e8` | MASKPFX: `vmsbf.m`, `vmsif.m`, `vmsof.m` | e8 / 16 | eight source patterns incl. first set at 0/7/8/15 and the all-zero row |
 | `v06_loadstore` | vector load/store, unit-stride | e8/e16/e32/e64 | byte-exact round trip at every wired width, plus a masked store |
 | `v08_masked_addsub_e32` | ADDSUB masked (`v0.t`) | e32 / 4 | masked-off elements undisturbed (`vma = 0`) under a seeded destination |
+| `v10_wide_e32` | WIDE: `vwaddu.vv`, `vwadd.vv`, `vwsubu.vx`, `vwsub.vx` | e32 / 4, dst e64 | widening add/sub, signed and unsigned, `.vv` and `.vx` |
+| `v11_mul_e32` | MUL: `vmul.vv`, `vmulh.vv`, `vmulhu.vv`, `vmulhsu.vx` | e32 / 4 | low/high-half products, all four signednesses |
+| `v12_mulw_e16` | MULW: `vwmulu.vv`, `vwmulsu.vv`, `vwmul.vv` | e16 / 8, dst e32 | widening products, all three signednesses |
+| `v13_shift_e32` | SHIFT: `vsll.vv`, `vsrl.vv`, `vsra.vv`, `vsll.vx` | e32 / 4 | logical and arithmetic shifts, vector and scalar amounts |
+| `v15_minmax_e32` | MINMAX: `vminu/vmin/vmaxu/vmax.vv` | e32 / 4 | signed and unsigned min/max at every element |
+| `v16_cmp_e32` | CMP: all eight `.vv` compares | e32 / 4 | each mask, stored and compared byte-exact |
+| `v17_sat_e32` | SAT: `vsaddu/vsadd/vssubu/vssub/vaaddu/vaadd/vasubu/vasub.vv` | e32 / 4, vxrm = rdn | saturation and the `2*SEW` averaging forms |
+| `v18_slide_e32` | SLIDE: `vslideup.vx`, `vslidedown.vx` | e32 / 4 | both offsets, including the unwritten `vslideup` prefix |
+| `v19_gather_e32` | GATHER: `vrgather.vv` | e32 / 4 | in-range reads and an out-of-range index yielding 0 |
+| `v20_compress_e8` | COMPRESS: `vcompress.vm` | e8 / 16 | a mask that packs elements across two mask bytes |
+| `v21_reduce_e32` | REDUCE: all eight `.vs` reductions | e32 / 4 | each fold from `vs1[0]`, result in `vd[0]` |
+| `v22_redwide_e16` | REDWIDE: `vwredsumu.vs`, `vwredsum.vs` | e16 / 8 | widening reduction, signed and unsigned |
 | `v07_control_wrong_addsub` | **negative control** | e64 / 2 | a copy of `v01` with one wrong expected constant; not part of the registered run |
 
 `v07` is built but is not in the Makefile's `PROGRAMS` list nor in the case
