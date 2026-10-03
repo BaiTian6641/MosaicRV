@@ -2946,3 +2946,62 @@ program corpus with golden signatures. That is the honest form of "blocked": not
 "its declared inputs are absent, and here is exactly which ones". It is also the item that would turn
 the lane broker's verified protocol into a measured aggregation benefit, so it is the largest remaining
 piece of the project's actual research claim.
+
+---
+
+## 2026-10-02 — three packages delivered, the first capability flipped, and two blockers that are decisions
+
+**Zve64d is advertisable, and it is the first capability this stretch has unlocked.** `V-062`'s
+coalescer campaign is delivered: the card's enumeration is covered where the port can express it (same
+line different bytes merges with each consumer answered its own word; duplicate bytes merge and are
+answered once; **a cross-line request sharing set and offset is NOT merged** — two entries, two reads;
+cross page is NOT merged; MMIO and AMO bypass the cache and are never merged, with a cacheable
+non-atomic control proving that clause is not vacuous; a coalesced fault yields **per-consumer** fault
+answers with no install and a successful retry; cancelling one consumer leaves the survivor answered
+once). Four controls, each from a deleted build directory, each exit 1 with a named first failure and a
+hash distinct from the shipping binary. `check_coverage` now lists Zve64d, and `gen_manifest --profile
+p2` publishes `rv64acim_zaamo_zalrsc_zicbom_zicbop_zicsr_zifencei_zihpm_zve64d` — an ISA string that the
+recorded evidence implies rather than one someone typed.
+
+**`V-061` delivered the LLB campaign, with its gaps named rather than checked.** Every hit is compared
+word-for-word against an independent memory oracle and every resident entry is checked at rest; five
+controls each exit 1 with a distinct hash and a named first failure (`STORE_NO_INVALIDATE`,
+`MMIO_HIT`, `RACE_STALE_HIT`, `ASID_SWITCH_NO_INVALIDATE`, `VA_KEYED`). **Lane reassignment and
+owner-domain transfer are not tested because they cannot be**: `mosaic_llb.sv` has no owner, lane or
+domain field, the lane broker does not connect to it, and the LLB is **not instantiated in
+`mosaic_core.sv`** — so there is no mechanism to drive or observe a leaked owner's data, and no check
+was invented to cover it. The case's RESULT line prints `checks=0` because `rep_->checks()` is not the
+counter that harness increments (the pre-existing LLB case prints the same), so the ledger records that
+as a reporting defect and quotes the coverage requirements that actually prove the stimulus arrived,
+not the misleading zero.
+
+**The mask-prefix gap is closed, and it needed two gates, not one.** The record said "the unit supports
+what the machine will not dispatch". Fixing the capability word was not enough: the core's vector
+decode had **no OPMVV arm at all**, so the mask-register instructions could not even be decoded. Both
+are now in — `VEC_ALU_CAPS` carries MASKLOG and MASKPFX, and an OPMVV arm decodes them — with MASKPFX
+justified by the delivered unit evidence (1115 + 2870 + 79 checks) and MASKLOG by **reading**
+`rvv.integer_mask_permute`'s stimulus (it drives all eight mask-logical ops against the host oracle)
+rather than trusting the case's name. The new case `vec.mask_prefix_at_core` passes at p0 and p1 under
+my own run: 112 checks over four phases, with the `vstart` rule tested at the core level — an illegal
+vector instruction with `vstart=2` traps with `mcause=2` at its own PC, the destination mask register
+unchanged, no element fault, and the `vstart` CSR left unmodified, which is the V-spec rule for
+illegal-instruction exceptions. Two controls bite at both profiles.
+
+**Two blockers are decisions rather than unfinished work, and they need the human.**
+
+**V-063 (MEF QoS no-starvation) cannot be delivered as written.** Its card verifies the three-layer
+address/transaction/criticality scheduler under mixed scalar/vector/prefetch/hot-bank traffic, with an
+age-fairness contract. Measured: `rtl/core/mosaic_mem_qos.sv` exists and is unit-verified with four
+mutants, but **it is not instantiated in `mosaic_core.sv`** (zero references) and the core's memory path
+has no criticality or age ports. The earlier record says that omission was *deliberate* — composing the
+QoS window model with the hand-written single-outstanding ownership mux "would replace the ownership
+model … and re-derive response routing and PTW priority — a second service model, which the card
+forbids". So V-063 is blocked by an **architectural decision**, not by neglect: either the ownership
+model is replaced and the card becomes deliverable, or the card is rewritten to verify the scheduler as
+a unit plus the ownership model as it exists. That call is the architect's, not mine.
+
+**V-060 (lane partition) cannot be delivered as written either**, for a different reason: its declared
+inputs do not exist. There is **no lane-count axis in any geometry profile** (lanes are an attribution
+the broker hands out, not parallel datapaths) and **no vector program in the corpus** (`tests/programs/src/`
+is scalar, p01..p13). Both are prerequisites that the project has never built, and the second is also
+the only way to make "one×8 vs two×4 vs four×2" measurable at all. F and D wait on V-060 alone now.
