@@ -3040,3 +3040,48 @@ all handled in `mosaic_csr.sv`, and Zihpm is already advertised), so what the pa
 **trace accounting**: every counter reconciled against a hand-computable derivation, with no
 under-counting and no double-counting, plus the explicit statement of which counters are CSR-visible
 and which are debug-only and therefore not reference-comparable.
+
+---
+
+## 2026-10-02 — the first real RVV programs, and the conformance defect they found on day one
+
+**Seven self-checking vector programs now run on the core** (`tests/programs/vec/`, its own directory
+because they cannot be oracle-recorded — `host_oracle.py` is scalar-only, so their expected values are
+**hand-derived from the specification and checked by the program itself**, with the derivation in a
+comment block a reader can re-derive without running anything). The case reaches the pass trap on 7/7
+programs at p2, and the control — one program with a deliberately wrong expected constant — exits 1 with
+`check 1 failed at byte offset 24`, which is what proves the self-checks bite rather than the programs
+merely not trapping. **These are evidence of execution and arithmetic, not of conformance**, and the
+report says so: the oracle here is a human derivation, and a reference-model comparison still does not
+exist.
+
+**And writing real software immediately found two divergences from RVV 1.0, both verified by me in the
+RTL rather than taken from the lane's word.**
+
+**1. `vtype.vsew` is encoded as log2(SEW), where the specification defines 0..3 — and `vtype` is
+architecturally visible.** `rtl/core/mosaic_vec_cfg.sv`: `vsew_ok(vsew) = (vsew >= 3) && (vsew <= 6)`,
+and `vlmax_of` computes `2^(VLEN_LOG2 + lmul_exp - vsew)`, which is only correct if the field *is* the
+exponent. The **position** (bits 5:3) is right and the module's header says so; the **value** stored is
+not, which makes the header's own claim — "a program that reads `vtype` back and decodes `vsew` at 5:3
+computes the SEW the specification defines" — false in the way that matters. The consequences are
+architectural, not cosmetic: `vsetvli e32,m1`, the encoding **every compiler emits**, sets `vill` and
+refuses every following vector instruction, so a toolchain-built RVV binary cannot run at all; and a
+runtime library that reads `vtype` to derive VLMAX gets a number the specification reserves. This is the
+fourth time this project has found a rule that was true for the wrong reason — the dispatch refusal that
+was accidentally right at queue depth 2, the 256-byte L1 the configuration never matched, the retire
+lane only two-wide allocation could reach — and the first one found by **writing software** rather than
+by reading RTL. The fix is dispatched: the field stores the spec value, every reader is being classified
+into "wanted the width" versus "wanted the encoding", `config/csr/vector.json` and any case that pinned
+the old encoding move with it, and a control restores the wrong encoding to prove the new case catches it.
+
+**2. A vector load's EEW must equal `vtype.SEW`, which RVV 1.0 does not require.** `mosaic_core.sv`
+around line 4486 compares the packet's `eew_sew` against `vec_vtype[5:3]`, so loading a mask with
+`vle8.v` under SEW=32 — legal, and common — traps with `mcause=2`. The fix lane is asked to decide
+whether this is the *same* confusion seen from the other side or a separate defect, and to record it as
+its own finding with its own reproduction if it is separate, rather than widening its package silently.
+
+**Both findings share a shape worth naming**: each is invisible to a unit test that drives the module's
+ports with the encoding the module already uses, and visible immediately to a program written against
+the *specification*. That is the argument for the self-checking corpus existing at all, and it is why
+the corpus programs are hand-derived rather than DUT-derived: a DUT-derived expectation would have
+agreed with the DUT about `vsew` and found nothing.
