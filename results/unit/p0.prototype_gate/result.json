@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "case": "p0.prototype_gate",
+  "verdict": "PASS",
+  "detail": "programs=4 both_clusters_alive=cycle 11 both_clusters_iq=cycle 447926 remote_route=program position 1 (pc 0x0000000080000004) granted at cycle 9: fixed cluster 1 -> dynamic cluster 0 wb_collision=cycle 1142 ooo_completion=cycle 1139 in_order_retires=284449",
+  "seed": 1,
+  "max_cycles": 4000000,
+  "checks": 53,
+  "failures": 0,
+  "image": "",
+  "expect": "",
+  "tool": "Verilator 5.052 2026-09-05",
+  "timestamp": "2026-10-03T02:27:20Z",
+  "first_mismatch": ""
+}

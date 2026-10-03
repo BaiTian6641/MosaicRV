@@ -94,9 +94,10 @@ struct ProgramChoice {
 };
 
 const ProgramChoice kPrograms[] = {
-    {"p02_branch", 0},
+    {"p01_addsub", 0},
+    {"p06_shiftlogic", 0},
     {"p11_bigmuldiv", 0},
-    {"p03_loadstore", 0},
+    {"p12_memwalk", 0},
 };
 
 struct Failure {
@@ -240,7 +241,6 @@ uint64_t PayloadLane(const Wide& wide, uint32_t lane) {
   return static_cast<uint64_t>(wide[lane * 2]) |
          (static_cast<uint64_t>(wide[lane * 2 + 1]) << 32);
 }
-inline uint64_t PayloadLane(uint64_t value, uint32_t /*lane*/) { return value; }
 
 uint64_t ScalarField(uint64_t value, uint32_t lane, uint32_t width) {
   if (width == 0) return 0;
@@ -392,6 +392,7 @@ struct RetireRec {
   uint64_t trap_cause = 0;
   uint64_t trap_tval = 0;
   int cluster = -1;   // the cluster the DUT granted this instruction's uop to
+  uint64_t grant_cycle = 0;  // the cycle that uop was granted (trace location)
 
   bool operator==(const RetireRec& o) const {
     return seq == o.seq && pc == o.pc && insn == o.insn && len == o.len &&
@@ -414,7 +415,8 @@ struct Observation {
 };
 
 struct TraceConditions {
-  Observation both_clusters_alive;
+  Observation both_clusters_alive;   // both clusters hold un-retired in-flight work
+  Observation both_clusters_iq;      // both issue queues hold live uops at once
   Observation remote_route;
   Observation wb_collision;
   Observation ooo_completion;
@@ -457,8 +459,6 @@ struct RunRecord {
   std::vector<int> cluster_by_pos;     // cluster of the uop at each program position
   TraceConditions trace;
 
-  uint64_t first_route_cycle = 0;      // cycle the first differing route was granted
-  std::string first_route_detail;
 };
 
 // ============================================================================
@@ -500,9 +500,11 @@ class Runner {
     last_progress_ = 0;
     retires_.clear();
     fab_dyn_ = fab_dyn;
-    for (int i = 0; i < g_.rob_entries; ++i) cluster_by_index_[i] = -1;
+    cluster_by_index_.assign(static_cast<size_t>(g_.rob_entries), -1);
+    grant_cycle_.assign(static_cast<size_t>(g_.rob_entries), 0);
+    inflight_[0] = 0;
+    inflight_[1] = 0;
     trace_ = TraceConditions{};
-    first_route_cycle_ = 0;
     tap_ = tap;
 
     dut_->clk = 0;
@@ -545,8 +547,6 @@ class Runner {
     record.invariant_first = invariant_first_;
     record.retires = retires_;
     record.trace = trace_;
-    record.first_route_cycle = first_route_cycle_;
-    record.first_route_detail = first_route_detail_;
     record.wb_collision_ctr = dut_->o_wb_collision_o;
     record.pmu_dcache_txn = dut_->o_pmu_dcache_txn_ctr_o;
     record.pmu_dcache_hit = dut_->o_pmu_dcache_hit_ctr_o;
@@ -601,14 +601,23 @@ class Runner {
     const uint32_t valid = static_cast<uint32_t>(dut_->ev_valid_o) & mask;
 
     // ------------------------------------------------------- trace condition 1
-    // Both clusters held live work at the same instant: the two issue queues'
-    // own occupancy counts are non-zero in one cycle.
-    if (!trace_.both_clusters_alive.seen && dut_->o_c0_count_o > 0 &&
-        dut_->o_c1_count_o > 0) {
+    // Both clusters held live work at the same instant. Two observations, both
+    // reported: the strong one is that each cluster has at least one granted,
+    // un-retired uop in flight (the "alive" the card means); the secondary one
+    // is the two issue queues' own occupancy counts being non-zero in one cycle.
+    if (!trace_.both_clusters_alive.seen && inflight_[0] > 0 && inflight_[1] > 0) {
       trace_.both_clusters_alive.seen = true;
       trace_.both_clusters_alive.cycle = cycles_;
       trace_.both_clusters_alive.event = retires_.size();
-      trace_.both_clusters_alive.detail =
+      trace_.both_clusters_alive.detail = "in flight c0=" + Dec(inflight_[0]) +
+                                          " c1=" + Dec(inflight_[1]);
+    }
+    if (!trace_.both_clusters_iq.seen && dut_->o_c0_count_o > 0 &&
+        dut_->o_c1_count_o > 0) {
+      trace_.both_clusters_iq.seen = true;
+      trace_.both_clusters_iq.cycle = cycles_;
+      trace_.both_clusters_iq.event = retires_.size();
+      trace_.both_clusters_iq.detail =
           "c0_occ=" + Dec(dut_->o_c0_count_o) + " c1_occ=" + Dec(dut_->o_c1_count_o);
     }
 
@@ -642,11 +651,19 @@ class Runner {
     // cleared at retire is unambiguous.
     if (dut_->o_c0_grant_valid_o != 0) {
       const uint64_t index = GrantIndex(dut_->o_c0_grant_uop_o);
-      if (index < g_.rob_entries) cluster_by_index_[index] = 0;
+      if (index < g_.rob_entries) {
+        cluster_by_index_[index] = 0;
+        grant_cycle_[index] = cycles_;
+      }
+      inflight_[0]++;
     }
     if (dut_->o_c1_grant_valid_o != 0) {
       const uint64_t index = GrantIndex(dut_->o_c1_grant_uop_o);
-      if (index < g_.rob_entries) cluster_by_index_[index] = 1;
+      if (index < g_.rob_entries) {
+        cluster_by_index_[index] = 1;
+        grant_cycle_[index] = cycles_;
+      }
+      inflight_[1]++;
     }
 
     // --------------------------------------------------------- retire stream
@@ -676,8 +693,10 @@ class Runner {
         const uint64_t index = (static_cast<uint64_t>(dut_->o_dbg_head_index_o) + lane) %
                                g_.rob_entries;
         r.cluster = cluster_by_index_[index];
+        r.grant_cycle = grant_cycle_[index];
         cluster_by_index_[index] = -1;
       }
+      if (r.cluster >= 0) inflight_[r.cluster]--;
       retires_.push_back(r);
       if (tap_ != nullptr) {
         mosaic::RetireEvent ev;
@@ -704,9 +723,10 @@ class Runner {
     // publishes in program order; a reordered retirement would break it.
     if (!retires_.empty()) {
       const uint64_t n = retires_.size();
-      if (n >= 2 && retires_[n - 1].seq <= retires_[n - 2].seq) {
-        Note("retire sequence did not advance in program order at event " +
-             Dec(n - 1) + " (seq " + Dec(retires_[n - 2].seq) + " -> " +
+      const uint64_t seq_mask = (UINT64_C(1) << g_.seq_w) - 1;
+      if (n >= 2 && retires_[n - 1].seq != ((retires_[n - 2].seq + 1) & seq_mask)) {
+        Note("retire sequence did not advance by one at event " + Dec(n - 1) +
+             " (seq " + Dec(retires_[n - 2].seq) + " -> " +
              Dec(retires_[n - 1].seq) + ")");
       }
     }
@@ -855,9 +875,9 @@ class Runner {
   std::string invariant_first_;
   std::vector<RetireRec> retires_;
   std::vector<int> cluster_by_index_;
+  std::vector<uint64_t> grant_cycle_;
+  int inflight_[2] = {0, 0};
   TraceConditions trace_;
-  uint64_t first_route_cycle_ = 0;
-  std::string first_route_detail_;
 };
 
 // ============================================================================
@@ -960,11 +980,8 @@ int main(int argc, char** argv) {
     // every configuration; the dynamic configuration is the one the conditions
     // are asserted on.
     TraceConditions gate;
-    uint64_t remote_route_cycle = 0;
-    std::string remote_route_detail;
     std::string remote_route_program;
     uint64_t remote_route_pos = 0;
-    uint64_t gate_ooo_pos = 0, gate_ooo_head = 0;
 
     for (const ProgramChoice& choice : kPrograms) {
       const std::string prog = choice.program;
@@ -985,6 +1002,16 @@ int main(int argc, char** argv) {
                                    max_cycles, nullptr);
       RunRecord dyn = runner.Run(image, prog, choice.input, true,
                                  max_cycles, &tap);
+      // Save the dynamic retire event stream immediately, before any check can
+      // abort the run: the injected-fault replay compares these files, and an
+      // injected build that fails a check must still leave its trace on disk.
+      if (!options.out_dir.empty()) {
+        std::string save_detail;
+        const std::string path = options.out_dir + "/events." + prog + ".txt";
+        if (!tap.Save(path, &save_detail)) {
+          Fail("setup", "cannot save the event stream: " + save_detail);
+        }
+      }
 
       std::printf("  %-14s in%d fixed(cycles=%llu c0/c1 alu=%u/%u br=%u/%u md=%u) "
                   "dyn(cycles=%llu alu=%u/%u br=%u/%u md=%u grants=%u/%u/%u/%u "
@@ -1047,6 +1074,10 @@ int main(int argc, char** argv) {
       // ---- the invariants ---------------------------------------------------
       for (const RunRecord* r : {&fixed, &dyn}) {
         const std::string label = r->fab_dyn ? "dynamic" : "fixed";
+        if (r->invariant_violations != 0) {
+          std::printf("    %s invariant first (%s): %s\n", label.c_str(), prog.c_str(),
+                      r->invariant_first.c_str());
+        }
         reporter.Check(r->invariant_violations == 0,
                        label + " configuration (" + prog +
                            "): the machine's invariants hold every cycle");
@@ -1058,28 +1089,55 @@ int main(int argc, char** argv) {
                            "): the program's own exit protocol declares success");
       }
 
+      // The fixed baseline is a two-cluster machine too: a mutant that pins every
+      // macro to cluster 0 (the I-023 fail mode) must not pass this gate. The
+      // dynamic steering would route around it in the dynamic run, so the fixed
+      // run is where the two-cluster property is asserted.
+      reporter.Check(fixed.trace.both_clusters_alive.seen,
+                     "two clusters were alive simultaneously (fixed baseline, " + prog +
+                         "): both clusters held un-retired work" +
+                         (fixed.trace.both_clusters_alive.seen
+                              ? " -- first at cycle " +
+                                    Dec(fixed.trace.both_clusters_alive.cycle)
+                              : " -- never"));
+
       // ---- trace condition 5: in-order retirement within a hart -------------
-      // Checked on the dynamic run of every program: the per-hart sequence is
-      // strictly increasing across the whole stream and starts at zero.
+      // The retire port's per-hart sequence is assigned in retirement order and
+      // its field is truncated to the contract width, so the k-th event must
+      // carry seq == k (mod 2^seq_w). A dropped, duplicated or reordered retire
+      // event breaks the +1 chain; the architectural order itself is separately
+      // checked by the oracle signature above.
+      const uint64_t seq_mod = (UINT64_C(1) << geom.seq_w) - 1;
       bool in_order = !dyn.retires.empty();
+      std::string in_order_why;
       for (size_t i = 0; i < dyn.retires.size(); ++i) {
-        if (dyn.retires[i].seq != i) { in_order = false; break; }
+        if (dyn.retires[i].seq != (i & seq_mod)) {
+          in_order = false;
+          in_order_why = "event " + Dec(i) + " carried seq " +
+                         Dec(dyn.retires[i].seq);
+          break;
+        }
       }
       gate.in_order = gate.in_order || in_order;
       gate.retire_events += dyn.retires.size();
       if (in_order) {
         gate.in_order_detail = prog + ": " + Dec(dyn.retires.size()) +
-                               " events, seq == program position, strictly increasing";
+                               " events, seq == event index mod " + Dec(seq_mod + 1);
       }
       reporter.Check(in_order,
                      "retirement stayed in order within a hart (" + prog +
-                         ", dynamic): the per-hart sequence is program order for all " +
-                         Dec(dyn.retires.size()) + " events");
+                         ", dynamic): the per-hart sequence advances by one per event for "
+                         "all " + Dec(dyn.retires.size()) + " events" +
+                         (in_order_why.empty() ? "" : " -- " + in_order_why));
 
       // ---- the dynamic dual-cluster path actually occurred ------------------
       if (!gate.both_clusters_alive.seen && dyn.trace.both_clusters_alive.seen) {
         gate.both_clusters_alive = dyn.trace.both_clusters_alive;
         gate.both_clusters_alive.detail += " (" + prog + ")";
+      }
+      if (!gate.both_clusters_iq.seen && dyn.trace.both_clusters_iq.seen) {
+        gate.both_clusters_iq = dyn.trace.both_clusters_iq;
+        gate.both_clusters_iq.detail += " (" + prog + ")";
       }
       if (!gate.wb_collision.seen && dyn.trace.wb_collision.seen) {
         gate.wb_collision = dyn.trace.wb_collision;
@@ -1088,8 +1146,6 @@ int main(int argc, char** argv) {
       if (!gate.ooo_completion.seen && dyn.trace.ooo_completion.seen) {
         gate.ooo_completion = dyn.trace.ooo_completion;
         gate.ooo_completion.detail += " (" + prog + ")";
-        gate_ooo_pos = dyn.trace.ooo_completion.event;
-        gate_ooo_head = dyn.trace.ooo_completion.event;
       }
 
       // A remote route: a program position the dynamic steering executed in a
@@ -1101,13 +1157,12 @@ int main(int argc, char** argv) {
           const int dc = dyn.cluster_by_pos[p];
           if (fc >= 0 && dc >= 0 && fc != dc) {
             gate.remote_route.seen = true;
-            gate.remote_route.cycle = dyn.first_route_cycle;
+            gate.remote_route.cycle = dyn.retires[p].grant_cycle;
             gate.remote_route.event = p;
             gate.remote_route.detail = "program position " + Dec(p) + " (pc " +
-                                       U64(dyn.retires[p].pc) + "): fixed cluster " +
+                                       U64(dyn.retires[p].pc) + ") granted at cycle " +
+                                       Dec(dyn.retires[p].grant_cycle) + ": fixed cluster " +
                                        Dec(fc) + " -> dynamic cluster " + Dec(dc);
-            remote_route_cycle = dyn.first_route_cycle;
-            remote_route_detail = gate.remote_route.detail;
             remote_route_program = prog;
             remote_route_pos = p;
             break;
@@ -1131,15 +1186,6 @@ int main(int argc, char** argv) {
       reporter.Check(changed,
                      "the dynamic p0 configuration changed something measurable (" +
                          prog + ")");
-
-      // Save the dynamic retire event stream for the replay record.
-      if (!options.out_dir.empty()) {
-        std::string save_detail;
-        const std::string path = options.out_dir + "/events." + prog + ".txt";
-        if (!tap.Save(path, &save_detail)) {
-          Fail("setup", "cannot save the event stream: " + save_detail);
-        }
-      }
     }
 
     // ---- trace condition 2: a remote route --------------------------------
@@ -1181,32 +1227,51 @@ int main(int argc, char** argv) {
                                   Dec(gate.ooo_completion.cycle) + ", " +
                                   gate.ooo_completion.detail
                             : std::string(" -- never")));
-    (void)gate_ooo_pos;
-    (void)gate_ooo_head;
-    (void)remote_route_cycle;
-    (void)remote_route_detail;
 
     // ---- trace condition 5: in-order retirement within a hart --------------
     reporter.Check(gate.in_order,
                    "retirement stayed in order within a hart across the gate (" +
                        gate.in_order_detail + ")");
 
-    // ---- the p0 capability advertisement ----------------------------------
-    // The card's boundary: I-042/I-043/I-076 are implemented and green, so p0's
-    // no-cache configuration is a configuration choice. What p0 must *not* do is
-    // advertise them (or the unimplemented I-036/I-047) as supported. This gate
-    // asserts the configuration it froze, and the report names the difference.
-    reporter.Check(true,
-                   "the p0 capability advertisement is the frozen configuration: "
-                   "cache/locality/vector-coalescing switches are off, no lane-quota "
-                   "request (the implemented-but-not-enabled features are named in "
-                   "results/reports/p0.prototype_gate.md)");
+    // The p0 capability advertisement is a *report* boundary, not a check: the
+    // falsifiable statement that the cache is off is the per-program L1D PMU
+    // counter check above, and what p0 does or does not advertise is named in
+    // results/reports/p0.prototype_gate.md rather than asserted here.
 
     passed = (reporter.failures() == 0);
+    std::printf("[trace] both clusters alive (in flight): %s\n",
+                gate.both_clusters_alive.seen
+                    ? ("cycle " + Dec(gate.both_clusters_alive.cycle) + ", " +
+                       gate.both_clusters_alive.detail).c_str()
+                    : "never");
+    std::printf("[trace] both clusters alive (IQ occupancy): %s\n",
+                gate.both_clusters_iq.seen
+                    ? ("cycle " + Dec(gate.both_clusters_iq.cycle) + ", " +
+                       gate.both_clusters_iq.detail).c_str()
+                    : "never");
+    std::printf("[trace] remote route: %s\n",
+                gate.remote_route.seen
+                    ? (gate.remote_route.detail + " in " + remote_route_program +
+                       ", program position " + Dec(remote_route_pos)).c_str()
+                    : "never");
+    std::printf("[trace] writeback collision: %s\n",
+                gate.wb_collision.seen
+                    ? ("cycle " + Dec(gate.wb_collision.cycle) + ", " +
+                       gate.wb_collision.detail).c_str()
+                    : "never");
+    std::printf("[trace] out-of-order completion: %s\n",
+                gate.ooo_completion.seen
+                    ? ("cycle " + Dec(gate.ooo_completion.cycle) + ", " +
+                       gate.ooo_completion.detail).c_str()
+                    : "never");
+    std::printf("[trace] in-order retirement: %s\n", gate.in_order_detail.c_str());
     detail = "programs=" + Dec(sizeof(kPrograms) / sizeof(kPrograms[0])) +
              " both_clusters_alive=" +
              (gate.both_clusters_alive.seen ? "cycle " + Dec(gate.both_clusters_alive.cycle)
                                             : "never") +
+             " both_clusters_iq=" +
+             (gate.both_clusters_iq.seen ? "cycle " + Dec(gate.both_clusters_iq.cycle)
+                                         : "never") +
              " remote_route=" +
              (gate.remote_route.seen ? gate.remote_route.detail : "never") +
              " wb_collision=" +
